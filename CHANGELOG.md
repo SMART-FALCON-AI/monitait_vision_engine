@@ -16,6 +16,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advanced analytics and reporting
 - Cloud synchronization improvements
 
+## [1.2.0] - 2025-12-29
+
+### Changed
+- **Project Reorganization**: Moved core service files to dedicated `vision_engine/` directory
+- **Service Renamed**: `monitaqc_counter` → `monitaqc_vision` (better reflects functionality)
+- Updated docker-compose.yml build context to `./vision_engine`
+- Cleaner main directory structure with only service folders
+
+### Added
+- `vision_engine/README.md` - Comprehensive vision engine documentation
+- `vision_engine/.dockerignore` - Docker build optimization
+- Better name reflects computer vision and AI processing capabilities
+
+### Improved
+- Main directory is now less crowded with only service directories
+- Better separation of concerns for each microservice
+- Easier navigation and maintenance
+- More descriptive service naming (vision_engine vs generic counter)
+
 ## [1.1.0] - 2025-12-29
 
 ### Changed

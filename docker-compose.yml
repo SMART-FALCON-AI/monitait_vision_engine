@@ -1,16 +1,16 @@
 services:
-  # Core QC Processing Engine
-  monitaqc_counter:
-    container_name: "monitaqc_counter"
-    build: "."
+  # Vision Processing Engine
+  monitaqc_vision:
+    container_name: "monitaqc_vision"
+    build: "./vision_engine"
     command: "python3 main.py"
     volumes:
-      - .:/code
+      - ./vision_engine:/code
       - /mnt/SSD-RESERVE/raw_images:/code/raw_images
     devices:
       - /dev:/dev
     ports:
-      - "5050:5050"  # Counter service status page
+      - "5050:5050"  # Vision engine status page
     privileged: true
     networks:
       - main_network

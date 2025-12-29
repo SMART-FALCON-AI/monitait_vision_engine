@@ -1,6 +1,6 @@
 # MonitaQC - Universal Quality Control Platform
 
-**MonitaQC** is an industrial computer vision platform for automated quality control and product identification. Forked from PartQC Box Counter, this project is the foundation for a unified quality control system.
+**MonitaQC** is an industrial computer vision platform for automated quality control and product identification. Forked from PartQC Box Vision Engine, this project is the foundation for a unified quality control system.
 
 ## Overview
 
@@ -40,15 +40,18 @@ MonitaQC uses a microservices architecture:
 
 ```
 MonitaQC/
-├── main.py                    # Core processing engine
+├── vision_engine/                   # Core QC processing engine
+│   ├── main.py                #   Main processing logic (3371 lines)
+│   ├── Dockerfile             #   Container build config
+│   └── requirements.txt       #   Python dependencies
 ├── yolo_inference/            # AI object detection service
-├── ocr/                       # Optical character recognition
-├── stream/                    # Real-time video streaming
-├── scanner/                   # Barcode scanner integration
-├── speaker/                   # Audio feedback system
-├── shipment_fulfillment/      # Django backend for order management
 ├── cleanup/                   # Automated disk space management
-└── docker-compose.yml         # Service orchestration
+├── ocr/                       # OCR service (optional)
+├── stream/                    # Video streaming (optional)
+├── scanner/                   # Barcode scanner (optional)
+├── speaker/                   # Audio feedback (optional)
+├── shipment_fulfillment/      # Django backend (optional)
+└── docker-compose.yml         # Lightweight orchestration
 ```
 
 ## Getting Started
@@ -112,7 +115,7 @@ sudo docker load -i yolo.tar
 
 **Lightweight Mode (Recommended):**
 ```bash
-# Core services only (Counter, Redis, YOLO, Cleanup)
+# Core services only (Vision Engine, Redis, YOLO, Cleanup)
 sudo docker compose up -d
 ```
 
@@ -187,7 +190,7 @@ MonitaQC uses a lightweight architecture by default with only essential services
 
 | Service | Port | Description | Required |
 |---------|------|-------------|----------|
-| **monitaqc_counter** | 5050 | Main processing engine and status page | ✅ Core |
+| **monitaqc_vision** | 5050 | Main processing engine and status page | ✅ Core |
 | **monitaqc_redis** | 6379 | Message queue and cache | ✅ Core |
 | **monitaqc_yolo** | 4442 | AI inference service | ✅ Core |
 | **monitaqc_cleanup** | - | Automated disk space management | ✅ Core |
@@ -223,7 +226,7 @@ Automatic cleanup service monitors disk usage and removes old images when reachi
 
 ## API Endpoints
 
-### Counter Service (Port 5050)
+### Vision Engine Service (Port 5050)
 - `GET /` - Status monitoring web interface
 - `GET /health` - Health check
 - WebSocket `/ws` - Real-time updates
@@ -242,12 +245,14 @@ Automatic cleanup service monitors disk usage and removes old images when reachi
 ### Project Structure
 
 ```
-main.py (3371 lines)
+vision_engine/main.py (3371 lines)
 ├── ArduinoSocket        # Hardware interface and capture orchestration
 ├── StateManager         # Multi-phase capture state machine
 ├── CameraBuffer         # Video stream buffering
 └── Processing Pipeline  # YOLO → Nesting → DataMatrix → Matching
 ```
+
+See [vision_engine/README.md](vision_engine/README.md) for detailed counter service documentation.
 
 ### Key Technologies
 
@@ -267,7 +272,7 @@ main.py (3371 lines)
 MonitaQC is evolving into a unified quality control platform. Planned features:
 
 - [ ] Merge with fabric inspection capabilities (from FabriQC)
-- [ ] Merge with signal counting capabilities (from PartQC Signal Counter)
+- [ ] Merge with signal counting capabilities (from PartQC Signal Vision Engine)
 - [ ] Unified admin interface for all QC modes
 - [ ] Multi-application mode support
 - [ ] Enhanced API with OpenAPI documentation
@@ -300,4 +305,4 @@ Proprietary - VirasAd / Monitait
 
 ---
 
-**Note**: This project is forked from PartQC Box Counter and serves as the foundation for the unified MonitaQC platform.
+**Note**: This project is forked from PartQC Box Vision Engine and serves as the foundation for the unified MonitaQC platform.
