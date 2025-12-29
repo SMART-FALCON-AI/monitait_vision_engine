@@ -81,15 +81,22 @@ DATA_FILE = os.environ.get("DATA_FILE", ".env.prepared_query_data")
 # Parent object enforcement configuration
 ENFORCE_PARENT_OBJECT = os.environ.get("ENFORCE_PARENT_OBJECT", "true").lower() == "true"
 
-# Camera paths configuration (legacy - used as fallback if auto-detect fails)
-CAM_1_PATH = os.environ.get("CAM_1_PATH", "/dev/video0")
-CAM_2_PATH = os.environ.get("CAM_2_PATH", "/dev/video2")
-CAM_3_PATH = os.environ.get("CAM_3_PATH", "/dev/video4")
-CAM_4_PATH = os.environ.get("CAM_4_PATH", "/dev/video6")
+# Camera paths configuration (optional - only used if devices exist)
+CAM_1_PATH = os.environ.get("CAM_1_PATH", "")
+CAM_2_PATH = os.environ.get("CAM_2_PATH", "")
+CAM_3_PATH = os.environ.get("CAM_3_PATH", "")
+CAM_4_PATH = os.environ.get("CAM_4_PATH", "")
 
 # IP Camera configuration (optional - can be mixed with USB cameras)
 # Format: rtsp://username:password@ip:port/path or http://ip:port/video
-IP_CAMERAS = os.environ.get("IP_CAMERAS", "")  # Comma-separated list
+IP_CAMERAS = os.environ.get("IP_CAMERAS", "")  # Comma-separated list or "auto" or "auto+manual"
+IP_CAMERA_USER = os.environ.get("IP_CAMERA_USER", "admin")  # Default username for auto-discovery
+IP_CAMERA_PASS = os.environ.get("IP_CAMERA_PASS", "")  # Default password for auto-discovery
+IP_CAMERA_SUBNET = os.environ.get("IP_CAMERA_SUBNET", "")  # Optional subnet override (e.g., "192.168.0")
+# IP Camera settings (applied to all IP cameras)
+IP_CAMERA_BRIGHTNESS = int(os.environ.get("IP_CAMERA_BRIGHTNESS", 128))  # 0-255
+IP_CAMERA_CONTRAST = int(os.environ.get("IP_CAMERA_CONTRAST", 128))  # 0-255
+IP_CAMERA_SATURATION = int(os.environ.get("IP_CAMERA_SATURATION", 128))  # 0-255
 
 # Auto-detect camera devices
 def detect_video_devices() -> List[str]:
@@ -120,43 +127,47 @@ def detect_video_devices() -> List[str]:
     return [path for _, path in video_devices]
 
 
-def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
-    """Scan local network for IP cameras using common ports and protocols.
+def scan_network_for_camera_devices(subnet: str = None) -> List[Dict[str, Any]]:
+    """Quick scan to detect devices with camera ports open (no authentication needed).
 
-    Returns list of discovered camera URLs.
+    Returns list of potential cameras with IP, port, and protocol info.
     """
     import socket
-    import subprocess
-    discovered_cameras = []
+    discovered_devices = []
 
-    # Get local network subnet
     try:
-        # Get local IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
+        # Get subnet
+        if subnet:
+            scan_subnet = subnet
+            logger.info(f"Using custom subnet: {scan_subnet}.0/24")
+        elif IP_CAMERA_SUBNET:
+            scan_subnet = IP_CAMERA_SUBNET
+            logger.info(f"Using configured subnet: {scan_subnet}.0/24")
+        else:
+            # Auto-detect local subnet
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            ip_parts = local_ip.split('.')
+            scan_subnet = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}"
+            logger.info(f"Auto-detected subnet: {scan_subnet}.0/24")
 
-        # Extract subnet (e.g., 192.168.1.0/24)
-        ip_parts = local_ip.split('.')
-        subnet = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}"
+        logger.info(f"Scanning subnet {scan_subnet}.0/24 for camera devices...")
 
-        logger.info(f"Scanning subnet {subnet}.0/24 for IP cameras...")
-
-        # Common camera ports
-        common_ports = [
-            554,   # RTSP
-            8554,  # Alternative RTSP
-            80,    # HTTP
-            8080,  # Alternative HTTP
-            3702,  # ONVIF Discovery
+        # Common camera ports and their protocols
+        camera_ports = [
+            (554, "RTSP", ["stream1", "Streaming/Channels/101", "cam/realmonitor?channel=1&subtype=0", "onvif1", "h264Preview_01_main", "videoMain"]),
+            (8554, "RTSP", ["stream1", "live"]),
+            (80, "HTTP", ["video.mjpg", "mjpg/video.mjpg", "video", "axis-media/media.amp"]),
+            (8080, "HTTP", ["video.mjpg", "video"]),
         ]
 
-        # Scan common IPs (router range typically .100-.254)
-        for ip_suffix in range(100, 255):
-            ip = f"{subnet}.{ip_suffix}"
+        # Scan IP range
+        for ip_suffix in range(1, 255):
+            ip = f"{scan_subnet}.{ip_suffix}"
 
-            for port in common_ports:
+            for port, protocol, paths in camera_ports:
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(0.1)  # Fast scan
@@ -164,20 +175,139 @@ def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
                     sock.close()
 
                     if result == 0:
-                        # Port is open, try to determine camera type
+                        # Port is open - this is a potential camera
+                        logger.info(f"📹 Found {protocol} service at {ip}:{port}")
+
+                        # Add all potential paths for this camera
+                        for path in paths:
+                            if protocol == "RTSP":
+                                port_str = f":{port}" if port != 554 else ""
+                                url = f"rtsp://{ip}{port_str}/{path}"
+                            else:  # HTTP
+                                port_str = f":{port}" if port != 80 else ""
+                                url = f"http://{ip}{port_str}/{path}"
+
+                            discovered_devices.append({
+                                "ip": ip,
+                                "port": port,
+                                "protocol": protocol,
+                                "path": path,
+                                "url": url
+                            })
+
+                        break  # Found open port, move to next IP
+
+                except Exception:
+                    continue
+
+        logger.info(f"Quick scan complete. Found {len(set([d['ip'] for d in discovered_devices]))} potential cameras with {len(discovered_devices)} possible paths.")
+        return discovered_devices
+
+    except Exception as e:
+        logger.error(f"Network scan failed: {e}")
+        return []
+
+
+def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
+    """Scan local network for IP cameras using common ports and protocols.
+
+    Returns list of discovered camera URLs.
+    """
+    import socket
+    discovered_cameras = []
+
+    # Get credentials for testing
+    username = IP_CAMERA_USER
+    password = IP_CAMERA_PASS
+    auth_str = f"{username}:{password}@" if username and password else ""
+
+    # Get local network subnet
+    try:
+        # Use custom subnet if specified, otherwise auto-detect
+        if IP_CAMERA_SUBNET:
+            subnet = IP_CAMERA_SUBNET
+            logger.info(f"Using custom subnet: {subnet}.0/24")
+        else:
+            # Get local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+
+            # Extract subnet (e.g., 192.168.1.0/24)
+            ip_parts = local_ip.split('.')
+            subnet = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}"
+
+        logger.info(f"Scanning subnet {subnet}.0/24 for IP cameras...")
+        if auth_str:
+            logger.info(f"Using credentials: {username}:***")
+
+        # Common camera ports and paths
+        camera_configs = [
+            # RTSP paths (port, paths)
+            (554, ["stream1", "Streaming/Channels/101", "cam/realmonitor?channel=1&subtype=0",
+                   "onvif1", "h264Preview_01_main", "videoMain"]),
+            (8554, ["stream1", "live"]),
+            # HTTP/MJPEG paths (port, paths)
+            (80, ["video.mjpg", "mjpg/video.mjpg", "video", "axis-media/media.amp"]),
+            (8080, ["video.mjpg", "video"]),
+        ]
+
+        # Scan IP range (typically cameras are .1-.254, scan all for thoroughness)
+        for ip_suffix in range(1, 255):
+            ip = f"{subnet}.{ip_suffix}"
+
+            # Quick check if IP is reachable
+            for port, paths in camera_configs:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.1)  # Fast scan
+                    result = sock.connect_ex((ip, port))
+                    sock.close()
+
+                    if result == 0:
+                        # Port is open - try camera paths
                         if port in [554, 8554]:
-                            # RTSP port - likely a camera
-                            camera_url = f"rtsp://{ip}:{port}/stream1"  # Common path
-                            discovered_cameras.append(camera_url)
-                            logger.info(f"Discovered RTSP camera: {ip}:{port}")
+                            # RTSP camera - log discovery first
+                            port_str = f":{port}" if port != 554 else ""
+                            logger.info(f"📹 Found RTSP service at {ip}:{port}")
+
+                            for path in paths:
+                                # Try without auth first (for discovery)
+                                camera_url_no_auth = f"rtsp://{ip}{port_str}/{path}"
+
+                                # If credentials provided, use them
+                                if auth_str:
+                                    camera_url = f"rtsp://{auth_str}{ip}{port_str}/{path}"
+                                else:
+                                    camera_url = camera_url_no_auth
+
+                                # Test if camera responds
+                                if test_camera_stream(camera_url):
+                                    discovered_cameras.append(camera_url)
+                                    logger.info(f"✓ Verified RTSP camera: {camera_url.split('@')[-1]} (path: /{path})")
+                                    break  # Found working path, move to next IP
+                                else:
+                                    # Log the attempted path for user reference
+                                    if not auth_str:
+                                        logger.info(f"  → Potential path: rtsp://{ip}{port_str}/{path} (may need credentials)")
+
                         elif port in [80, 8080]:
-                            # HTTP port - check if it's a camera
-                            # Common camera HTTP paths
-                            http_paths = ["/video.mjpg", "/mjpg/video.mjpg", "/video"]
-                            for path in http_paths:
-                                camera_url = f"http://{ip}:{port}{path}"
-                                # Could test the URL here, but for now just log
-                                logger.info(f"Potential HTTP camera: {ip}:{port}")
+                            # HTTP/MJPEG camera - log discovery first
+                            port_str = f":{port}" if port != 80 else ""
+                            logger.info(f"📹 Found HTTP service at {ip}:{port}")
+
+                            for path in paths:
+                                camera_url = f"http://{ip}{port_str}/{path}"
+
+                                # Test if camera responds
+                                if test_camera_stream(camera_url):
+                                    discovered_cameras.append(camera_url)
+                                    logger.info(f"✓ Verified HTTP camera: {camera_url}")
+                                    break  # Found working path, move to next IP
+                                else:
+                                    # Log the attempted path for user reference
+                                    logger.info(f"  → Potential path: {camera_url} (may need credentials)")
 
                 except Exception:
                     continue
@@ -185,7 +315,36 @@ def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
     except Exception as e:
         logger.warning(f"Network scan failed: {e}")
 
+    logger.info(f"IP camera scan complete. Found {len(discovered_cameras)} cameras.")
     return discovered_cameras
+
+
+def test_camera_stream(url: str, timeout: float = 2.0) -> bool:
+    """Test if a camera URL is accessible and returns valid video stream.
+
+    Args:
+        url: Camera URL (RTSP or HTTP)
+        timeout: Connection timeout in seconds
+
+    Returns:
+        True if camera is accessible and returns video frames
+    """
+    try:
+        # Try to open the camera stream
+        cap = cv2.VideoCapture(url)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(timeout * 1000))
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(timeout * 1000))
+
+        # Try to read a frame
+        ret, frame = cap.read()
+        cap.release()
+
+        # Check if we got a valid frame
+        if ret and frame is not None and frame.size > 0:
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def detect_ip_cameras() -> List[str]:
@@ -193,17 +352,29 @@ def detect_ip_cameras() -> List[str]:
 
     Returns list of IP camera URLs.
     Format: RTSP (rtsp://user:pass@ip:port/stream) or HTTP (http://ip:port/video.mjpg)
+    Supports: "auto", "manual_urls", or "auto,manual_urls" for both
     """
     ip_cameras = []
 
     if IP_CAMERAS:
-        if IP_CAMERAS.lower() == "auto":
+        # Check if it contains "auto" (can be "auto" or "auto,rtsp://...")
+        if "auto" in IP_CAMERAS.lower():
             # Auto-discover cameras on network
             logger.info("Auto-discovering IP cameras on network...")
             discovered = scan_network_for_cameras()
             ip_cameras.extend(discovered)
+
+            # If there are manual URLs after "auto,", parse them too
+            if "," in IP_CAMERAS:
+                manual_part = IP_CAMERAS.split(",", 1)[1] if IP_CAMERAS.lower().startswith("auto,") else IP_CAMERAS
+                if not manual_part.lower().startswith("auto"):
+                    cameras = [cam.strip() for cam in manual_part.split(",") if cam.strip() and not cam.lower() == "auto"]
+                    for cam_url in cameras:
+                        if cam_url.startswith(("rtsp://", "http://", "https://")):
+                            ip_cameras.append(cam_url)
+                            logger.info(f"Configured IP camera: {cam_url.split('@')[-1] if '@' in cam_url else cam_url}")
         else:
-            # Manual configuration - split by comma and strip whitespace
+            # Manual configuration only - split by comma and strip whitespace
             cameras = [cam.strip() for cam in IP_CAMERAS.split(",") if cam.strip()]
 
             for cam_url in cameras:
@@ -221,26 +392,41 @@ def get_all_cameras() -> List[str]:
     """Get all available cameras (USB + IP).
 
     Priority:
-    1. USB cameras (auto-detected or from env vars)
+    1. USB cameras (only from env vars if explicitly set and device exists)
     2. IP cameras (from IP_CAMERAS env var)
 
-    Returns combined list of camera sources.
+    Returns combined list of camera sources that actually exist.
     """
     all_cameras = []
 
-    # Get USB cameras
-    usb_cameras = detect_video_devices()
-    if not usb_cameras:
-        # Fallback to legacy env vars
-        usb_cameras = [CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH]
-
-    all_cameras.extend(usb_cameras)
+    # Get USB cameras - only add if env vars are set AND device exists
+    usb_env_vars = [CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH]
+    for cam_path in usb_env_vars:
+        # Only add if the path exists as a device
+        if cam_path and os.path.exists(cam_path):
+            all_cameras.append(cam_path)
+            logger.info(f"Found USB camera: {cam_path}")
 
     # Add IP cameras
     ip_cameras = detect_ip_cameras()
-    all_cameras.extend(ip_cameras)
 
-    return all_cameras
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_cameras = []
+    for cam in all_cameras + ip_cameras:
+        # Normalize camera URL for comparison
+        # Remove credentials and normalize port (rtsp://ip:554/ == rtsp://ip/)
+        cam_key = cam.split('@')[-1] if '@' in cam else cam
+        # Remove default RTSP port :554 for comparison
+        cam_key = cam_key.replace(':554/', '/').replace(':554', '')
+
+        if cam_key not in seen:
+            seen.add(cam_key)
+            unique_cameras.append(cam)
+        else:
+            logger.info(f"Skipping duplicate camera: {cam.split('@')[-1] if '@' in cam else cam}")
+
+    return unique_cameras
 
 
 # Detect cameras at module load time
@@ -487,11 +673,19 @@ class StateManager:
         with a single phase (U_ON_B_OFF light, 0.1s delay).
         Steps=-1 means capture on any encoder change.
         """
-        # Determine available camera IDs based on detected cameras
-        num_cameras = len(DETECTED_CAMERAS) if DETECTED_CAMERAS else 4
-        all_camera_ids = list(range(1, num_cameras + 1))
+        # Determine available camera IDs based on watcher's initialized cameras
+        if watcher_instance and watcher_instance.camera_paths:
+            num_cameras = len(watcher_instance.camera_paths)
+            all_camera_ids = list(range(1, num_cameras + 1))
+        else:
+            # No cameras available
+            num_cameras = 0
+            all_camera_ids = []
 
-        logger.info(f"Initializing default state with {num_cameras} cameras: {all_camera_ids}")
+        if num_cameras > 0:
+            logger.info(f"Initializing default state with {num_cameras} camera(s): {all_camera_ids}")
+        else:
+            logger.info("Initializing default state with no cameras. Add cameras via IP Camera Discovery.")
 
         # Default state: Single phase capturing all cameras with 0.1s delay
         # steps=1 means trigger on every 1 step change (default)
@@ -1685,6 +1879,123 @@ async def upload_config(request: Request):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 # =============================================================================
+# CAMERA DISCOVERY API ENDPOINTS
+# =============================================================================
+
+class CameraDiscoveryRequest(BaseModel):
+    subnet: str = "192.168.0"
+
+@app.post("/api/cameras/discover")
+async def discover_cameras(request: CameraDiscoveryRequest):
+    """Quick scan to discover IP cameras on the network (no credentials needed).
+
+    This scans for devices with camera ports open and returns all possible camera paths.
+    Users can then test each path with their own credentials.
+    """
+    try:
+        logger.info(f"Starting quick camera discovery on subnet {request.subnet}.0/24")
+
+        # Perform port scan (no authentication needed)
+        discovered_devices = scan_network_for_camera_devices(subnet=request.subnet)
+
+        # Group by IP address to avoid duplicates
+        cameras_by_ip = {}
+        for device in discovered_devices:
+            ip = device['ip']
+            if ip not in cameras_by_ip:
+                cameras_by_ip[ip] = {
+                    "ip": ip,
+                    "port": device['port'],
+                    "protocol": device['protocol'],
+                    "paths": []
+                }
+            cameras_by_ip[ip]['paths'].append({
+                "path": device['path'],
+                "url": device['url']
+            })
+
+        cameras = list(cameras_by_ip.values())
+        logger.info(f"Discovery complete. Found {len(cameras)} potential camera device(s).")
+
+        return JSONResponse(content={
+            "success": True,
+            "cameras": cameras,
+            "count": len(cameras),
+            "subnet": request.subnet
+        })
+
+    except Exception as e:
+        logger.error(f"Error during camera discovery: {e}")
+        return JSONResponse(content={
+            "success": False,
+            "error": str(e),
+            "cameras": []
+        }, status_code=500)
+
+@app.post("/api/cameras/test")
+async def test_camera(request: Request):
+    """Test a camera URL with credentials and return a snapshot."""
+    try:
+        body = await request.json()
+        url = body.get("url")
+        username = body.get("username", "admin")
+        password = body.get("password", "")
+
+        if not url:
+            return JSONResponse(content={"success": False, "error": "URL is required"}, status_code=400)
+
+        # Build authenticated URL if credentials provided
+        if username and password:
+            # Check if URL already has credentials
+            if "@" in url:
+                # Replace existing credentials
+                protocol = url.split("://")[0]
+                rest = url.split("@")[-1]
+                test_url = f"{protocol}://{username}:{password}@{rest}"
+            else:
+                # Add credentials
+                protocol = url.split("://")[0]
+                rest = url.split("://")[-1]
+                test_url = f"{protocol}://{username}:{password}@{rest}"
+        else:
+            test_url = url
+
+        # Test the camera
+        cap = cv2.VideoCapture(test_url)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
+
+        ret, frame = cap.read()
+        cap.release()
+
+        if ret and frame is not None:
+            # Encode frame as JPEG
+            ret, buffer = cv2.imencode('.jpg', frame)
+            if ret:
+                import base64
+                img_str = base64.b64encode(buffer).decode()
+
+                return JSONResponse(content={
+                    "success": True,
+                    "message": "Camera test successful",
+                    "image": f"data:image/jpeg;base64,{img_str}",
+                    "resolution": {"width": frame.shape[1], "height": frame.shape[0]},
+                    "authenticated_url": test_url.split("@")[-1] if "@" in test_url else test_url  # Return URL without password
+                })
+
+        return JSONResponse(content={
+            "success": False,
+            "error": "Failed to capture frame from camera"
+        }, status_code=400)
+
+    except Exception as e:
+        logger.error(f"Error testing camera: {e}")
+        return JSONResponse(content={
+            "success": False,
+            "error": str(e)
+        }, status_code=500)
+
+# =============================================================================
 # STATE MANAGEMENT API ENDPOINTS
 # =============================================================================
 
@@ -1966,12 +2277,19 @@ class CameraBuffer:
             self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
             logger.info(f"Initializing USB camera: {source}")
 
-        # Set properties (skip V4L2-specific settings for IP cameras)
+        # Set properties
         self.camera.set(cv2.CAP_PROP_FPS, 30)
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-        if not self.is_ip_camera:
+        if self.is_ip_camera:
+            # IP camera settings (limited control via RTSP)
+            # Note: Not all IP cameras support these settings via OpenCV
+            self.camera.set(cv2.CAP_PROP_BRIGHTNESS, IP_CAMERA_BRIGHTNESS)
+            self.camera.set(cv2.CAP_PROP_CONTRAST, IP_CAMERA_CONTRAST)
+            self.camera.set(cv2.CAP_PROP_SATURATION, IP_CAMERA_SATURATION)
+            logger.info(f"IP camera settings - Brightness: {IP_CAMERA_BRIGHTNESS}, Contrast: {IP_CAMERA_CONTRAST}, Saturation: {IP_CAMERA_SATURATION}")
+        else:
             # USB camera specific settings
             self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J', 'P', 'G'))
             self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
@@ -2168,13 +2486,20 @@ class ArduinoSocket:
         # Dynamic camera initialization
         # Use provided paths, or auto-detected, or fallback to legacy env vars
         if camera_paths is None:
-            camera_paths = DETECTED_CAMERAS if DETECTED_CAMERAS else [CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH]
+            if DETECTED_CAMERAS:
+                camera_paths = DETECTED_CAMERAS
+            else:
+                # Only include non-empty paths from env vars
+                camera_paths = [p for p in [CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH] if p]
 
         # Store camera paths for reference
         self.camera_paths = camera_paths
         self.cameras: Dict[int, CameraBuffer] = {}  # Dynamic camera storage {1: cam, 2: cam, ...}
 
-        logger.info(f"Initializing cameras from paths: {camera_paths}")
+        if camera_paths:
+            logger.info(f"Initializing {len(camera_paths)} camera(s) from paths: {camera_paths}")
+        else:
+            logger.info("No USB cameras configured. Use IP Camera Discovery to add IP cameras.")
 
         # Initialize cameras dynamically (1-indexed for backward compatibility)
         for idx, cam_path in enumerate(camera_paths, start=1):
