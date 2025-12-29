@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Unlimited Camera Support**: Updated from fixed 4-camera limit to dynamic camera detection
+  - Merged improvements from `zarrin-error-fix` branch
+  - Auto-detects all available cameras on startup
+  - Backward compatible with legacy 4-camera configuration
+- **Lightweight MJPEG Streaming**: Integrated live camera feed into status page
+  - `/video_feed` endpoint with 10 FPS, JPEG quality 40 for minimal bandwidth
+  - Embedded directly in status monitoring interface at port 5050
+  - No additional services or dependencies required
+  - Uses existing FastAPI StreamingResponse capability
+- **Full Deployment Mode**: Created `docker-compose.full.yml` with all optional services
+  - Shipment fulfillment web interface (Django)
+  - PostgreSQL database
+  - Celery workers (high/low priority queues)
+  - Image gallery (Pigallery2)
+  - Legacy streaming service
+
+### Changed
+- **Container Naming**: Renamed all containers from `monitaqc_*` to `monitait_*` prefix
+  - `monitait_vision_engine` - Core CV processing
+  - `monitait_redis` - Message broker
+  - `monitait_yolo` - AI inference
+  - `monitait_cleanup` - Disk management
+- **Branding Update**: Changed from VirasAd/Monitait to Smart Falcon AI
+  - Support: admin@smartfalcon-ai.com
+  - Removed client-specific references
+- **Base Image**: Updated Dockerfile from Debian Buster to Bookworm (Python 3.10-slim)
+
 ### Planned
 - Merge with fabric inspection capabilities (from FabriQC)
 - Merge with signal counting capabilities (from PartQC Signal Counter)

@@ -947,6 +947,27 @@ async def api_status():
         logger.error(f"API status error: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+@app.get("/video_feed")
+async def video_feed():
+    """Lightweight MJPEG stream from first available camera."""
+    def generate():
+        while True:
+            try:
+                if watcher_instance and watcher_instance.cameras:
+                    # Get first available camera
+                    cam = next((c for c in watcher_instance.cameras.values() if hasattr(c, 'frame')), None)
+                    if cam and hasattr(cam, 'frame') and cam.frame is not None:
+                        # Encode with lower quality for lightweight streaming
+                        ret, jpeg = cv2.imencode('.jpg', cam.frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
+                        if ret:
+                            yield (b'--frame\r\n'
+                                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                time.sleep(0.1)  # 10 FPS max
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                time.sleep(1)
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
 @app.get("/config")
 async def get_config():
     """Get current configuration."""

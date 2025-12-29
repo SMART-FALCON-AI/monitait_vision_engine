@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <title>Counter Service Status Monitor</title>
+        <title>MonitaQC Vision Engine - Status Monitor</title>
         <style>
             body {
                 font-family: Arial, sans-serif;
@@ -471,7 +471,7 @@
     <body>
         <div class="container">
             <div class="header-container">
-                <h1 class="header-title">Counter Service Status Monitor</h1>
+                <h1 class="header-title">MonitaQC Vision Engine</h1>
                 <div style="display: flex; align-items: center; gap: 15px;">
                     <div style="display: flex; align-items: center; gap: 8px;">
                         <label for="refresh-interval" style="font-size: 14px; color: #666;">Refresh:</label>
@@ -486,6 +486,12 @@
                     </div>
                     <span class="data-source" id="dataSource">Loading...</span>
                 </div>
+            </div>
+
+            <!-- Lightweight Camera Stream -->
+            <div class="status-box" style="text-align: center;">
+                <h3 style="margin: 0 0 10px 0; font-size: 16px; color: #333;">Live Camera Feed</h3>
+                <img src="/video_feed" style="max-width: 100%; max-height: 400px; border: 1px solid #ddd; border-radius: 4px;" alt="Live Stream">
             </div>
 
             <div class="status-box">

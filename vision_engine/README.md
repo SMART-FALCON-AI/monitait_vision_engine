@@ -16,7 +16,7 @@ This directory contains the computer vision processing engine for MonitaQC - the
 ## Functionality
 
 The vision engine handles:
-- **Multi-camera capture** (up to 4 cameras with auto-detection)
+- **Multi-camera capture** (unlimited cameras with dynamic auto-detection)
 - **Serial communication** with Arduino/PLC
 - **YOLO-based object detection** via inference service
 - **DataMatrix barcode decoding** with multi-stage preprocessing
@@ -24,7 +24,7 @@ The vision engine handles:
 - **Object nesting and classification** (parent-child relationships)
 - **Encoder-based triggering** for conveyor systems
 - **Ejector control** for defect rejection
-- **Real-time status web interface** (port 5050)
+- **Real-time status web interface** with live camera stream (port 5050)
 - **Image histogram analysis** and feature extraction
 
 ## Environment Variables

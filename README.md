@@ -207,12 +207,13 @@ Additional services in full configuration:
 
 | Service | Port | Description |
 |---------|------|-------------|
-| **monitaqc_web** | 8000, 6789 | Django shipment fulfillment interface |
-| **monitaqc_db** | 5432 | PostgreSQL database |
-| **monitaqc_stream** | 5000 | Real-time video streaming |
-| **monitaqc_gallery** | 80 | Image gallery browser (Pigallery2) |
-| **monitaqc_celery_worker_high** | - | Celery task worker |
-| **monitaqc_celery_beat** | - | Celery periodic scheduler |
+| **monitait_shipment_web** | 8000, 6789 | Django shipment fulfillment interface |
+| **monitait_postgres** | 5432 | PostgreSQL database |
+| **monitait_stream** | 5000 | Real-time video streaming (legacy) |
+| **monitait_gallery** | 80 | Image gallery browser (Pigallery2) |
+| **monitait_celery_worker1** | - | Celery high priority task worker |
+| **monitait_celery_worker2** | - | Celery low priority task worker |
+| **monitait_celery_beat** | - | Celery periodic scheduler |
 
 ## Data Storage
 
@@ -279,30 +280,21 @@ MonitaQC is evolving into a unified quality control platform. Planned features:
 - [ ] Advanced analytics and reporting
 - [ ] Cloud synchronization improvements
 
-Submit feature requests and ideas to the [project issues backlog](https://gitlab.virasad.ir/monitait/monitaqc/-/issues).
+Submit feature requests and ideas to the project issues backlog.
 
 ## Support
 
 For issues or questions:
-- Email: [contact@virasad.ir](mailto:contact@virasad.ir)
-- Contact the system administrator
-
-## Acknowledgments
-
-Special thanks to the teams at [Zarrin Roya](https://www.zarrinroya.com/en) who contributed to this project:
-- Digital Transformation Department
-- IT/ICT Department
-- Logistics Department
-- Mr. Ebrahimi, Mr. Ehsani, Ms. Nobahari, Mr. Pourmand, Mr. Solimani, Mr. Salehi, Ms. Samaneh
+- Email: [admin@smartfalcon-ai.com](mailto:admin@smartfalcon-ai.com)
 
 ## Project Status
 
-**Active Development** - Currently deployed at Zarrin Roya fulfillment center
+**Active Development** - Production deployment ready
 
 ## License
 
-Proprietary - VirasAd / Monitait
+Proprietary - Smart Falcon AI ([smartfalcon-ai.com](https://smartfalcon-ai.com))
 
 ---
 
-**Note**: This project is forked from PartQC Box Vision Engine and serves as the foundation for the unified MonitaQC platform.
+**Note**: This project is forked from PartQC Box Counter and serves as the foundation for the unified MonitaQC platform.

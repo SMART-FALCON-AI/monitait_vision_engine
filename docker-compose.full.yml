@@ -1,0 +1,329 @@
+services:
+  # Vision Processing Engine
+  monitait_vision_engine:
+    container_name: "monitait_vision_engine"
+    build: "./vision_engine"
+    command: "python3 main.py"
+    volumes:
+      - ./vision_engine:/code
+      - /mnt/SSD-RESERVE/raw_images:/code/raw_images
+    devices:
+      - /dev:/dev
+    ports:
+      - "554:554"
+      - "5050:5050"  # Vision engine status page with live stream
+    privileged: true
+    networks:
+      - main_network
+    depends_on:
+      - yolo_inference
+      - redis
+    environment:
+      # Ejector configuration
+      - EJECTOR_OFFSET=0
+      - EJECTOR_DURATION=0.4
+      - EJECTOR_POLL_INTERVAL=0.03
+      # Capture configuration
+      - CAPTURE_MODE=single
+      - TIME_BETWEEN_TWO_PACKAGE=0.305
+      # Image processing configuration
+      - REMOVE_RAW_IMAGE_WHEN_DM_DECODED=false
+      - PARENT_OBJECT_LIST=_root,box,pack,DP-105
+      # Data file configuration
+      - DATA_FILE=.env.prepared_query_data
+      # Camera paths configuration (auto-detect or manual)
+      - CAM_1_PATH=/dev/video0
+      - CAM_2_PATH=/dev/video2
+      - CAM_3_PATH=/dev/video4
+      - CAM_4_PATH=/dev/video6
+      # Redis configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # YOLO inference configuration
+      - YOLO_INFERENCE_URL=http://yolo_inference:4442/v1/object-detection/yolov5s/detect/
+      # Serial/Watcher configuration
+      - WATCHER_USB=/dev/ttyUSB0
+      - BAUD_RATE=57600
+      - SERIAL_MODE=legacy
+      # Web server configuration
+      - WEB_SERVER_PORT=5050
+      - WEB_SERVER_HOST=0.0.0.0
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: "always"
+
+  # Optional Barcode Scanner (disabled by default)
+  # scanner:
+  #   container_name: "monitait_scanner"
+  #   build: "./scanner"
+  #   command: "python3 main.py"
+  #   volumes:
+  #     - ./scanner:/code
+  #     - /run/udev/data:/run/udev/data
+  #   devices:
+  #     - /dev/input/*:/dev/input/*
+  #     - /dev/input/by-id/usb-TC_Electroinc_2D_Barcode_Scanner-hid-event-kbd:/dev/event100
+  #   privileged: true
+  #   network_mode: "host"
+  #   depends_on:
+  #     - redis
+  #   logging:
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+  #   restart: "always"
+
+  # Optional Speaker Service (disabled by default)
+  # speaker:
+  #   container_name: "monitait_speaker"
+  #   build: "./speaker"
+  #   command: "python3 main.py"
+  #   devices:
+  #     - /dev/snd:/dev/snd
+  #   volumes:
+  #     - ./speaker:/code
+  #   privileged: true
+  #   network_mode: "host"
+  #   depends_on:
+  #     - redis
+  #   logging:
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+  #   restart: "always"
+
+  # Shipment Fulfillment Web Interface
+  web:
+    container_name: monitait_shipment_web
+    hostname: monitait_shipment_web
+    build: "./shipment_fulfillment"
+    command: "bash entrypoint.sh"
+    ports:
+      - "8000:8000"
+      - "6789:6789"
+    volumes:
+      - ./shipment_fulfillment:/app
+      - ./volumes/logs:/app/logs
+    network_mode: "host"
+    restart: "always"
+    depends_on:
+      - db
+      - redis
+    env_file:
+      - ./shipment_fulfillment/.env.ini
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # PostgreSQL Database for Shipment Fulfillment
+  db:
+    container_name: monitait_postgres
+    image: postgres:13-alpine
+    env_file:
+      - ./shipment_fulfillment/.env.ini
+    volumes:
+      - pgdata:/var/lib/postgresql/data/
+    ports:
+      - "5432:5432"
+    network_mode: "host"
+    restart: "always"
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Celery Worker 1 (High Priority Tasks)
+  celery-shipment-worker1:
+    container_name: monitait_celery_worker1
+    build: "./shipment_fulfillment"
+    command: celery -A config worker -Q high_priority --loglevel=info --hostname=heavy_worker@%h
+    depends_on:
+      - redis
+      - db
+    volumes:
+      - ./shipment_fulfillment:/app
+    env_file:
+      - ./shipment_fulfillment/.env.ini
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings
+    privileged: true
+    network_mode: "host"
+    restart: "always"
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "celery", "-A", "config", "inspect", "ping"]
+      interval: 300s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker 2 (Low Priority Tasks)
+  celery-shipment-worker2:
+    container_name: monitait_celery_worker2
+    build: "./shipment_fulfillment"
+    command: celery -A config worker -Q low_priority --loglevel=info --hostname=light_worker@%h
+    depends_on:
+      - redis
+      - db
+    volumes:
+      - ./shipment_fulfillment:/app
+    env_file:
+      - ./shipment_fulfillment/.env.ini
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings
+    privileged: true
+    network_mode: "host"
+    restart: "always"
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "celery", "-A", "config", "inspect", "ping"]
+      interval: 300s
+      timeout: 10s
+      retries: 3
+
+  # Celery Beat Scheduler
+  celery-beat:
+    container_name: monitait_celery_beat
+    build: "./shipment_fulfillment"
+    command: celery -A config beat -l info
+    depends_on:
+      - redis
+      - db
+    env_file:
+      - ./shipment_fulfillment/.env.ini
+    volumes:
+      - ./shipment_fulfillment:/app
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings
+    privileged: true
+    network_mode: "host"
+    restart: "always"
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis Cache & Message Queue
+  redis:
+    container_name: "monitait_redis"
+    image: redis:7-alpine
+    command: ["redis-server", "--notify-keyspace-events", "KEA", "--stop-writes-on-bgsave-error", "no", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./volumes/redis_data:/data
+    privileged: true
+    networks:
+      - main_network
+    healthcheck:
+      test: redis-cli ping || exit 1
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: "always"
+
+  # YOLO AI Inference Service
+  yolo_inference:
+    container_name: "monitait_yolo"
+    build: "./yolo_inference"
+    shm_size: '2gb'
+    command: "uvicorn main:app --host 0.0.0.0 --port 4442 --reload"
+    expose:
+      - 4442
+    volumes:
+      - ./yolo_inference:/code
+      - ./volumes/weights:/weights
+      - ./volumes/dataset:/dataset
+    environment:
+      - YOLO_CONF_THRESHOLD=0.3
+      - YOLO_IOU_THRESHOLD=0.4
+    ipc: host
+    privileged: true
+    deploy:
+      replicas: 2
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    networks:
+      - main_network
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: "always"
+
+  # Video Streaming Service (legacy - now integrated in vision_engine)
+  stream:
+    container_name: "monitait_stream"
+    build: "./stream"
+    command: "uvicorn main:app --host 0.0.0.0 --port 5000"
+    expose:
+      - 5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./stream:/code
+      - ./volumes/images:/images
+    networks:
+      - main_network
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: "always"
+
+  # Image Gallery Service
+  pigallery2:
+    image: bpatrik/pigallery2
+    container_name: monitait_gallery
+    privileged: true
+    networks:
+      - main_network
+    ports:
+      - "80:80"
+    volumes:
+      - "./pigallery2/config:/app/data/config"
+      - "./pigallery2/db-data:/app/data/db"
+      - "/mnt/SSD-RESERVE/raw_images:/app/data/images:ro"
+      - "./pigallery2/tmp:/app/data/tmp"
+    restart: always
+
+  # Automated Disk Cleanup Service
+  cleanup:
+    container_name: "monitait_cleanup"
+    build: "./cleanup"
+    volumes:
+      - /mnt/SSD-RESERVE/raw_images:/data
+    environment:
+      - MONITOR_DIR=/data
+      - MAX_USAGE_PERCENT=90  # Cleanup threshold
+      - MIN_USAGE_PERCENT=80
+      - CHECK_INTERVAL=5  # Check every 5 seconds
+      - DELETION_BATCH_SIZE=10
+      - NUM_THREADS=1
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: always
+
+networks:
+  main_network:
+    driver: bridge
+
+volumes:
+  weights:
+  dataset:
+  pgdata:
