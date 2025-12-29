@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <title>Testing fastapi-frame-stream</title>
+</head>
+
+<body style="overflow: hidden;">
+
+  <div class="cards" style="height: 100vh;display: grid;width: auto;overflow: hidden;">
+
+    {% for cam in cams %}
+    <div class="{{ cam }}" style="display: flex;flex-direction: column;align-items: flex-start;justify-content: center;">
+      <img style="height: 80%;width: auto;margin: 0 auto;" src="http://0.0.0.0:5000/video_feed/{{ cam }}">
+      <button
+        style="border: 1px solid rgb(197, 197, 197);outline: none;display: flex;justify-content: center;background: #70d970;color: #FFF; padding: 7.5px;margin-top: 4px;cursor: pointer;width: 90%;margin: 0 auto;">
+        send {{ cam }}
+        <img src="loading.gif" alt="loading" style="width: 50px;height: 30px;display: none;">
+      </button>
+    </div><br>
+    {% endfor %}
+    <p id='messages'>
+    </p>
+    <p id='speed'>
+    </p>
+  </div>
+</body>
+<script>
+  var ws = new WebSocket("ws://0.0.0.0:5050/ws");
+  ws.onmessage = function(event) {
+      var messages = document.getElementById('messages')
+      var content = document.createTextNode(event.data)
+      messages.innerText = event.data
+  };
+  var ws = new WebSocket("ws://0.0.0.0:5050/speed_ws");
+  ws.onmessage = function(event) {
+      var messages = document.getElementById('speed')
+      var content = document.createTextNode(event.data)
+      messages.innerText = event.data
+  };
+</script>
+<script>
+  const listCard = document.querySelector('.cards')
+  const length = listCard.children.length;
+
+  listCard.addEventListener('click', (e) => {
+    if (e.target.nodeName === "BUTTON") {
+      e.target.style.padding = '0px'
+      e.target.innerHTML = '<img src="loading.gif" alt="loading" style="width: 50px;height: 30px;display: flex;">'
+      fetch(`http://0.0.0.0:5000/image_feed/${e.target.parentNode.className}`)
+        .then(res => {
+          e.target.style.padding = '7.5px'
+          e.target.innerText = 'send'
+        })
+        .catch(() => {
+          e.target.innerText = 'send'
+          e.target.style.padding = '7.5px'
+        })
+    }
+  })
+
+  function handleStyle(newLength) {
+    let style = ''
+    let styleRow = ''
+    Array(Math.floor(newLength)).fill({}).map(item => {
+      if (style) {
+        style = `${style} auto`
+        styleRow = `${styleRow} ${listCard.clientHeight / newLength}px`
+      } else {
+        style = 'auto'
+        styleRow = `${listCard.clientHeight / newLength}px`
+      }
+    })
+    listCard.style.gridTemplateColumns = style
+    listCard.style.gridTemplateRows = styleRow
+  }
+
+
+  // if (length < 3) {
+  //   handleStyle(length)
+  // } else if (length < 5) {
+  //   handleStyle(2)
+  // } else if (length < 10) {
+  //   handleStyle(3)
+  // } else if (length < 17) {
+  //   handleStyle(4)
+  // } else if (length < 26) {
+  //   handleStyle(5)
+  // } else if (length < 37) {
+  //   handleStyle(6)
+  // } else if (length < 50) {
+  //   handleStyle(7)
+  // } else if (length < 65) {
+  //   handleStyle(8)
+  // } else if (length < 82) {
+  //   handleStyle(9)
+  // } else if (length < 101) {
+  //   handleStyle(10)
+  // }
+</script>
+
+</html>

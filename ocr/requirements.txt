@@ -1,0 +1,7 @@
+easyocr
+requests
+numpy
+fastapi
+pillow
+fastapi-health
+python-multipart

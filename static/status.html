@@ -1,0 +1,2252 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Counter Service Status Monitor</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 20px;
+                background-color: #f0f0f0;
+            }
+            .container {
+                max-width: 1200px;
+                margin: 0 auto;
+                background-color: white;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+            .header-container {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 20px;
+            }
+            .header-title {
+                margin: 0;
+            }
+            .status-box {
+                background: #f5f5f5;
+                padding: 15px;
+                border-radius: 5px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                margin-bottom: 20px;
+            }
+            .status-box-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 20px;
+            }
+            .status-box-item {
+                text-align: center;
+            }
+            .status-box-label {
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 5px;
+            }
+            .status-box-value {
+                font-size: 18px;
+                font-weight: bold;
+            }
+            .timestamp-details {
+                font-size: 12px;
+                color: #666;
+                margin-top: 5px;
+            }
+            .connected { color: #006600; }
+            .disconnected { color: #cc0000; }
+            .error { color: #cc6600; }
+            .status-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }
+            .status-item {
+                background-color: #f8f9fa;
+                padding: 15px;
+                border-radius: 6px;
+                border: 1px solid #dee2e6;
+            }
+            .status-item h3 {
+                margin: 0 0 10px 0;
+                color: #495057;
+            }
+            .status-value {
+                font-size: 24px;
+                font-weight: bold;
+                color: #212529;
+            }
+            .status-unit {
+                font-size: 14px;
+                color: #666;
+            }
+            .range-bar {
+                width: 100%;
+                height: 8px;
+                background: #ddd;
+                border-radius: 4px;
+                margin-top: 5px;
+                overflow: hidden;
+            }
+            .range-fill {
+                height: 100%;
+                background: #4CAF50;
+                transition: width 0.3s ease;
+            }
+            .range-text {
+                font-size: 12px;
+                color: #666;
+                margin-top: 2px;
+            }
+            .movement-indicator {
+                display: inline-block;
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                margin-right: 10px;
+                transition: background-color 0.3s ease;
+            }
+            .movement-moving {
+                background-color: #4CAF50;
+                animation: pulse 1s infinite;
+            }
+            .movement-stopped {
+                background-color: #ff4444;
+            }
+            @keyframes pulse {
+                0% { transform: scale(1); }
+                50% { transform: scale(1.2); }
+                100% { transform: scale(1); }
+            }
+            .device-status {
+                font-size: 14px;
+                margin-top: 10px;
+                padding: 10px;
+                border-radius: 4px;
+                background: #fff;
+            }
+            .device-status.error {
+                background: #ffebee;
+                color: #c62828;
+            }
+            .device-status.connected {
+                background: #e8f5e9;
+                color: #2e7d32;
+            }
+            .status-indicators {
+                display: flex;
+                gap: 20px;
+                margin: 10px 0;
+            }
+            .status-indicator {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .status-circle {
+                width: 20px;
+                height: 20px;
+                border-radius: 50%;
+                background-color: #ccc;
+            }
+            .status-circle.active {
+                animation: pulse 2s infinite;
+            }
+            .status-circle.U.active {
+                background-color: #2196F3;
+            }
+            .status-circle.B.active {
+                background-color: #2196F3;
+            }
+            .status-circle.warning.active {
+                background-color: #f44336;
+                animation: pulse 1s infinite;
+            }
+            .data-source {
+                font-weight: bold;
+                padding: 4px 8px;
+                border-radius: 4px;
+                margin-left: 10px;
+            }
+            .data-source.serial {
+                background-color: #007bff;
+                color: white;
+            }
+            .data-source.gpio {
+                background-color: #28a745;
+                color: white;
+            }
+            .data-source.none {
+                background-color: #dc3545;
+                color: white;
+            }
+            .control-panel {
+                margin-top: 30px;
+                padding: 20px;
+                background-color: #f8f9fa;
+                border-radius: 8px;
+                border: 1px solid #dee2e6;
+            }
+            .verbose-panel {
+                margin-top: 20px;
+                padding: 15px;
+                background-color: #fff;
+                border-radius: 6px;
+                border: 1px dashed #ced4da;
+            }
+            .verbose-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 10px;
+            }
+            .verbose-item-label {
+                font-size: 13px;
+                color: #555;
+            }
+            .verbose-item-value {
+                font-size: 16px;
+                font-weight: 600;
+                margin-top: 2px;
+            }
+            .control-section {
+                margin-bottom: 20px;
+            }
+            .control-section h3 {
+                margin: 0 0 15px 0;
+                color: #495057;
+                border-bottom: 2px solid #dee2e6;
+                padding-bottom: 8px;
+            }
+            .control-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
+            }
+            .control-item {
+                background: white;
+                padding: 15px;
+                border-radius: 6px;
+                border: 1px solid #dee2e6;
+            }
+            .control-label {
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 8px;
+            }
+            .control-input {
+                width: 100%;
+                padding: 8px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                margin-bottom: 8px;
+                box-sizing: border-box;
+            }
+            .control-button {
+                width: 100%;
+                padding: 8px;
+                border: none;
+                border-radius: 4px;
+                background-color: #007bff;
+                color: white;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            }
+            .control-button:hover {
+                background-color: #0056b3;
+            }
+            .control-button:disabled {
+                background-color: #6c757d;
+                cursor: not-allowed;
+            }
+            .control-response {
+                font-size: 12px;
+                color: #666;
+                margin-top: 5px;
+                min-height: 20px;
+            }
+            .control-response.success {
+                color: #28a745;
+            }
+            .control-response.error {
+                color: #dc3545;
+            }
+            .camera-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 10px 0;
+            }
+            .camera-table th, .camera-table td {
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid #dee2e6;
+            }
+            .camera-table th {
+                background-color: #f8f9fa;
+                font-weight: bold;
+            }
+            .camera-ok { color: #28a745; font-weight: bold; }
+            .camera-fail { color: #dc3545; font-weight: bold; }
+
+            /* Camera Monitoring Styles */
+            .camera-monitor-section {
+                background: white;
+                border-radius: 10px;
+                padding: 20px;
+                margin-bottom: 20px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .section-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 20px;
+                padding-bottom: 10px;
+                border-bottom: 2px solid #e0e0e0;
+            }
+            .section-header h2 {
+                margin: 0;
+                color: #333;
+            }
+            .camera-refresh-status {
+                padding: 4px 10px;
+                border-radius: 12px;
+                font-size: 12px;
+                background-color: #28a745;
+                color: white;
+            }
+            .camera-refresh-status.paused {
+                background-color: #ffc107;
+                color: #000;
+            }
+            .camera-refresh-status.error {
+                background-color: #dc3545;
+            }
+            .camera-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+                gap: 20px;
+            }
+            .camera-card {
+                background: #f8f9fa;
+                border-radius: 8px;
+                padding: 15px;
+                border: 1px solid #e0e0e0;
+            }
+            .camera-card-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 12px;
+                padding-bottom: 8px;
+                border-bottom: 1px solid #dee2e6;
+            }
+            .camera-card-title {
+                font-size: 16px;
+                font-weight: bold;
+                color: #333;
+            }
+            .camera-status-badge {
+                padding: 4px 10px;
+                border-radius: 12px;
+                font-size: 11px;
+                color: white;
+            }
+            .camera-status-badge.running { background-color: #28a745; }
+            .camera-status-badge.stopped { background-color: #dc3545; }
+            .camera-card-content {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+            }
+            .camera-image-container {
+                text-align: center;
+            }
+            .camera-image {
+                max-width: 100%;
+                max-height: 200px;
+                border: 2px solid #ddd;
+                border-radius: 6px;
+                object-fit: contain;
+                background: #f0f0f0;
+            }
+            .camera-no-image {
+                padding: 40px 15px;
+                background: #f0f0f0;
+                border: 2px dashed #ccc;
+                border-radius: 6px;
+                color: #666;
+                font-style: italic;
+                font-size: 13px;
+            }
+            .camera-info {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .camera-info-item {
+                display: flex;
+                justify-content: space-between;
+                padding: 6px 10px;
+                background: white;
+                border-radius: 4px;
+                font-size: 13px;
+            }
+            .camera-info-label { color: #666; }
+            .camera-info-value { font-weight: bold; color: #333; }
+            .camera-config-section {
+                margin-top: 12px;
+                padding-top: 12px;
+                border-top: 1px solid #dee2e6;
+            }
+            .camera-config-grid {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                gap: 8px;
+                margin-bottom: 10px;
+            }
+            .camera-config-item {
+                display: flex;
+                flex-direction: column;
+            }
+            .camera-config-item label {
+                font-size: 11px;
+                color: #666;
+                margin-bottom: 3px;
+            }
+            .camera-config-item input {
+                padding: 5px 8px;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            .camera-actions {
+                display: flex;
+                gap: 8px;
+                justify-content: flex-end;
+                margin-top: 10px;
+            }
+            .camera-btn {
+                padding: 5px 12px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+                transition: all 0.2s;
+            }
+            .camera-btn-primary { background-color: #007bff; color: white; }
+            .camera-btn-primary:hover { background-color: #0056b3; }
+            .camera-btn-success { background-color: #28a745; color: white; }
+            .camera-btn-success:hover { background-color: #218838; }
+            .camera-btn-danger { background-color: #dc3545; color: white; }
+            .camera-btn-danger:hover { background-color: #c82333; }
+            .camera-btn-secondary { background-color: #6c757d; color: white; }
+            .camera-btn-secondary:hover { background-color: #545b62; }
+            .camera-message {
+                padding: 6px 10px;
+                border-radius: 4px;
+                margin-top: 8px;
+                font-size: 12px;
+                display: none;
+            }
+            .camera-message.success { background-color: #d4edda; color: #155724; display: block; }
+            .camera-message.error { background-color: #f8d7da; color: #721c24; display: block; }
+            .camera-message.info { background-color: #d1ecf1; color: #0c5460; display: block; }
+            .camera-loading {
+                text-align: center;
+                padding: 40px;
+                color: #666;
+                font-style: italic;
+            }
+
+            .timestamp-footer {
+                font-size: 14px;
+                color: #666;
+                margin-top: 20px;
+                text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header-container">
+                <h1 class="header-title">Counter Service Status Monitor</h1>
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <label for="refresh-interval" style="font-size: 14px; color: #666;">Refresh:</label>
+                        <select id="refresh-interval" class="control-input" style="width: auto; margin: 0; padding: 4px 8px;">
+                            <option value="100">0.1s</option>
+                            <option value="500" selected>0.5s</option>
+                            <option value="1000">1s</option>
+                            <option value="2000">2s</option>
+                            <option value="4000">4s</option>
+                            <option value="never">Never</option>
+                        </select>
+                    </div>
+                    <span class="data-source" id="dataSource">Loading...</span>
+                </div>
+            </div>
+
+            <div class="status-box">
+                <div class="status-indicators">
+                    <div class="status-indicator">
+                        <div class="status-circle U" id="U-status"></div>
+                        <span>U</span>
+                    </div>
+                    <div class="status-indicator">
+                        <div class="status-circle B" id="B-status"></div>
+                        <span>B</span>
+                    </div>
+                    <div class="status-indicator">
+                        <div class="status-circle warning" id="warning-status"></div>
+                        <span>Warning</span>
+                    </div>
+                </div>
+                <div class="status-box-grid">
+                    <div class="status-box-item">
+                        <div class="status-box-label">Connection Status</div>
+                        <div class="status-box-value" id="connection-status">Connecting...</div>
+                    </div>
+                    <div class="status-box-item">
+                        <div class="status-box-label">Last Update</div>
+                        <div class="status-box-value" id="timestamp">-</div>
+                    </div>
+                    <div class="status-box-item">
+                        <div class="status-box-label">Current Shipment</div>
+                        <div class="status-box-value" id="shipment-value">-</div>
+                    </div>
+                </div>
+                <div class="device-status" id="device-status">Checking device status...</div>
+            </div>
+
+            <div class="status-grid">
+                <div class="status-item">
+                    <h3>Encoder Value</h3>
+                    <div class="status-value" id="encoder-value">-</div>
+                </div>
+                <div class="status-item">
+                        <h3>Speed (PPM)</h3>
+                        <div class="status-value" id="speed-value">-</div>
+                        <div class="status-unit">pulses/min</div>
+                </div>
+                    <div class="status-item">
+                        <h3>Pulses / Second</h3>
+                        <div class="status-value" id="pps-value">-</div>
+                    </div>
+                <div class="status-item">
+                    <h3>Movement Status</h3>
+                    <div class="status-value">
+                        <span class="movement-indicator" id="movement-indicator"></span>
+                        <span id="movement-value">-</span>
+                    </div>
+                </div>
+                <div class="status-item">
+                    <h3>Ejector Queue</h3>
+                    <div class="status-value" id="ejector-queue">-</div>
+                </div>
+                <div class="status-item">
+                    <h3>Ejector Active</h3>
+                    <div class="status-value" id="ejector-running">-</div>
+                </div>
+                <div class="status-item">
+                            <h3>Ejector Enabled</h3>
+                            <div class="status-value" id="ejector-enabled">-</div>
+                        </div>
+                        <div class="status-item">
+                    <h3>Ejector Offset</h3>
+                    <div class="status-value" id="ejector-offset">-</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>OK Counter</h3>
+                        <div class="status-value" id="ok-counter">-</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>NG Counter</h3>
+                        <div class="status-value" id="ng-counter">-</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Downtime</h3>
+                        <div class="status-value" id="downtime-value">-</div>
+                        <div class="status-unit">seconds</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Analog Value (ANG)</h3>
+                        <div class="status-value" id="analog-value">-</div>
+                    </div>
+                    <div class="status-item">
+                        <h3>Power Value (PWR)</h3>
+                        <div class="status-value" id="power-value">-</div>
+                </div>
+            </div>
+
+            <!-- Camera Monitoring Section -->
+            <div class="camera-monitor-section">
+                <div class="section-header">
+                    <h2>📷 Camera Monitoring</h2>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span class="camera-refresh-status" id="camera-refresh-status">Active</span>
+                        <button class="control-button" style="width: auto; padding: 6px 12px;" onclick="refreshCameras()">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <!-- Service Config Persistence (All Settings) -->
+                <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px;">
+                        <span style="font-weight: bold; color: #333;">All Service Config:</span>
+                        <button class="camera-btn camera-btn-success" onclick="saveServiceConfig()">💾 Save</button>
+                        <button class="camera-btn camera-btn-primary" onclick="loadServiceConfig()">📂 Load</button>
+                        <button class="camera-btn camera-btn-secondary" onclick="downloadServiceConfig()">⬇️ Export</button>
+                        <label class="camera-btn camera-btn-secondary" style="cursor: pointer; margin: 0;">
+                            ⬆️ Import
+                            <input type="file" id="config-file-input" accept=".json" style="display: none;" onchange="importServiceConfig(event)">
+                        </label>
+                        <span id="camera-config-status" style="font-size: 12px; color: #666; margin-left: 10px;"></span>
+                    </div>
+                    <p style="font-size: 11px; color: #888; margin: 6px 0 0 0;">Saves: Ejector, Capture, Histogram, DataMatrix, Cameras, and other settings</p>
+                    <div id="camera-config-message" style="margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; display: none;"></div>
+                </div>
+
+                <div id="camera-grid" class="camera-grid">
+                    <div class="camera-loading">Loading cameras...</div>
+                </div>
+            </div>
+
+            <!-- Legacy Camera Status Table (kept for backward compatibility) -->
+            <h2>Camera Connection Status</h2>
+            <table class="camera-table">
+                <thead>
+                    <tr>
+                        <th>Camera</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="camera-table-body">
+                    <tr><td colspan="2">Loading...</td></tr>
+                </tbody>
+            </table>
+
+            <div class="control-panel">
+                <h2>Control Panel</h2>
+
+                <div class="control-section">
+                    <h3>Basic Controls</h3>
+                    <div class="control-grid" style="grid-template-columns: 1fr 1fr;">
+                        <div class="control-item" style="display: grid; grid-template-rows: repeat(3, 1fr); gap: 10px;">
+                            <div class="control-item">
+                                <button class="control-button" onclick="sendCommand('U_ON_B_ON')">Both On</button>
+                                <div class="control-response" id="cmd-U_ON_B_ON-response"></div>
+                            </div>
+                            <div class="control-item" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                                <div>
+                                    <button class="control-button" onclick="sendCommand('U_ON_B_OFF')">U On, B Off</button>
+                                    <div class="control-response" id="cmd-U_ON_B_OFF-response"></div>
+                                </div>
+                                <div>
+                                    <button class="control-button" onclick="sendCommand('B_ON_U_OFF')">B On, U Off</button>
+                                    <div class="control-response" id="cmd-B_ON_U_OFF-response"></div>
+                                </div>
+                            </div>
+                            <div class="control-item">
+                                <button class="control-button" onclick="sendCommand('B_OFF_U_OFF')">Both Off</button>
+                                <div class="control-response" id="cmd-B_OFF_U_OFF-response"></div>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Upper PWM Value (0-255)</div>
+                                <input type="number" class="control-input" id="pwm-up" min="0" max="255" value="255">
+                                <button class="control-button" onclick="sendCommand('U_SET_PWM', document.getElementById('pwm-up').value)">Set Upper PWM</button>
+                                <div class="control-response" id="cmd-U_SET_PWM-response"></div>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Bottom PWM Value (0-255)</div>
+                                <input type="number" class="control-input" id="pwm-down" min="0" max="255" value="255">
+                                <button class="control-button" onclick="sendCommand('B_SET_PWM', document.getElementById('pwm-down').value)">Set Bottom PWM</button>
+                                <div class="control-response" id="cmd-B_SET_PWM-response"></div>
+                            </div>
+                        </div>
+                        <div class="control-item" style="display: grid; grid-template-rows: repeat(3, 1fr); gap: 10px;">
+                            <div class="control-item">
+                                <button class="control-button" onclick="sendCommand('RESET_ENCODER')">Reset Encoder</button>
+                                <div class="control-response" id="cmd-RESET_ENCODER-response"></div>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Warning LED</div>
+                                <button class="control-button" onclick="sendCommand('WARNING_ON')">Warning On</button>
+                                <button class="control-button" onclick="sendCommand('WARNING_OFF')" style="margin-top: 5px;">Warning Off</button>
+                                <div class="control-response" id="cmd-WARNING-response"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>OK Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">OK Counter Adjustment</div>
+                            <input type="number" class="control-input" id="ok-adjust" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)">Adjust OK Counter</button>
+                            <div class="control-response" id="cmd-OK_ADJUST-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Offset Delay (milliseconds)</div>
+                            <input type="number" class="control-input" id="ok-offset-delay" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)">Set Offset Delay</button>
+                            <div class="control-response" id="cmd-OK_OFFSET_DELAY-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Duration Pulses (16us each)</div>
+                            <input type="number" class="control-input" id="ok-duration-pulses" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)">Set Duration Pulses</button>
+                            <div class="control-response" id="cmd-OK_DURATION_PULSES-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Duration Percent</div>
+                            <input type="number" class="control-input" id="ok-duration-percent" min="0" max="100" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)">Set Duration Percent</button>
+                            <div class="control-response" id="cmd-OK_DURATION_PERCENT-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Encoder Factor</div>
+                            <input type="number" class="control-input" id="ok-encoder-factor" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)">Set Encoder Factor</button>
+                            <div class="control-response" id="cmd-OK_ENCODER_FACTOR-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>NG Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">NG Counter Adjustment</div>
+                            <input type="number" class="control-input" id="ng-adjust" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)">Adjust NG Counter</button>
+                            <div class="control-response" id="cmd-NG_ADJUST-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Offset Delay (milliseconds)</div>
+                            <input type="number" class="control-input" id="ng-offset-delay" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)">Set Offset Delay</button>
+                            <div class="control-response" id="cmd-NG_OFFSET_DELAY-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Duration Pulses (16us each)</div>
+                            <input type="number" class="control-input" id="ng-duration-pulses" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)">Set Duration Pulses</button>
+                            <div class="control-response" id="cmd-NG_DURATION_PULSES-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Duration Percent</div>
+                            <input type="number" class="control-input" id="ng-duration-percent" min="0" max="100" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)">Set Duration Percent</button>
+                            <div class="control-response" id="cmd-NG_DURATION_PERCENT-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Encoder Factor</div>
+                            <input type="number" class="control-input" id="ng-encoder-factor" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)">Set Encoder Factor</button>
+                            <div class="control-response" id="cmd-NG_ENCODER_FACTOR-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Counter Service Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Ejector Enabled</div>
+                            <select class="control-input" id="ejector-enabled-input">
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('ejector_enabled', document.getElementById('ejector-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-ejector_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Ejector Offset (encoder counts)</div>
+                            <input type="number" class="control-input" id="ejector-offset-input" min="0" value="0">
+                            <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)">Set Offset</button>
+                            <div class="control-response" id="config-ejector_offset-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Ejector Duration (seconds)</div>
+                            <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.1" value="0.4">
+                            <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>
+                            <div class="control-response" id="config-ejector_duration-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Ejector Poll Interval (seconds)</div>
+                            <input type="number" class="control-input" id="ejector-poll-input" min="0.001" step="0.01" value="0.03">
+                            <button class="control-button" onclick="updateConfig('ejector_poll_interval', document.getElementById('ejector-poll-input').value)">Set Poll Interval</button>
+                            <div class="control-response" id="config-ejector_poll_interval-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Time Between Packages (seconds)</div>
+                            <input type="number" class="control-input" id="time-between-packages-input" min="0" step="0.001" value="0.305">
+                            <button class="control-button" onclick="updateConfig('time_between_packages', document.getElementById('time-between-packages-input').value)">Set Time</button>
+                            <div class="control-response" id="config-time_between_packages-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Capture Mode</div>
+                            <select class="control-input" id="capture-mode-input">
+                                <option value="single">Single</option>
+                                <option value="multiple">Multiple</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('capture_mode', document.getElementById('capture-mode-input').value)">Set Mode</button>
+                            <div class="control-response" id="config-capture_mode-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Image Processing Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label">Parent Object List (comma-separated, use _root for no parent requirement)</div>
+                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
+                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
+                            <div class="control-response" id="config-parent_object_list-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Remove Raw Image After DM Decode</div>
+                            <select class="control-input" id="remove-raw-image-input">
+                                <option value="false">No</option>
+                                <option value="true">Yes</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
+                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>DataMatrix Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Valid DM Char Sizes (comma-separated)</div>
+                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
+                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
+                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Confidence Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
+                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
+                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Overlap Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
+                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
+                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Feature Toggles</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Histogram Feature</div>
+                            <select class="control-input" id="histogram-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Save Histogram Images</div>
+                            <select class="control-input" id="histogram-save-image-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_save_image-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Class Count Check (equal counts)</div>
+                            <select class="control-input" id="check-class-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Classes to Check (comma-separated)</div>
+                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
+                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Class Count Confidence Threshold</div>
+                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Light Status Check (closed-loop)</div>
+                            <select class="control-input" id="light-status-check-input">
+                                <option value="false" selected>Disabled (open-loop, faster)</option>
+                                <option value="true">Enabled (verify via serial)</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
+                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Store Annotations to PostgreSQL</div>
+                            <select class="control-input" id="store-annotation-enabled-input">
+                                <option value="false">Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('store_annotation_enabled', document.getElementById('store-annotation-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-store_annotation_enabled-response"></div>
+                        </div>
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label" id="postgres-info">PostgreSQL: Loading...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>State Management (Camera Capture Control)</h3>
+                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <span style="font-weight: bold; color: #333;">Current State:</span>
+                            <span id="current-state-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
+                            <span id="capture-state-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <button class="camera-btn camera-btn-success" onclick="triggerCapture()">Trigger Capture</button>
+                            <button class="camera-btn camera-btn-primary" onclick="refreshStates()">Refresh</button>
+                        </div>
+                        <div id="state-message" style="margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; display: none;"></div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Available States</h4>
+                        <div id="states-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <span style="color: #666; font-style: italic;">Loading states...</span>
+                        </div>
+                    </div>
+
+                    <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Create/Edit State (Multi-Phase Capture)</h4>
+                        <div class="control-grid" style="margin-bottom: 15px;">
+                            <div class="control-item">
+                                <div class="control-label">State Name</div>
+                                <input type="text" class="control-input" id="state-name-input" placeholder="e.g., default">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Enabled</div>
+                                <select class="control-input" id="state-enabled-input">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; padding: 10px; margin-bottom: 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: #495057;">Capture Phases</h5>
+                                <button class="camera-btn camera-btn-success" onclick="addPhase()" style="padding: 4px 10px; font-size: 11px;">+ Add Phase</button>
+                            </div>
+
+                            <div id="phases-container">
+                                <!-- Phase 1 (default) - all cameras -->
+                                <div class="phase-row" id="phase-row-0" style="display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px;">
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Light Mode</label>
+                                        <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
+                                            <option value="U_ON_B_OFF" selected>U On, B Off</option>
+                                            <option value="U_OFF_B_ON">U Off, B On</option>
+                                            <option value="U_ON_B_ON">U On, B On</option>
+                                            <option value="U_OFF_B_OFF">U Off, B Off</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Delay (s)</label>
+                                        <input type="number" class="control-input phase-delay" value="0.1" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Cameras</label>
+                                        <input type="text" class="control-input phase-cameras" value="1,2,3,4" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Steps (-1=loop)</label>
+                                        <input type="number" class="control-input phase-steps" value="1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Analog (-1=off)</label>
+                                        <input type="number" class="control-input phase-analog" value="-1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <button class="camera-btn camera-btn-danger" onclick="removePhase(0)" style="padding: 4px 8px; font-size: 11px;">✕</button>
+                                </div>
+                            </div>
+                            <p style="font-size: 10px; color: #888; margin: 8px 0 0 0;">Steps: -1=infinite loop, 1=every step, N=every N steps. Analog: -1=disabled, N=trigger when analog≥N.</p>
+                        </div>
+
+                        <div style="margin-top: 10px; display: flex; gap: 8px;">
+                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateState()">Create/Update State</button>
+                            <button class="control-button" style="background-color: #dc3545;" onclick="deleteCurrentState()">Delete State</button>
+                        </div>
+                        <div class="control-response" id="state-config-response"></div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Data File Editor</h3>
+                    <div style="margin-bottom: 10px;">
+                        <span class="control-label">File: </span><span id="data-file-path">Loading...</span>
+                        <button class="control-button" style="width: auto; margin-left: 10px;" onclick="loadDataFile()">Reload</button>
+                    </div>
+                    <textarea id="data-file-content" class="control-input" style="width: 100%; height: 300px; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
+                    <div style="margin-top: 10px; display: flex; gap: 10px;">
+                        <button class="control-button" style="background-color: #28a745;" onclick="saveDataFile()">Save Data File</button>
+                        <button class="control-button" style="background-color: #6c757d;" onclick="formatDataFile()">Format JSON</button>
+                    </div>
+                    <div class="control-response" id="data-file-response"></div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Watcher Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Downtime Threshold (seconds)</div>
+                            <input type="number" class="control-input" id="downtime-threshold" min="1" value="10">
+                            <button class="control-button" onclick="sendCommand('SET_DOWNTIME', document.getElementById('downtime-threshold').value)">Set Threshold</button>
+                            <div class="control-response" id="cmd-SET_DOWNTIME-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Baud Rate</div>
+                            <select class="control-input" id="baud-rate">
+                                <option value="9600">9600</option>
+                                <option value="19200">19200</option>
+                                <option value="38400">38400</option>
+                                <option value="57600" selected>57600</option>
+                                <option value="115200">115200</option>
+                            </select>
+                            <button class="control-button" onclick="sendCommand('SET_BAUD_RATE', document.getElementById('baud-rate').value)">Set Baud Rate</button>
+                            <div class="control-response" id="cmd-SET_BAUD_RATE-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">External Reset</div>
+                            <select class="control-input" id="external-reset">
+                                <option value="0">Off</option>
+                                <option value="1">On</option>
+                            </select>
+                            <button class="control-button" onclick="sendCommand('SET_EXTERNAL_RESET', document.getElementById('external-reset').value)">Set External Reset</button>
+                            <div class="control-response" id="cmd-SET_EXTERNAL_RESET-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Verbose Mode</div>
+                            <select class="control-input" id="verbose-mode">
+                                <option value="0">Off</option>
+                                <option value="1">On</option>
+                            </select>
+                            <button class="control-button" onclick="sendCommand('SET_VERBOSE', document.getElementById('verbose-mode').value)">Set Verbose Mode</button>
+                            <div class="control-response" id="cmd-SET_VERBOSE-response"></div>
+                        </div>
+                    </div>
+                    <div class="verbose-panel" style="margin-top: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Watcher Verbose Configuration (Read-only)</h4>
+                        <div class="verbose-grid">
+                            <div>
+                                <div class="verbose-item-label">OK Offset Delay (OOD)</div>
+                                <div class="verbose-item-value" id="v-ood">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">OK Duration Pulses (ODP)</div>
+                                <div class="verbose-item-value" id="v-odp">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">OK Duration Percent (ODL)</div>
+                                <div class="verbose-item-value" id="v-odl">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">OK Encoder Factor (OEF)</div>
+                                <div class="verbose-item-value" id="v-oef">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">NG Offset Delay (NOD)</div>
+                                <div class="verbose-item-value" id="v-nod">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">NG Duration Pulses (NDP)</div>
+                                <div class="verbose-item-value" id="v-ndp">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">NG Duration Percent (NDL)</div>
+                                <div class="verbose-item-value" id="v-ndl">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">NG Encoder Factor (NEF)</div>
+                                <div class="verbose-item-value" id="v-nef">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">External Reset (EXT)</div>
+                                <div class="verbose-item-value" id="v-ext">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">Baud Rate (BUD)</div>
+                                <div class="verbose-item-value" id="v-bud">-</div>
+                            </div>
+                            <div>
+                                <div class="verbose-item-label">Downtime Threshold (DWT)</div>
+                                <div class="verbose-item-value" id="v-dwt">-</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="control-grid" style="margin-top: 15px;">
+                        <div class="control-item">
+                            <div class="control-label">Legacy Mode</div>
+                            <select class="control-input" id="legacy-mode">
+                                <option value="0">Off</option>
+                                <option value="1">On</option>
+                            </select>
+                            <button class="control-button" onclick="sendCommand('SET_LEGACY', document.getElementById('legacy-mode').value)">Set Legacy Mode</button>
+                            <div class="control-response" id="cmd-SET_LEGACY-response"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <p class="timestamp-footer" id="refresh-footer">Page auto-refreshes every 0.5 seconds</p>
+        </div>
+
+        <script>
+            function fetchStatus() {
+                // Fetch health data
+                fetch('/health')
+                    .then(response => response.json())
+                    .then(data => {
+                        // Update connection status
+                        const connectionStatus = document.getElementById('connection-status');
+                        const deviceStatus = document.getElementById('device-status');
+                        const dataSource = document.getElementById('dataSource');
+
+                        if (data.status === 'healthy') {
+                            connectionStatus.textContent = 'Connected';
+                            connectionStatus.className = 'status-box-value connected';
+                            deviceStatus.textContent = 'Device connected and accessible';
+                            deviceStatus.className = 'device-status connected';
+                            dataSource.textContent = 'ONLINE';
+                            dataSource.className = 'data-source serial';
+                        } else {
+                            connectionStatus.textContent = 'Disconnected';
+                            connectionStatus.className = 'status-box-value disconnected';
+                            deviceStatus.textContent = 'Device not connected';
+                            deviceStatus.className = 'device-status error';
+                            dataSource.textContent = 'OFFLINE';
+                            dataSource.className = 'data-source none';
+                        }
+
+                        document.getElementById('timestamp').textContent = data.timestamp;
+
+                        // Update camera table
+                        if (data.cameras) {
+                            updateCameraTable(data.cameras);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error fetching health:', error);
+                        document.getElementById('dataSource').textContent = 'ERROR';
+                        document.getElementById('dataSource').className = 'data-source none';
+                    });
+
+                // Fetch API status data
+                fetch('/api/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        document.getElementById('encoder-value').textContent = data.encoder_value || 0;
+                        document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
+                        document.getElementById('pps-value').textContent = data.pps || 0;
+                        document.getElementById('ok-counter').textContent = data.ok_counter || 0;
+                        document.getElementById('ng-counter').textContent = data.ng_counter || 0;
+                        document.getElementById('downtime-value').textContent = data.downtime_seconds || 0;
+                        document.getElementById('analog-value').textContent = data.analog_value || 0;
+                        document.getElementById('power-value').textContent = data.power_value || 0;
+                        document.getElementById('shipment-value').textContent = data.shipment || 'no_shipment';
+                        document.getElementById('ejector-queue').textContent = data.ejector_queue_length || 0;
+                        document.getElementById('ejector-running').textContent = data.ejector_running ? 'Yes' : 'No';
+                        document.getElementById('ejector-enabled').textContent = data.ejector_enabled ? 'Yes' : 'No';
+                        document.getElementById('ejector-offset').textContent = data.ejector_offset || 0;
+
+                        // Update movement status
+                        const movementIndicator = document.getElementById('movement-indicator');
+                        const movementValue = document.getElementById('movement-value');
+                        if (data.is_moving) {
+                            movementIndicator.className = 'movement-indicator movement-moving';
+                            movementValue.textContent = 'Moving';
+                        } else {
+                            movementIndicator.className = 'movement-indicator movement-stopped';
+                            movementValue.textContent = 'Stopped';
+                        }
+
+                        // Update U/B/Warning status circles from STS bits (if provided)
+                        const status = data.status || {};
+                        const uActive = !!status.U;
+                        const bActive = !!status.B;
+                        const warningActive = !!status.warning;
+
+                        const uEl = document.getElementById('U-status');
+                        const bEl = document.getElementById('B-status');
+                        const wEl = document.getElementById('warning-status');
+
+                        if (uEl) {
+                            uEl.className = 'status-circle U' + (uActive ? ' active' : '');
+                        }
+                        if (bEl) {
+                            bEl.className = 'status-circle B' + (bActive ? ' active' : '');
+                        }
+                        if (wEl) {
+                            wEl.className = 'status-circle warning' + (warningActive ? ' active' : '');
+                        }
+
+                        // Update verbose configuration values (if present)
+                        const v = data.verbose_data || {};
+                        const setVerbose = (id, key) => {
+                            const el = document.getElementById(id);
+                            if (el) {
+                                const val = v[key];
+                                el.textContent = (val === undefined || val === null) ? '-' : val;
+                            }
+                        };
+                        setVerbose('v-ood', 'OOD');
+                        setVerbose('v-odp', 'ODP');
+                        setVerbose('v-odl', 'ODL');
+                        setVerbose('v-oef', 'OEF');
+                        setVerbose('v-nod', 'NOD');
+                        setVerbose('v-ndp', 'NDP');
+                        setVerbose('v-ndl', 'NDL');
+                        setVerbose('v-nef', 'NEF');
+                        setVerbose('v-ext', 'EXT');
+                        setVerbose('v-bud', 'BUD');
+                        setVerbose('v-dwt', 'DWT');
+                    })
+                    .catch(error => console.error('Error fetching API status:', error));
+
+            }
+
+            // Separate function to fetch config - only called once on page load
+            function fetchConfig() {
+                fetch('/config')
+                    .then(response => response.json())
+                    .then(data => {
+                        // Update counter service configuration inputs with current values
+                        if (data.ejector) {
+                            document.getElementById('ejector-enabled-input').value = data.ejector.enabled ? 'true' : 'false';
+                            document.getElementById('ejector-offset-input').value = data.ejector.offset || 0;
+                            document.getElementById('ejector-duration-input').value = data.ejector.duration || 0.4;
+                            document.getElementById('ejector-poll-input').value = data.ejector.poll_interval || 0.03;
+                        }
+                        if (data.capture) {
+                            document.getElementById('time-between-packages-input').value = data.capture.time_between_packages || 0.305;
+                            document.getElementById('capture-mode-input').value = data.capture.mode || 'single';
+                        }
+                        // Image processing configuration
+                        if (data.image_processing) {
+                            document.getElementById('parent-object-list-input').value = (data.image_processing.parent_object_list || []).join(',');
+                            document.getElementById('remove-raw-image-input').value = data.image_processing.remove_raw_image_when_dm_decoded ? 'true' : 'false';
+                        }
+                        // DataMatrix configuration
+                        if (data.datamatrix) {
+                            document.getElementById('dm-chars-sizes-input').value = (data.datamatrix.chars_sizes || [13,19,26]).join(',');
+                            document.getElementById('dm-confidence-input').value = data.datamatrix.confidence_threshold || 0.8;
+                            document.getElementById('dm-overlap-input').value = data.datamatrix.overlap_threshold || 0.2;
+                        }
+                        // Class count check configuration
+                        if (data.class_count_check) {
+                            document.getElementById('check-class-enabled-input').value = data.class_count_check.enabled ? 'true' : 'false';
+                            document.getElementById('check-class-classes-input').value = (data.class_count_check.classes || []).join(',');
+                            document.getElementById('check-class-confidence-input').value = data.class_count_check.confidence || 0.5;
+                        }
+                        // Light control configuration
+                        if (data.light_control) {
+                            document.getElementById('light-status-check-input').value = data.light_control.status_check_enabled ? 'true' : 'false';
+                        }
+                        // Histogram configuration
+                        if (data.histogram) {
+                            document.getElementById('histogram-enabled-input').value = data.histogram.enabled ? 'true' : 'false';
+                            document.getElementById('histogram-save-image-input').value = data.histogram.save_image ? 'true' : 'false';
+                        }
+                        // Store annotation configuration
+                        if (data.store_annotation) {
+                            document.getElementById('store-annotation-enabled-input').value = data.store_annotation.enabled ? 'true' : 'false';
+                            document.getElementById('postgres-info').textContent =
+                                `PostgreSQL: ${data.store_annotation.postgres_host}:${data.store_annotation.postgres_port}/${data.store_annotation.postgres_db}`;
+                        }
+                    })
+                    .catch(error => console.error('Error fetching config:', error));
+            }
+
+            // Data file functions
+            async function loadDataFile() {
+                try {
+                    const response = await fetch('/api/data-file');
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        document.getElementById('data-file-path').textContent = data.file_path;
+                        document.getElementById('data-file-content').value = data.content;
+                    } else {
+                        document.getElementById('data-file-path').textContent = 'Error loading';
+                        document.getElementById('data-file-content').value = 'Error: ' + (data.detail || 'Unknown error');
+                    }
+                } catch (error) {
+                    document.getElementById('data-file-path').textContent = 'Error';
+                    document.getElementById('data-file-content').value = 'Error: ' + error.message;
+                }
+            }
+
+            async function saveDataFile() {
+                const responseEl = document.getElementById('data-file-response');
+                const content = document.getElementById('data-file-content').value;
+
+                try {
+                    // Validate JSON first
+                    JSON.parse(content);
+
+                    const response = await fetch('/api/data-file', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ content: content })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        responseEl.textContent = `Saved! ${data.entries_count} entries. Backup: ${data.backup_path}`;
+                        responseEl.className = 'control-response success';
+                    } else {
+                        responseEl.textContent = `Error: ${data.detail || 'Unknown error'}`;
+                        responseEl.className = 'control-response error';
+                    }
+
+                    setTimeout(() => {
+                        responseEl.textContent = '';
+                        responseEl.className = 'control-response';
+                    }, 5000);
+                } catch (error) {
+                    responseEl.textContent = `Error: ${error.message}`;
+                    responseEl.className = 'control-response error';
+                    setTimeout(() => {
+                        responseEl.textContent = '';
+                        responseEl.className = 'control-response';
+                    }, 5000);
+                }
+            }
+
+            function formatDataFile() {
+                const textarea = document.getElementById('data-file-content');
+                const responseEl = document.getElementById('data-file-response');
+
+                try {
+                    const parsed = JSON.parse(textarea.value);
+                    textarea.value = JSON.stringify(parsed, null, 2);
+                    responseEl.textContent = 'JSON formatted successfully';
+                    responseEl.className = 'control-response success';
+                    setTimeout(() => {
+                        responseEl.textContent = '';
+                        responseEl.className = 'control-response';
+                    }, 2000);
+                } catch (error) {
+                    responseEl.textContent = `Invalid JSON: ${error.message}`;
+                    responseEl.className = 'control-response error';
+                    setTimeout(() => {
+                        responseEl.textContent = '';
+                        responseEl.className = 'control-response';
+                    }, 3000);
+                }
+            }
+
+            function updateCameraTable(cameras) {
+                const tbody = document.getElementById('camera-table-body');
+                tbody.innerHTML = '';
+
+                const cameraNames = {
+                    'cam_1': 'Camera 1',
+                    'cam_2': 'Camera 2',
+                    'cam_3': 'Camera 3',
+                    'cam_4': 'Camera 4'
+                };
+
+                for (const [key, status] of Object.entries(cameras)) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${cameraNames[key] || key}</td>
+                        <td class="${status ? 'camera-ok' : 'camera-fail'}">${status ? 'OK' : 'FAIL'}</td>
+                    `;
+                    tbody.appendChild(row);
+                }
+            }
+
+            async function updateConfig(key, value) {
+                const responseId = `config-${key}-response`;
+                const responseEl = document.getElementById(responseId);
+
+                try {
+                    const response = await fetch('/api/config', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ [key]: value })
+                    });
+
+                    const data = await response.json();
+
+                    if (responseEl) {
+                        if (response.ok) {
+                            responseEl.textContent = `OK: ${key} = ${value}`;
+                            responseEl.className = 'control-response success';
+                        } else {
+                            responseEl.textContent = `Error: ${data.detail || 'Unknown error'}`;
+                            responseEl.className = 'control-response error';
+                        }
+
+                        setTimeout(() => {
+                            responseEl.textContent = '';
+                            responseEl.className = 'control-response';
+                        }, 3000);
+                    }
+                } catch (error) {
+                    if (responseEl) {
+                        responseEl.textContent = `Error: ${error.message}`;
+                        responseEl.className = 'control-response error';
+                        setTimeout(() => {
+                            responseEl.textContent = '';
+                            responseEl.className = 'control-response';
+                        }, 3000);
+                    }
+                }
+            }
+
+            async function sendCommand(command, value = null) {
+                const responseId = `cmd-${command}-response`;
+                const responseEl = document.getElementById(responseId);
+
+                try {
+                    let url = `/${command}`;
+                    if (value !== null) {
+                        url += `?value=${value}`;
+                    }
+
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+
+                    const data = await response.json();
+
+                    if (responseEl) {
+                        if (response.ok) {
+                            responseEl.textContent = `OK: ${data.command}`;
+                            responseEl.className = 'control-response success';
+                        } else {
+                            responseEl.textContent = `Error: ${data.detail || 'Unknown error'}`;
+                            responseEl.className = 'control-response error';
+                        }
+
+                        setTimeout(() => {
+                            responseEl.textContent = '';
+                            responseEl.className = 'control-response';
+                        }, 3000);
+                    }
+                } catch (error) {
+                    if (responseEl) {
+                        responseEl.textContent = `Error: ${error.message}`;
+                        responseEl.className = 'control-response error';
+                        setTimeout(() => {
+                            responseEl.textContent = '';
+                            responseEl.className = 'control-response';
+                        }, 3000);
+                    }
+                }
+            }
+
+            // Refresh interval management
+            let refreshIntervalId = null;
+
+            function updateRefreshInterval() {
+                const select = document.getElementById('refresh-interval');
+                const footer = document.getElementById('refresh-footer');
+                const value = select.value;
+
+                // Clear existing interval
+                if (refreshIntervalId) {
+                    clearInterval(refreshIntervalId);
+                    refreshIntervalId = null;
+                }
+
+                if (value === 'never') {
+                    footer.textContent = 'Auto-refresh disabled';
+                } else {
+                    const seconds = parseInt(value) / 1000;
+                    footer.textContent = `Page auto-refreshes every ${seconds} second${seconds !== 1 ? 's' : ''}`;
+                    refreshIntervalId = setInterval(fetchStatus, parseInt(value));
+                }
+            }
+
+            // Listen for refresh interval changes
+            document.getElementById('refresh-interval').addEventListener('change', updateRefreshInterval);
+
+            // ===== CAMERA MONITORING FUNCTIONS =====
+            // Direct camera control through counter service API
+            let cameraData = {};
+            let cameraRefreshInterval = null;
+            let isCameraUpdating = false;
+
+            async function fetchCameraStatus() {
+                if (isCameraUpdating) return;
+
+                const statusEl = document.getElementById('camera-refresh-status');
+                try {
+                    statusEl.textContent = 'Updating...';
+                    statusEl.className = 'camera-refresh-status';
+
+                    const response = await fetch('/api/cameras');
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({}));
+                        throw new Error(errorData.error || 'Failed to get camera status');
+                    }
+
+                    const cameras = await response.json();
+
+                    if (cameras.error) {
+                        throw new Error(cameras.error);
+                    }
+
+                    cameraData = {};
+                    cameras.forEach(c => cameraData[c.id] = c);
+
+                    renderCameraCards();
+
+                    statusEl.textContent = 'Active';
+                    statusEl.className = 'camera-refresh-status';
+                } catch (error) {
+                    console.error('Error fetching camera status:', error);
+                    statusEl.textContent = 'Error';
+                    statusEl.className = 'camera-refresh-status error';
+
+                    const grid = document.getElementById('camera-grid');
+                    grid.innerHTML = `
+                        <div class="camera-loading" style="color: #dc3545;">
+                            ⚠️ Could not load camera status<br>
+                            <small style="color: #666;">${error.message}</small>
+                        </div>
+                    `;
+                }
+            }
+
+            function renderCameraCards() {
+                const grid = document.getElementById('camera-grid');
+                const cameraIds = Object.keys(cameraData).sort((a, b) => parseInt(a) - parseInt(b));
+
+                if (cameraIds.length === 0) {
+                    grid.innerHTML = '<div class="camera-loading">No cameras detected</div>';
+                    return;
+                }
+
+                grid.innerHTML = '';
+                cameraIds.forEach(cameraId => {
+                    const camera = cameraData[cameraId];
+                    const card = createCameraCard(cameraId, camera);
+                    grid.appendChild(card);
+                });
+            }
+
+            function createCameraCard(cameraId, camera) {
+                const div = document.createElement('div');
+                div.className = 'camera-card';
+                div.id = `camera-card-${cameraId}`;
+
+                const config = camera.config || {};
+                const isConnected = camera.connected;
+
+                div.innerHTML = `
+                    <div class="camera-card-header">
+                        <span class="camera-card-title">Camera ${cameraId}</span>
+                        <span class="camera-status-badge ${isConnected ? 'running' : 'stopped'}">
+                            ${isConnected ? 'CONNECTED' : 'DISCONNECTED'}
+                        </span>
+                    </div>
+
+                    <div class="camera-message" id="camera-msg-${cameraId}"></div>
+
+                    <div class="camera-card-content">
+                        <div class="camera-image-container">
+                            ${isConnected ?
+                                `<img id="camera-img-${cameraId}" src="/api/camera/${cameraId}/snapshot?t=${Date.now()}" class="camera-image" alt="Camera ${cameraId}" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                 <div class="camera-no-image" style="display:none;">Image load failed</div>` :
+                                `<div class="camera-no-image">Camera not connected</div>`
+                            }
+                        </div>
+                        <div class="camera-info">
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">Path</span>
+                                <span class="camera-info-value" style="font-size: 11px;">${camera.path || '-'}</span>
+                            </div>
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">Resolution</span>
+                                <span class="camera-info-value">${config.width || '-'}x${config.height || '-'}</span>
+                            </div>
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">FPS</span>
+                                <span class="camera-info-value">${config.fps || '-'}</span>
+                            </div>
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">Exposure</span>
+                                <span class="camera-info-value">${config.exposure || '-'}</span>
+                            </div>
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">Gain</span>
+                                <span class="camera-info-value">${config.gain || '-'}</span>
+                            </div>
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">Brightness</span>
+                                <span class="camera-info-value">${config.brightness || '-'}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="camera-config-section">
+                        <div class="camera-config-grid">
+                            <div class="camera-config-item">
+                                <label>Exposure</label>
+                                <input type="number" id="cam-cfg-exposure-${cameraId}" value="${config.exposure || 100}" min="1" max="10000"
+                                       onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                            </div>
+                            <div class="camera-config-item">
+                                <label>Gain</label>
+                                <input type="number" id="cam-cfg-gain-${cameraId}" value="${config.gain || 100}" min="0" max="255"
+                                       onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                            </div>
+                            <div class="camera-config-item">
+                                <label>Brightness</label>
+                                <input type="number" id="cam-cfg-brightness-${cameraId}" value="${config.brightness || 100}" min="0" max="255"
+                                       onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                            </div>
+                            <div class="camera-config-item">
+                                <label>Contrast</label>
+                                <input type="number" id="cam-cfg-contrast-${cameraId}" value="${config.contrast || 0}" min="0" max="255"
+                                       onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                            </div>
+                            <div class="camera-config-item">
+                                <label>Saturation</label>
+                                <input type="number" id="cam-cfg-saturation-${cameraId}" value="${config.saturation || 50}" min="0" max="255"
+                                       onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                            </div>
+                            <div class="camera-config-item">
+                                <label>FPS</label>
+                                <input type="number" id="cam-cfg-fps-${cameraId}" value="${config.fps || 30}" min="1" max="120"
+                                       onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                            </div>
+                        </div>
+                        <div class="camera-roi-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #333;">
+                            <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                                <label style="margin-right: 10px; font-weight: bold;">ROI</label>
+                                <input type="checkbox" id="cam-cfg-roi-enabled-${cameraId}" ${config.roi_enabled ? 'checked' : ''} ${!isConnected ? 'disabled' : ''}>
+                                <span style="margin-left: 5px; font-size: 11px;">Enable</span>
+                            </div>
+                            <div class="camera-config-grid">
+                                <div class="camera-config-item">
+                                    <label>X Min</label>
+                                    <input type="number" id="cam-cfg-roi-xmin-${cameraId}" value="${config.roi_xmin || 0}" min="0" max="1280"
+                                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                                </div>
+                                <div class="camera-config-item">
+                                    <label>Y Min</label>
+                                    <input type="number" id="cam-cfg-roi-ymin-${cameraId}" value="${config.roi_ymin || 0}" min="0" max="720"
+                                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                                </div>
+                                <div class="camera-config-item">
+                                    <label>X Max</label>
+                                    <input type="number" id="cam-cfg-roi-xmax-${cameraId}" value="${config.roi_xmax || 1280}" min="0" max="1280"
+                                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                                </div>
+                                <div class="camera-config-item">
+                                    <label>Y Max</label>
+                                    <input type="number" id="cam-cfg-roi-ymax-${cameraId}" value="${config.roi_ymax || 720}" min="0" max="720"
+                                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="camera-actions">
+                            <button class="camera-btn camera-btn-secondary" onclick="restartCamera(${cameraId})" ${!isConnected ? 'disabled' : ''}>Restart</button>
+                            <button class="camera-btn camera-btn-primary" onclick="applyCameraConfig(${cameraId})" ${!isConnected ? 'disabled' : ''}>Apply</button>
+                        </div>
+                    </div>
+                `;
+
+                return div;
+            }
+
+            function pauseCameraRefresh() {
+                isCameraUpdating = true;
+                const statusEl = document.getElementById('camera-refresh-status');
+                if (statusEl) {
+                    statusEl.textContent = 'Paused';
+                    statusEl.className = 'camera-refresh-status paused';
+                }
+            }
+
+            function resumeCameraRefresh() {
+                setTimeout(() => {
+                    isCameraUpdating = false;
+                    const statusEl = document.getElementById('camera-refresh-status');
+                    if (statusEl) {
+                        statusEl.textContent = 'Active';
+                        statusEl.className = 'camera-refresh-status';
+                    }
+                }, 200);
+            }
+
+            function showCameraMessage(cameraId, message, type) {
+                const msgEl = document.getElementById(`camera-msg-${cameraId}`);
+                if (!msgEl) return;
+
+                msgEl.textContent = message;
+                msgEl.className = `camera-message ${type}`;
+
+                setTimeout(() => {
+                    msgEl.className = 'camera-message';
+                    msgEl.textContent = '';
+                }, 3000);
+            }
+
+            async function restartCamera(cameraId) {
+                try {
+                    showCameraMessage(cameraId, 'Restarting camera...', 'info');
+
+                    const response = await fetch(`/api/camera/${cameraId}/restart`, {
+                        method: 'POST'
+                    });
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        showCameraMessage(cameraId, 'Camera restarted successfully!', 'success');
+                        setTimeout(() => fetchCameraStatus(), 2000);
+                    } else {
+                        showCameraMessage(cameraId, result.error || 'Failed to restart camera', 'error');
+                    }
+                } catch (error) {
+                    showCameraMessage(cameraId, `Error: ${error.message}`, 'error');
+                }
+            }
+
+            async function applyCameraConfig(cameraId) {
+                pauseCameraRefresh();
+                showCameraMessage(cameraId, 'Applying configuration...', 'info');
+
+                try {
+                    const config = {
+                        fps: parseInt(document.getElementById(`cam-cfg-fps-${cameraId}`).value) || 30,
+                        exposure: parseInt(document.getElementById(`cam-cfg-exposure-${cameraId}`).value) || 100,
+                        gain: parseInt(document.getElementById(`cam-cfg-gain-${cameraId}`).value) || 100,
+                        brightness: parseInt(document.getElementById(`cam-cfg-brightness-${cameraId}`).value) || 100,
+                        contrast: parseInt(document.getElementById(`cam-cfg-contrast-${cameraId}`).value) || 0,
+                        saturation: parseInt(document.getElementById(`cam-cfg-saturation-${cameraId}`).value) || 50,
+                        roi_enabled: document.getElementById(`cam-cfg-roi-enabled-${cameraId}`).checked,
+                        roi_xmin: parseInt(document.getElementById(`cam-cfg-roi-xmin-${cameraId}`).value) || 0,
+                        roi_ymin: parseInt(document.getElementById(`cam-cfg-roi-ymin-${cameraId}`).value) || 0,
+                        roi_xmax: parseInt(document.getElementById(`cam-cfg-roi-xmax-${cameraId}`).value) || 1280,
+                        roi_ymax: parseInt(document.getElementById(`cam-cfg-roi-ymax-${cameraId}`).value) || 720
+                    };
+
+                    const response = await fetch(`/api/camera/${cameraId}/config`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(config)
+                    });
+
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        showCameraMessage(cameraId, 'Configuration applied!', 'success');
+                        setTimeout(() => fetchCameraStatus(), 1000);
+                    } else {
+                        showCameraMessage(cameraId, result.error || 'Failed to apply config', 'error');
+                    }
+                } catch (error) {
+                    showCameraMessage(cameraId, `Error: ${error.message}`, 'error');
+                }
+
+                setTimeout(resumeCameraRefresh, 2000);
+            }
+
+            function refreshCameras() {
+                fetchCameraStatus();
+            }
+
+            function updateCameraImages() {
+                if (isCameraUpdating) return;
+
+                Object.keys(cameraData).forEach(cameraId => {
+                    const camera = cameraData[cameraId];
+                    if (camera.connected) {
+                        const imgEl = document.getElementById(`camera-img-${cameraId}`);
+                        if (imgEl) {
+                            imgEl.src = `/api/camera/${cameraId}/snapshot?t=${Date.now()}`;
+                        }
+                    }
+                });
+            }
+
+            // ===== CAMERA CONFIG PERSISTENCE FUNCTIONS =====
+            function showConfigMessage(message, type) {
+                const msgEl = document.getElementById('camera-config-message');
+                msgEl.textContent = message;
+                msgEl.style.display = 'block';
+                msgEl.style.backgroundColor = type === 'success' ? '#d4edda' : type === 'error' ? '#f8d7da' : '#d1ecf1';
+                msgEl.style.color = type === 'success' ? '#155724' : type === 'error' ? '#721c24' : '#0c5460';
+                setTimeout(() => { msgEl.style.display = 'none'; }, 5000);
+            }
+
+            async function saveServiceConfig() {
+                try {
+                    showConfigMessage('Saving all service configuration...', 'info');
+                    const response = await fetch('/api/cameras/config/save', { method: 'POST' });
+                    const result = await response.json();
+                    if (response.ok && result.success) {
+                        showConfigMessage(`All config saved! (${result.cameras_saved} cameras, ${result.states_saved || 0} states + service settings)`, 'success');
+                        checkServiceConfigStatus();
+                        refreshStates();  // Refresh states display
+                    } else {
+                        showConfigMessage(result.error || 'Failed to save', 'error');
+                    }
+                } catch (error) {
+                    showConfigMessage(`Error: ${error.message}`, 'error');
+                }
+            }
+
+            async function loadServiceConfig() {
+                try {
+                    showConfigMessage('Loading all service configuration...', 'info');
+                    const response = await fetch('/api/cameras/config/load', { method: 'POST' });
+                    const result = await response.json();
+                    if (response.ok && result.success) {
+                        showConfigMessage(`All config loaded! (${result.cameras_loaded} cameras, ${result.states_loaded || 0} states + service settings)`, 'success');
+                        setTimeout(() => fetchCameraStatus(), 500);
+                        refreshStates();  // Refresh states display
+                    } else {
+                        showConfigMessage(result.error || 'Failed to load', 'error');
+                    }
+                } catch (error) {
+                    showConfigMessage(`Error: ${error.message}`, 'error');
+                }
+            }
+
+            async function downloadServiceConfig() {
+                try {
+                    const response = await fetch('/api/cameras/config');
+                    const data = await response.json();
+                    if (!data.exists || !data.config) {
+                        showConfigMessage('No saved configuration to export', 'error');
+                        return;
+                    }
+                    const blob = new Blob([JSON.stringify(data.config, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `service_config_${new Date().toISOString().slice(0,10)}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    showConfigMessage('All configuration exported!', 'success');
+                } catch (error) {
+                    showConfigMessage(`Error: ${error.message}`, 'error');
+                }
+            }
+
+            async function importServiceConfig(event) {
+                const file = event.target.files[0];
+                if (!file) return;
+                try {
+                    const text = await file.text();
+                    const config = JSON.parse(text);
+                    showConfigMessage('Uploading all service configuration...', 'info');
+                    const response = await fetch('/api/cameras/config/upload', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ config })
+                    });
+                    const result = await response.json();
+                    if (response.ok && result.success) {
+                        showConfigMessage(`All config imported! (${result.cameras_loaded} cameras, ${result.states_loaded || 0} states + service settings)`, 'success');
+                        setTimeout(() => fetchCameraStatus(), 500);
+                        checkServiceConfigStatus();
+                        refreshStates();  // Refresh states display
+                    } else {
+                        showConfigMessage(result.error || 'Failed to import', 'error');
+                    }
+                } catch (error) {
+                    showConfigMessage(`Error: ${error.message}`, 'error');
+                }
+                event.target.value = '';  // Reset file input
+            }
+
+            async function checkServiceConfigStatus() {
+                try {
+                    const response = await fetch('/api/cameras/config');
+                    const data = await response.json();
+                    const statusEl = document.getElementById('camera-config-status');
+                    if (data.exists && data.config) {
+                        statusEl.textContent = `Last saved: ${data.config.saved_at || 'unknown'}`;
+                    } else {
+                        statusEl.textContent = 'No saved config';
+                    }
+                } catch (error) {
+                    document.getElementById('camera-config-status').textContent = '';
+                }
+            }
+
+            // ===== STATE MANAGEMENT FUNCTIONS =====
+            let statesData = {};
+
+            function showStateMessage(message, type) {
+                const msgEl = document.getElementById('state-message');
+                msgEl.textContent = message;
+                msgEl.style.display = 'block';
+                msgEl.style.backgroundColor = type === 'success' ? '#d4edda' : type === 'error' ? '#f8d7da' : '#d1ecf1';
+                msgEl.style.color = type === 'success' ? '#155724' : type === 'error' ? '#721c24' : '#0c5460';
+                setTimeout(() => { msgEl.style.display = 'none'; }, 5000);
+            }
+
+            async function refreshStates() {
+                try {
+                    const response = await fetch('/api/states');
+                    const data = await response.json();
+                    statesData = data;
+
+                    // Update current state display
+                    const currentState = data.current_state;
+                    document.getElementById('current-state-name').textContent = currentState ? currentState.name : 'None';
+
+                    // Update capture state badge
+                    const captureState = data.capture_state || 'idle';
+                    const badge = document.getElementById('capture-state-badge');
+                    badge.textContent = captureState.toUpperCase();
+                    const badgeColors = {
+                        'idle': '#6c757d',
+                        'ready': '#17a2b8',
+                        'capturing': '#28a745',
+                        'processing': '#ffc107',
+                        'error': '#dc3545'
+                    };
+                    badge.style.backgroundColor = badgeColors[captureState] || '#6c757d';
+
+                    // Render states list
+                    renderStatesList(data.states || {});
+
+                } catch (error) {
+                    console.error('Error fetching states:', error);
+                    showStateMessage('Error loading states: ' + error.message, 'error');
+                }
+            }
+
+            function renderStatesList(states) {
+                const container = document.getElementById('states-list');
+                const stateNames = Object.keys(states);
+
+                if (stateNames.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No states configured</span>';
+                    return;
+                }
+
+                container.innerHTML = '';
+                stateNames.forEach(name => {
+                    const state = states[name];
+                    const isActive = statesData.current_state && statesData.current_state.name === name;
+
+                    // Get phases info for display
+                    const phases = state.phases || [];
+                    const phaseCount = phases.length;
+                    const allCameras = [...new Set(phases.flatMap(p => p.cameras || []))].sort();
+
+                    // Get trigger thresholds from first phase (or state-level fallback)
+                    const firstPhase = phases.length > 0 ? phases[0] : {};
+                    let steps = firstPhase.steps !== undefined ? firstPhase.steps : (state.steps !== undefined ? state.steps : 1);
+                    let analog = firstPhase.analog !== undefined ? firstPhase.analog : (state.analog !== undefined ? state.analog : -1);
+                    const stepsDisplay = steps < 0 ? 'loop' : steps;
+                    const analogDisplay = analog < 0 ? 'off' : analog;
+
+                    // Get light mode and delay info from phases
+                    const phasesInfo = phases.map((p, idx) => {
+                        const lightMode = p.light_mode || 'U_ON_B_OFF';
+                        const delay = p.delay !== undefined ? p.delay : 0;
+                        return `${lightMode}:${delay}s`;
+                    }).join(', ');
+
+                    const btn = document.createElement('button');
+                    btn.className = 'camera-btn ' + (isActive ? 'camera-btn-success' : 'camera-btn-secondary');
+                    btn.style.cssText = 'display: flex; flex-direction: column; align-items: center; padding: 8px 12px; min-width: 140px; cursor: pointer;';
+                    btn.innerHTML = `
+                        <span style="font-weight: bold;">${name}</span>
+                        <span style="font-size: 10px; opacity: 0.8;">${phaseCount} phase${phaseCount !== 1 ? 's' : ''} | Cams: ${allCameras.join(',')}</span>
+                        <span style="font-size: 10px; opacity: 0.8;">Steps: ${stepsDisplay} | Analog: ${analogDisplay}</span>
+                        <span style="font-size: 9px; opacity: 0.7;">${phasesInfo || 'No phases'}</span>
+                    `;
+                    btn.onclick = () => activateState(name);
+                    btn.ondblclick = () => loadStateToEditor(name, state);  // Double-click to edit
+                    btn.title = 'Click to activate, double-click to edit\nLight modes: ' + phasesInfo;
+                    container.appendChild(btn);
+                });
+            }
+
+            function loadStateToEditor(name, state) {
+                // Load state into editor form
+                document.getElementById('state-name-input').value = name;
+                document.getElementById('state-enabled-input').value = state.enabled ? 'true' : 'false';
+
+                // Clear existing phases and rebuild
+                const container = document.getElementById('phases-container');
+                container.innerHTML = '';
+
+                const phases = state.phases || [];
+                phases.forEach((phase, idx) => {
+                    const steps = phase.steps !== undefined ? phase.steps : (state.steps !== undefined ? state.steps : -1);
+                    const analog = phase.analog !== undefined ? phase.analog : (state.analog !== undefined ? state.analog : -1);
+                    addPhaseRow(idx, phase.light_mode, phase.delay, phase.cameras, steps, analog);
+                });
+
+                showStateMessage(`Loaded state '${name}' into editor`, 'info');
+            }
+
+            async function activateState(stateName) {
+                try {
+                    showStateMessage('Activating state...', 'info');
+                    const response = await fetch(`/api/states/${stateName}/activate`, { method: 'POST' });
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        showStateMessage(`State '${stateName}' activated!`, 'success');
+                        refreshStates();
+                    } else {
+                        showStateMessage(result.error || 'Failed to activate state', 'error');
+                    }
+                } catch (error) {
+                    showStateMessage('Error: ' + error.message, 'error');
+                }
+            }
+
+            async function triggerCapture() {
+                try {
+                    showStateMessage('Triggering capture...', 'info');
+                    const response = await fetch('/api/states/trigger-capture', { method: 'POST' });
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        showStateMessage(`Capture triggered! Count: ${result.capture_count}`, 'success');
+                        refreshStates();
+                    } else {
+                        showStateMessage(result.error || 'Failed to trigger capture', 'error');
+                    }
+                } catch (error) {
+                    showStateMessage('Error: ' + error.message, 'error');
+                }
+            }
+
+            // Phase management functions
+            let phaseCounter = 1;  // Start at 1 since we have 1 default phase
+
+            function addPhase() {
+                addPhaseRow(phaseCounter, 'U_ON_B_OFF', 0.1, [1, 2, 3, 4]);
+                phaseCounter++;
+            }
+
+            function addPhaseRow(idx, lightMode, delay, cameras, steps = 1, analog = -1) {
+                const container = document.getElementById('phases-container');
+                const div = document.createElement('div');
+                div.className = 'phase-row';
+                div.id = `phase-row-${idx}`;
+                div.style.cssText = 'display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px;';
+
+                const camerasStr = Array.isArray(cameras) ? cameras.join(',') : cameras;
+
+                div.innerHTML = `
+                    <div>
+                        <label style="font-size: 10px; color: #666;">Light Mode</label>
+                        <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
+                            <option value="U_ON_B_OFF" ${lightMode === 'U_ON_B_OFF' ? 'selected' : ''}>U On, B Off</option>
+                            <option value="U_OFF_B_ON" ${lightMode === 'U_OFF_B_ON' ? 'selected' : ''}>U Off, B On</option>
+                            <option value="U_ON_B_ON" ${lightMode === 'U_ON_B_ON' ? 'selected' : ''}>U On, B On</option>
+                            <option value="U_OFF_B_OFF" ${lightMode === 'U_OFF_B_OFF' ? 'selected' : ''}>U Off, B Off</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="font-size: 10px; color: #666;">Delay (s)</label>
+                        <input type="number" class="control-input phase-delay" value="${delay}" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
+                    </div>
+                    <div>
+                        <label style="font-size: 10px; color: #666;">Cameras</label>
+                        <input type="text" class="control-input phase-cameras" value="${camerasStr}" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
+                    </div>
+                    <div>
+                        <label style="font-size: 10px; color: #666;">Steps (-1=loop)</label>
+                        <input type="number" class="control-input phase-steps" value="${steps}" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
+                    </div>
+                    <div>
+                        <label style="font-size: 10px; color: #666;">Analog (-1=off)</label>
+                        <input type="number" class="control-input phase-analog" value="${analog}" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
+                    </div>
+                    <button class="camera-btn camera-btn-danger" onclick="removePhase('${idx}')" style="padding: 4px 8px; font-size: 11px;">✕</button>
+                `;
+                container.appendChild(div);
+            }
+
+            function removePhase(idx) {
+                const row = document.getElementById(`phase-row-${idx}`);
+                if (row) {
+                    row.remove();
+                }
+                // Check if we have at least one phase
+                const remaining = document.querySelectorAll('.phase-row').length;
+                if (remaining === 0) {
+                    addPhaseRow(phaseCounter++, 'U_ON_B_OFF', 0.1, [1, 2, 3, 4]);
+                }
+            }
+
+            function collectPhases() {
+                const phases = [];
+                const rows = document.querySelectorAll('.phase-row');
+                rows.forEach(row => {
+                    const lightMode = row.querySelector('.phase-light').value;
+                    const delay = parseFloat(row.querySelector('.phase-delay').value) || 0;
+                    const camerasStr = row.querySelector('.phase-cameras').value.trim();
+                    const cameras = camerasStr ? camerasStr.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [];
+                    const steps = parseInt(row.querySelector('.phase-steps').value) || -1;
+                    const analog = parseInt(row.querySelector('.phase-analog').value) || -1;
+
+                    // Allow phases without cameras (e.g., light-off phase)
+                    phases.push({
+                        light_mode: lightMode,
+                        delay: delay,
+                        cameras: cameras,
+                        steps: steps,
+                        analog: analog
+                    });
+                });
+                return phases;
+            }
+
+            async function createOrUpdateState() {
+                const responseEl = document.getElementById('state-config-response');
+                const name = document.getElementById('state-name-input').value.trim();
+
+                if (!name) {
+                    responseEl.textContent = 'State name is required';
+                    responseEl.className = 'control-response error';
+                    setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+                    return;
+                }
+
+                const phases = collectPhases();
+
+                if (phases.length === 0) {
+                    responseEl.textContent = 'At least one phase is required';
+                    responseEl.className = 'control-response error';
+                    setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+                    return;
+                }
+
+                // Warn if no phase has cameras (but still allow it)
+                const hasCapture = phases.some(p => p.cameras.length > 0);
+                if (!hasCapture) {
+                    console.warn('Warning: No phase has cameras configured - no images will be captured');
+                }
+
+                const stateData = {
+                    name: name,
+                    phases: phases,
+                    enabled: document.getElementById('state-enabled-input').value === 'true'
+                };
+
+                try {
+                    const response = await fetch('/api/states', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(stateData)
+                    });
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        responseEl.textContent = `State '${name}' created/updated with ${phases.length} phase(s)!`;
+                        responseEl.className = 'control-response success';
+                        refreshStates();
+                    } else {
+                        responseEl.textContent = result.error || 'Failed to create state';
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function deleteCurrentState() {
+                const responseEl = document.getElementById('state-config-response');
+                const name = document.getElementById('state-name-input').value.trim();
+
+                if (!name) {
+                    responseEl.textContent = 'Enter state name to delete';
+                    responseEl.className = 'control-response error';
+                    setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+                    return;
+                }
+
+                if (name === 'default') {
+                    responseEl.textContent = 'Cannot delete default state';
+                    responseEl.className = 'control-response error';
+                    setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+                    return;
+                }
+
+                if (!confirm(`Delete state '${name}'?`)) return;
+
+                try {
+                    const response = await fetch(`/api/states/${name}`, { method: 'DELETE' });
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        responseEl.textContent = `State '${name}' deleted!`;
+                        responseEl.className = 'control-response success';
+                        document.getElementById('state-name-input').value = '';
+                        refreshStates();
+                    } else {
+                        responseEl.textContent = result.error || 'Failed to delete state';
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            // Start camera monitoring
+            fetchCameraStatus();
+            checkServiceConfigStatus();  // Check if saved service config exists
+            cameraRefreshInterval = setInterval(() => {
+                fetchCameraStatus();
+            }, 3000);  // Refresh camera data every 3 seconds
+
+            // Initial fetch
+            fetchStatus();
+            fetchConfig();  // Only fetch config once on page load
+            loadDataFile();
+            refreshStates();  // Load state management data
+
+            // Start with default refresh interval (0.5s)
+            updateRefreshInterval();
+        </script>
+    </body>
+</html>

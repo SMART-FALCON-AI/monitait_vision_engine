@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <title>Testing fastapi-frame-stream</title>
+  <script src="https://unpkg.com/konva@9.2.3/konva.min.js"></script>
+</head>
+
+<!-- http://0.0.0.0:5000/video_feed/{{ cam }} -->
+
+<body>
+  <div style="display: flex;gap: 15px;align-items: flex-start;justify-content: center;">
+    <div style="display: flex;flex-direction: column;justify-content: flex-start;align-items: center;width: 80vw;">
+      <div class="cards" style="display: flex;width: 100%;gap: 10px;">
+        <div class="up"
+          style="display: flex;flex-direction: column;width: 100%;align-items: flex-start;justify-content: center;max-height: 90vh;">
+          <img id="img_up" style="height: 80%;width: 100%;margin: 0 auto;"
+          src="{{ ip }}up_1">
+
+         <!-- <div style="width: 100%;height: 80%;min-height: 30vh;" id="stage-parent">
+             <div style="height: 100%;width: 100%;margin: 0 auto;" id="container"></div>
+          </div> -->
+          <div
+            style="display: flex;align-items: center;justify-content: center;width: 90%;margin: 0 auto;margin-top: 10px;gap: 15px;">
+            <div
+              style="display: flex;margin-top: 10px; flex-direction: column;justify-content: center;align-items: flex-start;width: 80%;">
+              <div style="display: flex;align-items: center;justify-content: flex-start;">
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="back"
+          style="display: flex;flex-direction: column;width: 100%;align-items: flex-start;justify-content: center;max-height: 90vh;">
+          <img id="img_back" style="height: 80%;width: 100%;margin: 0 auto;"
+          src="{{ ip }}back_1">
+          <!--
+          <div style="width: 100%;height: 80%;min-height: 30vh;" id="stage-parent">
+            <div style="height: 100%;width: 100%;margin: 0 auto;" id="container2"></div>
+          </div>
+          -->
+          <div
+            style="display: flex;align-items: center;justify-content: center;width: 90%;margin: 0 auto;margin-top: 10px;gap: 15px;">
+            <div
+              style="display: flex;margin-top: 10px; flex-direction: column;justify-content: center;align-items: flex-start;width: 80%;">
+              <div style="display: flex;align-items: center;justify-content: flex-start;">
+          </div>
+          </div>
+        </div>
+        </div>
+      </div>
+    </div>
+    <ul class="listButton"
+      style="display: flex;list-style:none;padding: 0;width: 20vw;flex-direction: column;justify-content: flex-start;align-items: center;">
+      <li style="width: 100%;">
+        {% for cam in cams %}
+        <button class="{{ cam.id }}" onclick="buttonHandler(event)" name="{{ cam.position }}"
+        data-camid="{{ cam.id }}" data-camEXPO="{{ cam.exposure }}" data-camGAIN="{{ cam.gain }}"
+        data-camCONTRAST="{{cam.contrast}}" data-camISactive="{{cam.is_active}}" x="0" y="0" width="500"
+          height="300"
+          style="width: 100%;margin-top: 10px;border: 1px solid rgb(197, 197, 197);outline: none;display: flex;justify-content: center;background: #70d970;color: #FFF; padding: 7.5px;margin-top: 4px;cursor: pointer;">
+          camera {{ cam.position }}
+        </button>
+        {% endfor %}
+
+      </li>
+    </ul>
+  </div>
+  <script>
+    const listCard = document.querySelector('.cards')
+    const length = listCard.children.length;
+    const listButton = document.querySelector('.listButton')
+    let isEdited = false;
+
+    function changeHandler(e) {
+      const value = e.target.value;
+      e.target.previousElementSibling.children[1].innerText = value
+      document.querySelector(`.${e.target.name}`).value = e.target.value
+    }
+
+
+    let lastStage;
+    let lastStage2;
+    let lastImg;
+    let lastImg2;
+    let rectImg;
+    let rectImg2;
+    const handleStage = (name, src) => {
+      const container = document.querySelector(name);
+      const { clientHeight, clientWidth } = container
+      var stage = new Konva.Stage({
+        container: name,
+        width: clientWidth,
+        height: clientHeight,
+      });
+      if (name.includes('2')) {
+        lastStage2 = stage
+      } else {
+        lastStage = stage
+      }
+
+      var layer = new Konva.Layer();
+      stage.add(layer);
+
+      function updateBtn(selectedButton, data) {
+        selectedButton.attributes.x.value = data.x
+        selectedButton.attributes.y.value = data.y
+        selectedButton.attributes.width.value = data.width * data.scaleX
+        selectedButton.attributes.height.value = data.height * data.scaleY
+      }
+
+      // main API:
+      var imageObj = new Image();
+      imageObj.onload = function () {
+        var yoda = new Konva.Image({
+          x: 0,
+          y: 0,
+          image: imageObj,
+          width: clientWidth,
+          height: clientHeight,
+        });
+        if (name.includes('2')) {
+          lastImg2 = yoda
+        } else {
+          lastImg = yoda
+        }
+
+        // add the shape to the layer
+        layer.add(yoda);
+        var rect = new Konva.Rect({
+          x: 0,
+          y: 0,
+          width: clientWidth,
+          height: clientHeight,
+          name: 'rect',
+          stroke: 'black',
+          draggable: true,
+        });
+        if (name.includes('2')) {
+          rectImg2 = rect
+        } else {
+          rectImg = rect
+        }
+        // commented
+        // layer.add(rect);
+
+
+        // create new transformer
+        // commented
+        // var tr = new Konva.Transformer();
+        // tr.rotateEnabled(false)
+        // layer.add(tr);
+        tr.nodes([rect]);
+        rect.on('dragmove', function (event) {
+          if (name.includes('2')) {
+            rectImg.absolutePosition(rectImg2.absolutePosition())
+          } else {
+            rectImg2.absolutePosition(rectImg.absolutePosition())
+          }
+          const data = event.target.attrs
+          const selectedButton = document.querySelector('#selected_button')
+          if (selectedButton) {
+            updateBtn(selectedButton, data)
+          }
+        });
+        rect.on('transform', function (event) {
+          const attrs = event.target.attrs
+          if (name.includes('2')) {
+            rectImg.width(attrs.width * attrs.scaleX);
+            rectImg.height(attrs.height * attrs.scaleY);
+            rectImg.absolutePosition(rectImg2.absolutePosition())
+          } else {
+            rectImg2.width(attrs.width * attrs.scaleX);
+            rectImg2.height(attrs.height * attrs.scaleY);
+            rectImg2.absolutePosition(rectImg.absolutePosition())
+          }
+          const data = event.target.attrs
+          const selectedButton = document.querySelector('#selected_button')
+          if (selectedButton) {
+            updateBtn(selectedButton, data)
+          }
+        });
+      };
+      imageObj.src = src;
+    }
+
+    // ImageSrc
+    // handleStage('#container', "{{ ip }}config_up")
+    // handleStage('#container2', "{{ ip }}config_back")
+    
+    function changeSizeStage(width, height) {
+      rectImg.width(+width);
+      rectImg.height(+height);
+      rectImg2.width(+width);
+      rectImg2.height(+height);
+    }
+
+    function changeTextHandler(event) {
+      console.log(event);
+      console.log(event.target.className);
+      document.querySelector(`#${event.target.className}`).innerText = event.target.value
+      const name =
+        event.target.className === 'input_value_range_one' ? 'gain' :
+          event.target.className === 'input_range_two' ? 'contrast' :
+            event.target.className === 'input_range_three' ? 'exposure' : ''
+
+      document.querySelector(`.${name}`).value = event.target.value
+    }
+
+
+    function buttonHandler(e) {
+      document.querySelector('#img_back').src = "http://0.0.0.0:5000/video_feed/back_" + e.target.name;
+      document.querySelector('#img_up').src = "http://0.0.0.0:5000/video_feed/up_" + e.target.name;
+    }
+
+
+    function handleStyle(newLength) {
+      let style = ''
+      let styleRow = ''
+      Array(Math.floor(newLength)).fill({}).map(item => {
+        if (style) {
+          style = `${style} auto`
+          styleRow = `${styleRow} ${listCard.clientHeight / newLength}px`
+        } else {
+          style = 'auto'
+          styleRow = `${listCard.clientHeight / newLength}px`
+        }
+      })
+      listCard.style.gridTemplateColumns = style
+      listCard.style.gridTemplateRows = styleRow
+    }
+
+
+    if (length < 3) {
+      handleStyle(length)
+    } else if (length < 5) {
+      handleStyle(2)
+    } else if (length < 10) {
+      handleStyle(3)
+    } else if (length < 17) {
+      handleStyle(4)
+    } else if (length < 26) {
+      handleStyle(5)
+    } else if (length < 37) {
+      handleStyle(6)
+    } else if (length < 50) {
+      handleStyle(7)
+    } else if (length < 65) {
+      handleStyle(8)
+    } else if (length < 82) {
+      handleStyle(9)
+    } else if (length < 101) {
+      handleStyle(10)
+    }
+
+
+    // Konva
+    var width = window.innerWidth;
+    var height = window.innerHeight;
+  </script>
+</body>
+
+</html>
