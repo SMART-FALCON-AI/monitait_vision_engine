@@ -1,8 +1,11 @@
 FROM python:3.10-slim-bookworm
 ENV PYTHONUNBUFFERED=1
-# Use HTTPS mirrors to bypass potential firewall blocks
-RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources && \
-    sed -i 's|http://security.debian.org|https://security.debian.org|g' /etc/apt/sources.list.d/debian.sources && \
+# Use Tsinghua mirror for faster package downloads in China/Asia
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    printf "deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm main contrib non-free non-free-firmware\n\
+deb https://mirrors.tuna.tsinghua.edu.cn/debian bookworm-updates main contrib non-free non-free-firmware\n\
+deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware\n" \
+> /etc/apt/sources.list && \
     apt-get update -y && \
     apt-get install -y ffmpeg libsm6 libxext6 libpq-dev gcc libdmtx0b && \
     apt-get clean && rm -rf /var/lib/apt/lists/* 
