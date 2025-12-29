@@ -23,12 +23,15 @@ MonitaQC v1.0.0 features a **streamlined architecture** with only essential serv
 
 ### Key Features
 
-- **Multi-Camera Vision System**: Supports up to 4 cameras with auto-detection
+- **Multi-Camera Vision System**: Unlimited cameras with auto-detection (USB + IP cameras)
+  - USB cameras auto-detected via V4L2
+  - IP cameras via RTSP/HTTP (Hikvision, Dahua, Axis, etc.)
+  - Mix and match USB and network cameras
 - **AI-Powered Detection**: YOLOv5-based object detection with custom model support
 - **DataMatrix Recognition**: Advanced barcode decoding with multi-stage preprocessing
 - **OCR Capabilities**: Text recognition using EasyOCR
 - **Object Nesting Detection**: Hierarchical parent-child object relationships
-- **Real-Time Streaming**: Live video feeds with annotated results
+- **Real-Time Streaming**: Live MJPEG video feed on status page
 - **Hardware Integration**: Serial communication, barcode scanners, GPIO control
 - **Shipment Tracking**: Django-based fulfillment management system
 - **Ejector Control**: Automated defect rejection system

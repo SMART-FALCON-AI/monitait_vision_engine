@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Merged improvements from `zarrin-error-fix` branch
   - Auto-detects all available cameras on startup
   - Backward compatible with legacy 4-camera configuration
+- **IP Camera Support**: Native support for RTSP and HTTP/MJPEG cameras
+  - Configure via `IP_CAMERAS` environment variable (comma-separated URLs)
+  - Mix USB and IP cameras seamlessly
+  - Automatic backend selection (V4L2 for USB, FFMPEG for IP)
+  - Support for authentication (username/password in URL)
+  - Comprehensive setup guide in [docs/IP_CAMERA_SETUP.md](docs/IP_CAMERA_SETUP.md)
 - **Lightweight MJPEG Streaming**: Integrated live camera feed into status page
   - `/video_feed` endpoint with 10 FPS, JPEG quality 40 for minimal bandwidth
   - Embedded directly in status monitoring interface at port 5050

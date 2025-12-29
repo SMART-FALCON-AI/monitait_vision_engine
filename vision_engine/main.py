@@ -87,6 +87,10 @@ CAM_2_PATH = os.environ.get("CAM_2_PATH", "/dev/video2")
 CAM_3_PATH = os.environ.get("CAM_3_PATH", "/dev/video4")
 CAM_4_PATH = os.environ.get("CAM_4_PATH", "/dev/video6")
 
+# IP Camera configuration (optional - can be mixed with USB cameras)
+# Format: rtsp://username:password@ip:port/path or http://ip:port/video
+IP_CAMERAS = os.environ.get("IP_CAMERAS", "")  # Comma-separated list
+
 # Auto-detect camera devices
 def detect_video_devices() -> List[str]:
     """Auto-detect available video devices from /dev/video* (even numbers only).
@@ -116,9 +120,58 @@ def detect_video_devices() -> List[str]:
     return [path for _, path in video_devices]
 
 
+def detect_ip_cameras() -> List[str]:
+    """Detect IP cameras from environment variable.
+
+    Returns list of IP camera URLs.
+    Format: RTSP (rtsp://user:pass@ip:port/stream) or HTTP (http://ip:port/video.mjpg)
+    """
+    ip_cameras = []
+
+    if IP_CAMERAS:
+        # Split by comma and strip whitespace
+        cameras = [cam.strip() for cam in IP_CAMERAS.split(",") if cam.strip()]
+
+        for cam_url in cameras:
+            # Validate URL format
+            if cam_url.startswith(("rtsp://", "http://", "https://")):
+                ip_cameras.append(cam_url)
+                logger.info(f"Detected IP camera: {cam_url.split('@')[-1] if '@' in cam_url else cam_url}")
+            else:
+                logger.warning(f"Invalid IP camera URL format: {cam_url}")
+
+    return ip_cameras
+
+
+def get_all_cameras() -> List[str]:
+    """Get all available cameras (USB + IP).
+
+    Priority:
+    1. USB cameras (auto-detected or from env vars)
+    2. IP cameras (from IP_CAMERAS env var)
+
+    Returns combined list of camera sources.
+    """
+    all_cameras = []
+
+    # Get USB cameras
+    usb_cameras = detect_video_devices()
+    if not usb_cameras:
+        # Fallback to legacy env vars
+        usb_cameras = [CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH]
+
+    all_cameras.extend(usb_cameras)
+
+    # Add IP cameras
+    ip_cameras = detect_ip_cameras()
+    all_cameras.extend(ip_cameras)
+
+    return all_cameras
+
+
 # Detect cameras at module load time
-DETECTED_CAMERAS = detect_video_devices()
-logger.info(f"Auto-detected video devices: {DETECTED_CAMERAS}")
+DETECTED_CAMERAS = get_all_cameras()
+logger.info(f"Auto-detected cameras: {DETECTED_CAMERAS}")
 
 
 # Redis configuration
@@ -1827,25 +1880,39 @@ set_model_url = "http://yolo_inference:4442/v1/object-detection/yolov5s/set-mode
 class CameraBuffer:
     def __init__(self, source, exposure, gain) -> None:
         self.source = source
-#        self.camera = cv2.VideoCapture(source)
-        self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
-#        self.camera.set(cv2.CAP_MODE_RGB)
+        self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
+
+        # Initialize camera with appropriate backend
+        if self.is_ip_camera:
+            # IP camera - use default backend (FFMPEG for streams)
+            self.camera = cv2.VideoCapture(source)
+            logger.info(f"Initializing IP camera: {source.split('@')[-1] if '@' in source else source}")
+        else:
+            # USB/V4L2 camera
+            self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
+            logger.info(f"Initializing USB camera: {source}")
+
+        # Set properties (skip V4L2-specific settings for IP cameras)
         self.camera.set(cv2.CAP_PROP_FPS, 30)
-        self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J', 'P', 'G'))
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-        self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-        self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
-        self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
-        self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 100)
-        self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
-        self.camera.set(cv2.CAP_PROP_SATURATION, 50)
-        self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
-        self.camera.set(cv2.CAP_PROP_GAIN, gain)
-        self.camera.set(cv2.CAP_PROP_GAMMA, 1)
-        self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-        self.camera.set(cv2.CAP_PROP_CONTRAST, 0)
+
+        if not self.is_ip_camera:
+            # USB camera specific settings
+            self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J', 'P', 'G'))
+            self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+            self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
+            self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
+            self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 100)
+            self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
+            self.camera.set(cv2.CAP_PROP_SATURATION, 50)
+            self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
+            self.camera.set(cv2.CAP_PROP_GAIN, gain)
+            self.camera.set(cv2.CAP_PROP_GAMMA, 1)
+            self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            self.camera.set(cv2.CAP_PROP_CONTRAST, 0)
+
         success, frame = self.camera.retrieve(0)
         self.success = success
         self.frame = frame
@@ -1883,7 +1950,11 @@ class CameraBuffer:
     def restart_camera(self):
         self.stop = True
         self.camera.release()
-        self.camera = cv2.VideoCapture(self.source)
+        # Reinitialize with appropriate backend
+        if self.is_ip_camera:
+            self.camera = cv2.VideoCapture(self.source)
+        else:
+            self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
         success, frame = self.camera.retrieve(0)
         self.success = success
         self.frame = frame
