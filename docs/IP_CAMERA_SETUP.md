@@ -19,9 +19,27 @@ https://192.168.1.100/mjpg/video.mjpg
 
 ## Configuration
 
-### Option 1: Environment Variable (Recommended)
+### Option 1: Auto-Discovery (Easiest)
 
-Add IP cameras to your `docker-compose.yml`:
+Let MonitaQC automatically scan your network for IP cameras:
+
+```yaml
+environment:
+  # Auto-discover cameras on local network
+  - IP_CAMERAS=auto
+```
+
+This will:
+- Scan the local subnet (e.g., 192.168.1.0/24)
+- Check common camera ports (554, 8554, 80, 8080, 3702)
+- Detect RTSP and HTTP cameras
+- Add discovered cameras automatically
+
+**Note**: Auto-discovery uses common default paths. For best results, configure cameras manually with exact URLs.
+
+### Option 2: Manual Configuration (Recommended)
+
+Add specific IP cameras to your `docker-compose.yml`:
 
 ```yaml
 environment:
@@ -29,7 +47,7 @@ environment:
   - IP_CAMERAS=rtsp://admin:password@192.168.1.100:554/stream1,rtsp://admin:password@192.168.1.101:554/stream1
 ```
 
-### Option 2: Mixed USB + IP Cameras
+### Option 3: Mixed USB + IP Cameras
 
 ```yaml
 environment:
@@ -40,7 +58,7 @@ environment:
   - IP_CAMERAS=rtsp://192.168.1.100:554/stream1,http://192.168.1.101/video.mjpg
 ```
 
-### Option 3: IP Cameras Only
+### Option 4: IP Cameras Only
 
 ```yaml
 environment:

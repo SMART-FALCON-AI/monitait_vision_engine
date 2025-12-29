@@ -35,7 +35,8 @@ services:
       - CAM_2_PATH=/dev/video2
       - CAM_3_PATH=/dev/video4
       - CAM_4_PATH=/dev/video6
-      # IP cameras (optional, comma-separated)
+      # IP cameras (optional, comma-separated or "auto" for network scan)
+      # - IP_CAMERAS=auto
       # - IP_CAMERAS=rtsp://admin:password@192.168.1.100:554/stream1,http://192.168.1.101/video.mjpg
       # Redis configuration
       - REDIS_HOST=redis

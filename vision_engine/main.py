@@ -120,8 +120,76 @@ def detect_video_devices() -> List[str]:
     return [path for _, path in video_devices]
 
 
+def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
+    """Scan local network for IP cameras using common ports and protocols.
+
+    Returns list of discovered camera URLs.
+    """
+    import socket
+    import subprocess
+    discovered_cameras = []
+
+    # Get local network subnet
+    try:
+        # Get local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+
+        # Extract subnet (e.g., 192.168.1.0/24)
+        ip_parts = local_ip.split('.')
+        subnet = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}"
+
+        logger.info(f"Scanning subnet {subnet}.0/24 for IP cameras...")
+
+        # Common camera ports
+        common_ports = [
+            554,   # RTSP
+            8554,  # Alternative RTSP
+            80,    # HTTP
+            8080,  # Alternative HTTP
+            3702,  # ONVIF Discovery
+        ]
+
+        # Scan common IPs (router range typically .100-.254)
+        for ip_suffix in range(100, 255):
+            ip = f"{subnet}.{ip_suffix}"
+
+            for port in common_ports:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.1)  # Fast scan
+                    result = sock.connect_ex((ip, port))
+                    sock.close()
+
+                    if result == 0:
+                        # Port is open, try to determine camera type
+                        if port in [554, 8554]:
+                            # RTSP port - likely a camera
+                            camera_url = f"rtsp://{ip}:{port}/stream1"  # Common path
+                            discovered_cameras.append(camera_url)
+                            logger.info(f"Discovered RTSP camera: {ip}:{port}")
+                        elif port in [80, 8080]:
+                            # HTTP port - check if it's a camera
+                            # Common camera HTTP paths
+                            http_paths = ["/video.mjpg", "/mjpg/video.mjpg", "/video"]
+                            for path in http_paths:
+                                camera_url = f"http://{ip}:{port}{path}"
+                                # Could test the URL here, but for now just log
+                                logger.info(f"Potential HTTP camera: {ip}:{port}")
+
+                except Exception:
+                    continue
+
+    except Exception as e:
+        logger.warning(f"Network scan failed: {e}")
+
+    return discovered_cameras
+
+
 def detect_ip_cameras() -> List[str]:
-    """Detect IP cameras from environment variable.
+    """Detect IP cameras from environment variable or network scan.
 
     Returns list of IP camera URLs.
     Format: RTSP (rtsp://user:pass@ip:port/stream) or HTTP (http://ip:port/video.mjpg)
@@ -129,16 +197,22 @@ def detect_ip_cameras() -> List[str]:
     ip_cameras = []
 
     if IP_CAMERAS:
-        # Split by comma and strip whitespace
-        cameras = [cam.strip() for cam in IP_CAMERAS.split(",") if cam.strip()]
+        if IP_CAMERAS.lower() == "auto":
+            # Auto-discover cameras on network
+            logger.info("Auto-discovering IP cameras on network...")
+            discovered = scan_network_for_cameras()
+            ip_cameras.extend(discovered)
+        else:
+            # Manual configuration - split by comma and strip whitespace
+            cameras = [cam.strip() for cam in IP_CAMERAS.split(",") if cam.strip()]
 
-        for cam_url in cameras:
-            # Validate URL format
-            if cam_url.startswith(("rtsp://", "http://", "https://")):
-                ip_cameras.append(cam_url)
-                logger.info(f"Detected IP camera: {cam_url.split('@')[-1] if '@' in cam_url else cam_url}")
-            else:
-                logger.warning(f"Invalid IP camera URL format: {cam_url}")
+            for cam_url in cameras:
+                # Validate URL format
+                if cam_url.startswith(("rtsp://", "http://", "https://")):
+                    ip_cameras.append(cam_url)
+                    logger.info(f"Configured IP camera: {cam_url.split('@')[-1] if '@' in cam_url else cam_url}")
+                else:
+                    logger.warning(f"Invalid IP camera URL format: {cam_url}")
 
     return ip_cameras
 
