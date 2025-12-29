@@ -16,6 +16,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advanced analytics and reporting
 - Cloud synchronization improvements
 
+## [1.1.0] - 2025-12-29
+
+### Changed
+- **Lightweight Architecture**: Reduced from 11+ containers to 4 core services
+- Optimized Redis with 256MB memory limit and LRU eviction policy
+- Reduced logging overhead (5-10MB max per service vs 10MB)
+- Simplified docker-compose.yml to essential services only
+- Changed Redis from `redis:latest` to `redis:7-alpine` for smaller image size
+- Reduced YOLO shared memory from 2GB to 1GB
+- Removed YOLO replicas (deploy.replicas: 2 → 1) for simpler deployment
+
+### Added
+- `docker-compose.full.yml` with all optional services
+- Cleanup service now included in lightweight mode (prevents disk full)
+- Lightweight/Full mode documentation in README
+- Resource comparison table in README
+
+### Removed
+- Shipment fulfillment web interface (moved to full mode)
+- PostgreSQL database (moved to full mode)
+- Celery workers (2 workers + beat moved to full mode)
+- Video streaming service (moved to full mode)
+- Image gallery service (moved to full mode)
+- Port 554 from counter service (unused RTSP port)
+- Dataset volume mount from YOLO (unnecessary in production)
+
+### Fixed
+- Container naming consistency across all services
+- Network configuration simplified to bridge driver
+
 ## [1.0.0] - 2025-12-29
 
 ### Added

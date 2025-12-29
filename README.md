@@ -6,6 +6,21 @@
 
 MonitaQC combines advanced image processing, object detection, and hardware integration to provide real-time quality inspection capabilities for manufacturing and fulfillment operations.
 
+### Lightweight by Design
+
+MonitaQC v1.0.0 features a **streamlined architecture** with only essential services:
+- **4 core containers** instead of 11+ (60% reduction)
+- **Minimal memory footprint** with optimized Redis (256MB limit)
+- **Reduced logging** overhead (5-10MB max per service)
+- **Optional full-stack mode** available when needed
+
+**Resource Comparison:**
+
+| Mode | Containers | RAM Usage | Disk I/O | Best For |
+|------|------------|-----------|----------|----------|
+| Lightweight | 4 | ~2-3GB | Low | Basic QC operations, edge devices |
+| Full | 11 | ~6-8GB | High | Full shipment tracking, analytics |
+
 ### Key Features
 
 - **Multi-Camera Vision System**: Supports up to 4 cameras with auto-detection
@@ -95,11 +110,20 @@ sudo docker load -i yolo.tar
 
 ### 5. Build and Run
 
+**Lightweight Mode (Recommended):**
 ```bash
+# Core services only (Counter, Redis, YOLO, Cleanup)
 sudo docker compose up -d
 ```
 
-Access the web interface at `http://localhost:8000`
+**Full Mode (All Features):**
+```bash
+# Includes web interface, database, streaming, gallery
+sudo docker compose -f docker-compose.full.yml up -d
+```
+
+Access the counter status page at `http://localhost:5050`
+(Full mode: Web interface at `http://localhost:8000`)
 
 ## Configuration
 
@@ -159,15 +183,33 @@ WATCHER_CMD_U_ON_B_ON=9       # Both lights on
 
 ## Services
 
+MonitaQC uses a lightweight architecture by default with only essential services:
+
+| Service | Port | Description | Required |
+|---------|------|-------------|----------|
+| **monitaqc_counter** | 5050 | Main processing engine and status page | ✅ Core |
+| **monitaqc_redis** | 6379 | Message queue and cache | ✅ Core |
+| **monitaqc_yolo** | 4442 | AI inference service | ✅ Core |
+| **monitaqc_cleanup** | - | Automated disk space management | ✅ Core |
+
+### Optional Services
+
+For full functionality, use `docker-compose.full.yml`:
+
+```bash
+docker compose -f docker-compose.full.yml up -d
+```
+
+Additional services in full configuration:
+
 | Service | Port | Description |
 |---------|------|-------------|
-| **counter** | 5050 | Main processing engine and status page |
-| **web** | 8000 | Django shipment fulfillment interface |
-| **stream** | 5000 | Real-time video streaming |
-| **pigallery2** | 80 | Image gallery browser |
-| **redis** | 6379 | Message queue and cache |
-| **db** | 5432 | PostgreSQL database |
-| **yolo_inference** | 4442 | AI inference service (2 replicas) |
+| **monitaqc_web** | 8000, 6789 | Django shipment fulfillment interface |
+| **monitaqc_db** | 5432 | PostgreSQL database |
+| **monitaqc_stream** | 5000 | Real-time video streaming |
+| **monitaqc_gallery** | 80 | Image gallery browser (Pigallery2) |
+| **monitaqc_celery_worker_high** | - | Celery task worker |
+| **monitaqc_celery_beat** | - | Celery periodic scheduler |
 
 ## Data Storage
 
