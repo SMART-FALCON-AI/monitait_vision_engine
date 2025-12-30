@@ -784,10 +784,19 @@
                 <div class="camera-preview-content" onclick="event.stopPropagation()">
                     <div class="camera-preview-header">
                         <h3 id="preview-camera-title">Camera Preview</h3>
-                        <button class="camera-preview-close" onclick="closeCameraPreview()">Close</button>
+                        <div style="display: flex; gap: 10px;">
+                            <button id="save-camera-button" class="discovery-button" onclick="saveDiscoveredCamera()" style="padding: 8px 16px;">💾 Save Camera</button>
+                            <button class="camera-preview-close" onclick="closeCameraPreview()">Close</button>
+                        </div>
                     </div>
                     <div id="preview-camera-info"></div>
                     <img id="preview-camera-image" class="camera-preview-image" src="" alt="Camera preview">
+                    <div id="preview-camera-actions" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
+                        <div style="margin-bottom: 10px;">
+                            <label style="display: block; font-weight: 500; margin-bottom: 5px;">Camera Name (optional):</label>
+                            <input type="text" id="save-camera-name" placeholder="e.g., Front Door Camera, Line 1 Camera" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -2581,11 +2590,26 @@
                 }
             }
 
+            // Store current camera details for saving
+            let currentCameraDetails = null;
+
             function showCameraPreview(ip, path, imageData, resolution, authenticatedUrl) {
                 const modal = document.getElementById('camera-preview-modal');
                 const title = document.getElementById('preview-camera-title');
                 const info = document.getElementById('preview-camera-info');
                 const image = document.getElementById('preview-camera-image');
+                const nameInput = document.getElementById('save-camera-name');
+
+                // Store camera details for saving
+                currentCameraDetails = {
+                    ip: ip,
+                    path: path,
+                    url: authenticatedUrl,
+                    resolution: resolution
+                };
+
+                // Auto-suggest camera name
+                nameInput.value = `Camera ${ip}`;
 
                 title.textContent = `Camera Preview - ${ip}`;
                 info.innerHTML = `
@@ -2604,6 +2628,62 @@
             function closeCameraPreview(event) {
                 if (!event || event.target.id === 'camera-preview-modal') {
                     document.getElementById('camera-preview-modal').style.display = 'none';
+                    currentCameraDetails = null;
+                }
+            }
+
+            async function saveDiscoveredCamera() {
+                if (!currentCameraDetails) {
+                    alert('No camera details available to save');
+                    return;
+                }
+
+                const nameInput = document.getElementById('save-camera-name');
+                const cameraName = nameInput.value.trim() || `Camera ${currentCameraDetails.ip}`;
+                const saveButton = document.getElementById('save-camera-button');
+
+                saveButton.disabled = true;
+                saveButton.textContent = '💾 Saving...';
+
+                try {
+                    const response = await fetch('/api/cameras/save', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: cameraName,
+                            ip: currentCameraDetails.ip,
+                            url: currentCameraDetails.url,
+                            path: currentCameraDetails.path,
+                            resolution: currentCameraDetails.resolution
+                        })
+                    });
+
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        saveButton.textContent = '✓ Saved!';
+                        saveButton.style.background = '#28a745';
+
+                        // Show success message
+                        alert(`Camera "${cameraName}" saved successfully!\n\nYou can now use this camera in the Camera Monitoring section.`);
+
+                        // Refresh camera status to show the new camera
+                        setTimeout(() => {
+                            fetchCameraStatus();
+                            closeCameraPreview();
+                        }, 1000);
+                    } else {
+                        alert(`Failed to save camera: ${result.error || 'Unknown error'}`);
+                        saveButton.textContent = '💾 Save Camera';
+                        saveButton.style.background = '#007bff';
+                    }
+                } catch (error) {
+                    console.error('Save error:', error);
+                    alert(`Error saving camera: ${error.message}`);
+                    saveButton.textContent = '💾 Save Camera';
+                    saveButton.style.background = '#007bff';
+                } finally {
+                    saveButton.disabled = false;
                 }
             }
 

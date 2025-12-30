@@ -1995,6 +1995,81 @@ async def test_camera(request: Request):
             "error": str(e)
         }, status_code=500)
 
+@app.post("/api/cameras/save")
+async def save_camera(request: Request):
+    """Save a discovered camera to the configuration."""
+    try:
+        body = await request.json()
+        camera_name = body.get("name", "Unnamed Camera")
+        camera_url = body.get("url")
+        camera_ip = body.get("ip")
+        camera_path = body.get("path")
+        resolution = body.get("resolution", {})
+
+        if not camera_url:
+            return JSONResponse(content={"success": False, "error": "Camera URL is required"}, status_code=400)
+
+        logger.info(f"Saving camera: {camera_name} ({camera_ip}) - {camera_url}")
+
+        # Load existing service config or create new one
+        config = load_service_config()
+        if not config:
+            config = {
+                "ip_cameras": [],
+                "settings": {}
+            }
+
+        # Ensure ip_cameras list exists
+        if "ip_cameras" not in config:
+            config["ip_cameras"] = []
+
+        # Check if camera already exists (by URL)
+        existing_idx = None
+        for idx, cam in enumerate(config["ip_cameras"]):
+            if cam.get("url") == camera_url:
+                existing_idx = idx
+                break
+
+        # Prepare camera entry
+        camera_entry = {
+            "name": camera_name,
+            "url": camera_url,
+            "ip": camera_ip,
+            "path": camera_path,
+            "resolution": resolution,
+            "enabled": True
+        }
+
+        if existing_idx is not None:
+            # Update existing camera
+            config["ip_cameras"][existing_idx] = camera_entry
+            logger.info(f"Updated existing camera at index {existing_idx}")
+        else:
+            # Add new camera
+            config["ip_cameras"].append(camera_entry)
+            logger.info(f"Added new camera, total cameras: {len(config['ip_cameras'])}")
+
+        # Save configuration
+        if save_service_config(config):
+            return JSONResponse(content={
+                "success": True,
+                "message": f"Camera '{camera_name}' saved successfully",
+                "camera": camera_entry,
+                "total_cameras": len(config["ip_cameras"])
+            })
+        else:
+            return JSONResponse(content={
+                "success": False,
+                "error": "Failed to save configuration"
+            }, status_code=500)
+
+    except Exception as e:
+        logger.error(f"Error saving camera: {e}")
+        return JSONResponse(content={
+            "success": False,
+            "error": str(e)
+        }, status_code=500)
+
 # =============================================================================
 # STATE MANAGEMENT API ENDPOINTS
 # =============================================================================
