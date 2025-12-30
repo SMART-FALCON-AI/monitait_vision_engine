@@ -3,6 +3,7 @@
 Run a rest API exposing the yolov5s object detection model
 """
 import io
+import json
 from fastapi import FastAPI, File, UploadFile, Request, Form
 from PIL import Image
 from detect import Detector
@@ -15,12 +16,14 @@ DETECTION_URL = "/v1/object-detection/yolov5s"
 detector = Detector()
 
 
+@app.post(os.path.join(DETECTION_URL, 'detect') + '/')
 @app.post(os.path.join(DETECTION_URL, 'detect'))
 async def predict(image: UploadFile = File(...)):
     contents = await image.read()
     img = Image.open(io.BytesIO(contents))
     results = detector.detect(img)
-    return results.to_json(orient="records")
+    # Parse JSON string to prevent double-encoding by FastAPI
+    return json.loads(results.to_json(orient="records"))
 
 
 @app.post(os.path.join(DETECTION_URL, 'set-model'))

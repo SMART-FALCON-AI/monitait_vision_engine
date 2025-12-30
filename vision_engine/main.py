@@ -81,6 +81,15 @@ DATA_FILE = os.environ.get("DATA_FILE", ".env.prepared_query_data")
 # Parent object enforcement configuration
 ENFORCE_PARENT_OBJECT = os.environ.get("ENFORCE_PARENT_OBJECT", "true").lower() == "true"
 
+# Gradio/YOLO API configuration (defaults - will be overridden by DATA_FILE config)
+YOLO_INFERENCE_URL = "http://yolo_inference:4442/v1/object-detection/yolov5s/detect/"
+GRADIO_MODEL = "Data Matrix"
+GRADIO_CONFIDENCE_THRESHOLD = 0.25
+
+# Global cache for latest detections (used by video feeds, stored in Redis for cross-process sharing)
+latest_detections = []
+latest_detections_timestamp = 0.0
+
 # Camera paths configuration (optional - only used if devices exist)
 CAM_1_PATH = os.environ.get("CAM_1_PATH", "")
 CAM_2_PATH = os.environ.get("CAM_2_PATH", "")
@@ -964,9 +973,18 @@ def apply_config_settings(config, watcher_inst=None):
     global CHECK_CLASS_COUNTS_ENABLED, CHECK_CLASS_COUNTS_CLASSES, CHECK_CLASS_COUNTS_CONFIDENCE
     global DM_CHARS_SIZES, DM_CONFIDENCE_THRESHOLD, DM_OVERLAP_THRESHOLD
     global STORE_ANNOTATION_ENABLED, ENFORCE_PARENT_OBJECT
+    global YOLO_INFERENCE_URL, GRADIO_MODEL, GRADIO_CONFIDENCE_THRESHOLD
     global capture_mode, time_between_two_package, remove_raw_image_when_dm_decoded, parent_object_list
 
     settings_applied = {}
+
+    # Apply infrastructure settings (Gradio/YOLO API configuration)
+    if "infrastructure" in config:
+        YOLO_INFERENCE_URL = config["infrastructure"].get("yolo_url", YOLO_INFERENCE_URL)
+        GRADIO_MODEL = config["infrastructure"].get("gradio_model", GRADIO_MODEL)
+        GRADIO_CONFIDENCE_THRESHOLD = config["infrastructure"].get("gradio_confidence", GRADIO_CONFIDENCE_THRESHOLD)
+        settings_applied["infrastructure"] = True
+        logger.info(f"Infrastructure: YOLO URL={YOLO_INFERENCE_URL}, Gradio Model={GRADIO_MODEL}, Confidence={GRADIO_CONFIDENCE_THRESHOLD}")
 
     # Apply ejector settings
     if "ejector" in config:
@@ -1018,15 +1036,70 @@ def apply_config_settings(config, watcher_inst=None):
         STORE_ANNOTATION_ENABLED = config["store_annotation"].get("enabled", STORE_ANNOTATION_ENABLED)
         settings_applied["store_annotation"] = True
 
-    # Apply camera configs (for existing USB cameras)
+    # Apply/load cameras from unified cameras structure
     cameras_loaded = 0
-    if "cameras" in config and watcher_inst is not None and hasattr(watcher_inst, 'cameras'):
+    if "cameras" in config and watcher_inst is not None:
         for cam_id_str, cam_config in config["cameras"].items():
+            if not cam_config.get("enabled", True):
+                logger.info(f"  Skipping disabled camera {cam_id_str}")
+                continue
+
             cam_id = int(cam_id_str)
-            cam = watcher_inst.cameras.get(cam_id)
+            cam_type = cam_config.get("type", "usb")
+
+            # Check if camera already exists
+            cam = watcher_inst.cameras.get(cam_id) if hasattr(watcher_inst, 'cameras') else None
+
             if cam is not None:
+                # Camera exists - apply config to existing camera
                 apply_camera_config_from_saved(cam, cam_config)
                 cameras_loaded += 1
+                logger.info(f"  Updated existing camera {cam_id}: {cam_config.get('name', f'Camera {cam_id}')}")
+            elif cam_type == "ip":
+                # IP camera doesn't exist - create it
+                cam_url = cam_config.get("url")
+                cam_name = cam_config.get("name", f"IP Camera {cam_id}")
+
+                if not cam_url:
+                    logger.warning(f"  Skipping camera {cam_name}: missing URL")
+                    continue
+
+                try:
+                    logger.info(f"  Initializing IP camera {cam_id}: {cam_name}")
+
+                    # Create camera buffer for IP camera
+                    cam = CameraBuffer(cam_url, exposure=cam_config.get("exposure", 100), gain=cam_config.get("gain", 100))
+                    watcher_inst.cameras[cam_id] = cam
+
+                    # Ensure camera_paths list is large enough
+                    while len(watcher_inst.camera_paths) < cam_id:
+                        watcher_inst.camera_paths.append(None)
+                    if cam_id > len(watcher_inst.camera_paths):
+                        watcher_inst.camera_paths.append(cam_url)
+                    else:
+                        watcher_inst.camera_paths[cam_id - 1] = cam_url
+
+                    # Store camera metadata
+                    if not hasattr(watcher_inst, 'camera_metadata'):
+                        watcher_inst.camera_metadata = {}
+                    watcher_inst.camera_metadata[cam_id] = {
+                        "name": cam_name,
+                        "type": "ip",
+                        "ip": cam_config.get("ip"),
+                        "path": cam_config.get("path"),
+                        "url": cam_url
+                    }
+
+                    # Apply camera settings (ROI, etc.)
+                    apply_camera_config_from_saved(cam, cam_config)
+
+                    cameras_loaded += 1
+                    logger.info(f"  ✓ IP Camera {cam_id} initialized: {cam_name} (success={cam.success})")
+
+                except Exception as e:
+                    logger.error(f"  ✗ Failed to initialize camera {cam_id}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
     # Load IP cameras from config
     if "ip_cameras" in config and watcher_inst is not None:
@@ -1206,29 +1279,64 @@ def format_relative_time(timestamp):
         return f"{int(diff/3600)} hours ago"
 
 @app.get("/health")
-async def health_check():
+async def health_check(request: Request):
     """Health check endpoint."""
+    global YOLO_INFERENCE_URL
+
     try:
+        # Get watcher from app state (more reliable than global)
+        watcher = getattr(request.app.state, 'watcher', None)
+
         # Check if watcher is available
-        device_ok = watcher_instance is not None and watcher_instance.health_check
+        device_ok = watcher is not None and watcher.health_check
 
         # Check Redis connection
         redis_ok = False
-        if watcher_instance and watcher_instance.redis_connection:
+        if watcher and watcher.redis_connection:
             try:
-                watcher_instance.redis_connection.redis_connection.ping()
+                watcher.redis_connection.redis_connection.ping()
                 redis_ok = True
             except:
                 pass
 
         # Check cameras dynamically
         cameras_status = {}
-        if watcher_instance and hasattr(watcher_instance, 'cameras'):
-            for cam_id, cam in watcher_instance.cameras.items():
+        if watcher and hasattr(watcher, 'cameras'):
+            for cam_id, cam in watcher.cameras.items():
                 cameras_status[f"cam_{cam_id}"] = cam is not None and cam.success if cam else False
 
         # Check serial availability
-        serial_available = watcher_instance.serial_available if watcher_instance else False
+        serial_available = watcher.serial_available if watcher else False
+
+        # Check YOLO/Gradio inference availability
+        yolo_ok = False
+        try:
+            # Check if Gradio client is initialized (for HuggingFace URLs)
+            if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+                # Check Redis for last detection timestamp (cross-process)
+                last_detection_ts = 0.0
+                if watcher and watcher.redis_connection:
+                    try:
+                        cached_ts = watcher.redis_connection.redis_connection.get("gradio_last_detection_timestamp")
+                        if cached_ts:
+                            last_detection_ts = float(cached_ts.decode('utf-8'))
+                    except Exception as e:
+                        logger.warning(f"Failed to read detection timestamp from Redis: {e}")
+
+                # For Gradio, check if we have successful detections cached recently
+                if last_detection_ts > 0:
+                    age = time.time() - last_detection_ts
+                    yolo_ok = age < 30.0
+                    logger.info(f"YOLO health: timestamp={last_detection_ts:.2f}, age={age:.2f}s, status={'OK' if yolo_ok else 'stale'}")
+                else:
+                    logger.info(f"YOLO health: No detections yet (no Redis cache)")
+            else:
+                # For traditional YOLO endpoint, try a quick ping
+                response = session.get(YOLO_INFERENCE_URL.replace('/detect/', '/health'), timeout=1)
+                yolo_ok = response.status_code == 200
+        except Exception as e:
+            logger.error(f"[HEALTH] Error checking YOLO status: {e}")
+            yolo_ok = False
 
         # Consider healthy if redis works and either serial is connected or we're in camera-only mode
         status_code = 200 if redis_ok else 503
@@ -1240,6 +1348,7 @@ async def health_check():
                 "device": "connected" if device_ok else ("camera-only" if not serial_available else "disconnected"),
                 "serial": "connected" if serial_available else "not available",
                 "redis": "connected" if redis_ok else "disconnected",
+                "yolo": "connected" if yolo_ok else "not available",
                 "cameras": cameras_status,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
@@ -1318,16 +1427,56 @@ async def api_status():
 
 @app.get("/video_feed")
 async def video_feed():
-    """Lightweight MJPEG stream from first available camera."""
+    """Lightweight MJPEG stream from first available camera with detection overlays."""
     def generate():
+        frame_count = 0
+        last_log_time = time.time()
         while True:
             try:
                 if watcher_instance and watcher_instance.cameras:
                     # Get first available camera
                     cam = next((c for c in watcher_instance.cameras.values() if hasattr(c, 'frame')), None)
                     if cam and hasattr(cam, 'frame') and cam.frame is not None:
+                        # Make a copy of the frame to draw on
+                        frame = cam.frame.copy()
+                        frame_count += 1
+
+                        # Draw bounding boxes from latest detections (if recent) from module globals
+                        global latest_detections, latest_detections_timestamp
+                        detections = latest_detections
+                        timestamp = latest_detections_timestamp
+
+                        # Log periodically
+                        if time.time() - last_log_time > 5.0:
+                            logger.info(f"[VIDEO_FEED] Frame #{frame_count}, latest_detections={len(detections) if detections else 0}, age={time.time() - timestamp if timestamp else 'N/A'}s")
+                            last_log_time = time.time()
+                        if detections and timestamp:
+                            detection_age = time.time() - timestamp
+                            # Only show detections if they're less than 10 seconds old
+                            if detection_age < 10.0:
+                                for det in detections:
+                                    try:
+                                        # Get coordinates (YOLO format: xmin, ymin, xmax, ymax)
+                                        x1 = int(det.get('xmin', 0))
+                                        y1 = int(det.get('ymin', 0))
+                                        x2 = int(det.get('xmax', 0))
+                                        y2 = int(det.get('ymax', 0))
+                                        confidence = det.get('confidence', 0)
+                                        name = det.get('name', f"Class {det.get('class', 0)}")
+
+                                        # Draw thick green rectangle
+                                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+                                        # Draw label with background
+                                        label = f"{name} {confidence:.2f}"
+                                        (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                                        cv2.rectangle(frame, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
+                                        cv2.putText(frame, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                                    except Exception as e:
+                                        logger.error(f"Error drawing detection box: {e}")
+
                         # Encode with lower quality for lightweight streaming
-                        ret, jpeg = cv2.imencode('.jpg', cam.frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
+                        ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                         if ret:
                             yield (b'--frame\r\n'
                                    b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
@@ -1336,6 +1485,93 @@ async def video_feed():
                 logger.error(f"Stream error: {e}")
                 time.sleep(1)
     return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.get("/video_feed_detections")
+async def video_feed_detections():
+    """Video feed showing the LAST PROCESSED IMAGE with bounding boxes (Gradio inference results).
+
+    This shows the actual processed images from raw_images/ directory with detections drawn on them,
+    NOT the live camera stream. Updates when new images are processed by the state machine.
+    """
+    def generate():
+        logger.info("[DETECTION_FEED] Stream started - showing processed images with detections")
+        last_frame_id = None
+        while True:
+            try:
+                global latest_detections, latest_detections_timestamp, watcher_instance
+                detections = latest_detections
+                timestamp = latest_detections_timestamp
+                latest_frame_id = getattr(watcher_instance, 'latest_frame_id', None) if watcher_instance else None
+
+                # Only update when a new frame has been processed
+                if latest_frame_id and latest_frame_id != last_frame_id and detections:
+                    last_frame_id = latest_frame_id
+
+                    # Try to load the processed image from raw_images directory
+                    frame_path = os.path.join("raw_images", f"{latest_frame_id}.jpg")
+                    if os.path.exists(frame_path):
+                        frame = cv2.imread(frame_path)
+                        if frame is not None:
+                            # Draw all detections with bounding boxes
+                            for det in detections:
+                                try:
+                                    x1 = int(det.get('xmin', 0))
+                                    y1 = int(det.get('ymin', 0))
+                                    x2 = int(det.get('xmax', 0))
+                                    y2 = int(det.get('ymax', 0))
+                                    confidence = det.get('confidence', 0)
+                                    name = det.get('name', f"Class {det.get('class', 0)}")
+
+                                    # Draw thick green rectangle
+                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+                                    # Draw label with background
+                                    label = f"{name} {confidence:.2f}"
+                                    (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                                    cv2.rectangle(frame, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
+                                    cv2.putText(frame, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                                except Exception as e:
+                                    logger.error(f"Error drawing detection: {e}")
+
+                            # Encode and yield
+                            ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                            if ret:
+                                yield (b'--frame\r\n'
+                                       b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+                                logger.info(f"[DETECTION_FEED] Displayed frame {latest_frame_id} with {len(latest_detections)} detections")
+
+                time.sleep(0.5)  # 2 FPS - only updates when new images are processed
+            except Exception as e:
+                logger.error(f"Detection stream error: {e}")
+                time.sleep(1)
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.get("/latest_detection_image")
+async def latest_detection_image():
+    """Serve the latest image with detection bounding boxes."""
+    try:
+        import glob
+        # Find all _DETECTED.jpg files in raw_images directory (including subdirectories)
+        pattern = os.path.join("raw_images", "**", "*_DETECTED.jpg")
+        detected_files = glob.glob(pattern, recursive=True)
+
+        if detected_files:
+            # Get the most recent file by modification time
+            latest_file = max(detected_files, key=os.path.getmtime)
+
+            # Read and return the image
+            with open(latest_file, 'rb') as f:
+                image_data = f.read()
+
+            return Response(content=image_data, media_type="image/jpeg")
+        else:
+            # Return a placeholder image or 404
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="No detection images found")
+    except Exception as e:
+        logger.error(f"Error serving latest detection image: {e}")
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/config")
 async def get_config():
@@ -1415,6 +1651,11 @@ async def update_config(config: Dict[str, Any]):
         - dm_overlap_threshold: float - Overlap threshold for DM detection
         - check_class_counts_enabled: bool - Enable/disable class count checking
         - check_class_counts_classes: str - Comma-separated list of classes to check
+        - yolo_url: str - YOLO/Gradio API inference URL
+        - gradio_model: str - Gradio model name (e.g., "Data Matrix", "Tire Cord")
+        - gradio_confidence: float - Gradio detection confidence threshold (0-1)
+        - redis_host: str - Redis server hostname
+        - redis_port: int - Redis server port
     """
     global EJECTOR_ENABLED, EJECTOR_OFFSET, EJECTOR_DURATION, EJECTOR_POLL_INTERVAL
     global TIME_BETWEEN_TWO_PACKAGE, CAPTURE_MODE, time_between_two_package, capture_mode
@@ -1560,6 +1801,37 @@ async def update_config(config: Dict[str, Any]):
             ENFORCE_PARENT_OBJECT = str(value).lower() in ("true", "1", "yes")
             updated["enforce_parent_object"] = ENFORCE_PARENT_OBJECT
             logger.info(f"Updated ENFORCE_PARENT_OBJECT to {ENFORCE_PARENT_OBJECT}")
+
+        # Infrastructure configuration (Gradio/YOLO API)
+        if "yolo_url" in config:
+            global YOLO_INFERENCE_URL
+            YOLO_INFERENCE_URL = str(config["yolo_url"])
+            updated["yolo_url"] = YOLO_INFERENCE_URL
+            logger.info(f"Updated YOLO_INFERENCE_URL to {YOLO_INFERENCE_URL}")
+
+        if "gradio_model" in config:
+            global GRADIO_MODEL
+            GRADIO_MODEL = str(config["gradio_model"])
+            updated["gradio_model"] = GRADIO_MODEL
+            logger.info(f"Updated GRADIO_MODEL to {GRADIO_MODEL}")
+
+        if "gradio_confidence" in config:
+            global GRADIO_CONFIDENCE_THRESHOLD
+            GRADIO_CONFIDENCE_THRESHOLD = float(config["gradio_confidence"])
+            updated["gradio_confidence"] = GRADIO_CONFIDENCE_THRESHOLD
+            logger.info(f"Updated GRADIO_CONFIDENCE_THRESHOLD to {GRADIO_CONFIDENCE_THRESHOLD}")
+
+        if "redis_host" in config:
+            global REDIS_HOST
+            REDIS_HOST = str(config["redis_host"])
+            updated["redis_host"] = REDIS_HOST
+            logger.info(f"Updated REDIS_HOST to {REDIS_HOST}")
+
+        if "redis_port" in config:
+            global REDIS_PORT
+            REDIS_PORT = int(config["redis_port"])
+            updated["redis_port"] = REDIS_PORT
+            logger.info(f"Updated REDIS_PORT to {REDIS_PORT}")
 
         if not updated:
             raise HTTPException(status_code=400, detail="No valid configuration keys provided")
@@ -2372,13 +2644,115 @@ except:
 
 session = requests.Session()
 def req_predict(image):
-    try:
-        response = session.post(YOLO_INFERENCE_URL, files={"image": image}, timeout=10)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"YOLO prediction failed: {e}")
-        return []
+    """
+    Unified prediction function supporting both YOLO and Gradio APIs.
+    Returns detections in standardized format with keys: x1, y1, x2, y2, confidence, class_id, name
+    """
+    # Check if we're using Gradio API (HuggingFace Space)
+    if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+        try:
+            from gradio_client import Client, handle_file
+            import tempfile
+            import cv2
+            import numpy as np
+
+            # Initialize Gradio client (cached globally for reuse)
+            if not hasattr(req_predict, 'gradio_client'):
+                logger.info(f"Initializing Gradio client for {YOLO_INFERENCE_URL}")
+                req_predict.gradio_client = Client(YOLO_INFERENCE_URL)
+                logger.info("Gradio client initialized successfully")
+
+            # Decode image bytes and save to temp file
+            nparr = np.frombuffer(image, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                cv2.imwrite(tmp.name, img)
+                tmp_path = tmp.name
+
+            # Get model name and confidence from globals (loaded from config)
+            model_name = globals().get('GRADIO_MODEL', 'Data Matrix')
+            confidence = globals().get('GRADIO_CONFIDENCE_THRESHOLD', 0.25)
+
+            logger.info(f"Calling Gradio API: model={model_name}, confidence={confidence}")
+
+            # Call Gradio /api/detect endpoint
+            result = req_predict.gradio_client.predict(
+                handle_file(tmp_path),
+                model_name,
+                confidence,
+                api_name="/detect"
+            )
+
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
+
+            logger.info(f"Gradio API response: {len(result) if isinstance(result, list) else 0} detection(s)")
+            logger.info(f"Gradio result type: {type(result)}")
+            if result:
+                logger.info(f"First detection sample: {result[0] if isinstance(result, list) else result}")
+
+            # Convert Gradio response format to match YOLO format exactly
+            # YOLO format: {"xmin", "ymin", "xmax", "ymax", "confidence", "class", "name"}
+            # Gradio format: {"x1", "y1", "x2", "y2", "confidence", "class_id", "name"}
+            normalized_detections = []
+            if result and isinstance(result, list):
+                for det in result:
+                    # Convert Gradio format to YOLO format
+                    normalized_det = {
+                        "xmin": det.get('x1', det.get('xmin', 0)),
+                        "ymin": det.get('y1', det.get('ymin', 0)),
+                        "xmax": det.get('x2', det.get('xmax', 0)),
+                        "ymax": det.get('y2', det.get('ymax', 0)),
+                        "confidence": det.get('confidence', 0.0),
+                        "class": det.get('class_id', det.get('class', 0)),
+                        "name": det.get('name', f"Class {det.get('class_id', det.get('class', 0))}")
+                    }
+                    normalized_detections.append(normalized_det)
+
+                logger.info(f"Normalized {len(normalized_detections)} detections to YOLO format")
+                if normalized_detections:
+                    logger.info(f"First normalized detection: {normalized_detections[0]}")
+
+            # Cache detections in module-level variables and Redis (for cross-process sharing)
+            global latest_detections, latest_detections_timestamp, watcher_instance
+            latest_detections = normalized_detections
+            latest_detections_timestamp = time.time()
+
+            # Also store in Redis for cross-process access
+            if watcher_instance and watcher_instance.redis_connection:
+                try:
+                    watcher_instance.redis_connection.redis_connection.setex(
+                        "gradio_last_detection_timestamp",
+                        60,  # Expire after 60 seconds
+                        str(latest_detections_timestamp)
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to cache detection timestamp in Redis: {e}")
+
+            logger.info(f"Cached {len(normalized_detections)} detections at timestamp {latest_detections_timestamp}")
+
+            return json.dumps(normalized_detections)
+
+        except Exception as e:
+            logger.error(f"Gradio prediction failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return "[]"
+    else:
+        # Original YOLO inference endpoint
+        try:
+            # Use Connection: close header to prevent keep-alive issues
+            headers = {'Connection': 'close'}
+            response = requests.post(YOLO_INFERENCE_URL, files={"image": image}, headers=headers, timeout=10)
+            response.raise_for_status()
+            return response.text  # Return JSON string, not parsed dict
+        except requests.exceptions.RequestException as e:
+            logger.error(f"YOLO prediction failed: {e}")
+            return "[]"  # Return empty JSON array string
 
 
 # prepared data based on: https://docs.google.com/spreadsheets/d/1G1StYfEsSuQq9S6EWPO7WDpGGeqtRcZu6vN2-ixSqV8/edit?gid=1480612965#gid=1480612965&range=46:46
@@ -2391,10 +2765,12 @@ try:
         elif isinstance(data, dict) and "prepared_query_data" in data:
             prepared_query_data = data["prepared_query_data"]
         else:
-            prepared_query_data = data
+            # Config file doesn't have prepared_query_data - use empty list (no datamatrix validation)
+            logger.info(f"No prepared_query_data found in {DATA_FILE}, using empty list (detection only mode)")
+            prepared_query_data = []
 except Exception as e:
     logger.error(f"Error loading data from {DATA_FILE}: {e}")
-    prepared_query_data = [{"dm": "warning: {DATA_FILE}", "chars": [["box"]]}]
+    prepared_query_data = []
 
 set_model_url = "http://yolo_inference:4442/v1/object-detection/yolov5s/set-model"
 
@@ -3709,10 +4085,14 @@ def decode_objects(frame_name, frame, nested_object, iterator=0, query_data=None
 
         except Exception as e:
             logger.error(f"Error in decode_objects: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return 4 , None
 
     except Exception as e:
         logger.error(f"Error in decode_objects: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return 4 , None
 
 
@@ -3795,6 +4175,40 @@ def process_frame(frame, capture_mode):
         img_encoded = cv2.imencode('.jpg', image)[1]
         img_bytes = img_encoded.tobytes()
         yolo_res = json.loads(req_predict(img_bytes))
+
+        # Cache frame_id for video feed to display processed image
+        global watcher_instance
+        if watcher_instance:
+            watcher_instance.latest_frame_id = frame_id
+
+        # Save annotated image with bounding boxes
+        if yolo_res and len(yolo_res) > 0:
+            annotated_image = image.copy()
+            for det in yolo_res:
+                try:
+                    x1 = int(det.get('xmin', 0))
+                    y1 = int(det.get('ymin', 0))
+                    x2 = int(det.get('xmax', 0))
+                    y2 = int(det.get('ymax', 0))
+                    confidence = det.get('confidence', 0)
+                    name = det.get('name', f"Class {det.get('class', 0)}")
+
+                    # Draw thick green rectangle
+                    cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+                    # Draw label with background
+                    label = f"{name} {confidence:.2f}"
+                    (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.rectangle(annotated_image, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
+                    cv2.putText(annotated_image, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                except Exception as e:
+                    logger.error(f"Error drawing detection on {frame_id}: {e}")
+
+            # Save annotated image with _DETECTED suffix
+            annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")
+            cv2.imwrite(annotated_path, annotated_image)
+            logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections")
+
         frame_data = [frame_id, image, yolo_res, 5]
 
         if yolo_res:
