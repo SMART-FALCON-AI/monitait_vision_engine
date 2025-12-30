@@ -18,32 +18,19 @@ services:
       - yolo_inference
       - redis
     environment:
-      # Ejector configuration
-      - EJECTOR_OFFSET=0
-      - EJECTOR_DURATION=0.4
-      - EJECTOR_POLL_INTERVAL=0.03
-      # Capture configuration
-      - CAPTURE_MODE=single
-      - TIME_BETWEEN_TWO_PACKAGE=0.305
-      # Image processing configuration
-      - REMOVE_RAW_IMAGE_WHEN_DM_DECODED=false
-      - PARENT_OBJECT_LIST=_root,box,pack,DP-105
-      # Data file configuration
-      - DATA_FILE=.env.prepared_query_data
-      # USB cameras are auto-detected from /dev/video* (even numbers only)
-      # IP cameras are configured via web interface at http://localhost:5050/status
-      # Redis configuration
+      # Infrastructure configuration
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      # YOLO inference configuration
       - YOLO_INFERENCE_URL=http://yolo_inference:4442/v1/object-detection/yolov5s/detect/
-      # Serial/Watcher configuration
+      - WEB_SERVER_PORT=5050
+      - WEB_SERVER_HOST=0.0.0.0
+      # Hardware configuration
       - WATCHER_USB=/dev/ttyUSB0
       - BAUD_RATE=57600
       - SERIAL_MODE=legacy
-      # Web server configuration
-      - WEB_SERVER_PORT=5050
-      - WEB_SERVER_HOST=0.0.0.0
+      # Note: All other settings (ejector, capture, cameras, image processing, etc.)
+      #       are configured via the web interface at http://localhost:5050/status
+      #       and saved to .env.prepared_query_data for persistence
     logging:
       options:
         max-size: "10m"
