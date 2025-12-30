@@ -1800,10 +1800,12 @@
 
                 const config = camera.config || {};
                 const isConnected = camera.connected;
+                const isIPCamera = camera.type === 'ip';
+                const cameraName = camera.name || `Camera ${cameraId}`;
 
                 div.innerHTML = `
                     <div class="camera-card-header">
-                        <span class="camera-card-title">Camera ${cameraId}</span>
+                        <span class="camera-card-title">${cameraName}</span>
                         <span class="camera-status-badge ${isConnected ? 'running' : 'stopped'}">
                             ${isConnected ? 'CONNECTED' : 'DISCONNECTED'}
                         </span>
@@ -1814,15 +1816,21 @@
                     <div class="camera-card-content">
                         <div class="camera-image-container">
                             ${isConnected ?
-                                `<img id="camera-img-${cameraId}" src="/api/camera/${cameraId}/snapshot?t=${Date.now()}" class="camera-image" alt="Camera ${cameraId}" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                `<img id="camera-img-${cameraId}" src="/api/camera/${cameraId}/snapshot?t=${Date.now()}" class="camera-image" alt="${cameraName}" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                                  <div class="camera-no-image" style="display:none;">Image load failed</div>` :
                                 `<div class="camera-no-image">Camera not connected</div>`
                             }
                         </div>
                         <div class="camera-info">
+                            ${isIPCamera ? `
+                            <div class="camera-info-item">
+                                <span class="camera-info-label">Type</span>
+                                <span class="camera-info-value">IP Camera (${camera.ip || 'N/A'})</span>
+                            </div>
+                            ` : ''}
                             <div class="camera-info-item">
                                 <span class="camera-info-label">Path</span>
-                                <span class="camera-info-value" style="font-size: 11px;">${camera.path || '-'}</span>
+                                <span class="camera-info-value" style="font-size: 11px;">${isIPCamera && camera.camera_path ? camera.camera_path : camera.path || '-'}</span>
                             </div>
                             <div class="camera-info-item">
                                 <span class="camera-info-label">Resolution</span>
@@ -1832,6 +1840,7 @@
                                 <span class="camera-info-label">FPS</span>
                                 <span class="camera-info-value">${config.fps || '-'}</span>
                             </div>
+                            ${!isIPCamera ? `
                             <div class="camera-info-item">
                                 <span class="camera-info-label">Exposure</span>
                                 <span class="camera-info-value">${config.exposure || '-'}</span>
@@ -1844,9 +1853,21 @@
                                 <span class="camera-info-label">Brightness</span>
                                 <span class="camera-info-value">${config.brightness || '-'}</span>
                             </div>
+                            ` : ''}
                         </div>
                     </div>
 
+                    ${isIPCamera ? `
+                    <div class="camera-config-section" style="background: #2c2c2c; padding: 15px; border-radius: 4px;">
+                        <div style="color: #ffc107; font-size: 13px; margin-bottom: 10px;">
+                            ℹ️ <strong>IP Camera Note:</strong> Exposure, gain, and brightness cannot be controlled via software for RTSP/IP cameras.
+                            These settings must be configured through the camera's web interface or manufacturer app.
+                        </div>
+                        <div class="camera-actions">
+                            <button class="camera-btn camera-btn-secondary" onclick="restartCamera(${cameraId})" ${!isConnected ? 'disabled' : ''}>Restart Camera</button>
+                        </div>
+                    </div>
+                    ` : `
                     <div class="camera-config-section">
                         <div class="camera-config-grid">
                             <div class="camera-config-item">
@@ -1914,6 +1935,7 @@
                             <button class="camera-btn camera-btn-primary" onclick="applyCameraConfig(${cameraId})" ${!isConnected ? 'disabled' : ''}>Apply</button>
                         </div>
                     </div>
+                    `}
                 `;
 
                 return div;
