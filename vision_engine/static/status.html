@@ -2559,8 +2559,8 @@
                     const result = await response.json();
 
                     if (response.ok && result.success) {
-                        // Show camera preview
-                        showCameraPreview(ip, path, result.image, result.resolution, result.authenticated_url);
+                        // Show camera preview (pass both display URL and full URL)
+                        showCameraPreview(ip, path, result.image, result.resolution, result.authenticated_url, result.full_url);
                         button.textContent = '✓ Success!';
                         button.style.background = '#218838';
                         setTimeout(() => {
@@ -2593,18 +2593,18 @@
             // Store current camera details for saving
             let currentCameraDetails = null;
 
-            function showCameraPreview(ip, path, imageData, resolution, authenticatedUrl) {
+            function showCameraPreview(ip, path, imageData, resolution, authenticatedUrl, fullUrl) {
                 const modal = document.getElementById('camera-preview-modal');
                 const title = document.getElementById('preview-camera-title');
                 const info = document.getElementById('preview-camera-info');
                 const image = document.getElementById('preview-camera-image');
                 const nameInput = document.getElementById('save-camera-name');
 
-                // Store camera details for saving
+                // Store camera details for saving (use fullUrl which has credentials)
                 currentCameraDetails = {
                     ip: ip,
                     path: path,
-                    url: authenticatedUrl,
+                    url: fullUrl || authenticatedUrl,  // Use full URL with credentials for saving
                     resolution: resolution
                 };
 

@@ -1018,7 +1018,7 @@ def apply_config_settings(config, watcher_inst=None):
         STORE_ANNOTATION_ENABLED = config["store_annotation"].get("enabled", STORE_ANNOTATION_ENABLED)
         settings_applied["store_annotation"] = True
 
-    # Apply camera configs
+    # Apply camera configs (for existing USB cameras)
     cameras_loaded = 0
     if "cameras" in config and watcher_inst is not None and hasattr(watcher_inst, 'cameras'):
         for cam_id_str, cam_config in config["cameras"].items():
@@ -1027,6 +1027,54 @@ def apply_config_settings(config, watcher_inst=None):
             if cam is not None:
                 apply_camera_config_from_saved(cam, cam_config)
                 cameras_loaded += 1
+
+    # Load IP cameras from config
+    if "ip_cameras" in config and watcher_inst is not None:
+        ip_cameras = config["ip_cameras"]
+        if ip_cameras:
+            logger.info(f"Loading {len(ip_cameras)} IP camera(s) from configuration")
+
+            # Get the next available camera ID (after USB cameras)
+            next_cam_id = len(watcher_inst.camera_paths) + 1
+
+            for idx, ip_cam in enumerate(ip_cameras):
+                if not ip_cam.get("enabled", True):
+                    logger.info(f"  Skipping disabled camera: {ip_cam.get('name', 'Unknown')}")
+                    continue
+
+                cam_id = next_cam_id + idx
+                cam_url = ip_cam.get("url")
+                cam_name = ip_cam.get("name", f"IP Camera {cam_id}")
+
+                if not cam_url:
+                    logger.warning(f"  Skipping camera {cam_name}: missing URL")
+                    continue
+
+                try:
+                    logger.info(f"  Initializing IP camera {cam_id}: {cam_name} ({cam_url.split('@')[-1] if '@' in cam_url else cam_url})")
+
+                    # Create camera buffer for IP camera
+                    cam = CameraBuffer(cam_url, exposure=100, gain=100)
+                    watcher_inst.cameras[cam_id] = cam
+                    watcher_inst.camera_paths.append(cam_url)
+
+                    # Store camera metadata
+                    if not hasattr(watcher_inst, 'camera_metadata'):
+                        watcher_inst.camera_metadata = {}
+                    watcher_inst.camera_metadata[cam_id] = {
+                        "name": cam_name,
+                        "type": "ip",
+                        "ip": ip_cam.get("ip"),
+                        "path": ip_cam.get("path"),
+                        "url": cam_url
+                    }
+
+                    cameras_loaded += 1
+                    logger.info(f"  ✓ Camera {cam_id} initialized successfully (success={cam.success})")
+
+                except Exception as e:
+                    logger.error(f"  ✗ Failed to initialize IP camera {cam_name}: {e}")
+                    continue
 
     return settings_applied, cameras_loaded
 
@@ -1612,12 +1660,26 @@ async def get_cameras_status():
     for cam_id, cam in watcher_instance.cameras.items():
         # Get camera path from stored paths
         cam_path = watcher_instance.camera_paths[cam_id - 1] if cam_id <= len(watcher_instance.camera_paths) else "unknown"
+
+        # Get camera metadata if available
+        metadata = {}
+        if hasattr(watcher_instance, 'camera_metadata') and cam_id in watcher_instance.camera_metadata:
+            metadata = watcher_instance.camera_metadata[cam_id]
+
         cam_info = {
             "id": cam_id,
             "path": cam_path,
+            "name": metadata.get("name", f"Camera {cam_id}"),
+            "type": metadata.get("type", "usb"),
             "connected": cam is not None and getattr(cam, 'success', False),
             "running": cam is not None and not getattr(cam, 'stop', True),
         }
+
+        # Add IP camera specific info
+        if metadata.get("type") == "ip":
+            cam_info["ip"] = metadata.get("ip")
+            cam_info["camera_path"] = metadata.get("path")
+
         if cam is not None and hasattr(cam, 'camera'):
             try:
                 cam_info["config"] = {
@@ -1980,7 +2042,8 @@ async def test_camera(request: Request):
                     "message": "Camera test successful",
                     "image": f"data:image/jpeg;base64,{img_str}",
                     "resolution": {"width": frame.shape[1], "height": frame.shape[0]},
-                    "authenticated_url": test_url.split("@")[-1] if "@" in test_url else test_url  # Return URL without password
+                    "authenticated_url": test_url.split("@")[-1] if "@" in test_url else test_url,  # URL without credentials (for display)
+                    "full_url": test_url  # Full URL with credentials (for saving)
                 })
 
         return JSONResponse(content={
