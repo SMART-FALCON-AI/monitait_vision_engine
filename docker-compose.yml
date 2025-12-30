@@ -30,13 +30,8 @@ services:
       - PARENT_OBJECT_LIST=_root,box,pack,DP-105
       # Data file configuration
       - DATA_FILE=.env.prepared_query_data
-      # Camera paths configuration (auto-detected or manual)
-      # Comment out USB cameras if not available - system will only show connected cameras
-      # - CAM_1_PATH=/dev/video0
-      # - CAM_2_PATH=/dev/video2
-      # - CAM_3_PATH=/dev/video4
-      # - CAM_4_PATH=/dev/video6
-      # IP cameras - Configure via web interface at http://localhost:5050/status
+      # USB cameras are auto-detected from /dev/video* (even numbers only)
+      # IP cameras are configured via web interface at http://localhost:5050/status
       # Redis configuration
       - REDIS_HOST=redis
       - REDIS_PORT=6379
