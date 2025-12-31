@@ -14,21 +14,11 @@ services:
     privileged: true
     networks:
       - main_network
-    depends_on:
-      - yolo_inference
-      - redis
     environment:
-      # Infrastructure configuration
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - YOLO_INFERENCE_URL=http://yolo_inference:4442/v1/object-detection/yolov5s/detect/
+      # Web server configuration
       - WEB_SERVER_PORT=5050
       - WEB_SERVER_HOST=0.0.0.0
-      # Hardware configuration
-      - WATCHER_USB=/dev/ttyUSB0
-      - BAUD_RATE=57600
-      - SERIAL_MODE=legacy
-      # Note: All other settings (ejector, capture, cameras, image processing, etc.)
+      # Note: All settings (infrastructure, serial port, ejector, capture, cameras, image processing, etc.)
       #       are configured via the web interface at http://localhost:5050/status
       #       and saved to .env.prepared_query_data for persistence
     logging:
@@ -101,9 +91,58 @@ services:
         max-file: "2"
     restart: "always"
 
+  # TimescaleDB PostgreSQL Database
+  timescaledb:
+    container_name: "monitait_timescaledb"
+    image: timescale/timescaledb:latest-pg15
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=monitaqc
+      - POSTGRES_PASSWORD=monitaqc2024
+      - POSTGRES_DB=monitaqc
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+    networks:
+      - main_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitaqc"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: "always"
+
+  # Grafana Visualization
+  grafana:
+    container_name: "monitait_grafana"
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - main_network
+    depends_on:
+      - timescaledb
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: "always"
+
 networks:
   main_network:
     driver: bridge
 
 volumes:
   redis_data:
+  timescale_data:
+  grafana_data:

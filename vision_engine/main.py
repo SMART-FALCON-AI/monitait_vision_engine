@@ -15,7 +15,7 @@ import math
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import Pool, cpu_count
 import logging
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List, Set
@@ -90,19 +90,26 @@ GRADIO_CONFIDENCE_THRESHOLD = 0.25
 latest_detections = []
 latest_detections_timestamp = 0.0
 
+# Inference performance tracking
+inference_times = []  # Store last 10 inference times (processing time only)
+frame_intervals = []  # Store last 10 frame-to-frame intervals
+last_inference_timestamp = 0.0  # Timestamp of last inference
+max_inference_samples = 10
+
+# Camera capture FPS tracking (separate from inference FPS)
+capture_timestamps = []  # Store last 10 capture timestamps
+max_capture_samples = 10
+
 # Camera paths configuration (optional - only used if devices exist)
 CAM_1_PATH = os.environ.get("CAM_1_PATH", "")
 CAM_2_PATH = os.environ.get("CAM_2_PATH", "")
 CAM_3_PATH = os.environ.get("CAM_3_PATH", "")
 CAM_4_PATH = os.environ.get("CAM_4_PATH", "")
 
-# IP Camera configuration (optional - can be mixed with USB cameras)
-# Format: rtsp://username:password@ip:port/path or http://ip:port/video
-IP_CAMERAS = os.environ.get("IP_CAMERAS", "")  # Comma-separated list or "auto" or "auto+manual"
+# Camera discovery configuration
 IP_CAMERA_USER = os.environ.get("IP_CAMERA_USER", "admin")  # Default username for auto-discovery
 IP_CAMERA_PASS = os.environ.get("IP_CAMERA_PASS", "")  # Default password for auto-discovery
 IP_CAMERA_SUBNET = os.environ.get("IP_CAMERA_SUBNET", "")  # Optional subnet override (e.g., "192.168.0")
-# IP Camera settings (applied to all IP cameras)
 IP_CAMERA_BRIGHTNESS = int(os.environ.get("IP_CAMERA_BRIGHTNESS", 128))  # 0-255
 IP_CAMERA_CONTRAST = int(os.environ.get("IP_CAMERA_CONTRAST", 128))  # 0-255
 IP_CAMERA_SATURATION = int(os.environ.get("IP_CAMERA_SATURATION", 128))  # 0-255
@@ -356,55 +363,15 @@ def test_camera_stream(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def detect_ip_cameras() -> List[str]:
-    """Detect IP cameras from environment variable or network scan.
-
-    Returns list of IP camera URLs.
-    Format: RTSP (rtsp://user:pass@ip:port/stream) or HTTP (http://ip:port/video.mjpg)
-    Supports: "auto", "manual_urls", or "auto,manual_urls" for both
-    """
-    ip_cameras = []
-
-    if IP_CAMERAS:
-        # Check if it contains "auto" (can be "auto" or "auto,rtsp://...")
-        if "auto" in IP_CAMERAS.lower():
-            # Auto-discover cameras on network
-            logger.info("Auto-discovering IP cameras on network...")
-            discovered = scan_network_for_cameras()
-            ip_cameras.extend(discovered)
-
-            # If there are manual URLs after "auto,", parse them too
-            if "," in IP_CAMERAS:
-                manual_part = IP_CAMERAS.split(",", 1)[1] if IP_CAMERAS.lower().startswith("auto,") else IP_CAMERAS
-                if not manual_part.lower().startswith("auto"):
-                    cameras = [cam.strip() for cam in manual_part.split(",") if cam.strip() and not cam.lower() == "auto"]
-                    for cam_url in cameras:
-                        if cam_url.startswith(("rtsp://", "http://", "https://")):
-                            ip_cameras.append(cam_url)
-                            logger.info(f"Configured IP camera: {cam_url.split('@')[-1] if '@' in cam_url else cam_url}")
-        else:
-            # Manual configuration only - split by comma and strip whitespace
-            cameras = [cam.strip() for cam in IP_CAMERAS.split(",") if cam.strip()]
-
-            for cam_url in cameras:
-                # Validate URL format
-                if cam_url.startswith(("rtsp://", "http://", "https://")):
-                    ip_cameras.append(cam_url)
-                    logger.info(f"Configured IP camera: {cam_url.split('@')[-1] if '@' in cam_url else cam_url}")
-                else:
-                    logger.warning(f"Invalid IP camera URL format: {cam_url}")
-
-    return ip_cameras
+# Note: IP camera detection is now handled through the camera discovery API
+# and saved to the unified "cameras" configuration structure
 
 
 def get_all_cameras() -> List[str]:
-    """Get all available cameras (USB + IP).
+    """Get all available cameras (USB only from environment variables).
 
-    Priority:
-    1. USB cameras (only from env vars if explicitly set and device exists)
-    2. IP cameras (from IP_CAMERAS env var)
-
-    Returns combined list of camera sources that actually exist.
+    Returns list of USB camera sources that exist as devices.
+    Note: IP cameras are now loaded from the unified "cameras" configuration.
     """
     all_cameras = []
 
@@ -416,13 +383,10 @@ def get_all_cameras() -> List[str]:
             all_cameras.append(cam_path)
             logger.info(f"Found USB camera: {cam_path}")
 
-    # Add IP cameras
-    ip_cameras = detect_ip_cameras()
-
     # Remove duplicates while preserving order
     seen = set()
     unique_cameras = []
-    for cam in all_cameras + ip_cameras:
+    for cam in all_cameras:
         # Normalize camera URL for comparison
         # Remove credentials and normalize port (rtsp://ip:554/ == rtsp://ip/)
         cam_key = cam.split('@')[-1] if '@' in cam else cam
@@ -1057,7 +1021,7 @@ def apply_config_settings(config, watcher_inst=None):
                 logger.info(f"  Updated existing camera {cam_id}: {cam_config.get('name', f'Camera {cam_id}')}")
             elif cam_type == "ip":
                 # IP camera doesn't exist - create it
-                cam_url = cam_config.get("url")
+                cam_url = cam_config.get("source") or cam_config.get("url")  # Support both "source" and legacy "url"
                 cam_name = cam_config.get("name", f"IP Camera {cam_id}")
 
                 if not cam_url:
@@ -1101,53 +1065,7 @@ def apply_config_settings(config, watcher_inst=None):
                     import traceback
                     logger.error(traceback.format_exc())
 
-    # Load IP cameras from config
-    if "ip_cameras" in config and watcher_inst is not None:
-        ip_cameras = config["ip_cameras"]
-        if ip_cameras:
-            logger.info(f"Loading {len(ip_cameras)} IP camera(s) from configuration")
-
-            # Get the next available camera ID (after USB cameras)
-            next_cam_id = len(watcher_inst.camera_paths) + 1
-
-            for idx, ip_cam in enumerate(ip_cameras):
-                if not ip_cam.get("enabled", True):
-                    logger.info(f"  Skipping disabled camera: {ip_cam.get('name', 'Unknown')}")
-                    continue
-
-                cam_id = next_cam_id + idx
-                cam_url = ip_cam.get("url")
-                cam_name = ip_cam.get("name", f"IP Camera {cam_id}")
-
-                if not cam_url:
-                    logger.warning(f"  Skipping camera {cam_name}: missing URL")
-                    continue
-
-                try:
-                    logger.info(f"  Initializing IP camera {cam_id}: {cam_name} ({cam_url.split('@')[-1] if '@' in cam_url else cam_url})")
-
-                    # Create camera buffer for IP camera
-                    cam = CameraBuffer(cam_url, exposure=100, gain=100)
-                    watcher_inst.cameras[cam_id] = cam
-                    watcher_inst.camera_paths.append(cam_url)
-
-                    # Store camera metadata
-                    if not hasattr(watcher_inst, 'camera_metadata'):
-                        watcher_inst.camera_metadata = {}
-                    watcher_inst.camera_metadata[cam_id] = {
-                        "name": cam_name,
-                        "type": "ip",
-                        "ip": ip_cam.get("ip"),
-                        "path": ip_cam.get("path"),
-                        "url": cam_url
-                    }
-
-                    cameras_loaded += 1
-                    logger.info(f"  ✓ Camera {cam_id} initialized successfully (success={cam.success})")
-
-                except Exception as e:
-                    logger.error(f"  ✗ Failed to initialize IP camera {cam_name}: {e}")
-                    continue
+    # IP cameras are now loaded from the unified "cameras" structure above
 
     return settings_applied, cameras_loaded
 
@@ -1215,6 +1133,7 @@ def get_camera_config_for_save(cam, cam_id):
     """Extract camera configuration for saving."""
     if cam is None:
         return None
+
     config = {
         "roi_enabled": getattr(cam, 'roi_enabled', False),
         "roi_xmin": getattr(cam, 'roi_xmin', 0),
@@ -1222,6 +1141,24 @@ def get_camera_config_for_save(cam, cam_id):
         "roi_xmax": getattr(cam, 'roi_xmax', 1280),
         "roi_ymax": getattr(cam, 'roi_ymax', 720),
     }
+
+    # Add camera source (URL/path)
+    if hasattr(cam, 'source'):
+        config["source"] = cam.source
+        # Determine camera type
+        if isinstance(cam.source, str) and cam.source.startswith(("rtsp://", "http://", "https://")):
+            config["type"] = "ip"
+            # Extract IP and path from RTSP URL if possible
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(cam.source)
+                config["ip"] = parsed.hostname
+                config["path"] = parsed.path + ("?" + parsed.query if parsed.query else "")
+            except:
+                pass
+        else:
+            config["type"] = "usb"
+
     if hasattr(cam, 'camera'):
         try:
             config["exposure"] = int(cam.camera.get(cv2.CAP_PROP_EXPOSURE))
@@ -1232,6 +1169,7 @@ def get_camera_config_for_save(cam, cam_id):
             config["fps"] = int(cam.camera.get(cv2.CAP_PROP_FPS))
         except:
             pass
+
     return config
 
 def apply_camera_config_from_saved(cam, saved_config):
@@ -1313,26 +1251,68 @@ async def health_check(request: Request):
         try:
             # Check if Gradio client is initialized (for HuggingFace URLs)
             if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
-                # Check Redis for last detection timestamp (cross-process)
-                last_detection_ts = 0.0
-                if watcher and watcher.redis_connection:
-                    try:
-                        cached_ts = watcher.redis_connection.redis_connection.get("gradio_last_detection_timestamp")
-                        if cached_ts:
-                            last_detection_ts = float(cached_ts.decode('utf-8'))
-                    except Exception as e:
-                        logger.warning(f"Failed to read detection timestamp from Redis: {e}")
+                gradio_health_status = "unknown"
+                gradio_needs_restart = False
 
-                # For Gradio, check if we have successful detections cached recently
-                if last_detection_ts > 0:
-                    age = time.time() - last_detection_ts
-                    yolo_ok = age < 30.0
-                    logger.info(f"YOLO health: timestamp={last_detection_ts:.2f}, age={age:.2f}s, status={'OK' if yolo_ok else 'stale'}")
-                else:
-                    logger.info(f"YOLO health: No detections yet (no Redis cache)")
+                # Try comprehensive health check
+                try:
+                    # 1. Check if health endpoint responds
+                    base_url = YOLO_INFERENCE_URL.split('/api/')[0] if '/api/' in YOLO_INFERENCE_URL else YOLO_INFERENCE_URL.rsplit('/', 1)[0]
+                    health_url = f"{base_url}/api/health"
+
+                    health_response = session.get(health_url, timeout=5)
+
+                    if health_response.status_code == 200:
+                        # 2. Check recent successful inference from Redis
+                        last_detection_ts = 0.0
+                        if watcher and watcher.redis_connection:
+                            try:
+                                cached_ts = watcher.redis_connection.redis_connection.get("gradio_last_detection_timestamp")
+                                if cached_ts:
+                                    last_detection_ts = float(cached_ts.decode('utf-8'))
+                            except Exception as e:
+                                logger.warning(f"Failed to read detection timestamp from Redis: {e}")
+
+                        # 3. Determine health based on recent activity
+                        if last_detection_ts > 0:
+                            age = time.time() - last_detection_ts
+                            if age < 60.0:  # Less than 1 minute - healthy
+                                yolo_ok = True
+                                gradio_health_status = "healthy"
+                            elif age < 300.0:  # Less than 5 minutes - warning
+                                yolo_ok = True
+                                gradio_health_status = "warning"
+                            else:  # More than 5 minutes - may need restart
+                                yolo_ok = False
+                                gradio_health_status = "stale"
+                                gradio_needs_restart = True
+                            logger.info(f"Gradio health: {gradio_health_status}, last inference {age:.1f}s ago")
+                        else:
+                            # Health endpoint OK but no recent inferences
+                            yolo_ok = True
+                            gradio_health_status = "idle"
+                            logger.info(f"Gradio health: {gradio_health_status} (no recent inferences)")
+                    else:
+                        raise Exception(f"Health endpoint returned {health_response.status_code}")
+
+                except Exception as e:
+                    # Health endpoint failed - space may be sleeping or needs restart
+                    yolo_ok = False
+                    gradio_health_status = "offline"
+                    gradio_needs_restart = True
+                    logger.error(f"Gradio health check failed: {e}")
+
+                # Store status in Redis for monitoring
+                try:
+                    if watcher and watcher.redis_connection:
+                        watcher.redis_connection.redis_connection.set("gradio_health_status", gradio_health_status)
+                        watcher.redis_connection.redis_connection.set("gradio_needs_restart", str(gradio_needs_restart))
+                except:
+                    pass
             else:
                 # For traditional YOLO endpoint, try a quick ping
-                response = session.get(YOLO_INFERENCE_URL.replace('/detect/', '/health'), timeout=1)
+                health_url = YOLO_INFERENCE_URL.replace('/detect/', '/health').replace('/detect', '/health')
+                response = session.get(health_url, timeout=1)
                 yolo_ok = response.status_code == 200
         except Exception as e:
             logger.error(f"[HEALTH] Error checking YOLO status: {e}")
@@ -1341,17 +1321,37 @@ async def health_check(request: Request):
         # Consider healthy if redis works and either serial is connected or we're in camera-only mode
         status_code = 200 if redis_ok else 503
 
+        # Get Gradio-specific health info from Redis
+        gradio_health_info = {}
+        if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+            try:
+                if watcher and watcher.redis_connection:
+                    health_status = watcher.redis_connection.redis_connection.get("gradio_health_status")
+                    needs_restart = watcher.redis_connection.redis_connection.get("gradio_needs_restart")
+                    gradio_health_info = {
+                        "gradio_status": health_status.decode('utf-8') if health_status else "unknown",
+                        "gradio_needs_restart": needs_restart.decode('utf-8') == "True" if needs_restart else False
+                    }
+            except:
+                pass
+
+        response_content = {
+            "status": "healthy" if status_code == 200 else "unhealthy",
+            "device": "connected" if device_ok else ("camera-only" if not serial_available else "disconnected"),
+            "serial": "connected" if serial_available else "not available",
+            "redis": "connected" if redis_ok else "disconnected",
+            "yolo": "connected" if yolo_ok else "not available",
+            "cameras": cameras_status,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        # Add Gradio-specific info if available
+        if gradio_health_info:
+            response_content.update(gradio_health_info)
+
         return JSONResponse(
             status_code=status_code,
-            content={
-                "status": "healthy" if status_code == 200 else "unhealthy",
-                "device": "connected" if device_ok else ("camera-only" if not serial_available else "disconnected"),
-                "serial": "connected" if serial_available else "not available",
-                "redis": "connected" if redis_ok else "disconnected",
-                "yolo": "connected" if yolo_ok else "not available",
-                "cameras": cameras_status,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+            content=response_content
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -1363,6 +1363,102 @@ async def health_check(request: Request):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
         )
+
+@app.get("/api/inference/stats")
+async def get_inference_stats():
+    """Get inference performance statistics."""
+    global inference_times, frame_intervals, YOLO_INFERENCE_URL, watcher
+
+    # Determine service type
+    if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+        service_type = "Gradio (Cloud)"
+        service_url = YOLO_INFERENCE_URL
+    else:
+        service_type = "YOLO (Local)"
+        service_url = YOLO_INFERENCE_URL
+
+    # Try to get timing data from Redis (cross-process)
+    redis_inference_times = []
+    redis_frame_intervals = []
+    redis_capture_timestamps = []
+
+    try:
+        if watcher and watcher.redis_connection:
+            # Get inference times from Redis
+            times_raw = watcher.redis_connection.redis_connection.lrange("inference_times", 0, -1)
+            redis_inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
+
+            # Get frame intervals from Redis
+            intervals_raw = watcher.redis_connection.redis_connection.lrange("frame_intervals", 0, -1)
+            redis_frame_intervals = [float(i.decode('utf-8')) for i in intervals_raw if i]
+
+            # Get capture timestamps from Redis
+            capture_raw = watcher.redis_connection.redis_connection.lrange("capture_timestamps", 0, -1)
+            redis_capture_timestamps = [float(t.decode('utf-8')) for t in capture_raw if t]
+    except Exception as e:
+        logger.warning(f"Failed to read timing from Redis: {e}")
+
+    # Use Redis data if available, otherwise fall back to in-memory
+    use_inference_times = redis_inference_times if redis_inference_times else inference_times
+    use_frame_intervals = redis_frame_intervals if redis_frame_intervals else frame_intervals
+
+    # Calculate average inference time (processing time only)
+    if use_inference_times:
+        avg_inference = sum(use_inference_times) / len(use_inference_times)
+        min_inference = min(use_inference_times)
+        max_inference = max(use_inference_times)
+    else:
+        avg_inference = 0
+        min_inference = 0
+        max_inference = 0
+
+    # Calculate average frame interval (time between frames)
+    if use_frame_intervals:
+        avg_interval = sum(use_frame_intervals) / len(use_frame_intervals)
+        min_interval = min(use_frame_intervals)
+        max_interval = max(use_frame_intervals)
+        # Calculate inference FPS from average interval (1000ms / interval_ms = fps)
+        inference_fps = 1000.0 / avg_interval if avg_interval > 0 else 0
+    else:
+        avg_interval = 0
+        min_interval = 0
+        max_interval = 0
+        inference_fps = 0
+
+    # Calculate capture FPS from capture timestamps
+    capture_fps = 0
+    if redis_capture_timestamps and len(redis_capture_timestamps) >= 2:
+        # Sort timestamps and calculate intervals
+        sorted_timestamps = sorted(redis_capture_timestamps)
+        capture_intervals = [
+            (sorted_timestamps[i] - sorted_timestamps[i-1]) * 1000  # Convert to ms
+            for i in range(1, len(sorted_timestamps))
+        ]
+        if capture_intervals:
+            avg_capture_interval = sum(capture_intervals) / len(capture_intervals)
+            capture_fps = 1000.0 / avg_capture_interval if avg_capture_interval > 0 else 0
+
+    return JSONResponse(content={
+        "service_type": service_type,
+        "service_url": service_url,
+        # Processing time (from capture to result)
+        "avg_inference_time_ms": round(avg_inference, 1),
+        "min_inference_time_ms": round(min_inference, 1),
+        "max_inference_time_ms": round(max_inference, 1),
+        # Frame-to-frame interval (time between processes)
+        "avg_frame_interval_ms": round(avg_interval, 1),
+        "min_frame_interval_ms": round(min_interval, 1),
+        "max_frame_interval_ms": round(max_interval, 1),
+        # Inference FPS based on frame intervals
+        "inference_fps": round(inference_fps, 2),
+        # Capture FPS based on camera capture rate
+        "capture_fps": round(capture_fps, 2),
+        # Sample counts
+        "inference_sample_count": len(use_inference_times),
+        "interval_sample_count": len(use_frame_intervals),
+        "capture_sample_count": len(redis_capture_timestamps),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    })
 
 @app.get("/")
 async def root_redirect():
@@ -1572,6 +1668,53 @@ async def latest_detection_image():
         logger.error(f"Error serving latest detection image: {e}")
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def generate_detection_stream():
+    """Generator function that yields MJPEG frames from latest detections."""
+    import glob
+    last_file = None
+    last_mtime = 0
+
+    while True:
+        try:
+            # Find all _DETECTED.jpg files in raw_images directory
+            pattern = os.path.join("raw_images", "**", "*_DETECTED.jpg")
+            detected_files = glob.glob(pattern, recursive=True)
+
+            if detected_files:
+                # Get the most recent file by modification time
+                latest_file = max(detected_files, key=os.path.getmtime)
+                current_mtime = os.path.getmtime(latest_file)
+
+                # Only send if file has changed or it's a new file
+                if latest_file != last_file or current_mtime != last_mtime:
+                    # Read the image
+                    with open(latest_file, 'rb') as f:
+                        image_data = f.read()
+
+                    # Yield the frame in MJPEG format
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + image_data + b'\r\n')
+
+                    last_file = latest_file
+                    last_mtime = current_mtime
+
+            # Wait a bit before checking for new frames (2 times per second)
+            time.sleep(0.5)
+
+        except Exception as e:
+            logger.error(f"Error in detection stream: {e}")
+            time.sleep(1)
+
+
+@app.get("/detection_stream")
+async def detection_stream():
+    """Serve a continuous MJPEG stream of detection results."""
+    return StreamingResponse(
+        generate_detection_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame"
+    )
 
 @app.get("/config")
 async def get_config():
@@ -1832,6 +1975,17 @@ async def update_config(config: Dict[str, Any]):
             REDIS_PORT = int(config["redis_port"])
             updated["redis_port"] = REDIS_PORT
             logger.info(f"Updated REDIS_PORT to {REDIS_PORT}")
+
+        # Shipment ID
+        if "shipment" in config:
+            shipment_id = str(config["shipment"])
+            # Store in Redis
+            if redis_client:
+                redis_client.set("shipment", shipment_id)
+                updated["shipment"] = shipment_id
+                logger.info(f"Updated shipment ID to {shipment_id}")
+            else:
+                logger.warning("Redis not available, cannot update shipment ID")
 
         if not updated:
             raise HTTPException(status_code=400, detail="No valid configuration keys provided")
@@ -2349,48 +2503,63 @@ async def save_camera(request: Request):
         # Load existing service config or create new one
         config = load_service_config()
         if not config:
-            config = {
-                "ip_cameras": [],
-                "settings": {}
-            }
+            config = {}
 
-        # Ensure ip_cameras list exists
-        if "ip_cameras" not in config:
-            config["ip_cameras"] = []
+        # Ensure cameras dict exists
+        if "cameras" not in config:
+            config["cameras"] = {}
 
-        # Check if camera already exists (by URL)
-        existing_idx = None
-        for idx, cam in enumerate(config["ip_cameras"]):
-            if cam.get("url") == camera_url:
-                existing_idx = idx
+        # Find next available camera ID or check if camera already exists
+        existing_id = None
+        for cam_id, cam_config in config["cameras"].items():
+            if cam_config.get("source") == camera_url:
+                existing_id = cam_id
                 break
+
+        # Determine camera ID
+        if existing_id:
+            camera_id = existing_id
+        else:
+            # Find next available ID
+            existing_ids = [int(k) for k in config["cameras"].keys() if k.isdigit()]
+            camera_id = str(max(existing_ids) + 1) if existing_ids else "1"
 
         # Prepare camera entry
         camera_entry = {
             "name": camera_name,
-            "url": camera_url,
+            "source": camera_url,
+            "type": "ip",
             "ip": camera_ip,
             "path": camera_path,
-            "resolution": resolution,
+            "roi_enabled": False,
+            "roi_xmin": 0,
+            "roi_ymin": 0,
+            "roi_xmax": resolution.get("width", 1920),
+            "roi_ymax": resolution.get("height", 1080),
+            "exposure": 0,
+            "gain": 0,
+            "brightness": 0,
+            "contrast": 0,
+            "saturation": 0,
+            "fps": 25,
             "enabled": True
         }
 
-        if existing_idx is not None:
-            # Update existing camera
-            config["ip_cameras"][existing_idx] = camera_entry
-            logger.info(f"Updated existing camera at index {existing_idx}")
+        # Save camera
+        config["cameras"][camera_id] = camera_entry
+        if existing_id:
+            logger.info(f"Updated existing camera ID {camera_id}")
         else:
-            # Add new camera
-            config["ip_cameras"].append(camera_entry)
-            logger.info(f"Added new camera, total cameras: {len(config['ip_cameras'])}")
+            logger.info(f"Added new camera ID {camera_id}, total cameras: {len(config['cameras'])}")
 
         # Save configuration
         if save_service_config(config):
             return JSONResponse(content={
                 "success": True,
-                "message": f"Camera '{camera_name}' saved successfully",
+                "message": f"Camera '{camera_name}' saved successfully as Camera {camera_id}",
                 "camera": camera_entry,
-                "total_cameras": len(config["ip_cameras"])
+                "camera_id": camera_id,
+                "total_cameras": len(config["cameras"])
             })
         else:
             return JSONResponse(content={
@@ -2580,6 +2749,258 @@ async def load_states():
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@app.post("/api/save_service_config")
+async def api_save_service_config():
+    """Save current service configuration to file."""
+    try:
+        config = load_service_config() or {}
+        if save_service_config(config):
+            return JSONResponse(content={"success": True, "message": "Service configuration saved"})
+        else:
+            return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error saving service config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/save_data_file")
+async def api_save_data_file():
+    """Save current data file (same as service config)."""
+    try:
+        config = load_service_config() or {}
+        if save_service_config(config):
+            return JSONResponse(content={"success": True, "message": "Data file saved"})
+        else:
+            return JSONResponse(content={"error": "Failed to save data file"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error saving data file: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/load_service_config")
+async def api_load_service_config():
+    """Load service configuration from file (triggers page reload on client)."""
+    try:
+        config = load_service_config()
+        if config:
+            return JSONResponse(content={"success": True, "message": "Service configuration loaded"})
+        else:
+            return JSONResponse(content={"error": "No saved configuration found"}, status_code=404)
+    except Exception as e:
+        logger.error(f"Error loading service config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/export_service_config")
+async def api_export_service_config():
+    """Export current service configuration as downloadable JSON file."""
+    try:
+        config = load_service_config() or {}
+
+        # Create JSON response with proper headers for download
+        from fastapi.responses import Response
+        import json
+
+        json_str = json.dumps(config, indent=2)
+        filename = f"monitaqc_config_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+
+        return Response(
+            content=json_str,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error exporting service config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# Temporarily disabled until python-multipart is installed
+# @app.post("/api/import_service_config")
+# async def api_import_service_config(file: UploadFile = File(...)):
+#     """Import service configuration from uploaded JSON file."""
+#     try:
+#         import json
+#
+#         # Read uploaded file
+#         contents = await file.read()
+#         config = json.loads(contents.decode('utf-8'))
+#
+#         # Save the imported configuration
+#         if save_service_config(config):
+#             return JSONResponse(content={"success": True, "message": "Configuration imported successfully"})
+#         else:
+#             return JSONResponse(content={"error": "Failed to save imported configuration"}, status_code=500)
+#     except json.JSONDecodeError:
+#         return JSONResponse(content={"error": "Invalid JSON file"}, status_code=400)
+#     except Exception as e:
+#         logger.error(f"Error importing service config: {e}")
+#         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# =============================================================================
+# AI ASSISTANT ENDPOINTS
+# =============================================================================
+
+@app.post("/api/ai_config")
+async def save_ai_config(config: Dict[str, Any]):
+    """Save AI model configuration to Redis."""
+    try:
+        model = config.get("model", "claude")
+        api_key = config.get("api_key", "")
+
+        if not api_key:
+            return JSONResponse(content={"error": "API key is required"}, status_code=400)
+
+        # Store in Redis
+        if watcher and watcher.redis_connection:
+            watcher.redis_connection.redis_connection.set("ai_model", model)
+            watcher.redis_connection.redis_connection.set("ai_api_key", api_key)
+            logger.info(f"AI configuration saved: model={model}")
+            return JSONResponse(content={"success": True, "message": f"AI configuration saved ({model})"})
+        else:
+            return JSONResponse(content={"error": "Redis not available"}, status_code=503)
+    except Exception as e:
+        logger.error(f"Error saving AI config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/ai_query")
+async def query_ai(request: Dict[str, Any]):
+    """Query AI with production data from TimescaleDB and real-time metrics."""
+    try:
+        user_query = request.get("query", "")
+        if not user_query:
+            return JSONResponse(content={"error": "Query is required"}, status_code=400)
+
+        # Get AI configuration from Redis
+        if not watcher or not watcher.redis_connection:
+            return JSONResponse(content={"error": "Redis not available"}, status_code=503)
+
+        r = watcher.redis_connection.redis_connection
+        model = r.get("ai_model")
+        api_key = r.get("ai_api_key")
+
+        if not model or not api_key:
+            return JSONResponse(content={
+                "error": "AI not configured. Please set your API key in the AI Configuration panel."
+            }, status_code=400)
+
+        model = model.decode('utf-8') if isinstance(model, bytes) else model
+        api_key = api_key.decode('utf-8') if isinstance(api_key, bytes) else api_key
+
+        # Gather current system context
+        system_context = {
+            "current_time": datetime.now().isoformat(),
+            "real_time_data": {
+                "encoder_value": r.get("encoder") or 0,
+                "ok_counter": r.get("ok_counter") or 0,
+                "ng_counter": r.get("ng_counter") or 0,
+                "shipment": r.get("shipment") or "no_shipment",
+                "is_moving": r.get("is_moving") == b"true",
+                "downtime_seconds": r.get("downtime_seconds") or 0,
+            },
+            "inference_stats": {
+                "service_type": "YOLO" if YOLO_INFERENCE_URL else "Gradio",
+                "service_url": YOLO_INFERENCE_URL or f"https://{GRADIO_MODEL}.hf.space",
+            }
+        }
+
+        # Build AI prompt with system context
+        system_prompt = f"""You are an AI analytics assistant for MonitaQC Vision Engine, an industrial quality control system.
+
+Current System Status:
+- Time: {system_context['current_time']}
+- Encoder Value: {system_context['real_time_data']['encoder_value']}
+- OK Counter: {system_context['real_time_data']['ok_counter']}
+- NG Counter: {system_context['real_time_data']['ng_counter']}
+- Current Shipment: {system_context['real_time_data']['shipment']}
+- Movement Status: {'Moving' if system_context['real_time_data']['is_moving'] else 'Stopped'}
+- Downtime: {system_context['real_time_data']['downtime_seconds']} seconds
+
+Database Available: TimescaleDB at timescaledb:5432/monitaqc
+
+You can analyze:
+1. Real-time production metrics (encoder, counters, movement)
+2. Defect detection patterns
+3. Production speed and efficiency
+4. Downtime analysis
+5. Quality trends
+
+Provide clear, actionable insights based on the data. If you need specific historical data from TimescaleDB, explain what query would be needed."""
+
+        # Call AI API based on model
+        ai_response = await call_ai_model(model, api_key, system_prompt, user_query)
+
+        return JSONResponse(content={"response": ai_response, "model": model})
+
+    except Exception as e:
+        logger.error(f"Error querying AI: {e}")
+        return JSONResponse(content={"error": f"AI query failed: {str(e)}"}, status_code=500)
+
+
+async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str) -> str:
+    """Call the appropriate AI model API."""
+    try:
+        if model == "claude":
+            # Anthropic Claude API
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_query}]
+            )
+            return message.content[0].text
+
+        elif model == "chatgpt":
+            # OpenAI ChatGPT API
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_query}
+                ],
+                max_tokens=1024
+            )
+            return response.choices[0].message.content
+
+        elif model == "gemini":
+            # Google Gemini API
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            model_instance = genai.GenerativeModel('gemini-pro')
+            full_prompt = f"{system_prompt}\n\nUser Question: {user_query}"
+            response = model_instance.generate_content(full_prompt)
+            return response.text
+
+        elif model == "local":
+            # Local model (Ollama)
+            import requests
+            endpoint = api_key  # For local, "api_key" is the endpoint URL
+            response = requests.post(
+                f"{endpoint}/api/generate",
+                json={
+                    "model": "llama2",
+                    "prompt": f"{system_prompt}\n\nUser: {user_query}\n\nAssistant:",
+                    "stream": False
+                }
+            )
+            return response.json().get("response", "No response from local model")
+        else:
+            return f"Unsupported model: {model}"
+
+    except ImportError as e:
+        return f"Required AI library not installed: {str(e)}. Please install: pip install anthropic openai google-generativeai"
+    except Exception as e:
+        logger.error(f"AI model call failed: {e}")
+        return f"AI request failed: {str(e)}"
+
+
 # =============================================================================
 # COMMAND ENDPOINT (must be last due to catch-all pattern)
 # =============================================================================
@@ -2648,6 +3069,16 @@ def req_predict(image):
     Unified prediction function supporting both YOLO and Gradio APIs.
     Returns detections in standardized format with keys: x1, y1, x2, y2, confidence, class_id, name
     """
+    global inference_times, frame_intervals, last_inference_timestamp, max_inference_samples
+    start_time = time.time()
+
+    # Track frame-to-frame interval
+    if last_inference_timestamp > 0:
+        interval = (start_time - last_inference_timestamp) * 1000  # Convert to ms
+        frame_intervals.append(interval)
+        if len(frame_intervals) > max_inference_samples:
+            frame_intervals.pop(0)
+
     # Check if we're using Gradio API (HuggingFace Space)
     if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
         try:
@@ -2735,6 +3166,26 @@ def req_predict(image):
 
             logger.info(f"Cached {len(normalized_detections)} detections at timestamp {latest_detections_timestamp}")
 
+            # Track inference time and update timestamp
+            elapsed = (time.time() - start_time) * 1000  # Convert to ms
+            inference_times.append(elapsed)
+            if len(inference_times) > max_inference_samples:
+                inference_times.pop(0)
+            last_inference_timestamp = time.time()
+
+            # Store timing in Redis for cross-process access
+            try:
+                if watcher_instance and watcher_instance.redis_connection:
+                    watcher_instance.redis_connection.redis_connection.lpush("inference_times", str(elapsed))
+                    watcher_instance.redis_connection.redis_connection.ltrim("inference_times", 0, max_inference_samples - 1)
+                    if last_inference_timestamp > 0:
+                        interval_ms = (time.time() - last_inference_timestamp) * 1000
+                        watcher_instance.redis_connection.redis_connection.lpush("frame_intervals", str(interval_ms))
+                        watcher_instance.redis_connection.redis_connection.ltrim("frame_intervals", 0, max_inference_samples - 1)
+                    watcher_instance.redis_connection.redis_connection.set("last_inference_timestamp", str(time.time()))
+            except Exception as e:
+                logger.warning(f"Failed to store timing in Redis: {e}")
+
             return json.dumps(normalized_detections)
 
         except Exception as e:
@@ -2749,6 +3200,32 @@ def req_predict(image):
             headers = {'Connection': 'close'}
             response = requests.post(YOLO_INFERENCE_URL, files={"image": image}, headers=headers, timeout=10)
             response.raise_for_status()
+
+            # Track inference time and update timestamp
+            elapsed = (time.time() - start_time) * 1000  # Convert to ms
+            inference_times.append(elapsed)
+            if len(inference_times) > max_inference_samples:
+                inference_times.pop(0)
+
+            # Store timing in Redis for cross-process access
+            try:
+                if watcher_instance and watcher_instance.redis_connection:
+                    watcher_instance.redis_connection.redis_connection.lpush("inference_times", str(elapsed))
+                    watcher_instance.redis_connection.redis_connection.ltrim("inference_times", 0, max_inference_samples - 1)
+
+                    # Calculate and store frame interval
+                    last_ts_str = watcher_instance.redis_connection.redis_connection.get("last_inference_timestamp")
+                    if last_ts_str:
+                        last_ts = float(last_ts_str.decode('utf-8'))
+                        interval_ms = (time.time() - last_ts) * 1000
+                        watcher_instance.redis_connection.redis_connection.lpush("frame_intervals", str(interval_ms))
+                        watcher_instance.redis_connection.redis_connection.ltrim("frame_intervals", 0, max_inference_samples - 1)
+
+                    watcher_instance.redis_connection.redis_connection.set("last_inference_timestamp", str(time.time()))
+            except Exception as e:
+                logger.warning(f"Failed to store timing in Redis: {e}")
+
+            last_inference_timestamp = time.time()
             return response.text  # Return JSON string, not parsed dict
         except requests.exceptions.RequestException as e:
             logger.error(f"YOLO prediction failed: {e}")
@@ -2832,6 +3309,9 @@ class CameraBuffer:
         threading.Thread(target=self.buffer).start()
 
     def buffer(self):
+        failure_count = 0
+        max_failures = 100  # Reconnect after 100 consecutive failures
+
         while True:
             try:
                 if self.stop:
@@ -2841,11 +3321,37 @@ class CameraBuffer:
                 if success:
                     self.frame = frame
                     self.success = success
+                    failure_count = 0  # Reset counter on successful read
                 else:
                     self.success = success
+                    failure_count += 1
+
+                    # Auto-reconnect after consecutive failures
+                    if failure_count >= max_failures:
+                        logger.warning(f"Camera connection lost after {failure_count} failures. Attempting reconnect...")
+                        try:
+                            self.camera.release()
+                            time.sleep(1)  # Brief pause before reconnecting
+
+                            # Reinitialize camera
+                            if self.is_ip_camera:
+                                self.camera = cv2.VideoCapture(self.source)
+                                logger.info(f"Reconnecting IP camera: {self.source.split('@')[-1] if '@' in self.source else self.source}")
+                            else:
+                                self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+                                logger.info(f"Reconnecting USB camera: {self.source}")
+
+                            # Reset failure counter after reconnect attempt
+                            failure_count = 0
+                            logger.info("Camera reconnection attempted")
+                        except Exception as e:
+                            logger.error(f"Camera reconnection failed: {e}")
+                            time.sleep(5)  # Wait longer before next attempt
+
                 time.sleep(0.0001)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Camera buffer error: {e}")
+                time.sleep(0.1)
 
     def read(self):
         frame = self.frame
@@ -3521,7 +4027,17 @@ class ArduinoSocket:
                             for cam_id in phase.cameras:
                                 cam = self.cameras.get(cam_id)
                                 if cam and cam.success:
+                                    # Track capture timestamp for FPS calculation
+                                    capture_ts = time.time()
                                     grabbed_frames.append((cam_id, cam.read()))
+
+                                    # Store capture timestamp in Redis for FPS tracking
+                                    try:
+                                        if self.redis_connection:
+                                            self.redis_connection.redis_connection.lpush("capture_timestamps", str(capture_ts))
+                                            self.redis_connection.redis_connection.ltrim("capture_timestamps", 0, 9)  # Keep last 10
+                                    except Exception as e:
+                                        logger.debug(f"Failed to track capture FPS: {e}")
                     else:
                         # No fallback - StateManager must be properly configured
                         logger.error("StateManager not available or state disabled - no capture performed")
