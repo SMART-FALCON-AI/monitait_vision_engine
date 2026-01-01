@@ -5116,6 +5116,135 @@ web_server_thread = threading.Thread(target=start_web_server, daemon=True)
 web_server_thread.start()
 logger.info(f"Web server started on http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
 
+# Inference worker thread function - must be defined before being used
+def inference_worker_thread():
+    """
+    Dedicated thread for processing frames through inference pipeline.
+    Runs independently from capture and web server threads.
+    """
+    logger.info("Inference worker thread started")
+
+    while True:
+        try:
+            # Fetch all frames from Redis queue
+            st_ts = time.time()
+            raw_frames_queue = watcher.get_queue_messages(stream_name="frames_queue")
+            if not raw_frames_queue:
+                time.sleep(0.01)
+                continue
+
+            try:
+                frames_data = json.loads(raw_frames_queue)
+            except json.JSONDecodeError:
+                continue
+
+            if not frames_data:
+                continue
+
+            # Handle new format with encoder value or legacy format
+            if isinstance(frames_data, dict):
+                frames = frames_data.get("frames", [])
+                capture_encoder = frames_data.get("encoder", 0)
+                capture_shipment = frames_data.get("shipment", "no_shipment")
+            else:
+                # Legacy format: frames_data is the frames list directly
+                frames = frames_data
+                capture_encoder = 0
+                capture_shipment = "no_shipment"
+
+            # Validate frame structure before processing
+            valid_frames = []
+            for frame in frames:
+                if isinstance(frame, list) and len(frame) > 0:
+                    valid_frames.append(frame)
+
+            if not valid_frames:
+                continue
+
+            try:
+                with ProcessPoolExecutor() as process_executor:
+                    # Process only valid frames
+                    results = list(process_executor.map(process_frame_helper, valid_frames))
+
+                    # Filter out None results
+                    valid_results = [r for r in results if r is not None]
+                    if not valid_results:
+                        # Retry the entire batch once
+                        results = list(process_executor.map(process_frame_helper, valid_frames))
+                        valid_results = [r for r in results if r is not None]
+                        if not valid_results:
+                            continue
+
+                    queue_messages, processed_frames = zip(*valid_results)
+
+                    # Filter and collect all valid messages in one go
+                    valid_queue_messages = [
+                        msg for msg in queue_messages
+                        if isinstance(msg.get('dms'), list) and len(msg['dms']) > 0 and msg['dms'][0] not in [None, '']
+                    ]
+
+                    if valid_queue_messages:
+                        all_dms = [msg['dms'][0] for msg in valid_queue_messages]
+                        most_frequent = most_frequent_string(all_dms)
+
+                        # Sort queue messages with safe handling of None values
+                        queue_messages = sorted(
+                            queue_messages,
+                            key=lambda x: (
+                                x.get('priority', 0),
+                                not isinstance(x.get('dms'), list) or len(x.get('dms', [])) == 0 or x['dms'][0] is None,
+                                -len(x['dms'][0]) if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else float('-inf'),
+                                x['dms'][0] != most_frequent if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else True
+                            )
+                        )
+
+                    # Add histogram data to the first queue message if available
+                    if hasattr(watcher, 'stream_histogram_data') and watcher.stream_histogram_data:
+                        if len(queue_messages) > 0:
+                            queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
+                            watcher.stream_histogram_data = []
+
+                    if queue_messages:
+                        # Add encoder value to each queue message for ejector tracking
+                        for msg in queue_messages:
+                            msg['encoder'] = capture_encoder
+                        watcher.send_queue_messages(json.dumps(queue_messages))
+
+                    if processed_frames:
+                        watcher.redis_connection.update_queue_messages_redis(
+                            json.dumps(processed_frames),
+                            stream_name="stream_queue"
+                        )
+
+                    try:
+                        for msg in queue_messages:
+                            ts = msg.get('ts', 'N/A')
+
+                            # DMS extraction
+                            dms_list = msg.get('dms', [])
+                            first_dms = dms_list[0] if isinstance(dms_list, list) and len(dms_list) > 0 else None
+
+                            timestamp = time.time() - st_ts
+
+                            # Detection extraction
+                            detection_info = msg.get('detection', [])
+                            if not isinstance(detection_info, list):
+                                detection_info = []
+
+                            # Log processed frame result
+                            classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
+                            print(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
+
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Processing error: {e}")
+                continue
+
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+            time.sleep(0.1)
+
 # Start inference worker in a separate thread
 inference_thread = threading.Thread(target=inference_worker_thread, daemon=True)
 inference_thread.start()
@@ -5300,134 +5429,6 @@ def process_frame_helper(frame):
     capture_mode = "single"  # or "multiple"
     return process_frame(frame, capture_mode)
 
-
-def inference_worker_thread():
-    """
-    Dedicated thread for processing frames through inference pipeline.
-    Runs independently from capture and web server threads.
-    """
-    logger.info("Inference worker thread started")
-
-    while True:
-        try:
-            # Fetch all frames from Redis queue
-            st_ts = time.time()
-            raw_frames_queue = watcher.get_queue_messages(stream_name="frames_queue")
-            if not raw_frames_queue:
-                time.sleep(0.01)
-                continue
-
-            try:
-                frames_data = json.loads(raw_frames_queue)
-            except json.JSONDecodeError:
-                continue
-
-            if not frames_data:
-                continue
-
-            # Handle new format with encoder value or legacy format
-            if isinstance(frames_data, dict):
-                frames = frames_data.get("frames", [])
-                capture_encoder = frames_data.get("encoder", 0)
-                capture_shipment = frames_data.get("shipment", "no_shipment")
-            else:
-                # Legacy format: frames_data is the frames list directly
-                frames = frames_data
-                capture_encoder = 0
-                capture_shipment = "no_shipment"
-
-            # Validate frame structure before processing
-            valid_frames = []
-            for frame in frames:
-                if isinstance(frame, list) and len(frame) > 0:
-                    valid_frames.append(frame)
-
-            if not valid_frames:
-                continue
-
-            try:
-                with ProcessPoolExecutor() as process_executor:
-                    # Process only valid frames
-                    results = list(process_executor.map(process_frame_helper, valid_frames))
-
-                    # Filter out None results
-                    valid_results = [r for r in results if r is not None]
-                    if not valid_results:
-                        # Retry the entire batch once
-                        results = list(process_executor.map(process_frame_helper, valid_frames))
-                        valid_results = [r for r in results if r is not None]
-                        if not valid_results:
-                            continue
-
-                    queue_messages, processed_frames = zip(*valid_results)
-                
-                    # Filter and collect all valid messages in one go
-                    valid_queue_messages = [
-                        msg for msg in queue_messages
-                        if isinstance(msg.get('dms'), list) and len(msg['dms']) > 0 and msg['dms'][0] not in [None, '']
-                    ]
-
-                    if valid_queue_messages:
-                        all_dms = [msg['dms'][0] for msg in valid_queue_messages]
-                        most_frequent = most_frequent_string(all_dms)
-
-                        # Sort queue messages with safe handling of None values
-                        queue_messages = sorted(
-                            queue_messages,
-                            key=lambda x: (
-                                x.get('priority', 0),
-                                not isinstance(x.get('dms'), list) or len(x.get('dms', [])) == 0 or x['dms'][0] is None,
-                                -len(x['dms'][0]) if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else float('-inf'),
-                                x['dms'][0] != most_frequent if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else True
-                            )
-                        )
-
-                    # Add histogram data to the first queue message if available
-                    if hasattr(watcher, 'stream_histogram_data') and watcher.stream_histogram_data:
-                        if len(queue_messages) > 0:
-                            queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
-                            watcher.stream_histogram_data = []
-
-                    if queue_messages:
-                        # Add encoder value to each queue message for ejector tracking
-                        for msg in queue_messages:
-                            msg['encoder'] = capture_encoder
-                        watcher.send_queue_messages(json.dumps(queue_messages))
-
-                    if processed_frames:
-                        watcher.redis_connection.update_queue_messages_redis(
-                            json.dumps(processed_frames), 
-                            stream_name="stream_queue"
-                        )
-
-                    try:
-                        for msg in queue_messages:
-                            ts = msg.get('ts', 'N/A')
-                
-                            # DMS extraction
-                            dms_list = msg.get('dms', [])
-                            first_dms = dms_list[0] if isinstance(dms_list, list) and len(dms_list) > 0 else None
-                
-                            timestamp = time.time() - st_ts
-                
-                            # Detection extraction
-                            detection_info = msg.get('detection', [])
-                            if not isinstance(detection_info, list):
-                                detection_info = []
-                
-                            # Log processed frame result
-                            classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
-                            print(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
-
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.error(f"Processing error: {e}")
-                continue
-
-        except Exception as e:
-            logger.error(f"Main loop error: {e}")
-            time.sleep(0.1)
 
 # Main thread - keep application alive
 # All work is done in separate threads (uvicorn, inference, capture, etc.)
