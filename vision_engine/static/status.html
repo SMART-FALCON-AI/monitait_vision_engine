@@ -1235,8 +1235,8 @@
                         <div class="control-item">
                             <div class="control-label">Serial Mode</div>
                             <select class="control-input" id="serial-mode-input">
-                                <option value="legacy" selected>Legacy</option>
-                                <option value="new">New</option>
+                                <option value="new" selected>Normal</option>
+                                <option value="legacy">Legacy</option>
                             </select>
                             <button class="control-button" onclick="updateConfig('serial_mode', document.getElementById('serial-mode-input').value)">Set Mode</button>
                             <div class="control-response" id="config-serial_mode-response"></div>
@@ -1334,17 +1334,6 @@
                                 <div class="verbose-item-label">Downtime Threshold (DWT)</div>
                                 <div class="verbose-item-value" id="v-dwt">-</div>
                             </div>
-                        </div>
-                    </div>
-                    <div class="control-grid" style="margin-top: 15px;">
-                        <div class="control-item">
-                            <div class="control-label">Legacy Mode</div>
-                            <select class="control-input" id="legacy-mode">
-                                <option value="0">Off</option>
-                                <option value="1">On</option>
-                            </select>
-                            <button class="control-button" onclick="sendCommand('SET_LEGACY', document.getElementById('legacy-mode').value)">Set Legacy Mode</button>
-                            <div class="control-response" id="cmd-SET_LEGACY-response"></div>
                         </div>
                     </div>
                 </div>
@@ -1957,17 +1946,6 @@
                                 <div class="verbose-item-label">Downtime Threshold (DWT)</div>
                                 <div class="verbose-item-value" id="v-dwt">-</div>
                             </div>
-                        </div>
-                    </div>
-                    <div class="control-grid" style="margin-top: 15px;">
-                        <div class="control-item">
-                            <div class="control-label">Legacy Mode</div>
-                            <select class="control-input" id="legacy-mode">
-                                <option value="0">Off</option>
-                                <option value="1">On</option>
-                            </select>
-                            <button class="control-button" onclick="sendCommand('SET_LEGACY', document.getElementById('legacy-mode').value)">Set Legacy Mode</button>
-                            <div class="control-response" id="cmd-SET_LEGACY-response"></div>
                         </div>
                     </div>
                 </div>

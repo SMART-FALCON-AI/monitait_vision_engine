@@ -510,7 +510,7 @@ YOLO_INFERENCE_URL = os.environ.get("YOLO_INFERENCE_URL", "http://yolo_inference
 # Serial/Watcher configuration
 WATCHER_USB = os.environ.get("WATCHER_USB", "/dev/ttyUSB0")
 SERIAL_BAUDRATE = int(os.environ.get("BAUD_RATE", 57600))
-SERIAL_MODE = os.environ.get("SERIAL_MODE", "legacy")  # "legacy" or "new"
+SERIAL_MODE = os.environ.get("SERIAL_MODE", "new")  # "new" (normal) or "legacy"
 
 # Web server configuration
 WEB_SERVER_PORT = int(os.environ.get("WEB_SERVER_PORT", 5050))
