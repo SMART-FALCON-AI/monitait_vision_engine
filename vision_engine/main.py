@@ -2553,6 +2553,46 @@ async def get_pipelines():
         logger.error(f"Error reading pipelines: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+@app.get("/api/gradio/models")
+async def get_gradio_models(url: str):
+    """Fetch available models from a Gradio API endpoint."""
+    try:
+        # Try to fetch models from Gradio API
+        # Most Gradio apps expose model list through /info endpoint or as part of the main interface
+        response = requests.get(f"{url.rstrip('/')}/info", timeout=5)
+        if response.status_code == 200:
+            info = response.json()
+            # Extract model names if available
+            if "models" in info:
+                return JSONResponse(content={"models": info["models"]})
+
+        # Fallback: Try to get from config endpoint
+        response = requests.get(f"{url.rstrip('/')}/config", timeout=5)
+        if response.status_code == 200:
+            config = response.json()
+            # Look for model dropdown in components
+            models = []
+            if "components" in config:
+                for comp in config["components"]:
+                    if comp.get("type") == "dropdown" and "choices" in comp:
+                        # Assume first dropdown with choices is the model selector
+                        models = comp["choices"]
+                        break
+            if models:
+                return JSONResponse(content={"models": models})
+
+        # If no specific endpoint works, return common default models
+        return JSONResponse(content={
+            "models": ["Data Matrix", "N/A"],
+            "note": "Could not fetch from Gradio API, showing defaults"
+        })
+    except Exception as e:
+        logger.error(f"Error fetching Gradio models from {url}: {e}")
+        return JSONResponse(content={
+            "models": ["Data Matrix", "N/A"],
+            "error": str(e)
+        }, status_code=500)
+
 @app.post("/api/cameras/config/upload")
 async def upload_config(request: Request):
     """Upload and apply a service configuration (for restoring from backup)."""

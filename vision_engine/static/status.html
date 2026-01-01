@@ -1422,79 +1422,111 @@
                         </div>
                     </div>
 
-                    <div style="margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Available Pipelines</h4>
-                        <div id="pipelines-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <span style="color: #666; font-style: italic;">Loading pipelines...</span>
+                    <!-- PIPELINES SECTION (TOP) -->
+                    <div style="background: #fff; border: 2px solid #007bff; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                        <h4 style="margin: 0 0 15px 0; color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 8px;">📋 Pipelines</h4>
+
+                        <div style="margin-bottom: 15px;">
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Pipelines</h5>
+                            <div id="pipelines-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                <span style="color: #666; font-style: italic;">Loading pipelines...</span>
+                            </div>
+                        </div>
+
+                        <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Pipeline</h5>
+                            <div class="control-grid" style="margin-bottom: 15px;">
+                                <div class="control-item">
+                                    <div class="control-label">Pipeline ID <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="pipeline-id-input" placeholder="e.g., default, two_stage">
+                                </div>
+                                <div class="control-item">
+                                    <div class="control-label">Pipeline Name <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="pipeline-name-input" placeholder="e.g., Default Pipeline">
+                                </div>
+                            </div>
+
+                            <!-- Phase Management -->
+                            <div style="background: #fff; border: 1px solid #17a2b8; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                                <h5 style="margin: 0 0 10px 0; color: #17a2b8;">Pipeline Phases</h5>
+                                <div id="phases-list" style="margin-bottom: 10px;">
+                                    <span style="color: #666; font-style: italic; font-size: 12px;">No phases configured. Add modules to create phases.</span>
+                                </div>
+                                <div class="control-grid" style="margin-bottom: 10px;">
+                                    <div class="control-item">
+                                        <div class="control-label">Add Module to Phase</div>
+                                        <select class="control-input" id="phase-module-select">
+                                            <option value="">Select module...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div style="display: flex; gap: 8px;">
+                                    <button class="control-button" style="background-color: #17a2b8; font-size: 12px; padding: 6px 12px;" onclick="addPhase()">Add Phase</button>
+                                    <button class="control-button" style="background-color: #ffc107; color: #000; font-size: 12px; padding: 6px 12px;" onclick="clearPhases()">Clear All Phases</button>
+                                </div>
+                            </div>
+
+                            <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                                <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
+                                <button class="control-button" style="background-color: #dc3545;" onclick="deletePipeline()">Delete Pipeline</button>
+                                <button class="control-button" style="background-color: #007bff;" onclick="activatePipeline()">Set as Active</button>
+                            </div>
+                            <div class="control-response" id="pipeline-response"></div>
                         </div>
                     </div>
 
-                    <div style="margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Inference Modules Library</h4>
-                        <div id="modules-list" style="display: flex; flex-direction: column; gap: 10px;">
-                            <span style="color: #666; font-style: italic;">Loading modules...</span>
-                        </div>
-                    </div>
+                    <!-- MODULES SECTION (BOTTOM) -->
+                    <div style="background: #fff; border: 2px solid #28a745; border-radius: 8px; padding: 15px;">
+                        <h4 style="margin: 0 0 15px 0; color: #28a745; border-bottom: 2px solid #28a745; padding-bottom: 8px;">🔧 Inference Modules Library</h4>
 
-                    <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Module</h4>
-                        <div class="control-grid" style="margin-bottom: 15px;">
-                            <div class="control-item">
-                                <div class="control-label">Module ID</div>
-                                <input type="text" class="control-input" id="module-id-input" placeholder="e.g., gradio_hf">
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label">Module Name</div>
-                                <input type="text" class="control-input" id="module-name-input" placeholder="Gradio HuggingFace">
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label">Type</div>
-                                <select class="control-input" id="module-type-input">
-                                    <option value="gradio">Gradio</option>
-                                    <option value="yolo">YOLO</option>
-                                </select>
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label">Model</div>
-                                <select class="control-input" id="module-model-input">
-                                    <option value="N/A">N/A</option>
-                                    <option value="Data Matrix">Data Matrix</option>
-                                </select>
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label">Min Confidence (0-1)</div>
-                                <input type="number" class="control-input" id="module-confidence-input" min="0" max="1" step="0.05" value="0.25">
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label">Inference URL</div>
-                                <input type="text" class="control-input" id="module-url-input" placeholder="https://...">
+                        <div style="margin-bottom: 15px;">
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Modules</h5>
+                            <div id="modules-list" style="display: flex; flex-direction: column; gap: 10px;">
+                                <span style="color: #666; font-style: italic;">Loading modules...</span>
                             </div>
                         </div>
-                        <div style="display: flex; gap: 8px;">
-                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateModule()">Create/Update Module</button>
-                            <button class="control-button" style="background-color: #dc3545;" onclick="deleteModule()">Delete Module</button>
-                        </div>
-                        <div class="control-response" id="module-response"></div>
-                    </div>
 
-                    <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Pipeline</h4>
-                        <div class="control-grid" style="margin-bottom: 15px;">
-                            <div class="control-item">
-                                <div class="control-label">Pipeline ID</div>
-                                <input type="text" class="control-input" id="pipeline-id-input" placeholder="e.g., default">
+                        <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px;">
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Module</h5>
+                            <div class="control-grid" style="margin-bottom: 15px;">
+                                <div class="control-item">
+                                    <div class="control-label">Module ID <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="module-id-input" placeholder="e.g., gradio_hf, yolo_defect">
+                                </div>
+                                <div class="control-item">
+                                    <div class="control-label">Module Name <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="module-name-input" placeholder="e.g., Gradio HuggingFace">
+                                </div>
+                                <div class="control-item">
+                                    <div class="control-label">Type <span style="color: #dc3545;">*</span></div>
+                                    <select class="control-input" id="module-type-input" onchange="handleModuleTypeChange()">
+                                        <option value="gradio">Gradio</option>
+                                        <option value="yolo">YOLO</option>
+                                    </select>
+                                </div>
+                                <div class="control-item">
+                                    <div class="control-label">Inference URL <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="module-url-input" placeholder="https://..." onchange="fetchModelsFromGradio()">
+                                    <button class="control-button" style="font-size: 11px; padding: 4px 8px; margin-top: 4px;" onclick="fetchModelsFromGradio()">Fetch Models</button>
+                                </div>
+                                <div class="control-item">
+                                    <div class="control-label">Model</div>
+                                    <select class="control-input" id="module-model-input">
+                                        <option value="N/A">N/A</option>
+                                        <option value="Data Matrix">Data Matrix</option>
+                                    </select>
+                                </div>
+                                <div class="control-item">
+                                    <div class="control-label">Min Confidence (0-1)</div>
+                                    <input type="number" class="control-input" id="module-confidence-input" min="0" max="1" step="0.05" value="0.25">
+                                </div>
                             </div>
-                            <div class="control-item">
-                                <div class="control-label">Pipeline Name</div>
-                                <input type="text" class="control-input" id="pipeline-name-input" placeholder="Default Pipeline">
+                            <div style="display: flex; gap: 8px;">
+                                <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateModule()">Create/Update Module</button>
+                                <button class="control-button" style="background-color: #dc3545;" onclick="deleteModule()">Delete Module</button>
                             </div>
+                            <div class="control-response" id="module-response"></div>
                         </div>
-                        <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
-                            <button class="control-button" style="background-color: #dc3545;" onclick="deletePipeline()">Delete Pipeline</button>
-                            <button class="control-button" style="background-color: #007bff;" onclick="activatePipeline()">Set as Active</button>
-                        </div>
-                        <div class="control-response" id="pipeline-response"></div>
                     </div>
                 </div>
             </div>
@@ -3639,6 +3671,9 @@
             // ===== INFERENCE PIPELINE MANAGEMENT =====
             let pipelinesData = {};
 
+            // Global array to store phases for current pipeline being edited
+            let currentPipelinePhases = [];
+
             async function refreshPipelines() {
                 try {
                     const response = await fetch('/api/pipelines');
@@ -3657,9 +3692,120 @@
 
                     renderPipelinesList(pipelinesData.pipelines || {}, currentPipeline);
                     renderModulesList(pipelinesData.modules || {});
+                    updatePhaseModuleSelect(pipelinesData.modules || {});
 
                 } catch (error) {
                     console.error('Error loading pipelines:', error);
+                }
+            }
+
+            function updatePhaseModuleSelect(modules) {
+                const select = document.getElementById('phase-module-select');
+                select.innerHTML = '<option value="">Select module...</option>';
+                Object.keys(modules).forEach(id => {
+                    const option = document.createElement('option');
+                    option.value = id;
+                    option.textContent = modules[id].name;
+                    select.appendChild(option);
+                });
+            }
+
+            function renderPhasesList() {
+                const container = document.getElementById('phases-list');
+                if (currentPipelinePhases.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic; font-size: 12px;">No phases configured. Add modules to create phases.</span>';
+                    return;
+                }
+                container.innerHTML = '';
+                currentPipelinePhases.forEach((phase, index) => {
+                    const moduleName = pipelinesData.modules[phase.module_id]?.name || phase.module_id;
+                    const phaseDiv = document.createElement('div');
+                    phaseDiv.style.cssText = 'padding: 8px; background: #e7f3ff; border: 1px solid #17a2b8; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;';
+                    phaseDiv.innerHTML = `
+                        <span style="font-size: 12px;"><strong>Phase ${phase.phase_id}:</strong> ${moduleName}</span>
+                        <button onclick="removePhase(${index})" style="background: #dc3545; color: white; border: none; border-radius: 3px; padding: 2px 8px; cursor: pointer; font-size: 11px;">Remove</button>
+                    `;
+                    container.appendChild(phaseDiv);
+                });
+            }
+
+            function addPhase() {
+                const moduleId = document.getElementById('phase-module-select').value;
+                if (!moduleId) {
+                    alert('Please select a module');
+                    return;
+                }
+                const phaseId = currentPipelinePhases.length + 1;
+                currentPipelinePhases.push({
+                    phase_id: phaseId,
+                    module_id: moduleId,
+                    enabled: true
+                });
+                renderPhasesList();
+            }
+
+            function removePhase(index) {
+                currentPipelinePhases.splice(index, 1);
+                // Renumber phases
+                currentPipelinePhases.forEach((phase, idx) => {
+                    phase.phase_id = idx + 1;
+                });
+                renderPhasesList();
+            }
+
+            function clearPhases() {
+                if (confirm('Clear all phases?')) {
+                    currentPipelinePhases = [];
+                    renderPhasesList();
+                }
+            }
+
+            async function fetchModelsFromGradio() {
+                const url = document.getElementById('module-url-input').value.trim();
+                const select = document.getElementById('module-model-input');
+
+                if (!url) {
+                    alert('Please enter a Gradio URL first');
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/gradio/models?url=${encodeURIComponent(url)}`);
+                    const data = await response.json();
+
+                    if (data.models && data.models.length > 0) {
+                        // Clear and repopulate select
+                        select.innerHTML = '';
+                        data.models.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model;
+                            option.textContent = model;
+                            select.appendChild(option);
+                        });
+
+                        if (data.note) {
+                            console.log('Note:', data.note);
+                        }
+                    } else {
+                        alert('No models found from Gradio API');
+                    }
+                } catch (error) {
+                    console.error('Error fetching models:', error);
+                    alert('Failed to fetch models: ' + error.message);
+                }
+            }
+
+            function handleModuleTypeChange() {
+                const type = document.getElementById('module-type-input').value;
+                const modelSelect = document.getElementById('module-model-input');
+                const urlInput = document.getElementById('module-url-input');
+
+                if (type === 'yolo') {
+                    // YOLO doesn't typically need model selection
+                    modelSelect.innerHTML = '<option value="N/A">N/A</option>';
+                } else if (type === 'gradio') {
+                    // Gradio can fetch models
+                    modelSelect.innerHTML = '<option value="N/A">N/A</option><option value="Data Matrix">Data Matrix</option>';
                 }
             }
 
@@ -3681,9 +3827,17 @@
                     button.className = 'camera-btn';
                     button.style.cssText = `padding: 6px 12px; ${isActive ? 'background-color: #007bff; color: white; font-weight: bold;' : 'background-color: #f8f9fa; color: #333;'}`;
                     button.textContent = `${pipeline.name} (${pipeline.phases.length})`;
+                    button.onclick = () => loadPipelineForEdit(id, pipeline);
 
                     container.appendChild(button);
                 });
+            }
+
+            function loadPipelineForEdit(id, pipeline) {
+                document.getElementById('pipeline-id-input').value = id;
+                document.getElementById('pipeline-name-input').value = pipeline.name;
+                currentPipelinePhases = JSON.parse(JSON.stringify(pipeline.phases)); // Deep copy
+                renderPhasesList();
             }
 
             function renderModulesList(modules) {
@@ -3806,13 +3960,19 @@
                     return;
                 }
 
+                if (currentPipelinePhases.length === 0) {
+                    responseEl.textContent = 'Please add at least one phase to the pipeline';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
                 try {
                     const config = await fetch('/api/cameras/config').then(r => r.json());
                     if (!config.config.inference) config.config.inference = {current_pipeline: 'default', pipelines: {}, modules: {}};
 
                     config.config.inference.pipelines[pipelineId] = {
                         name: pipelineName,
-                        phases: [{phase_id: 1, module_id: 'gradio_hf', enabled: true}]
+                        phases: currentPipelinePhases
                     };
 
                     const response = await fetch('/api/cameras/config/save', {
@@ -3822,8 +3982,10 @@
                     });
 
                     if (response.ok) {
-                        responseEl.textContent = `Pipeline '${pipelineName}' saved!`;
+                        responseEl.textContent = `Pipeline '${pipelineName}' saved with ${currentPipelinePhases.length} phase(s)!`;
                         responseEl.className = 'control-response success';
+                        currentPipelinePhases = []; // Clear after save
+                        renderPhasesList();
                         refreshPipelines();
                     } else {
                         responseEl.textContent = 'Failed to save pipeline';
