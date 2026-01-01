@@ -973,23 +973,6 @@
                     </div>
                 </div>
 
-                <!-- Service Config Persistence (All Settings) -->
-                <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
-                    <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px;">
-                        <span style="font-weight: bold; color: #333;">All Service Config:</span>
-                        <button class="camera-btn camera-btn-success" onclick="saveServiceConfig()">💾 Save</button>
-                        <button class="camera-btn camera-btn-primary" onclick="loadServiceConfig()">📂 Load</button>
-                        <button class="camera-btn camera-btn-secondary" onclick="downloadServiceConfig()">⬇️ Export</button>
-                        <label class="camera-btn camera-btn-secondary" style="cursor: pointer; margin: 0;">
-                            ⬆️ Import
-                            <input type="file" id="config-file-input" accept=".json" style="display: none;" onchange="importServiceConfig(event)">
-                        </label>
-                        <span id="camera-config-status" style="font-size: 12px; color: #666; margin-left: 10px;"></span>
-                    </div>
-                    <p style="font-size: 11px; color: #888; margin: 6px 0 0 0;">Saves: Ejector, Capture, Histogram, DataMatrix, Cameras, and other settings</p>
-                    <div id="camera-config-message" style="margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; display: none;"></div>
-                </div>
-
                 <div id="camera-grid" class="camera-grid">
                     <div class="camera-loading">Loading cameras...</div>
                 </div>
@@ -3018,8 +3001,9 @@
                             </div>
                         </div>
                         <div class="camera-actions" style="margin-top: 15px;">
-                            <button class="camera-btn camera-btn-secondary" onclick="restartCamera(${cameraId})" ${!isConnected ? 'disabled' : ''}>Restart Camera</button>
+                            <button class="camera-btn camera-btn-secondary" onclick="restartCamera(${cameraId})" ${!isConnected ? 'disabled' : ''}>Restart</button>
                             <button class="camera-btn camera-btn-primary" onclick="applyCameraConfig(${cameraId})" ${!isConnected ? 'disabled' : ''}>Apply ROI</button>
+                            <button class="camera-btn camera-btn-success" onclick="saveCameraConfig(${cameraId})">💾 Save</button>
                         </div>
                     </div>
                     ` : `
@@ -3088,6 +3072,7 @@
                         <div class="camera-actions">
                             <button class="camera-btn camera-btn-secondary" onclick="restartCamera(${cameraId})" ${!isConnected ? 'disabled' : ''}>Restart</button>
                             <button class="camera-btn camera-btn-primary" onclick="applyCameraConfig(${cameraId})" ${!isConnected ? 'disabled' : ''}>Apply</button>
+                            <button class="camera-btn camera-btn-success" onclick="saveCameraConfig(${cameraId})">💾 Save</button>
                         </div>
                     </div>
                     `}
@@ -3197,6 +3182,27 @@
                 }
 
                 setTimeout(resumeCameraRefresh, 2000);
+            }
+
+            async function saveCameraConfig(cameraId) {
+                try {
+                    showCameraMessage(cameraId, 'Saving camera configuration...', 'info');
+
+                    // First apply the current settings
+                    await applyCameraConfig(cameraId);
+
+                    // Then save all config to file
+                    const response = await fetch('/api/cameras/config/save', { method: 'POST' });
+                    const result = await response.json();
+
+                    if (response.ok && result.success) {
+                        showCameraMessage(cameraId, 'Camera settings saved!', 'success');
+                    } else {
+                        showCameraMessage(cameraId, result.error || 'Failed to save config', 'error');
+                    }
+                } catch (error) {
+                    showCameraMessage(cameraId, `Error: ${error.message}`, 'error');
+                }
             }
 
             function refreshCameras() {
