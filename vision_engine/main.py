@@ -124,8 +124,8 @@ def release_db_connection(conn):
     if db_connection_pool and conn:
         db_connection_pool.putconn(conn)
 
-def write_inference_to_db(shipment, image_path, detections, inference_time_ms, model_used="yolov8", pipeline_name=None, module_id=None, phase_id=None):
-    """Write inference result to TimescaleDB with pipeline tracking."""
+def write_inference_to_db(shipment, image_path, detections, inference_time_ms, model_used="yolov8"):
+    """Write inference result to TimescaleDB."""
     if not STORE_ANNOTATION_ENABLED:
         return
 
@@ -137,9 +137,9 @@ def write_inference_to_db(shipment, image_path, detections, inference_time_ms, m
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO inference_results
-               (time, shipment, image_path, detections, detection_count, inference_time_ms, model_used, pipeline_name, module_id, phase_id)
-               VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (shipment, image_path, Json(detections), len(detections), inference_time_ms, model_used, pipeline_name, module_id, phase_id)
+               (time, shipment, image_path, detections, detection_count, inference_time_ms, model_used)
+               VALUES (NOW(), %s, %s, %s, %s, %s, %s)""",
+            (shipment, image_path, Json(detections), len(detections), inference_time_ms, model_used)
         )
         conn.commit()
         cursor.close()
@@ -453,36 +453,44 @@ def test_camera_stream(url: str, timeout: float = 2.0) -> bool:
 
 
 def get_all_cameras() -> List[str]:
-    """Get all available cameras (USB only from environment variables).
+    """Get all available USB cameras (auto-detected or from environment variables).
 
     Returns list of USB camera sources that exist as devices.
     Note: IP cameras are now loaded from the unified "cameras" configuration.
+
+    Priority:
+    1. If environment variables (CAM_X_PATH) are set, use those
+    2. Otherwise, auto-detect USB cameras from /dev/video*
     """
     all_cameras = []
 
-    # Get USB cameras - only add if env vars are set AND device exists
+    # First check if any env vars are explicitly set
     usb_env_vars = [CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH]
-    for cam_path in usb_env_vars:
-        # Only add if the path exists as a device
-        if cam_path and os.path.exists(cam_path):
-            all_cameras.append(cam_path)
-            logger.info(f"Found USB camera: {cam_path}")
+    env_cameras_set = any(p for p in usb_env_vars if p)
+
+    if env_cameras_set:
+        # Use env vars if set - only add if device exists
+        for cam_path in usb_env_vars:
+            if cam_path and os.path.exists(cam_path):
+                all_cameras.append(cam_path)
+                logger.info(f"Found USB camera from env: {cam_path}")
+    else:
+        # Auto-detect USB cameras from /dev/video*
+        detected = detect_video_devices()
+        for cam_path in detected:
+            if os.path.exists(cam_path):
+                all_cameras.append(cam_path)
+                logger.info(f"Auto-detected USB camera: {cam_path}")
 
     # Remove duplicates while preserving order
     seen = set()
     unique_cameras = []
     for cam in all_cameras:
-        # Normalize camera URL for comparison
-        # Remove credentials and normalize port (rtsp://ip:554/ == rtsp://ip/)
-        cam_key = cam.split('@')[-1] if '@' in cam else cam
-        # Remove default RTSP port :554 for comparison
-        cam_key = cam_key.replace(':554/', '/').replace(':554', '')
-
-        if cam_key not in seen:
-            seen.add(cam_key)
+        if cam not in seen:
+            seen.add(cam)
             unique_cameras.append(cam)
         else:
-            logger.info(f"Skipping duplicate camera: {cam.split('@')[-1] if '@' in cam else cam}")
+            logger.info(f"Skipping duplicate camera: {cam}")
 
     return unique_cameras
 
@@ -1027,53 +1035,22 @@ def apply_config_settings(config, watcher_inst=None):
 
     settings_applied = {}
 
-    # Apply inference pipeline configuration
+    # Apply inference module configuration
     if "inference" in config:
-        current_pipeline = config["inference"].get("current_pipeline", "default")
-        pipelines = config["inference"].get("pipelines", {})
         modules = config["inference"].get("modules", {})
+        current_module = config["inference"].get("current_module")
 
-        if current_pipeline in pipelines:
-            pipeline = pipelines[current_pipeline]
-            phases = pipeline.get("phases", [])
+        if current_module and current_module in modules:
+            active_module = modules[current_module]
+            YOLO_INFERENCE_URL = active_module.get("inference_url", YOLO_INFERENCE_URL)
+            GRADIO_MODEL = active_module.get("inference_model", GRADIO_MODEL)
+            GRADIO_CONFIDENCE_THRESHOLD = active_module.get("inference_min_confidence", GRADIO_CONFIDENCE_THRESHOLD)
+            settings_applied["inference"] = True
 
-            # For backward compatibility, use the first enabled phase for primary inference
-            primary_phase = None
-            for phase in phases:
-                if phase.get("enabled", True):
-                    primary_phase = phase
-                    break
-
-            if primary_phase and primary_phase["module_id"] in modules:
-                active_module = modules[primary_phase["module_id"]]
-                YOLO_INFERENCE_URL = active_module.get("inference_url", YOLO_INFERENCE_URL)
-                GRADIO_MODEL = active_module.get("inference_model", GRADIO_MODEL)
-                GRADIO_CONFIDENCE_THRESHOLD = active_module.get("inference_min_confidence", GRADIO_CONFIDENCE_THRESHOLD)
-                settings_applied["inference"] = True
-
-                logger.info(f"Inference pipeline loaded: {pipeline.get('name', current_pipeline)}")
-                logger.info(f"  Phases: {len(phases)} phase(s)")
-                for idx, phase in enumerate(phases, 1):
-                    module_id = phase.get("module_id")
-                    enabled = phase.get("enabled", True)
-                    status = "✓" if enabled else "✗"
-                    module_name = modules.get(module_id, {}).get("name", module_id) if module_id in modules else "Unknown"
-                    logger.info(f"    Phase {idx}: {status} {module_name}")
-
-                logger.info(f"  Primary module: {active_module.get('name')}")
-                logger.info(f"    URL: {YOLO_INFERENCE_URL}")
-                logger.info(f"    Model: {GRADIO_MODEL}")
-                logger.info(f"    Min Confidence: {GRADIO_CONFIDENCE_THRESHOLD}")
-        # Legacy support for old "current_module" format
-        elif "current_module" in config["inference"]:
-            current_module = config["inference"].get("current_module")
-            if current_module in modules:
-                active_module = modules[current_module]
-                YOLO_INFERENCE_URL = active_module.get("inference_url", YOLO_INFERENCE_URL)
-                GRADIO_MODEL = active_module.get("inference_model", GRADIO_MODEL)
-                GRADIO_CONFIDENCE_THRESHOLD = active_module.get("inference_min_confidence", GRADIO_CONFIDENCE_THRESHOLD)
-                settings_applied["inference"] = True
-                logger.info(f"Inference module loaded (legacy): {active_module.get('name', current_module)}")
+            logger.info(f"Inference module loaded: {active_module.get('name', current_module)}")
+            logger.info(f"  URL: {YOLO_INFERENCE_URL}")
+            logger.info(f"  Model: {GRADIO_MODEL}")
+            logger.info(f"  Min Confidence: {GRADIO_CONFIDENCE_THRESHOLD}")
     elif "infrastructure" in config:
         # Legacy support for old config format
         YOLO_INFERENCE_URL = config["infrastructure"].get("yolo_url", YOLO_INFERENCE_URL)
@@ -1271,7 +1248,7 @@ def apply_states_from_config(sm):
         logger.error(f"Error applying states from config: {e}")
         return False
 
-def get_camera_config_for_save(cam, cam_id):
+def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
     """Extract camera configuration for saving."""
     if cam is None:
         return None
@@ -1284,13 +1261,26 @@ def get_camera_config_for_save(cam, cam_id):
         "roi_ymax": getattr(cam, 'roi_ymax', 720),
     }
 
+    # Include name from metadata if available
+    if camera_metadata and cam_id in camera_metadata:
+        meta = camera_metadata[cam_id]
+        config["name"] = meta.get("name", f"Camera {cam_id}")
+        # Also include type from metadata if available
+        if "type" in meta:
+            config["type"] = meta["type"]
+
     # Add camera source (URL/path)
     if hasattr(cam, 'source'):
         config["source"] = cam.source
-        # Determine camera type
-        if isinstance(cam.source, str) and cam.source.startswith(("rtsp://", "http://", "https://")):
-            config["type"] = "ip"
-            # Extract IP and path from RTSP URL if possible
+        # Determine camera type if not already set from metadata
+        if "type" not in config:
+            if isinstance(cam.source, str) and cam.source.startswith(("rtsp://", "http://", "https://")):
+                config["type"] = "ip"
+            else:
+                config["type"] = "usb"
+
+        # Extract IP and path from RTSP URL if IP camera
+        if config.get("type") == "ip":
             try:
                 from urllib.parse import urlparse
                 parsed = urlparse(cam.source)
@@ -1298,8 +1288,11 @@ def get_camera_config_for_save(cam, cam_id):
                 config["path"] = parsed.path + ("?" + parsed.query if parsed.query else "")
             except:
                 pass
-        else:
-            config["type"] = "usb"
+
+    # Set default name if not already set
+    if "name" not in config:
+        cam_type = config.get("type", "usb")
+        config["name"] = f"{'IP' if cam_type == 'ip' else 'USB'} Camera {cam_id}"
 
     if hasattr(cam, 'camera'):
         try:
@@ -2396,19 +2389,7 @@ async def save_all_config():
                 "postgres_user": POSTGRES_USER
             },
             "inference": {
-                "current_pipeline": "default",  # Currently active pipeline
-                "pipelines": {
-                    "default": {
-                        "name": "Default Pipeline",
-                        "phases": [
-                            {
-                                "phase_id": 1,
-                                "module_id": "gradio_hf",
-                                "enabled": True
-                            }
-                        ]
-                    }
-                },
+                "current_module": "gradio_hf",  # Currently active module
                 "modules": {
                     "gradio_hf": {
                         "name": "Gradio HuggingFace",
@@ -2464,8 +2445,9 @@ async def save_all_config():
         }
 
         # Add camera configs dynamically
+        camera_metadata = getattr(watcher_instance, 'camera_metadata', {})
         for cam_id, cam in watcher_instance.cameras.items():
-            cam_config = get_camera_config_for_save(cam, cam_id)
+            cam_config = get_camera_config_for_save(cam, cam_id, camera_metadata)
             if cam_config:
                 config["cameras"][str(cam_id)] = cam_config
 
@@ -2537,20 +2519,19 @@ async def get_saved_config():
         logger.error(f"Error reading config: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-@app.get("/api/pipelines")
-async def get_pipelines():
-    """Get inference pipeline configuration (fast endpoint for UI)."""
+@app.get("/api/inference")
+async def get_inference_config():
+    """Get inference module configuration (fast endpoint for UI)."""
     try:
         config = load_service_config()
         if not config or "inference" not in config:
             return JSONResponse(content={
-                "current_pipeline": "default",
-                "pipelines": {},
+                "current_module": "gradio_hf",
                 "modules": {}
             })
         return JSONResponse(content=config["inference"])
     except Exception as e:
-        logger.error(f"Error reading pipelines: {e}")
+        logger.error(f"Error reading inference config: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/api/gradio/models")
@@ -3968,6 +3949,7 @@ class ArduinoSocket:
         # Store camera paths for reference
         self.camera_paths = camera_paths
         self.cameras: Dict[int, CameraBuffer] = {}  # Dynamic camera storage {1: cam, 2: cam, ...}
+        self.camera_metadata: Dict[int, Dict[str, Any]] = {}  # Metadata for each camera
 
         if camera_paths:
             logger.info(f"Initializing {len(camera_paths)} camera(s) from paths: {camera_paths}")
@@ -3980,6 +3962,15 @@ class ArduinoSocket:
                 cam = CameraBuffer(cam_path, exposure=100, gain=100)
                 self.cameras[idx] = cam
                 logger.info(f"Camera {idx} initialized: {cam_path} (success={cam.success})")
+
+                # Store metadata for USB cameras
+                self.camera_metadata[idx] = {
+                    "name": f"USB Camera {idx}",
+                    "type": "usb",
+                    "path": cam_path,
+                    "source": cam_path
+                }
+
                 time.sleep(1)
             except Exception as e:
                 logger.warning(f"Failed to initialize camera {idx} at {cam_path}: {e}")
@@ -3988,6 +3979,14 @@ class ArduinoSocket:
                     success = False
                     def read(self): return None
                 self.cameras[idx] = DummyCamera()
+                # Still store metadata even for failed cameras
+                self.camera_metadata[idx] = {
+                    "name": f"USB Camera {idx} (failed)",
+                    "type": "usb",
+                    "path": cam_path,
+                    "source": cam_path,
+                    "error": str(e)
+                }
 
         # Legacy attribute compatibility (cam_1, cam_2, cam_3, cam_4)
         self.cam_1 = self.cameras.get(1)
