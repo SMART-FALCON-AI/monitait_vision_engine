@@ -1443,6 +1443,7 @@ def apply_config_settings(config, watcher_inst=None):
     global STORE_ANNOTATION_ENABLED, ENFORCE_PARENT_OBJECT
     global YOLO_INFERENCE_URL, GRADIO_MODEL, GRADIO_CONFIDENCE_THRESHOLD
     global capture_mode, time_between_two_package, remove_raw_image_when_dm_decoded, parent_object_list
+    global SERIAL_MODE
 
     settings_applied = {}
 
@@ -1469,6 +1470,17 @@ def apply_config_settings(config, watcher_inst=None):
         GRADIO_CONFIDENCE_THRESHOLD = config["infrastructure"].get("gradio_confidence", GRADIO_CONFIDENCE_THRESHOLD)
         settings_applied["infrastructure"] = True
         logger.info(f"Infrastructure (legacy): YOLO URL={YOLO_INFERENCE_URL}, Gradio Model={GRADIO_MODEL}, Confidence={GRADIO_CONFIDENCE_THRESHOLD}")
+
+    # Apply serial mode from infrastructure config
+    if "infrastructure" in config:
+        saved_serial_mode = config["infrastructure"].get("serial_mode")
+        if saved_serial_mode:
+            SERIAL_MODE = saved_serial_mode
+            # Update watcher if it exists
+            if watcher_inst:
+                watcher_inst.serial_mode = SERIAL_MODE
+            settings_applied["serial_mode"] = True
+            logger.info(f"Serial mode loaded from config: {SERIAL_MODE}")
 
     # Apply AI configuration (load from DATA_FILE to Redis for runtime use)
     if "ai" in config and watcher_inst and watcher_inst.redis_connection:
@@ -2542,6 +2554,20 @@ async def update_config(config: Dict[str, Any]):
             REDIS_PORT = int(config["redis_port"])
             updated["redis_port"] = REDIS_PORT
             logger.info(f"Updated REDIS_PORT to {REDIS_PORT}")
+
+        # Serial mode configuration
+        if "serial_mode" in config:
+            global SERIAL_MODE
+            mode = str(config["serial_mode"])
+            if mode in ["new", "legacy"]:
+                SERIAL_MODE = mode
+                # Update watcher if available
+                if watcher_instance:
+                    watcher_instance.serial_mode = SERIAL_MODE
+                updated["serial_mode"] = SERIAL_MODE
+                logger.info(f"Updated SERIAL_MODE to {SERIAL_MODE}")
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid serial_mode: {mode}. Must be 'new' or 'legacy'")
 
         # Shipment ID
         if "shipment" in config:
