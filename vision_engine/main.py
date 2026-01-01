@@ -948,6 +948,417 @@ class StateManager:
 # Global state manager instance (initialized after watcher)
 state_manager: Optional[StateManager] = None
 
+
+# =============================================================================
+# INFERENCE PIPELINE MANAGEMENT
+# =============================================================================
+
+@dataclass
+class InferenceModel:
+    """Represents a single inference model configuration.
+
+    A model defines how to run inference on an image:
+    - name: Human-readable name
+    - model_type: "gradio" or "yolo"
+    - inference_url: API endpoint URL
+    - model_name: Specific model to use (for Gradio)
+    - confidence_threshold: Minimum confidence for detections
+    """
+    name: str
+    model_type: str = "gradio"  # "gradio" or "yolo"
+    inference_url: str = "https://smartfalcon-ai-industrial-defect-detection.hf.space"
+    model_name: str = "Data Matrix"
+    confidence_threshold: float = 0.25
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert model to dictionary for JSON serialization."""
+        return {
+            "name": self.name,
+            "model_type": self.model_type,
+            "inference_url": self.inference_url,
+            "model_name": self.model_name,
+            "confidence_threshold": self.confidence_threshold
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'InferenceModel':
+        """Create an InferenceModel from a dictionary."""
+        return cls(
+            name=data.get("name", "Unknown Model"),
+            model_type=data.get("model_type", "gradio"),
+            inference_url=data.get("inference_url", ""),
+            model_name=data.get("model_name", "Data Matrix"),
+            confidence_threshold=float(data.get("confidence_threshold", 0.25))
+        )
+
+
+@dataclass
+class PipelinePhase:
+    """A single phase in an inference pipeline.
+
+    Each phase runs a specific model on the captured images.
+    Multiple phases allow sequential processing (e.g., defect detection then classification).
+    """
+    model_id: str  # Reference to a model by ID
+    enabled: bool = True
+    order: int = 0  # Order in pipeline (lower = first)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "model_id": self.model_id,
+            "enabled": self.enabled,
+            "order": self.order
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PipelinePhase':
+        return cls(
+            model_id=data.get("model_id", "default_gradio"),
+            enabled=data.get("enabled", True),
+            order=int(data.get("order", 0))
+        )
+
+
+@dataclass
+class Pipeline:
+    """Represents an inference pipeline configuration.
+
+    A pipeline consists of one or more phases, each running a model.
+    This is similar to State for capture - Pipeline is for inference.
+    """
+    name: str
+    phases: List[PipelinePhase] = field(default_factory=list)
+    enabled: bool = True
+    description: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "phases": [p.to_dict() for p in self.phases],
+            "enabled": self.enabled,
+            "description": self.description
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Pipeline':
+        phases_data = data.get("phases", [])
+        phases = [PipelinePhase.from_dict(p) for p in phases_data] if phases_data else []
+        # Sort phases by order
+        phases.sort(key=lambda p: p.order)
+
+        return cls(
+            name=data.get("name", "default"),
+            phases=phases,
+            enabled=data.get("enabled", True),
+            description=data.get("description", "")
+        )
+
+
+class PipelineManager:
+    """Manages inference pipelines and models.
+
+    Similar to StateManager for capture, this handles:
+    - Available inference models (Gradio, YOLO, etc.)
+    - Pipeline definitions (sequences of models)
+    - Active pipeline selection
+    - Running inference through the active pipeline
+    """
+
+    # Default Gradio model URL
+    DEFAULT_GRADIO_URL = "https://smartfalcon-ai-industrial-defect-detection.hf.space"
+    # Default YOLO model URL
+    DEFAULT_YOLO_URL = "http://yolo_inference:4442/v1/object-detection/yolov5s/detect/"
+
+    def __init__(self):
+        self.models: Dict[str, InferenceModel] = {}
+        self.pipelines: Dict[str, Pipeline] = {}
+        self.current_pipeline: Optional[Pipeline] = None
+        self.pipeline_lock = threading.Lock()
+
+        # Gradio client cache (for reuse)
+        self._gradio_clients: Dict[str, Any] = {}
+
+        # Initialize default models and pipeline
+        self._init_defaults()
+
+    def _init_defaults(self):
+        """Initialize default models and pipeline."""
+        # Default Gradio model (HuggingFace)
+        self.models["default_gradio"] = InferenceModel(
+            name="Gradio HuggingFace",
+            model_type="gradio",
+            inference_url=self.DEFAULT_GRADIO_URL,
+            model_name="Data Matrix",
+            confidence_threshold=0.25
+        )
+
+        # Default YOLO model (local)
+        self.models["default_yolo"] = InferenceModel(
+            name="Local YOLO",
+            model_type="yolo",
+            inference_url=self.DEFAULT_YOLO_URL,
+            model_name="yolov5s",
+            confidence_threshold=0.3
+        )
+
+        # Default pipeline using Gradio
+        default_pipeline = Pipeline(
+            name="default",
+            phases=[
+                PipelinePhase(model_id="default_gradio", enabled=True, order=0)
+            ],
+            enabled=True,
+            description="Default pipeline using Gradio HuggingFace model"
+        )
+        self.pipelines["default"] = default_pipeline
+        self.current_pipeline = default_pipeline
+
+        logger.info(f"PipelineManager initialized with {len(self.models)} models, {len(self.pipelines)} pipelines")
+
+    def add_model(self, model_id: str, model: InferenceModel) -> bool:
+        """Add or update an inference model."""
+        try:
+            with self.pipeline_lock:
+                self.models[model_id] = model
+                logger.info(f"Added/updated model: {model_id} ({model.name})")
+                return True
+        except Exception as e:
+            logger.error(f"Error adding model: {e}")
+            return False
+
+    def remove_model(self, model_id: str) -> bool:
+        """Remove an inference model."""
+        try:
+            with self.pipeline_lock:
+                if model_id.startswith("default_"):
+                    logger.warning(f"Cannot remove default model: {model_id}")
+                    return False
+                if model_id in self.models:
+                    del self.models[model_id]
+                    logger.info(f"Removed model: {model_id}")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Error removing model: {e}")
+            return False
+
+    def add_pipeline(self, pipeline: Pipeline) -> bool:
+        """Add or update a pipeline."""
+        try:
+            with self.pipeline_lock:
+                self.pipelines[pipeline.name] = pipeline
+                logger.info(f"Added/updated pipeline: {pipeline.name}")
+                return True
+        except Exception as e:
+            logger.error(f"Error adding pipeline: {e}")
+            return False
+
+    def remove_pipeline(self, name: str) -> bool:
+        """Remove a pipeline."""
+        try:
+            with self.pipeline_lock:
+                if name == "default":
+                    logger.warning("Cannot remove default pipeline")
+                    return False
+                if name in self.pipelines:
+                    del self.pipelines[name]
+                    logger.info(f"Removed pipeline: {name}")
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Error removing pipeline: {e}")
+            return False
+
+    def set_current_pipeline(self, name: str) -> bool:
+        """Set the currently active pipeline."""
+        try:
+            with self.pipeline_lock:
+                if name not in self.pipelines:
+                    logger.error(f"Pipeline not found: {name}")
+                    return False
+                self.current_pipeline = self.pipelines[name]
+                logger.info(f"Set current pipeline to: {name}")
+                return True
+        except Exception as e:
+            logger.error(f"Error setting pipeline: {e}")
+            return False
+
+    def get_model(self, model_id: str) -> Optional[InferenceModel]:
+        """Get a model by ID."""
+        return self.models.get(model_id)
+
+    def get_current_model(self) -> Optional[InferenceModel]:
+        """Get the first enabled model in the current pipeline."""
+        if not self.current_pipeline or not self.current_pipeline.phases:
+            return self.models.get("default_gradio")
+
+        for phase in sorted(self.current_pipeline.phases, key=lambda p: p.order):
+            if phase.enabled and phase.model_id in self.models:
+                return self.models[phase.model_id]
+
+        return self.models.get("default_gradio")
+
+    def run_inference(self, image_bytes: bytes) -> tuple:
+        """Run inference through the current pipeline.
+
+        Returns:
+            Tuple of (detections_list, model_name_used)
+        """
+        if not self.current_pipeline:
+            logger.warning("No pipeline set, using default model")
+            model = self.models.get("default_gradio")
+            if model:
+                return self._run_model_inference(image_bytes, model), model.name
+            return [], "unknown"
+
+        all_detections = []
+        models_used = []
+
+        # Run through each enabled phase in order
+        for phase in sorted(self.current_pipeline.phases, key=lambda p: p.order):
+            if not phase.enabled:
+                continue
+
+            model = self.models.get(phase.model_id)
+            if not model:
+                logger.warning(f"Model not found for phase: {phase.model_id}")
+                continue
+
+            try:
+                detections = self._run_model_inference(image_bytes, model)
+                if detections:
+                    all_detections.extend(detections)
+                    models_used.append(model.name)
+            except Exception as e:
+                logger.error(f"Error running inference with model {model.name}: {e}")
+
+        model_names = ", ".join(models_used) if models_used else "none"
+        return all_detections, model_names
+
+    def _run_model_inference(self, image_bytes: bytes, model: InferenceModel) -> List[Dict]:
+        """Run inference using a specific model."""
+        if model.model_type == "gradio":
+            return self._run_gradio_inference(image_bytes, model)
+        elif model.model_type == "yolo":
+            return self._run_yolo_inference(image_bytes, model)
+        else:
+            logger.error(f"Unknown model type: {model.model_type}")
+            return []
+
+    def _run_gradio_inference(self, image_bytes: bytes, model: InferenceModel) -> List[Dict]:
+        """Run inference through Gradio API."""
+        try:
+            from gradio_client import Client, handle_file
+            import tempfile
+
+            # Get or create cached client
+            if model.inference_url not in self._gradio_clients:
+                logger.info(f"Initializing Gradio client for {model.inference_url}")
+                self._gradio_clients[model.inference_url] = Client(model.inference_url)
+
+            client = self._gradio_clients[model.inference_url]
+
+            # Write image to temp file (Gradio needs file path)
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                tmp_file.write(image_bytes)
+                tmp_path = tmp_file.name
+
+            try:
+                # Call Gradio API
+                result = client.predict(
+                    handle_file(tmp_path),
+                    model.model_name,
+                    model.confidence_threshold,
+                    api_name="/detect"
+                )
+
+                # Convert Gradio response to standard format
+                detections = []
+                if isinstance(result, list):
+                    for det in result:
+                        if isinstance(det, dict):
+                            detections.append({
+                                "xmin": det.get("x1", det.get("xmin", 0)),
+                                "ymin": det.get("y1", det.get("ymin", 0)),
+                                "xmax": det.get("x2", det.get("xmax", 0)),
+                                "ymax": det.get("y2", det.get("ymax", 0)),
+                                "confidence": det.get("confidence", 0),
+                                "class": det.get("class_id", det.get("class", 0)),
+                                "name": det.get("name", f"Class {det.get('class_id', 0)}")
+                            })
+
+                return detections
+
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+
+        except Exception as e:
+            logger.error(f"Gradio inference error: {e}")
+            return []
+
+    def _run_yolo_inference(self, image_bytes: bytes, model: InferenceModel) -> List[Dict]:
+        """Run inference through YOLO API."""
+        try:
+            response = requests.post(
+                model.inference_url,
+                files={"image": image_bytes},
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            logger.error(f"YOLO inference error: {e}")
+            return []
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current pipeline manager status."""
+        return {
+            "models": {mid: m.to_dict() for mid, m in self.models.items()},
+            "pipelines": {name: p.to_dict() for name, p in self.pipelines.items()},
+            "current_pipeline": self.current_pipeline.name if self.current_pipeline else None,
+            "current_model": self.get_current_model().to_dict() if self.get_current_model() else None
+        }
+
+    def to_config(self) -> Dict[str, Any]:
+        """Export configuration for saving to DATA_FILE."""
+        return {
+            "models": {mid: m.to_dict() for mid, m in self.models.items()},
+            "pipelines": {name: p.to_dict() for name, p in self.pipelines.items()},
+            "current_pipeline": self.current_pipeline.name if self.current_pipeline else "default"
+        }
+
+    def from_config(self, config: Dict[str, Any]) -> bool:
+        """Load configuration from DATA_FILE."""
+        try:
+            # Load models
+            if "models" in config:
+                for model_id, model_data in config["models"].items():
+                    self.models[model_id] = InferenceModel.from_dict(model_data)
+
+            # Load pipelines
+            if "pipelines" in config:
+                for name, pipeline_data in config["pipelines"].items():
+                    self.pipelines[name] = Pipeline.from_dict(pipeline_data)
+
+            # Set current pipeline
+            current_name = config.get("current_pipeline", "default")
+            if current_name in self.pipelines:
+                self.current_pipeline = self.pipelines[current_name]
+
+            logger.info(f"Loaded pipeline config: {len(self.models)} models, {len(self.pipelines)} pipelines")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading pipeline config: {e}")
+            return False
+
+
+# Global pipeline manager instance (initialized at startup)
+pipeline_manager: Optional[PipelineManager] = None
+
 # =============================================================================
 
 # Initialize FastAPI app
@@ -1247,6 +1658,27 @@ def apply_states_from_config(sm):
     except Exception as e:
         logger.error(f"Error applying states from config: {e}")
         return False
+
+
+def apply_pipeline_config_at_startup(pm):
+    """Apply saved pipeline configuration to pipeline manager."""
+    global pipeline_manager
+    try:
+        config = load_service_config()
+        if not config or "pipeline_config" not in config:
+            logger.info("No saved pipeline configuration found - using defaults")
+            return False
+
+        pipeline_config = config["pipeline_config"]
+        pm.from_config(pipeline_config)
+
+        logger.info(f"Loaded pipeline config: current pipeline={pm.current_pipeline.name if pm.current_pipeline else 'none'}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error applying pipeline config: {e}")
+        return False
+
 
 def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
     """Extract camera configuration for saving."""
@@ -2456,12 +2888,17 @@ async def save_all_config():
             config["states"] = {name: s.to_dict() for name, s in state_manager.states.items()}
             config["current_state_name"] = state_manager.current_state.name if state_manager.current_state else "default"
 
+        # Add pipeline configuration
+        if pipeline_manager:
+            config["pipeline_config"] = pipeline_manager.to_config()
+
         if save_service_config(config):
             return JSONResponse(content={
                 "success": True,
                 "message": f"Configuration saved to {DATA_FILE}",
                 "cameras_saved": len(config["cameras"]),
-                "states_saved": len(config.get("states", {}))
+                "states_saved": len(config.get("states", {})),
+                "pipelines_saved": len(config.get("pipeline_config", {}).get("pipelines", {}))
             })
         else:
             return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
@@ -2533,6 +2970,136 @@ async def get_inference_config():
     except Exception as e:
         logger.error(f"Error reading inference config: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# ===== PIPELINE MANAGEMENT ENDPOINTS =====
+
+@app.get("/api/pipelines")
+async def get_pipelines():
+    """Get all pipelines and models configuration."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    return JSONResponse(content=pipeline_manager.get_status())
+
+
+@app.get("/api/pipelines/current")
+async def get_current_pipeline():
+    """Get the currently active pipeline."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    if pipeline_manager.current_pipeline:
+        return JSONResponse(content={
+            "pipeline": pipeline_manager.current_pipeline.to_dict(),
+            "current_model": pipeline_manager.get_current_model().to_dict() if pipeline_manager.get_current_model() else None
+        })
+    return JSONResponse(content={"pipeline": None, "current_model": None})
+
+
+@app.post("/api/pipelines/activate/{pipeline_name}")
+async def activate_pipeline(pipeline_name: str):
+    """Set the active pipeline by name."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    if pipeline_manager.set_current_pipeline(pipeline_name):
+        return JSONResponse(content={
+            "success": True,
+            "message": f"Activated pipeline: {pipeline_name}",
+            "current_model": pipeline_manager.get_current_model().to_dict() if pipeline_manager.get_current_model() else None
+        })
+    return JSONResponse(content={"error": f"Pipeline not found: {pipeline_name}"}, status_code=404)
+
+
+@app.post("/api/pipelines")
+async def create_or_update_pipeline(request: Request):
+    """Create or update a pipeline."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    try:
+        body = await request.json()
+        pipeline = Pipeline.from_dict(body)
+
+        if pipeline_manager.add_pipeline(pipeline):
+            return JSONResponse(content={
+                "success": True,
+                "message": f"Pipeline '{pipeline.name}' created/updated",
+                "pipeline": pipeline.to_dict()
+            })
+        return JSONResponse(content={"error": "Failed to add pipeline"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error creating pipeline: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+
+
+@app.delete("/api/pipelines/{pipeline_name}")
+async def delete_pipeline(pipeline_name: str):
+    """Delete a pipeline."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    if pipeline_manager.remove_pipeline(pipeline_name):
+        return JSONResponse(content={"success": True, "message": f"Pipeline '{pipeline_name}' deleted"})
+    return JSONResponse(content={"error": f"Cannot delete pipeline: {pipeline_name}"}, status_code=400)
+
+
+@app.get("/api/models")
+async def get_models():
+    """Get all available inference models."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    return JSONResponse(content={
+        "models": {mid: m.to_dict() for mid, m in pipeline_manager.models.items()}
+    })
+
+
+@app.post("/api/models")
+async def create_or_update_model(request: Request):
+    """Create or update an inference model."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    try:
+        body = await request.json()
+        model_id = body.get("model_id")
+        if not model_id:
+            return JSONResponse(content={"error": "model_id is required"}, status_code=400)
+
+        model = InferenceModel.from_dict(body)
+
+        if pipeline_manager.add_model(model_id, model):
+            return JSONResponse(content={
+                "success": True,
+                "message": f"Model '{model_id}' created/updated",
+                "model": model.to_dict()
+            })
+        return JSONResponse(content={"error": "Failed to add model"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error creating model: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=400)
+
+
+@app.delete("/api/models/{model_id}")
+async def delete_model(model_id: str):
+    """Delete an inference model."""
+    global pipeline_manager
+    if pipeline_manager is None:
+        return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    if pipeline_manager.remove_model(model_id):
+        return JSONResponse(content={"success": True, "message": f"Model '{model_id}' deleted"})
+    return JSONResponse(content={"error": f"Cannot delete model: {model_id}"}, status_code=400)
+
 
 @app.get("/api/gradio/models")
 async def get_gradio_models(url: str):
@@ -5099,17 +5666,25 @@ watcher_instance = watcher
 # Initialize state manager with watcher
 state_manager = StateManager(watcher)
 
+# Initialize pipeline manager for inference
+pipeline_manager = PipelineManager()
+logger.info(f"Pipeline manager initialized: current pipeline={pipeline_manager.current_pipeline.name if pipeline_manager.current_pipeline else 'none'}")
+
 # Store in app.state for FastAPI endpoint access (similar to fabriqc-local-server pattern)
 app.state.watcher = watcher
 app.state.cameras = watcher.cameras  # Use dynamic cameras dict
 app.state.redis_conn = watcher.redis_connection
 app.state.state_manager = state_manager
+app.state.pipeline_manager = pipeline_manager
 
 # Load and apply saved configuration at startup
 apply_saved_config_at_startup(watcher)
 
 # Load saved states configuration
 apply_states_from_config(state_manager)
+
+# Load saved pipeline configuration
+apply_pipeline_config_at_startup(pipeline_manager)
 
 # Start web server in a separate thread
 web_server_thread = threading.Thread(target=start_web_server, daemon=True)
@@ -5293,6 +5868,7 @@ def check_class_counts(yolo_results, confidence_threshold=None):
 
 def process_frame(frame, capture_mode):
     try:
+        global pipeline_manager
 
         frame_id , _ = frame
         frame_path = os.path.join("raw_images", f"{frame_id}.jpg")
@@ -5300,7 +5876,19 @@ def process_frame(frame, capture_mode):
 
         img_encoded = cv2.imencode('.jpg', image)[1]
         img_bytes = img_encoded.tobytes()
-        yolo_res = json.loads(req_predict(img_bytes))
+
+        # Use pipeline manager if available, otherwise fallback to legacy req_predict
+        start_time = time.time()
+        model_name_used = "unknown"
+
+        if pipeline_manager:
+            yolo_res, model_name_used = pipeline_manager.run_inference(img_bytes)
+        else:
+            # Fallback to legacy inference
+            yolo_res = json.loads(req_predict(img_bytes))
+            model_name_used = "legacy"
+
+        processing_time = time.time() - start_time
 
         # Cache frame_id for video feed to display processed image
         global watcher_instance
@@ -5333,17 +5921,17 @@ def process_frame(frame, capture_mode):
             # Save annotated image with _DETECTED suffix
             annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")
             cv2.imwrite(annotated_path, annotated_image)
-            logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections")
+            logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections (model: {model_name_used})")
 
-            # Write inference result to database
+            # Write inference result to database with model name
             if watcher:
-                inference_time_ms = int(processing_time * 1000) if 'processing_time' in locals() else 0
+                inference_time_ms = int(processing_time * 1000)
                 write_inference_to_db(
                     shipment=watcher.shipment or "no_shipment",
                     image_path=annotated_path,
                     detections=yolo_res,
                     inference_time_ms=inference_time_ms,
-                    model_used="yolov8"
+                    model_used=model_name_used
                 )
 
         frame_data = [frame_id, image, yolo_res, 5]

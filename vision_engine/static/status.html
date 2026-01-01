@@ -1410,68 +1410,104 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>Inference Module Management</h3>
+                    <h3>Inference Pipeline Management</h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: #333;">Active Module:</span>
-                            <span id="current-module-name" style="font-size: 16px; font-weight: bold; color: #28a745;">Loading...</span>
+                            <span style="font-weight: bold; color: #333;">Active Pipeline:</span>
+                            <span id="current-pipeline-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
+                            <span style="color: #666;">|</span>
+                            <span style="font-weight: bold; color: #333;">Current Model:</span>
+                            <span id="current-model-name" style="font-size: 16px; font-weight: bold; color: #28a745;">Loading...</span>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <button class="camera-btn camera-btn-primary" onclick="refreshInferenceConfig()">Refresh</button>
+                            <button class="camera-btn camera-btn-primary" onclick="refreshPipelineConfig()">Refresh</button>
                         </div>
                     </div>
 
-                    <!-- MODULES SECTION -->
-                    <div style="background: #fff; border: 2px solid #28a745; border-radius: 8px; padding: 15px;">
-                        <h4 style="margin: 0 0 15px 0; color: #28a745; border-bottom: 2px solid #28a745; padding-bottom: 8px;">🔧 Inference Modules</h4>
+                    <!-- PIPELINES SECTION -->
+                    <div style="background: #fff; border: 2px solid #007bff; border-radius: 8px; padding: 15px; margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 15px 0; color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 8px;">Pipeline Configuration</h4>
 
                         <div style="margin-bottom: 15px;">
-                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Modules</h5>
-                            <div id="modules-list" style="display: flex; flex-direction: column; gap: 10px;">
-                                <span style="color: #666; font-style: italic;">Loading modules...</span>
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Pipelines</h5>
+                            <div id="pipelines-list" style="display: flex; flex-wrap: wrap; gap: 10px;">
+                                <span style="color: #666; font-style: italic;">Loading pipelines...</span>
                             </div>
                         </div>
 
                         <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px;">
-                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Module</h5>
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Pipeline</h5>
                             <div class="control-grid" style="margin-bottom: 15px;">
                                 <div class="control-item">
-                                    <div class="control-label">Module ID <span style="color: #dc3545;">*</span></div>
-                                    <input type="text" class="control-input" id="module-id-input" placeholder="e.g., gradio_hf, yolo_defect">
+                                    <div class="control-label">Pipeline Name <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="pipeline-name-input" placeholder="e.g., defect_detection">
                                 </div>
                                 <div class="control-item">
-                                    <div class="control-label">Module Name <span style="color: #dc3545;">*</span></div>
-                                    <input type="text" class="control-input" id="module-name-input" placeholder="e.g., Gradio HuggingFace">
+                                    <div class="control-label">Description</div>
+                                    <input type="text" class="control-input" id="pipeline-desc-input" placeholder="Pipeline description...">
+                                </div>
+                                <div class="control-item" style="grid-column: span 2;">
+                                    <div class="control-label">Models in Pipeline (select models to include)</div>
+                                    <div id="pipeline-models-checklist" style="display: flex; flex-wrap: wrap; gap: 10px; padding: 8px; background: white; border: 1px solid #ccc; border-radius: 4px;">
+                                        <span style="color: #666; font-style: italic;">Loading models...</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div style="display: flex; gap: 8px;">
+                                <button class="control-button" style="background-color: #007bff;" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
+                                <button class="control-button" style="background-color: #dc3545;" onclick="deletePipeline()">Delete Pipeline</button>
+                            </div>
+                            <div class="control-response" id="pipeline-response"></div>
+                        </div>
+                    </div>
+
+                    <!-- MODELS SECTION -->
+                    <div style="background: #fff; border: 2px solid #28a745; border-radius: 8px; padding: 15px;">
+                        <h4 style="margin: 0 0 15px 0; color: #28a745; border-bottom: 2px solid #28a745; padding-bottom: 8px;">Inference Models</h4>
+
+                        <div style="margin-bottom: 15px;">
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Models</h5>
+                            <div id="models-list" style="display: flex; flex-direction: column; gap: 10px;">
+                                <span style="color: #666; font-style: italic;">Loading models...</span>
+                            </div>
+                        </div>
+
+                        <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px;">
+                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Model</h5>
+                            <div class="control-grid" style="margin-bottom: 15px;">
+                                <div class="control-item">
+                                    <div class="control-label">Model Name <span style="color: #dc3545;">*</span></div>
+                                    <input type="text" class="control-input" id="model-name-input" placeholder="e.g., Gradio HuggingFace">
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Type <span style="color: #dc3545;">*</span></div>
-                                    <select class="control-input" id="module-type-input" onchange="handleModuleTypeChange()">
+                                    <select class="control-input" id="model-type-input" onchange="handleModelTypeChange()">
                                         <option value="gradio">Gradio</option>
                                         <option value="yolo">YOLO</option>
                                     </select>
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Inference URL <span style="color: #dc3545;">*</span></div>
-                                    <input type="text" class="control-input" id="module-url-input" placeholder="https://..." onchange="fetchModelsFromGradio()">
+                                    <input type="text" class="control-input" id="model-url-input" placeholder="https://..." onchange="fetchModelsFromGradio()">
                                     <button class="control-button" style="font-size: 11px; padding: 4px 8px; margin-top: 4px;" onclick="fetchModelsFromGradio()">Fetch Models</button>
                                 </div>
                                 <div class="control-item">
-                                    <div class="control-label">Model</div>
-                                    <select class="control-input" id="module-model-input">
+                                    <div class="control-label">Model Name (for Gradio)</div>
+                                    <select class="control-input" id="model-gradio-name-input">
                                         <option value="N/A">N/A</option>
                                         <option value="Data Matrix">Data Matrix</option>
                                     </select>
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Min Confidence (0-1)</div>
-                                    <input type="number" class="control-input" id="module-confidence-input" min="0" max="1" step="0.05" value="0.25">
+                                    <input type="number" class="control-input" id="model-confidence-input" min="0" max="1" step="0.05" value="0.25">
                                 </div>
                             </div>
                             <div style="display: flex; gap: 8px;">
-                                <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateModule()">Create/Update Module</button>
-                                <button class="control-button" style="background-color: #dc3545;" onclick="deleteModule()">Delete Module</button>
+                                <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateModel()">Create/Update Model</button>
+                                <button class="control-button" style="background-color: #dc3545;" onclick="deleteModel()">Delete Model</button>
                             </div>
-                            <div class="control-response" id="module-response"></div>
+                            <div class="control-response" id="model-response"></div>
                         </div>
                     </div>
                 </div>
@@ -3614,30 +3650,35 @@
                 setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
             }
 
-            // ===== INFERENCE MODULE MANAGEMENT =====
-            let inferenceData = {};
+            // ===== INFERENCE PIPELINE MANAGEMENT =====
+            let pipelineData = {};
 
-            async function refreshInferenceConfig() {
+            async function refreshPipelineConfig() {
                 try {
-                    const response = await fetch('/api/inference');
+                    const response = await fetch('/api/pipelines');
                     const data = await response.json();
-                    inferenceData = data;
+                    pipelineData = data;
 
-                    const currentModule = inferenceData.current_module || 'gradio_hf';
-                    const module = inferenceData.modules ? inferenceData.modules[currentModule] : null;
+                    // Update current pipeline/model display
+                    const currentPipeline = pipelineData.current_pipeline || 'default';
+                    const currentModel = pipelineData.current_model;
 
-                    document.getElementById('current-module-name').textContent = module ? module.name : currentModule;
+                    document.getElementById('current-pipeline-name').textContent = currentPipeline;
+                    document.getElementById('current-model-name').textContent = currentModel ? currentModel.name : 'None';
 
-                    renderModulesList(inferenceData.modules || {}, currentModule);
+                    // Render lists
+                    renderPipelinesList(pipelineData.pipelines || {}, currentPipeline);
+                    renderModelsList(pipelineData.models || {});
+                    renderModelsChecklist(pipelineData.models || {});
 
                 } catch (error) {
-                    console.error('Error loading inference config:', error);
+                    console.error('Error loading pipeline config:', error);
                 }
             }
 
             async function fetchModelsFromGradio() {
-                const url = document.getElementById('module-url-input').value.trim();
-                const select = document.getElementById('module-model-input');
+                const url = document.getElementById('model-url-input').value.trim();
+                const select = document.getElementById('model-gradio-name-input');
 
                 if (!url) {
                     alert('Please enter a Gradio URL first');
@@ -3649,7 +3690,6 @@
                     const data = await response.json();
 
                     if (data.models && data.models.length > 0) {
-                        // Clear and repopulate select
                         select.innerHTML = '';
                         data.models.forEach(model => {
                             const option = document.createElement('option');
@@ -3657,10 +3697,6 @@
                             option.textContent = model;
                             select.appendChild(option);
                         });
-
-                        if (data.note) {
-                            console.log('Note:', data.note);
-                        }
                     } else {
                         alert('No models found from Gradio API');
                     }
@@ -3670,71 +3706,131 @@
                 }
             }
 
-            function handleModuleTypeChange() {
-                const type = document.getElementById('module-type-input').value;
-                const modelSelect = document.getElementById('module-model-input');
-                const urlInput = document.getElementById('module-url-input');
+            function handleModelTypeChange() {
+                const type = document.getElementById('model-type-input').value;
+                const modelSelect = document.getElementById('model-gradio-name-input');
 
                 if (type === 'yolo') {
-                    // YOLO doesn't typically need model selection
                     modelSelect.innerHTML = '<option value="N/A">N/A</option>';
                 } else if (type === 'gradio') {
-                    // Gradio can fetch models
                     modelSelect.innerHTML = '<option value="N/A">N/A</option><option value="Data Matrix">Data Matrix</option>';
                 }
             }
 
-            function renderModulesList(modules, currentModule) {
-                const container = document.getElementById('modules-list');
-                const moduleIds = Object.keys(modules);
+            function renderPipelinesList(pipelines, currentPipeline) {
+                const container = document.getElementById('pipelines-list');
+                const pipelineNames = Object.keys(pipelines);
 
-                if (moduleIds.length === 0) {
-                    container.innerHTML = '<span style="color: #666; font-style: italic;">No modules configured</span>';
+                if (pipelineNames.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No pipelines configured</span>';
                     return;
                 }
 
                 container.innerHTML = '';
-                moduleIds.forEach(id => {
-                    const module = modules[id];
-                    const isActive = id === currentModule;
-                    const moduleDiv = document.createElement('div');
-                    moduleDiv.style.cssText = `padding: 10px; background: ${isActive ? '#d4edda' : '#f8f9fa'}; border: 2px solid ${isActive ? '#28a745' : '#dee2e6'}; border-radius: 4px;`;
-                    moduleDiv.innerHTML = `
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
-                            <div style="flex: 1;">
-                                <strong style="font-size: 14px;">${module.name}</strong>
-                                <span style="margin-left: 8px; padding: 2px 6px; background: #6c757d; color: white; border-radius: 3px; font-size: 10px;">${module.type.toUpperCase()}</span>
-                                ${isActive ? '<span style="margin-left: 8px; padding: 2px 6px; background: #28a745; color: white; border-radius: 3px; font-size: 10px;">ACTIVE</span>' : ''}
-                                <div style="margin-top: 4px; font-size: 11px; color: #666;">
-                                    Model: ${module.inference_model} | Confidence: ${module.inference_min_confidence}
-                                </div>
-                                <div style="margin-top: 2px; font-size: 10px; color: #888; word-break: break-all;">
-                                    ${module.inference_url}
-                                </div>
-                            </div>
-                            <div style="display: flex; gap: 4px; margin-left: 10px;">
-                                ${!isActive ? `<button onclick="setActiveModule('${id}')" style="padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Set Active</button>` : ''}
-                                <button onclick="loadModuleForEdit('${id}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
+                pipelineNames.forEach(name => {
+                    const pipeline = pipelines[name];
+                    const isActive = name === currentPipeline;
+                    const pipelineDiv = document.createElement('div');
+                    pipelineDiv.style.cssText = `padding: 10px; background: ${isActive ? '#cce5ff' : '#f8f9fa'}; border: 2px solid ${isActive ? '#007bff' : '#dee2e6'}; border-radius: 6px; min-width: 200px;`;
+
+                    const phaseModels = pipeline.phases.map(p => p.model_id).join(' -> ') || 'No models';
+                    pipelineDiv.innerHTML = `
+                        <div>
+                            <strong style="font-size: 14px;">${pipeline.name}</strong>
+                            ${isActive ? '<span style="margin-left: 8px; padding: 2px 6px; background: #007bff; color: white; border-radius: 3px; font-size: 10px;">ACTIVE</span>' : ''}
+                            <div style="margin-top: 4px; font-size: 11px; color: #666;">${pipeline.description || 'No description'}</div>
+                            <div style="margin-top: 4px; font-size: 10px; color: #888;">Phases: ${phaseModels}</div>
+                            <div style="margin-top: 8px; display: flex; gap: 4px;">
+                                ${!isActive ? `<button onclick="activatePipeline('${name}')" style="padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Activate</button>` : ''}
+                                <button onclick="loadPipelineForEdit('${name}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
                             </div>
                         </div>
                     `;
-                    container.appendChild(moduleDiv);
+                    container.appendChild(pipelineDiv);
                 });
             }
 
-            function loadModuleForEdit(moduleId) {
-                const module = inferenceData.modules[moduleId];
-                if (!module) return;
+            function renderModelsList(models) {
+                const container = document.getElementById('models-list');
+                const modelIds = Object.keys(models);
 
-                document.getElementById('module-id-input').value = moduleId;
-                document.getElementById('module-name-input').value = module.name;
-                document.getElementById('module-type-input').value = module.type || 'gradio';
-                document.getElementById('module-url-input').value = module.inference_url;
-                document.getElementById('module-confidence-input').value = module.inference_min_confidence;
+                if (modelIds.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No models configured</span>';
+                    return;
+                }
 
-                // Set model in dropdown
-                const modelSelect = document.getElementById('module-model-input');
-                const modelValue = module.inference_model;
+                container.innerHTML = '';
+                modelIds.forEach(id => {
+                    const model = models[id];
+                    const modelDiv = document.createElement('div');
+                    modelDiv.style.cssText = 'padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;';
+                    modelDiv.innerHTML = `
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                            <div style="flex: 1;">
+                                <strong style="font-size: 14px;">${model.name}</strong>
+                                <span style="margin-left: 8px; padding: 2px 6px; background: ${model.model_type === 'gradio' ? '#17a2b8' : '#28a745'}; color: white; border-radius: 3px; font-size: 10px;">${model.model_type.toUpperCase()}</span>
+                                <div style="margin-top: 4px; font-size: 11px; color: #666;">
+                                    Model: ${model.model_name} | Confidence: ${model.confidence_threshold}
+                                </div>
+                                <div style="margin-top: 2px; font-size: 10px; color: #888; word-break: break-all;">${model.inference_url}</div>
+                            </div>
+                            <div style="display: flex; gap: 4px; margin-left: 10px;">
+                                <button onclick="loadModelForEdit('${id}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(modelDiv);
+                });
+            }
+
+            function renderModelsChecklist(models) {
+                const container = document.getElementById('pipeline-models-checklist');
+                const modelIds = Object.keys(models);
+
+                if (modelIds.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No models available</span>';
+                    return;
+                }
+
+                container.innerHTML = '';
+                modelIds.forEach(id => {
+                    const model = models[id];
+                    const label = document.createElement('label');
+                    label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: #e9ecef; border-radius: 4px; cursor: pointer;';
+                    label.innerHTML = `
+                        <input type="checkbox" name="pipeline-model" value="${id}">
+                        <span>${model.name}</span>
+                    `;
+                    container.appendChild(label);
+                });
+            }
+
+            function loadPipelineForEdit(pipelineName) {
+                const pipeline = pipelineData.pipelines[pipelineName];
+                if (!pipeline) return;
+
+                document.getElementById('pipeline-name-input').value = pipeline.name;
+                document.getElementById('pipeline-desc-input').value = pipeline.description || '';
+
+                // Check the models in this pipeline
+                const checkboxes = document.querySelectorAll('input[name="pipeline-model"]');
+                const pipelineModelIds = pipeline.phases.map(p => p.model_id);
+                checkboxes.forEach(cb => {
+                    cb.checked = pipelineModelIds.includes(cb.value);
+                });
+            }
+
+            function loadModelForEdit(modelId) {
+                const model = pipelineData.models[modelId];
+                if (!model) return;
+
+                document.getElementById('model-name-input').value = model.name;
+                document.getElementById('model-type-input').value = model.model_type || 'gradio';
+                document.getElementById('model-url-input').value = model.inference_url;
+                document.getElementById('model-confidence-input').value = model.confidence_threshold;
+
+                const modelSelect = document.getElementById('model-gradio-name-input');
+                const modelValue = model.model_name;
                 let found = false;
                 for (let option of modelSelect.options) {
                     if (option.value === modelValue) {
@@ -3743,7 +3839,7 @@
                         break;
                     }
                 }
-                if (!found) {
+                if (!found && modelValue) {
                     const option = document.createElement('option');
                     option.value = modelValue;
                     option.textContent = modelValue;
@@ -3752,27 +3848,18 @@
                 }
             }
 
-            async function setActiveModule(moduleId) {
-                const responseEl = document.getElementById('module-response');
-
+            async function activatePipeline(pipelineName) {
+                const responseEl = document.getElementById('pipeline-response');
                 try {
-                    const config = await fetch('/api/cameras/config').then(r => r.json());
-                    if (!config.config.inference) config.config.inference = {current_module: moduleId, modules: {}};
-
-                    config.config.inference.current_module = moduleId;
-
-                    const response = await fetch('/api/cameras/config/save', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(config.config)
-                    });
+                    const response = await fetch(`/api/pipelines/activate/${pipelineName}`, { method: 'POST' });
+                    const result = await response.json();
 
                     if (response.ok) {
-                        responseEl.textContent = `Module '${moduleId}' is now active!`;
+                        responseEl.textContent = `Pipeline '${pipelineName}' activated!`;
                         responseEl.className = 'control-response success';
-                        refreshInferenceConfig();
+                        refreshPipelineConfig();
                     } else {
-                        responseEl.textContent = 'Failed to set active module';
+                        responseEl.textContent = result.error || 'Failed to activate pipeline';
                         responseEl.className = 'control-response error';
                     }
                 } catch (error) {
@@ -3782,45 +3869,50 @@
                 setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
             }
 
-            async function createOrUpdateModule() {
-                const moduleId = document.getElementById('module-id-input').value.trim();
-                const moduleName = document.getElementById('module-name-input').value.trim();
-                const moduleType = document.getElementById('module-type-input').value;
-                const moduleModel = document.getElementById('module-model-input').value;
-                const moduleConfidence = parseFloat(document.getElementById('module-confidence-input').value);
-                const moduleUrl = document.getElementById('module-url-input').value.trim();
-                const responseEl = document.getElementById('module-response');
+            async function createOrUpdatePipeline() {
+                const pipelineName = document.getElementById('pipeline-name-input').value.trim();
+                const description = document.getElementById('pipeline-desc-input').value.trim();
+                const responseEl = document.getElementById('pipeline-response');
 
-                if (!moduleId || !moduleName || !moduleUrl) {
-                    responseEl.textContent = 'Please fill in Module ID, Name, and URL';
+                if (!pipelineName) {
+                    responseEl.textContent = 'Please enter a pipeline name';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
+                // Get selected models
+                const checkboxes = document.querySelectorAll('input[name="pipeline-model"]:checked');
+                const phases = Array.from(checkboxes).map((cb, idx) => ({
+                    model_id: cb.value,
+                    enabled: true,
+                    order: idx
+                }));
+
+                if (phases.length === 0) {
+                    responseEl.textContent = 'Please select at least one model for the pipeline';
                     responseEl.className = 'control-response error';
                     return;
                 }
 
                 try {
-                    const config = await fetch('/api/cameras/config').then(r => r.json());
-                    if (!config.config.inference) config.config.inference = {current_module: moduleId, modules: {}};
-
-                    config.config.inference.modules[moduleId] = {
-                        name: moduleName,
-                        type: moduleType,
-                        inference_model: moduleModel,
-                        inference_min_confidence: moduleConfidence,
-                        inference_url: moduleUrl
-                    };
-
-                    const response = await fetch('/api/cameras/config/save', {
+                    const response = await fetch('/api/pipelines', {
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(config.config)
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: pipelineName,
+                            description: description,
+                            phases: phases,
+                            enabled: true
+                        })
                     });
 
+                    const result = await response.json();
                     if (response.ok) {
-                        responseEl.textContent = `Module '${moduleName}' saved!`;
+                        responseEl.textContent = `Pipeline '${pipelineName}' saved!`;
                         responseEl.className = 'control-response success';
-                        refreshInferenceConfig();
+                        refreshPipelineConfig();
                     } else {
-                        responseEl.textContent = 'Failed to save module';
+                        responseEl.textContent = result.error || 'Failed to save pipeline';
                         responseEl.className = 'control-response error';
                     }
                 } catch (error) {
@@ -3830,41 +3922,116 @@
                 setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
             }
 
-            async function deleteModule() {
-                const moduleId = document.getElementById('module-id-input').value.trim();
-                const responseEl = document.getElementById('module-response');
+            async function deletePipeline() {
+                const pipelineName = document.getElementById('pipeline-name-input').value.trim();
+                const responseEl = document.getElementById('pipeline-response');
 
-                if (!moduleId || !confirm(`Delete module '${moduleId}'?`)) return;
+                if (!pipelineName || !confirm(`Delete pipeline '${pipelineName}'?`)) return;
 
                 try {
-                    const config = await fetch('/api/cameras/config').then(r => r.json());
-                    if (config.config.inference && config.config.inference.modules) {
-                        delete config.config.inference.modules[moduleId];
+                    const response = await fetch(`/api/pipelines/${pipelineName}`, { method: 'DELETE' });
+                    const result = await response.json();
 
-                        // If deleted module was active, set another one as active
-                        if (config.config.inference.current_module === moduleId) {
-                            const remainingModules = Object.keys(config.config.inference.modules);
-                            config.config.inference.current_module = remainingModules.length > 0 ? remainingModules[0] : null;
-                        }
-
-                        const response = await fetch('/api/cameras/config/save', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify(config.config)
-                        });
-
-                        if (response.ok) {
-                            responseEl.textContent = `Module '${moduleId}' deleted!`;
-                            responseEl.className = 'control-response success';
-                            document.getElementById('module-id-input').value = '';
-                            refreshInferenceConfig();
-                        }
+                    if (response.ok) {
+                        responseEl.textContent = `Pipeline '${pipelineName}' deleted!`;
+                        responseEl.className = 'control-response success';
+                        document.getElementById('pipeline-name-input').value = '';
+                        refreshPipelineConfig();
+                    } else {
+                        responseEl.textContent = result.error || 'Failed to delete pipeline';
+                        responseEl.className = 'control-response error';
                     }
                 } catch (error) {
                     responseEl.textContent = 'Error: ' + error.message;
                     responseEl.className = 'control-response error';
                 }
                 setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function createOrUpdateModel() {
+                const modelName = document.getElementById('model-name-input').value.trim();
+                const modelType = document.getElementById('model-type-input').value;
+                const modelGradioName = document.getElementById('model-gradio-name-input').value;
+                const modelConfidence = parseFloat(document.getElementById('model-confidence-input').value);
+                const modelUrl = document.getElementById('model-url-input').value.trim();
+                const responseEl = document.getElementById('model-response');
+
+                if (!modelName || !modelUrl) {
+                    responseEl.textContent = 'Please fill in Model Name and URL';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
+                // Generate model_id from name (lowercase, underscores)
+                const modelId = modelName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+
+                try {
+                    const response = await fetch('/api/models', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            model_id: modelId,
+                            name: modelName,
+                            model_type: modelType,
+                            model_name: modelGradioName,
+                            confidence_threshold: modelConfidence,
+                            inference_url: modelUrl
+                        })
+                    });
+
+                    const result = await response.json();
+                    if (response.ok) {
+                        responseEl.textContent = `Model '${modelName}' saved!`;
+                        responseEl.className = 'control-response success';
+                        refreshPipelineConfig();
+                    } else {
+                        responseEl.textContent = result.error || 'Failed to save model';
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function deleteModel() {
+                const modelName = document.getElementById('model-name-input').value.trim();
+                const responseEl = document.getElementById('model-response');
+
+                if (!modelName) {
+                    responseEl.textContent = 'Please enter a model name to delete';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
+                const modelId = modelName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+
+                if (!confirm(`Delete model '${modelName}'?`)) return;
+
+                try {
+                    const response = await fetch(`/api/models/${modelId}`, { method: 'DELETE' });
+                    const result = await response.json();
+
+                    if (response.ok) {
+                        responseEl.textContent = `Model '${modelName}' deleted!`;
+                        responseEl.className = 'control-response success';
+                        document.getElementById('model-name-input').value = '';
+                        refreshPipelineConfig();
+                    } else {
+                        responseEl.textContent = result.error || 'Failed to delete model';
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            // Legacy compatibility - keep old function name
+            function refreshInferenceConfig() {
+                refreshPipelineConfig();
             }
 
             // ===== Camera Discovery Functions =====
