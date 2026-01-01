@@ -12,6 +12,8 @@ from datetime import datetime
 from redis import Redis
 from pylibdmtx import pylibdmtx
 import math
+import psycopg2
+from psycopg2.extras import Json
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import Pool, cpu_count
 import logging
@@ -89,6 +91,89 @@ GRADIO_CONFIDENCE_THRESHOLD = 0.25
 # Global cache for latest detections (used by video feeds, stored in Redis for cross-process sharing)
 latest_detections = []
 latest_detections_timestamp = 0.0
+
+# Database connection pool
+db_connection_pool = None
+
+def get_db_connection():
+    """Get PostgreSQL connection from pool."""
+    global db_connection_pool
+    if db_connection_pool is None:
+        try:
+            from psycopg2 import pool
+            db_connection_pool = pool.SimpleConnectionPool(
+                1, 10,
+                host="timescaledb",
+                port=5432,
+                database="monitaqc",
+                user="monitaqc",
+                password="monitaqc2024"
+            )
+            logger.info("Database connection pool initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize database pool: {e}")
+            return None
+    try:
+        return db_connection_pool.getconn()
+    except Exception as e:
+        logger.error(f"Failed to get database connection: {e}")
+        return None
+
+def release_db_connection(conn):
+    """Release connection back to pool."""
+    if db_connection_pool and conn:
+        db_connection_pool.putconn(conn)
+
+def write_inference_to_db(shipment, image_path, detections, inference_time_ms, model_used="yolov8", pipeline_name=None, module_id=None, phase_id=None):
+    """Write inference result to TimescaleDB with pipeline tracking."""
+    if not STORE_ANNOTATION_ENABLED:
+        return
+
+    conn = get_db_connection()
+    if not conn:
+        return
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO inference_results
+               (time, shipment, image_path, detections, detection_count, inference_time_ms, model_used, pipeline_name, module_id, phase_id)
+               VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (shipment, image_path, Json(detections), len(detections), inference_time_ms, model_used, pipeline_name, module_id, phase_id)
+        )
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Failed to write inference to database: {e}")
+        conn.rollback()
+    finally:
+        release_db_connection(conn)
+
+def write_production_metrics_to_db(encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds):
+    """Write production metrics to TimescaleDB.
+
+    Production metrics are always written regardless of annotation storage settings,
+    as they represent different types of data (real-time system state vs. detection results).
+    """
+    conn = get_db_connection()
+    if not conn:
+        return
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO production_metrics
+               (time, encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds)
+               VALUES (NOW(), %s, %s, %s, %s, %s, %s)""",
+            (encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds)
+        )
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Failed to write production metrics to database: {e}")
+        conn.rollback()
+    finally:
+        release_db_connection(conn)
 
 # Inference performance tracking
 inference_times = []  # Store last 10 inference times (processing time only)
@@ -942,13 +1027,70 @@ def apply_config_settings(config, watcher_inst=None):
 
     settings_applied = {}
 
-    # Apply infrastructure settings (Gradio/YOLO API configuration)
-    if "infrastructure" in config:
+    # Apply inference pipeline configuration
+    if "inference" in config:
+        current_pipeline = config["inference"].get("current_pipeline", "default")
+        pipelines = config["inference"].get("pipelines", {})
+        modules = config["inference"].get("modules", {})
+
+        if current_pipeline in pipelines:
+            pipeline = pipelines[current_pipeline]
+            phases = pipeline.get("phases", [])
+
+            # For backward compatibility, use the first enabled phase for primary inference
+            primary_phase = None
+            for phase in phases:
+                if phase.get("enabled", True):
+                    primary_phase = phase
+                    break
+
+            if primary_phase and primary_phase["module_id"] in modules:
+                active_module = modules[primary_phase["module_id"]]
+                YOLO_INFERENCE_URL = active_module.get("inference_url", YOLO_INFERENCE_URL)
+                GRADIO_MODEL = active_module.get("inference_model", GRADIO_MODEL)
+                GRADIO_CONFIDENCE_THRESHOLD = active_module.get("inference_min_confidence", GRADIO_CONFIDENCE_THRESHOLD)
+                settings_applied["inference"] = True
+
+                logger.info(f"Inference pipeline loaded: {pipeline.get('name', current_pipeline)}")
+                logger.info(f"  Phases: {len(phases)} phase(s)")
+                for idx, phase in enumerate(phases, 1):
+                    module_id = phase.get("module_id")
+                    enabled = phase.get("enabled", True)
+                    status = "✓" if enabled else "✗"
+                    module_name = modules.get(module_id, {}).get("name", module_id) if module_id in modules else "Unknown"
+                    logger.info(f"    Phase {idx}: {status} {module_name}")
+
+                logger.info(f"  Primary module: {active_module.get('name')}")
+                logger.info(f"    URL: {YOLO_INFERENCE_URL}")
+                logger.info(f"    Model: {GRADIO_MODEL}")
+                logger.info(f"    Min Confidence: {GRADIO_CONFIDENCE_THRESHOLD}")
+        # Legacy support for old "current_module" format
+        elif "current_module" in config["inference"]:
+            current_module = config["inference"].get("current_module")
+            if current_module in modules:
+                active_module = modules[current_module]
+                YOLO_INFERENCE_URL = active_module.get("inference_url", YOLO_INFERENCE_URL)
+                GRADIO_MODEL = active_module.get("inference_model", GRADIO_MODEL)
+                GRADIO_CONFIDENCE_THRESHOLD = active_module.get("inference_min_confidence", GRADIO_CONFIDENCE_THRESHOLD)
+                settings_applied["inference"] = True
+                logger.info(f"Inference module loaded (legacy): {active_module.get('name', current_module)}")
+    elif "infrastructure" in config:
+        # Legacy support for old config format
         YOLO_INFERENCE_URL = config["infrastructure"].get("yolo_url", YOLO_INFERENCE_URL)
         GRADIO_MODEL = config["infrastructure"].get("gradio_model", GRADIO_MODEL)
         GRADIO_CONFIDENCE_THRESHOLD = config["infrastructure"].get("gradio_confidence", GRADIO_CONFIDENCE_THRESHOLD)
         settings_applied["infrastructure"] = True
-        logger.info(f"Infrastructure: YOLO URL={YOLO_INFERENCE_URL}, Gradio Model={GRADIO_MODEL}, Confidence={GRADIO_CONFIDENCE_THRESHOLD}")
+        logger.info(f"Infrastructure (legacy): YOLO URL={YOLO_INFERENCE_URL}, Gradio Model={GRADIO_MODEL}, Confidence={GRADIO_CONFIDENCE_THRESHOLD}")
+
+    # Apply AI configuration (load from DATA_FILE to Redis for runtime use)
+    if "ai" in config and watcher_inst and watcher_inst.redis_connection:
+        ai_model = config["ai"].get("model", "claude")
+        ai_api_key = config["ai"].get("api_key", "")
+        if ai_api_key:  # Only load if API key exists
+            watcher_inst.redis_connection.redis_connection.set("ai_model", ai_model)
+            watcher_inst.redis_connection.redis_connection.set("ai_api_key", ai_api_key)
+            settings_applied["ai"] = True
+            logger.info(f"AI configuration loaded: model={ai_model}")
 
     # Apply ejector settings
     if "ejector" in config:
@@ -2228,8 +2370,66 @@ async def save_all_config():
         return JSONResponse(content={"error": "Watcher not initialized"}, status_code=503)
 
     try:
+        # Get AI configuration from Redis (if available)
+        ai_config = {}
+        if watcher_instance.redis_connection:
+            r = watcher_instance.redis_connection.redis_connection
+            ai_model = r.get("ai_model")
+            ai_api_key = r.get("ai_api_key")
+            if ai_model or ai_api_key:
+                ai_config = {
+                    "model": ai_model.decode('utf-8') if isinstance(ai_model, bytes) else (ai_model or "claude"),
+                    "api_key": ai_api_key.decode('utf-8') if isinstance(ai_api_key, bytes) else (ai_api_key or "")
+                }
+
         config = {
             "cameras": {},
+            "infrastructure": {
+                "redis_host": REDIS_HOST,
+                "redis_port": REDIS_PORT,
+                "serial_port": WATCHER_USB,
+                "serial_baudrate": SERIAL_BAUDRATE,
+                "serial_mode": SERIAL_MODE,
+                "postgres_host": POSTGRES_HOST,
+                "postgres_port": POSTGRES_PORT,
+                "postgres_db": POSTGRES_DB,
+                "postgres_user": POSTGRES_USER
+            },
+            "inference": {
+                "current_pipeline": "default",  # Currently active pipeline
+                "pipelines": {
+                    "default": {
+                        "name": "Default Pipeline",
+                        "phases": [
+                            {
+                                "phase_id": 1,
+                                "module_id": "gradio_hf",
+                                "enabled": True
+                            }
+                        ]
+                    }
+                },
+                "modules": {
+                    "gradio_hf": {
+                        "name": "Gradio HuggingFace",
+                        "inference_url": "https://smartfalcon-ai-industrial-defect-detection.hf.space",
+                        "inference_model": "Data Matrix",
+                        "inference_min_confidence": 0.25,
+                        "type": "gradio"
+                    },
+                    "local_yolo": {
+                        "name": "Local YOLO",
+                        "inference_url": "http://yolo_inference:4442/v1/object-detection/yolov5s/detect/",
+                        "inference_model": "N/A",
+                        "inference_min_confidence": 0.25,
+                        "type": "yolo"
+                    }
+                }
+            },
+            "ai": ai_config if ai_config else {
+                "model": "claude",
+                "api_key": ""
+            },
             "ejector": {
                 "enabled": EJECTOR_ENABLED,
                 "offset": EJECTOR_OFFSET,
@@ -2335,6 +2535,22 @@ async def get_saved_config():
         return JSONResponse(content={"exists": True, "config": config})
     except Exception as e:
         logger.error(f"Error reading config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.get("/api/pipelines")
+async def get_pipelines():
+    """Get inference pipeline configuration (fast endpoint for UI)."""
+    try:
+        config = load_service_config()
+        if not config or "inference" not in config:
+            return JSONResponse(content={
+                "current_pipeline": "default",
+                "pipelines": {},
+                "modules": {}
+            })
+        return JSONResponse(content=config["inference"])
+    except Exception as e:
+        logger.error(f"Error reading pipelines: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/api/cameras/config/upload")
@@ -2845,7 +3061,7 @@ async def api_export_service_config():
 
 @app.post("/api/ai_config")
 async def save_ai_config(config: Dict[str, Any]):
-    """Save AI model configuration to Redis."""
+    """Save AI model configuration to DATA_FILE and Redis (for runtime use)."""
     try:
         model = config.get("model", "claude")
         api_key = config.get("api_key", "")
@@ -2853,14 +3069,24 @@ async def save_ai_config(config: Dict[str, Any]):
         if not api_key:
             return JSONResponse(content={"error": "API key is required"}, status_code=400)
 
-        # Store in Redis
+        # Store in Redis for runtime use
         if watcher and watcher.redis_connection:
             watcher.redis_connection.redis_connection.set("ai_model", model)
             watcher.redis_connection.redis_connection.set("ai_api_key", api_key)
-            logger.info(f"AI configuration saved: model={model}")
+
+        # Load existing config and update AI section
+        existing_config = load_service_config() or {}
+        existing_config["ai"] = {
+            "model": model,
+            "api_key": api_key
+        }
+
+        # Save to DATA_FILE for persistence
+        if save_service_config(existing_config):
+            logger.info(f"AI configuration saved to {DATA_FILE}: model={model}")
             return JSONResponse(content={"success": True, "message": f"AI configuration saved ({model})"})
         else:
-            return JSONResponse(content={"error": "Redis not available"}, status_code=503)
+            return JSONResponse(content={"error": "Failed to save AI configuration to file"}, status_code=500)
     except Exception as e:
         logger.error(f"Error saving AI config: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -2907,28 +3133,12 @@ async def query_ai(request: Dict[str, Any]):
             }
         }
 
-        # Build AI prompt with system context
-        system_prompt = f"""You are an AI analytics assistant for MonitaQC Vision Engine, an industrial quality control system.
+        # Build concise AI prompt
+        system_prompt = f"""AI assistant for MonitaQC quality control system.
 
-Current System Status:
-- Time: {system_context['current_time']}
-- Encoder Value: {system_context['real_time_data']['encoder_value']}
-- OK Counter: {system_context['real_time_data']['ok_counter']}
-- NG Counter: {system_context['real_time_data']['ng_counter']}
-- Current Shipment: {system_context['real_time_data']['shipment']}
-- Movement Status: {'Moving' if system_context['real_time_data']['is_moving'] else 'Stopped'}
-- Downtime: {system_context['real_time_data']['downtime_seconds']} seconds
+Current: Encoder={system_context['real_time_data']['encoder_value']}, OK={system_context['real_time_data']['ok_counter']}, NG={system_context['real_time_data']['ng_counter']}, Shipment={system_context['real_time_data']['shipment']}, Moving={'Yes' if system_context['real_time_data']['is_moving'] else 'No'}
 
-Database Available: TimescaleDB at timescaledb:5432/monitaqc
-
-You can analyze:
-1. Real-time production metrics (encoder, counters, movement)
-2. Defect detection patterns
-3. Production speed and efficiency
-4. Downtime analysis
-5. Quality trends
-
-Provide clear, actionable insights based on the data. If you need specific historical data from TimescaleDB, explain what query would be needed."""
+Use tools to query TimescaleDB (timescaledb:5432/monitaqc) for historical data. Provide actionable insights."""
 
         # Call AI API based on model
         ai_response = await call_ai_model(model, api_key, system_prompt, user_query)
@@ -2940,37 +3150,234 @@ Provide clear, actionable insights based on the data. If you need specific histo
         return JSONResponse(content={"error": f"AI query failed: {str(e)}"}, status_code=500)
 
 
+def get_ai_tools():
+    """Define tools that AI can use to query data autonomously."""
+    return [
+        {
+            "name": "query_database",
+            "description": "Execute SQL query on TimescaleDB to retrieve production data, metrics, defects, or any historical data. Returns query results as JSON.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "SQL query to execute. Can query tables like production_metrics, inference_results, etc."
+                    }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "get_redis_data",
+            "description": "Get current real-time data from Redis cache. Returns current values for encoder, counters, shipment, movement status, etc.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Redis keys to retrieve. Common keys: encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds"
+                    }
+                },
+                "required": ["keys"]
+            }
+        },
+        {
+            "name": "get_system_logs",
+            "description": "Retrieve recent application logs to diagnose issues or understand system behavior.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of recent log lines to retrieve",
+                        "default": 50
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "Optional filter pattern to match in logs"
+                    }
+                },
+                "required": []
+            }
+        }
+    ]
+
+
+def execute_tool(tool_name: str, tool_input: dict) -> str:
+    """Execute a tool and return results."""
+    try:
+        if tool_name == "query_database":
+            # Execute TimescaleDB query
+            import psycopg2
+            conn = psycopg2.connect(
+                host="timescaledb",
+                port=5432,
+                database="monitaqc",
+                user="monitaqc",
+                password="monitaqc2024"
+            )
+            cursor = conn.cursor()
+            cursor.execute(tool_input["query"])
+            results = cursor.fetchall()
+            column_names = [desc[0] for desc in cursor.description]
+            cursor.close()
+            conn.close()
+
+            # Format as JSON
+            formatted_results = []
+            for row in results:
+                formatted_results.append(dict(zip(column_names, row)))
+            return json.dumps(formatted_results, default=str)
+
+        elif tool_name == "get_redis_data":
+            # Get Redis data
+            if not watcher or not watcher.redis_connection:
+                return json.dumps({"error": "Redis not available"})
+
+            r = watcher.redis_connection.redis_connection
+            results = {}
+            for key in tool_input["keys"]:
+                value = r.get(key)
+                if value:
+                    results[key] = value.decode('utf-8') if isinstance(value, bytes) else value
+                else:
+                    results[key] = None
+            return json.dumps(results)
+
+        elif tool_name == "get_system_logs":
+            # Get recent logs (simplified - returns last N log entries)
+            lines = tool_input.get("lines", 50)
+            filter_pattern = tool_input.get("filter")
+
+            # For now, return a simple status message
+            # In production, this would read from actual log files
+            return json.dumps({
+                "message": f"Log retrieval with {lines} lines" + (f" filtered by '{filter_pattern}'" if filter_pattern else ""),
+                "note": "Full log integration pending"
+            })
+
+        else:
+            return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
+    except Exception as e:
+        logger.error(f"Tool execution error ({tool_name}): {e}")
+        return json.dumps({"error": str(e)})
+
+
 async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str) -> str:
-    """Call the appropriate AI model API."""
+    """Call the appropriate AI model API with tool support."""
     try:
         if model == "claude":
-            # Anthropic Claude API
+            # Anthropic Claude API with tool use
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
-            message = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=1024,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_query}]
-            )
-            return message.content[0].text
+
+            tools = get_ai_tools()
+            messages = [{"role": "user", "content": user_query}]
+
+            # Agentic loop - allow multiple tool calls
+            max_iterations = 5
+            for iteration in range(max_iterations):
+                response = client.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=4096,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools
+                )
+
+                # Check if Claude wants to use tools
+                if response.stop_reason == "end_turn":
+                    # No more tools, return final answer
+                    for block in response.content:
+                        if hasattr(block, 'text'):
+                            return block.text
+                    return "No response generated"
+
+                elif response.stop_reason == "tool_use":
+                    # Add assistant response to messages
+                    messages.append({"role": "assistant", "content": response.content})
+
+                    # Execute each tool call
+                    tool_results = []
+                    for block in response.content:
+                        if block.type == "tool_use":
+                            tool_result = execute_tool(block.name, block.input)
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": tool_result
+                            })
+
+                    # Add tool results to messages
+                    messages.append({"role": "user", "content": tool_results})
+                    # Continue loop to let Claude process results
+                else:
+                    # Unexpected stop reason
+                    return f"Unexpected response: {response.stop_reason}"
+
+            return "Maximum iterations reached. Please simplify your query."
 
         elif model == "chatgpt":
-            # OpenAI ChatGPT API
+            # OpenAI ChatGPT API with function calling
             import openai
             client = openai.OpenAI(api_key=api_key)
-            response = client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ],
-                max_tokens=1024
-            )
-            return response.choices[0].message.content
+
+            # Convert tools to OpenAI format
+            functions = []
+            for tool in get_ai_tools():
+                functions.append({
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["input_schema"]
+                })
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ]
+
+            # Agentic loop
+            max_iterations = 5
+            for iteration in range(max_iterations):
+                response = client.chat.completions.create(
+                    model="gpt-4o",  # Use gpt-4o for 128K context
+                    messages=messages,
+                    functions=functions,
+                    max_tokens=4096
+                )
+
+                message = response.choices[0].message
+
+                if message.function_call:
+                    # Execute function
+                    function_name = message.function_call.name
+                    function_args = json.loads(message.function_call.arguments)
+                    function_result = execute_tool(function_name, function_args)
+
+                    # Add to messages
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "function_call": {
+                            "name": function_name,
+                            "arguments": message.function_call.arguments
+                        }
+                    })
+                    messages.append({
+                        "role": "function",
+                        "name": function_name,
+                        "content": function_result
+                    })
+                else:
+                    # No function call, return answer
+                    return message.content
+
+            return "Maximum iterations reached. Please simplify your query."
 
         elif model == "gemini":
-            # Google Gemini API
+            # Gemini doesn't support function calling in same way, use basic response
             import google.generativeai as genai
             genai.configure(api_key=api_key)
             model_instance = genai.GenerativeModel('gemini-pro')
@@ -2979,9 +3386,9 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             return response.text
 
         elif model == "local":
-            # Local model (Ollama)
+            # Local model (Ollama) - basic response
             import requests
-            endpoint = api_key  # For local, "api_key" is the endpoint URL
+            endpoint = api_key
             response = requests.post(
                 f"{endpoint}/api/generate",
                 json={
@@ -3040,13 +3447,19 @@ def start_web_server():
     """Start the FastAPI web server in a separate thread."""
     try:
         logger.info(f"Starting web server on {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
-        uvicorn.run(
+        import asyncio
+        config = uvicorn.Config(
             app,
             host=WEB_SERVER_HOST,
             port=WEB_SERVER_PORT,
             log_level="warning",
-            access_log=False
+            access_log=False,
+            loop="asyncio",
+            limit_concurrency=100,
+            timeout_keep_alive=5
         )
+        server = uvicorn.Server(config)
+        asyncio.run(server.serve())
     except Exception as e:
         logger.error(f"Web server error: {e}")
 
@@ -3556,6 +3969,8 @@ class ArduinoSocket:
         threading.Thread(target=self.run_ejector).start()
         time.sleep(0.5)
         threading.Thread(target=self.stream_results).start()
+        time.sleep(0.5)
+        threading.Thread(target=self.write_production_metrics_loop).start()
 
 
     def on_up_down_off(self):
@@ -4273,6 +4688,28 @@ class ArduinoSocket:
             except Exception as e:
                 logger.error(f"Error streaming frame: {e}")
 
+    def write_production_metrics_loop(self):
+        """Background thread that periodically writes production metrics to TimescaleDB."""
+        logger.info("Production metrics database writer started")
+        write_interval = 60  # Write every 60 seconds
+
+        while not self.stop_thread:
+            try:
+                time.sleep(write_interval)
+
+                # Write current production metrics to database
+                write_production_metrics_to_db(
+                    encoder_value=self.encoder_value,
+                    ok_counter=self.ok_counter,
+                    ng_counter=self.ng_counter,
+                    shipment=self.shipment or "no_shipment",
+                    is_moving=self.is_moving,
+                    downtime_seconds=self.downtime_seconds
+                )
+
+            except Exception as e:
+                logger.error(f"Error writing production metrics to database: {e}")
+                time.sleep(5)  # Wait before retrying
 
 
 def create_dynamic_images(frame_height):
@@ -4640,6 +5077,11 @@ web_server_thread = threading.Thread(target=start_web_server, daemon=True)
 web_server_thread.start()
 logger.info(f"Web server started on http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
 
+# Start inference worker in a separate thread
+inference_thread = threading.Thread(target=inference_worker_thread, daemon=True)
+inference_thread.start()
+logger.info("Inference worker thread started")
+
 # scanner = Scanner(watcher)
 
 ejector_start_ts = time.time()
@@ -4725,6 +5167,17 @@ def process_frame(frame, capture_mode):
             cv2.imwrite(annotated_path, annotated_image)
             logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections")
 
+            # Write inference result to database
+            if watcher:
+                inference_time_ms = int(processing_time * 1000) if 'processing_time' in locals() else 0
+                write_inference_to_db(
+                    shipment=watcher.shipment or "no_shipment",
+                    image_path=annotated_path,
+                    detections=yolo_res,
+                    inference_time_ms=inference_time_ms,
+                    model_used="yolov8"
+                )
+
         frame_data = [frame_id, image, yolo_res, 5]
 
         if yolo_res:
@@ -4809,123 +5262,140 @@ def process_frame_helper(frame):
     return process_frame(frame, capture_mode)
 
 
-while True:
-    try:
-        # Fetch all frames from Redis queue
-        st_ts = time.time()
-        raw_frames_queue = watcher.get_queue_messages(stream_name="frames_queue")
-        if not raw_frames_queue:
-            time.sleep(0.01)
-            continue
+def inference_worker_thread():
+    """
+    Dedicated thread for processing frames through inference pipeline.
+    Runs independently from capture and web server threads.
+    """
+    logger.info("Inference worker thread started")
 
+    while True:
         try:
-            frames_data = json.loads(raw_frames_queue)
-        except json.JSONDecodeError:
-            continue
+            # Fetch all frames from Redis queue
+            st_ts = time.time()
+            raw_frames_queue = watcher.get_queue_messages(stream_name="frames_queue")
+            if not raw_frames_queue:
+                time.sleep(0.01)
+                continue
 
-        if not frames_data:
-            continue
+            try:
+                frames_data = json.loads(raw_frames_queue)
+            except json.JSONDecodeError:
+                continue
 
-        # Handle new format with encoder value or legacy format
-        if isinstance(frames_data, dict):
-            frames = frames_data.get("frames", [])
-            capture_encoder = frames_data.get("encoder", 0)
-            capture_shipment = frames_data.get("shipment", "no_shipment")
-        else:
-            # Legacy format: frames_data is the frames list directly
-            frames = frames_data
-            capture_encoder = 0
-            capture_shipment = "no_shipment"
+            if not frames_data:
+                continue
 
-        # Validate frame structure before processing
-        valid_frames = []
-        for frame in frames:
-            if isinstance(frame, list) and len(frame) > 0:
-                valid_frames.append(frame)
+            # Handle new format with encoder value or legacy format
+            if isinstance(frames_data, dict):
+                frames = frames_data.get("frames", [])
+                capture_encoder = frames_data.get("encoder", 0)
+                capture_shipment = frames_data.get("shipment", "no_shipment")
+            else:
+                # Legacy format: frames_data is the frames list directly
+                frames = frames_data
+                capture_encoder = 0
+                capture_shipment = "no_shipment"
 
-        if not valid_frames:
-            continue
+            # Validate frame structure before processing
+            valid_frames = []
+            for frame in frames:
+                if isinstance(frame, list) and len(frame) > 0:
+                    valid_frames.append(frame)
 
-        try:
-            with ProcessPoolExecutor() as process_executor:
-                # Process only valid frames
-                results = list(process_executor.map(process_frame_helper, valid_frames))
+            if not valid_frames:
+                continue
 
-                # Filter out None results
-                valid_results = [r for r in results if r is not None]
-                if not valid_results:
-                    # Retry the entire batch once
+            try:
+                with ProcessPoolExecutor() as process_executor:
+                    # Process only valid frames
                     results = list(process_executor.map(process_frame_helper, valid_frames))
+
+                    # Filter out None results
                     valid_results = [r for r in results if r is not None]
                     if not valid_results:
-                        continue
+                        # Retry the entire batch once
+                        results = list(process_executor.map(process_frame_helper, valid_frames))
+                        valid_results = [r for r in results if r is not None]
+                        if not valid_results:
+                            continue
 
-                queue_messages, processed_frames = zip(*valid_results)
+                    queue_messages, processed_frames = zip(*valid_results)
                 
-                # Filter and collect all valid messages in one go
-                valid_queue_messages = [
-                    msg for msg in queue_messages
-                    if isinstance(msg.get('dms'), list) and len(msg['dms']) > 0 and msg['dms'][0] not in [None, '']
-                ]
+                    # Filter and collect all valid messages in one go
+                    valid_queue_messages = [
+                        msg for msg in queue_messages
+                        if isinstance(msg.get('dms'), list) and len(msg['dms']) > 0 and msg['dms'][0] not in [None, '']
+                    ]
 
-                if valid_queue_messages:
-                    all_dms = [msg['dms'][0] for msg in valid_queue_messages]
-                    most_frequent = most_frequent_string(all_dms)
+                    if valid_queue_messages:
+                        all_dms = [msg['dms'][0] for msg in valid_queue_messages]
+                        most_frequent = most_frequent_string(all_dms)
 
-                    # Sort queue messages with safe handling of None values
-                    queue_messages = sorted(
-                        queue_messages,
-                        key=lambda x: (
-                            x.get('priority', 0),
-                            not isinstance(x.get('dms'), list) or len(x.get('dms', [])) == 0 or x['dms'][0] is None,
-                            -len(x['dms'][0]) if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else float('-inf'),
-                            x['dms'][0] != most_frequent if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else True
+                        # Sort queue messages with safe handling of None values
+                        queue_messages = sorted(
+                            queue_messages,
+                            key=lambda x: (
+                                x.get('priority', 0),
+                                not isinstance(x.get('dms'), list) or len(x.get('dms', [])) == 0 or x['dms'][0] is None,
+                                -len(x['dms'][0]) if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else float('-inf'),
+                                x['dms'][0] != most_frequent if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else True
+                            )
                         )
-                    )
 
-                # Add histogram data to the first queue message if available
-                if hasattr(watcher, 'stream_histogram_data') and watcher.stream_histogram_data:
-                    if len(queue_messages) > 0:
-                        queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
-                        watcher.stream_histogram_data = []
+                    # Add histogram data to the first queue message if available
+                    if hasattr(watcher, 'stream_histogram_data') and watcher.stream_histogram_data:
+                        if len(queue_messages) > 0:
+                            queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
+                            watcher.stream_histogram_data = []
 
-                if queue_messages:
-                    # Add encoder value to each queue message for ejector tracking
-                    for msg in queue_messages:
-                        msg['encoder'] = capture_encoder
-                    watcher.send_queue_messages(json.dumps(queue_messages))
+                    if queue_messages:
+                        # Add encoder value to each queue message for ejector tracking
+                        for msg in queue_messages:
+                            msg['encoder'] = capture_encoder
+                        watcher.send_queue_messages(json.dumps(queue_messages))
 
-                if processed_frames:
-                    watcher.redis_connection.update_queue_messages_redis(
-                        json.dumps(processed_frames), 
-                        stream_name="stream_queue"
-                    )
+                    if processed_frames:
+                        watcher.redis_connection.update_queue_messages_redis(
+                            json.dumps(processed_frames), 
+                            stream_name="stream_queue"
+                        )
 
-                try:
-                    for msg in queue_messages:
-                        ts = msg.get('ts', 'N/A')
+                    try:
+                        for msg in queue_messages:
+                            ts = msg.get('ts', 'N/A')
                 
-                        # DMS extraction
-                        dms_list = msg.get('dms', [])
-                        first_dms = dms_list[0] if isinstance(dms_list, list) and len(dms_list) > 0 else None
+                            # DMS extraction
+                            dms_list = msg.get('dms', [])
+                            first_dms = dms_list[0] if isinstance(dms_list, list) and len(dms_list) > 0 else None
                 
-                        timestamp = time.time() - st_ts
+                            timestamp = time.time() - st_ts
                 
-                        # Detection extraction
-                        detection_info = msg.get('detection', [])
-                        if not isinstance(detection_info, list):
-                            detection_info = []
+                            # Detection extraction
+                            detection_info = msg.get('detection', [])
+                            if not isinstance(detection_info, list):
+                                detection_info = []
                 
-                        # Log processed frame result
-                        classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
-                        print(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
+                            # Log processed frame result
+                            classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
+                            print(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
 
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Processing error: {e}")
+                continue
+
         except Exception as e:
-            logger.error(f"Processing error: {e}")
-            continue
+            logger.error(f"Main loop error: {e}")
+            time.sleep(0.1)
 
-    except Exception as e:
-        logger.error(f"Main loop error: {e}")
-        time.sleep(0.1)
+# Main thread - keep application alive
+# All work is done in separate threads (uvicorn, inference, capture, etc.)
+logger.info('All worker threads started - main thread entering keep-alive loop')
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    logger.info('Shutting down...')
+

@@ -1403,43 +1403,98 @@
                             <button class="control-button" onclick="updateConfig('redis_port', document.getElementById('redis-port-input').value)">Set Port</button>
                             <div class="control-response" id="config-redis_port-response"></div>
                         </div>
-                        <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Inference API Type</div>
-                            <select class="control-input" id="api-type-select" onchange="updateAPITypeFields()">
-                                <option value="yolo">YOLO API (Local/Custom)</option>
-                                <option value="gradio" selected>Gradio API (HuggingFace)</option>
-                            </select>
-                        </div>
-                        <div class="control-item" style="grid-column: span 2;" id="gradio-model-selector">
-                            <div class="control-label">Gradio Model</div>
-                            <select class="control-input" id="gradio-model-select">
-                                <option value="Data Matrix">Data Matrix</option>
-                                <option value="Dental Implant">Dental Implant</option>
-                                <option value="Ball Pen">Ball Pen</option>
-                                <option value="Knit Up">Knit Up</option>
-                                <option value="Knit Back">Knit Back</option>
-                                <option value="Jean Up">Jean Up</option>
-                                <option value="Jean Back">Jean Back</option>
-                                <option value="Tire Cord">Tire Cord</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('gradio_model', document.getElementById('gradio-model-select').value)">Set Model</button>
-                            <div class="control-response" id="config-gradio_model-response"></div>
-                        </div>
-                        <div class="control-item" id="gradio-confidence-field">
-                            <div class="control-label">Gradio Confidence (0-1)</div>
-                            <input type="number" class="control-input" id="gradio-confidence-input" min="0" max="1" step="0.05" value="0.25">
-                            <button class="control-button" onclick="updateConfig('gradio_confidence', document.getElementById('gradio-confidence-input').value)">Set Confidence</button>
-                            <div class="control-response" id="config-gradio_confidence-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" id="yolo-url-label">YOLO Inference URL</div>
-                            <input type="text" class="control-input" id="yolo-url-input" value="http://yolo_inference:4442/v1/object-detection/yolov5s/detect/" placeholder="http://yolo_inference:4442/v1/object-detection/yolov5s/detect/">
-                            <button class="control-button" onclick="updateConfig('yolo_url', document.getElementById('yolo-url-input').value)">Set URL</button>
-                            <div class="control-response" id="config-yolo_url-response"></div>
-                        </div>
                     </div>
                     <div style="background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 4px; padding: 10px; margin-top: 10px; font-size: 12px; color: #0c5460;">
                         ℹ️ <strong>Auto-Apply:</strong> Infrastructure settings are applied immediately when changed. Connections will be reinitialized automatically.
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Inference Pipeline Management</h3>
+                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <span style="font-weight: bold; color: #333;">Current Pipeline:</span>
+                            <span id="current-pipeline-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
+                            <span id="pipeline-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <button class="camera-btn camera-btn-primary" onclick="refreshPipelines()">Refresh</button>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Available Pipelines</h4>
+                        <div id="pipelines-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <span style="color: #666; font-style: italic;">Loading pipelines...</span>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Inference Modules Library</h4>
+                        <div id="modules-list" style="display: flex; flex-direction: column; gap: 10px;">
+                            <span style="color: #666; font-style: italic;">Loading modules...</span>
+                        </div>
+                    </div>
+
+                    <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Module</h4>
+                        <div class="control-grid" style="margin-bottom: 15px;">
+                            <div class="control-item">
+                                <div class="control-label">Module ID</div>
+                                <input type="text" class="control-input" id="module-id-input" placeholder="e.g., gradio_hf">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Module Name</div>
+                                <input type="text" class="control-input" id="module-name-input" placeholder="Gradio HuggingFace">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Type</div>
+                                <select class="control-input" id="module-type-input">
+                                    <option value="gradio">Gradio</option>
+                                    <option value="yolo">YOLO</option>
+                                </select>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Model</div>
+                                <select class="control-input" id="module-model-input">
+                                    <option value="N/A">N/A</option>
+                                    <option value="Data Matrix">Data Matrix</option>
+                                </select>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Min Confidence (0-1)</div>
+                                <input type="number" class="control-input" id="module-confidence-input" min="0" max="1" step="0.05" value="0.25">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Inference URL</div>
+                                <input type="text" class="control-input" id="module-url-input" placeholder="https://...">
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateModule()">Create/Update Module</button>
+                            <button class="control-button" style="background-color: #dc3545;" onclick="deleteModule()">Delete Module</button>
+                        </div>
+                        <div class="control-response" id="module-response"></div>
+                    </div>
+
+                    <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Pipeline</h4>
+                        <div class="control-grid" style="margin-bottom: 15px;">
+                            <div class="control-item">
+                                <div class="control-label">Pipeline ID</div>
+                                <input type="text" class="control-input" id="pipeline-id-input" placeholder="e.g., default">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Pipeline Name</div>
+                                <input type="text" class="control-input" id="pipeline-name-input" placeholder="Default Pipeline">
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
+                            <button class="control-button" style="background-color: #dc3545;" onclick="deletePipeline()">Delete Pipeline</button>
+                            <button class="control-button" style="background-color: #007bff;" onclick="activatePipeline()">Set as Active</button>
+                        </div>
+                        <div class="control-response" id="pipeline-response"></div>
                     </div>
                 </div>
             </div>
@@ -3581,6 +3636,274 @@
                 setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
             }
 
+            // ===== INFERENCE PIPELINE MANAGEMENT =====
+            let pipelinesData = {};
+
+            async function refreshPipelines() {
+                try {
+                    const response = await fetch('/api/pipelines');
+                    const data = await response.json();
+                    pipelinesData = data;
+
+                    const currentPipeline = pipelinesData.current_pipeline || 'default';
+                    const pipeline = pipelinesData.pipelines[currentPipeline];
+
+                    document.getElementById('current-pipeline-name').textContent = pipeline ? pipeline.name : currentPipeline;
+
+                    const phaseCount = pipeline ? pipeline.phases.length : 0;
+                    const badge = document.getElementById('pipeline-badge');
+                    badge.textContent = `${phaseCount} phase${phaseCount !== 1 ? 's' : ''}`;
+                    badge.style.backgroundColor = '#28a745';
+
+                    renderPipelinesList(pipelinesData.pipelines || {}, currentPipeline);
+                    renderModulesList(pipelinesData.modules || {});
+
+                } catch (error) {
+                    console.error('Error loading pipelines:', error);
+                }
+            }
+
+            function renderPipelinesList(pipelines, currentPipeline) {
+                const container = document.getElementById('pipelines-list');
+                const pipelineNames = Object.keys(pipelines);
+
+                if (pipelineNames.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No pipelines configured</span>';
+                    return;
+                }
+
+                container.innerHTML = '';
+                pipelineNames.forEach(id => {
+                    const pipeline = pipelines[id];
+                    const isActive = id === currentPipeline;
+
+                    const button = document.createElement('button');
+                    button.className = 'camera-btn';
+                    button.style.cssText = `padding: 6px 12px; ${isActive ? 'background-color: #007bff; color: white; font-weight: bold;' : 'background-color: #f8f9fa; color: #333;'}`;
+                    button.textContent = `${pipeline.name} (${pipeline.phases.length})`;
+
+                    container.appendChild(button);
+                });
+            }
+
+            function renderModulesList(modules) {
+                const container = document.getElementById('modules-list');
+                const moduleIds = Object.keys(modules);
+
+                if (moduleIds.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No modules configured</span>';
+                    return;
+                }
+
+                container.innerHTML = '';
+                moduleIds.forEach(id => {
+                    const module = modules[id];
+                    const moduleDiv = document.createElement('div');
+                    moduleDiv.style.cssText = 'padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;';
+                    moduleDiv.innerHTML = `
+                        <div>
+                            <strong style="font-size: 14px;">${module.name}</strong>
+                            <span style="margin-left: 8px; padding: 2px 6px; background: #6c757d; color: white; border-radius: 3px; font-size: 10px;">${module.type.toUpperCase()}</span>
+                            <div style="margin-top: 4px; font-size: 11px; color: #666;">
+                                Model: ${module.inference_model} | Confidence: ${module.inference_min_confidence}
+                            </div>
+                            <div style="margin-top: 2px; font-size: 10px; color: #888; word-break: break-all;">
+                                ${module.inference_url}
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(moduleDiv);
+                });
+            }
+
+            async function createOrUpdateModule() {
+                const moduleId = document.getElementById('module-id-input').value.trim();
+                const moduleName = document.getElementById('module-name-input').value.trim();
+                const moduleType = document.getElementById('module-type-input').value;
+                const moduleModel = document.getElementById('module-model-input').value;
+                const moduleConfidence = parseFloat(document.getElementById('module-confidence-input').value);
+                const moduleUrl = document.getElementById('module-url-input').value.trim();
+                const responseEl = document.getElementById('module-response');
+
+                if (!moduleId || !moduleName || !moduleUrl) {
+                    responseEl.textContent = 'Please fill in Module ID, Name, and URL';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
+                try {
+                    const config = await fetch('/api/cameras/config').then(r => r.json());
+                    if (!config.config.inference) config.config.inference = {current_pipeline: 'default', pipelines: {}, modules: {}};
+
+                    config.config.inference.modules[moduleId] = {
+                        name: moduleName,
+                        type: moduleType,
+                        inference_model: moduleModel,
+                        inference_min_confidence: moduleConfidence,
+                        inference_url: moduleUrl
+                    };
+
+                    const response = await fetch('/api/cameras/config/save', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(config.config)
+                    });
+
+                    if (response.ok) {
+                        responseEl.textContent = `Module '${moduleName}' saved!`;
+                        responseEl.className = 'control-response success';
+                        refreshPipelines();
+                    } else {
+                        responseEl.textContent = 'Failed to save module';
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function deleteModule() {
+                const moduleId = document.getElementById('module-id-input').value.trim();
+                const responseEl = document.getElementById('module-response');
+
+                if (!moduleId || !confirm(`Delete module '${moduleId}'?`)) return;
+
+                try {
+                    const config = await fetch('/api/cameras/config').then(r => r.json());
+                    if (config.config.inference && config.config.inference.modules) {
+                        delete config.config.inference.modules[moduleId];
+
+                        const response = await fetch('/api/cameras/config/save', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(config.config)
+                        });
+
+                        if (response.ok) {
+                            responseEl.textContent = `Module '${moduleId}' deleted!`;
+                            responseEl.className = 'control-response success';
+                            document.getElementById('module-id-input').value = '';
+                            refreshPipelines();
+                        }
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function createOrUpdatePipeline() {
+                const pipelineId = document.getElementById('pipeline-id-input').value.trim();
+                const pipelineName = document.getElementById('pipeline-name-input').value.trim();
+                const responseEl = document.getElementById('pipeline-response');
+
+                if (!pipelineId || !pipelineName) {
+                    responseEl.textContent = 'Please fill in Pipeline ID and Name';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
+                try {
+                    const config = await fetch('/api/cameras/config').then(r => r.json());
+                    if (!config.config.inference) config.config.inference = {current_pipeline: 'default', pipelines: {}, modules: {}};
+
+                    config.config.inference.pipelines[pipelineId] = {
+                        name: pipelineName,
+                        phases: [{phase_id: 1, module_id: 'gradio_hf', enabled: true}]
+                    };
+
+                    const response = await fetch('/api/cameras/config/save', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(config.config)
+                    });
+
+                    if (response.ok) {
+                        responseEl.textContent = `Pipeline '${pipelineName}' saved!`;
+                        responseEl.className = 'control-response success';
+                        refreshPipelines();
+                    } else {
+                        responseEl.textContent = 'Failed to save pipeline';
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function deletePipeline() {
+                const pipelineId = document.getElementById('pipeline-id-input').value.trim();
+                const responseEl = document.getElementById('pipeline-response');
+
+                if (!pipelineId || !confirm(`Delete pipeline '${pipelineId}'?`)) return;
+
+                try {
+                    const config = await fetch('/api/cameras/config').then(r => r.json());
+                    if (config.config.inference && config.config.inference.pipelines) {
+                        delete config.config.inference.pipelines[pipelineId];
+
+                        const response = await fetch('/api/cameras/config/save', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(config.config)
+                        });
+
+                        if (response.ok) {
+                            responseEl.textContent = `Pipeline '${pipelineId}' deleted!`;
+                            responseEl.className = 'control-response success';
+                            document.getElementById('pipeline-id-input').value = '';
+                            refreshPipelines();
+                        }
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
+            async function activatePipeline() {
+                const pipelineId = document.getElementById('pipeline-id-input').value.trim();
+                const responseEl = document.getElementById('pipeline-response');
+
+                if (!pipelineId) {
+                    responseEl.textContent = 'Please enter Pipeline ID';
+                    responseEl.className = 'control-response error';
+                    return;
+                }
+
+                try {
+                    const config = await fetch('/api/cameras/config').then(r => r.json());
+                    if (config.config.inference && config.config.inference.pipelines[pipelineId]) {
+                        config.config.inference.current_pipeline = pipelineId;
+
+                        const response = await fetch('/api/cameras/config/save', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(config.config)
+                        });
+
+                        if (response.ok) {
+                            responseEl.textContent = `Pipeline '${pipelineId}' is now active!`;
+                            responseEl.className = 'control-response success';
+                            refreshPipelines();
+                        }
+                    } else {
+                        responseEl.textContent = `Pipeline '${pipelineId}' not found`;
+                        responseEl.className = 'control-response error';
+                    }
+                } catch (error) {
+                    responseEl.textContent = 'Error: ' + error.message;
+                    responseEl.className = 'control-response error';
+                }
+                setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
+            }
+
             // ===== Camera Discovery Functions =====
             async function scanForCameras() {
                 const subnet = document.getElementById('subnet-input').value.trim();
@@ -3877,6 +4200,7 @@
             fetchConfig();  // Only fetch config once on page load
             loadDataFile();
             refreshStates();  // Load state management data
+            refreshPipelines();  // Load inference pipeline data
 
             // Set default API type fields (Gradio with HuggingFace URL)
             updateAPITypeFields();
