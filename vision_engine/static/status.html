@@ -903,6 +903,61 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Audio Notifications & Timeline Row -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
+                        <!-- Audio Notifications -->
+                        <div class="status-box" style="padding: 15px;">
+                            <h3 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+                                <span>🔊</span> Audio Notifications
+                            </h3>
+                            <div style="display: flex; flex-direction: column; gap: 10px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                        <input type="checkbox" id="audio-enabled" onchange="toggleAudio()" style="width: 18px; height: 18px; cursor: pointer;">
+                                        <span style="font-weight: 600;">Enable Audio</span>
+                                    </label>
+                                    <button onclick="testAudio()" style="padding: 4px 10px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Test</button>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span style="font-size: 12px; color: var(--text-secondary); min-width: 50px;">Volume:</span>
+                                    <input type="range" id="audio-volume" min="0" max="100" value="50" onchange="updateVolume()" style="flex: 1; cursor: pointer;">
+                                    <span id="audio-volume-display" style="font-size: 12px; min-width: 35px;">50%</span>
+                                </div>
+                                <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                    <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
+                                        <input type="checkbox" id="audio-ok" checked onchange="updateSoundType('ok')">
+                                        <span style="color: var(--success-color);">OK</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
+                                        <input type="checkbox" id="audio-ng" checked onchange="updateSoundType('ng')">
+                                        <span style="color: var(--danger-color);">NG</span>
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
+                                        <input type="checkbox" id="audio-object" onchange="updateSoundType('object')">
+                                        <span style="color: var(--primary-color);">Object</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Timeline View -->
+                        <div class="status-box" style="padding: 15px;">
+                            <h3 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+                                <span>🕐</span> Camera Timeline
+                                <span style="font-size: 11px; font-weight: normal; color: var(--text-secondary);">(History)</span>
+                            </h3>
+                            <div style="text-align: center;">
+                                <img id="timeline-image" src="/timeline_image" style="max-width: 100%; max-height: 200px; border: 1px solid var(--border-color); border-radius: 6px; background: #f0f0f0;" alt="Timeline" onerror="this.style.display='none'; document.getElementById('timeline-placeholder').style.display='block';">
+                                <div id="timeline-placeholder" style="display: none; padding: 30px; color: var(--text-secondary); font-size: 13px;">
+                                    Timeline will appear once cameras capture frames
+                                </div>
+                                <div style="margin-top: 8px; font-size: 11px; color: var(--text-secondary);">
+                                    Columns = Cameras | Rows = Time (newest at top)
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
             <!-- End Dashboard Tab -->
@@ -1842,6 +1897,180 @@
         </div>
 
         <script>
+            // ===== Audio Notification System =====
+            // Settings stored in localStorage and synced with DATA_FILE
+            let audioSettings = {
+                enabled: false,
+                volume: 0.5,
+                okSound: true,
+                ngSound: true,
+                objectSound: false
+            };
+            let audioContext = null;
+            let lastEventTimestamp = 0;
+
+            // Load audio settings from localStorage
+            function loadAudioSettings() {
+                const saved = localStorage.getItem('audioSettings');
+                if (saved) {
+                    try {
+                        audioSettings = { ...audioSettings, ...JSON.parse(saved) };
+                    } catch (e) {
+                        console.error('Error loading audio settings:', e);
+                    }
+                }
+                updateAudioUI();
+            }
+
+            // Save audio settings to localStorage
+            function saveAudioSettings() {
+                localStorage.setItem('audioSettings', JSON.stringify(audioSettings));
+                // Also save to server DATA_FILE
+                fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ audio: audioSettings })
+                }).catch(e => console.error('Error saving audio settings to server:', e));
+            }
+
+            // Update UI to reflect current settings
+            function updateAudioUI() {
+                const enabledEl = document.getElementById('audio-enabled');
+                const volumeEl = document.getElementById('audio-volume');
+                const okEl = document.getElementById('audio-ok');
+                const ngEl = document.getElementById('audio-ng');
+                const objectEl = document.getElementById('audio-object');
+                const volumeDisplay = document.getElementById('audio-volume-display');
+
+                if (enabledEl) enabledEl.checked = audioSettings.enabled;
+                if (volumeEl) volumeEl.value = audioSettings.volume * 100;
+                if (okEl) okEl.checked = audioSettings.okSound;
+                if (ngEl) ngEl.checked = audioSettings.ngSound;
+                if (objectEl) objectEl.checked = audioSettings.objectSound;
+                if (volumeDisplay) volumeDisplay.textContent = Math.round(audioSettings.volume * 100) + '%';
+            }
+
+            // Initialize Web Audio API (must be called after user interaction)
+            function initAudioContext() {
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
+            }
+
+            // Play a beep sound using Web Audio API
+            function playBeep(frequency, duration, type = 'sine') {
+                if (!audioContext || !audioSettings.enabled) return;
+
+                try {
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+
+                    oscillator.type = type;
+                    oscillator.frequency.value = frequency;
+
+                    gainNode.gain.setValueAtTime(audioSettings.volume, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
+
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + duration);
+                } catch (e) {
+                    console.error('Error playing beep:', e);
+                }
+            }
+
+            // Play OK sound (pleasant ascending tone)
+            function playOkSound() {
+                if (!audioSettings.okSound) return;
+                playBeep(523, 0.15, 'sine');  // C5
+                setTimeout(() => playBeep(659, 0.15, 'sine'), 100);  // E5
+                setTimeout(() => playBeep(784, 0.2, 'sine'), 200);  // G5
+            }
+
+            // Play NG sound (warning descending tone)
+            function playNgSound() {
+                if (!audioSettings.ngSound) return;
+                playBeep(440, 0.2, 'square');  // A4
+                setTimeout(() => playBeep(349, 0.2, 'square'), 150);  // F4
+                setTimeout(() => playBeep(262, 0.3, 'square'), 300);  // C4
+            }
+
+            // Play object detected sound (short beep)
+            function playObjectSound() {
+                if (!audioSettings.objectSound) return;
+                playBeep(880, 0.1, 'sine');  // A5
+            }
+
+            // Handle detection event from SSE
+            function handleDetectionEvent(event) {
+                if (!event || !audioSettings.enabled) return;
+
+                // Debounce: don't play sounds for same timestamp
+                if (event.timestamp === lastEventTimestamp) return;
+                lastEventTimestamp = event.timestamp;
+
+                // Initialize audio context on first event (browsers require user interaction)
+                initAudioContext();
+
+                switch (event.type) {
+                    case 'ok':
+                        playOkSound();
+                        break;
+                    case 'ng':
+                        playNgSound();
+                        break;
+                    case 'object':
+                    case 'datamatrix':
+                        playObjectSound();
+                        break;
+                }
+            }
+
+            // Toggle audio enabled
+            function toggleAudio() {
+                const enabledEl = document.getElementById('audio-enabled');
+                audioSettings.enabled = enabledEl.checked;
+                if (audioSettings.enabled) {
+                    initAudioContext();
+                    // Play test sound to confirm audio is working
+                    playBeep(440, 0.1, 'sine');
+                }
+                saveAudioSettings();
+            }
+
+            // Update volume
+            function updateVolume() {
+                const volumeEl = document.getElementById('audio-volume');
+                const volumeDisplay = document.getElementById('audio-volume-display');
+                audioSettings.volume = volumeEl.value / 100;
+                if (volumeDisplay) volumeDisplay.textContent = Math.round(audioSettings.volume * 100) + '%';
+                saveAudioSettings();
+            }
+
+            // Update sound type toggles
+            function updateSoundType(type) {
+                const el = document.getElementById('audio-' + type);
+                if (type === 'ok') audioSettings.okSound = el.checked;
+                else if (type === 'ng') audioSettings.ngSound = el.checked;
+                else if (type === 'object') audioSettings.objectSound = el.checked;
+                saveAudioSettings();
+            }
+
+            // Test audio button
+            function testAudio() {
+                initAudioContext();
+                const originalEnabled = audioSettings.enabled;
+                audioSettings.enabled = true;
+                playOkSound();
+                setTimeout(() => playNgSound(), 600);
+                audioSettings.enabled = originalEnabled;
+            }
+
             // Tab switching functionality
             function switchTab(tabName) {
                 // Hide all tab contents
@@ -2319,6 +2548,11 @@
                                 restartWarning.style.display = data.health.gradio_needs_restart ? 'inline' : 'none';
                             }
                         }
+
+                        // Handle detection events for audio notification
+                        if (data.detection_event && audioSettings.enabled) {
+                            handleDetectionEvent(data.detection_event);
+                        }
                     } catch (e) {
                         console.error('Error parsing SSE data:', e);
                     }
@@ -2335,6 +2569,31 @@
                     dataSource.textContent = 'LIVE';
                     dataSource.className = 'data-source serial';
                 };
+            }
+
+            // Refresh timeline image periodically (every 2 seconds)
+            let timelineRefreshInterval = null;
+            function startTimelineRefresh() {
+                if (timelineRefreshInterval) clearInterval(timelineRefreshInterval);
+                timelineRefreshInterval = setInterval(() => {
+                    const timelineImg = document.getElementById('timeline-image');
+                    const placeholder = document.getElementById('timeline-placeholder');
+                    if (timelineImg) {
+                        // Add timestamp to force browser to reload
+                        const newSrc = '/timeline_image?t=' + Date.now();
+                        const testImg = new Image();
+                        testImg.onload = () => {
+                            timelineImg.src = newSrc;
+                            timelineImg.style.display = 'block';
+                            if (placeholder) placeholder.style.display = 'none';
+                        };
+                        testImg.onerror = () => {
+                            timelineImg.style.display = 'none';
+                            if (placeholder) placeholder.style.display = 'block';
+                        };
+                        testImg.src = newSrc;
+                    }
+                }, 2000);
             }
 
             // Fetch health data (infrastructure status) - called periodically
@@ -4186,6 +4445,12 @@
 
             // Start Server-Sent Events for real-time status updates (replaces all polling)
             startStatusStream();
+
+            // Load audio settings from localStorage
+            loadAudioSettings();
+
+            // Start timeline image refresh
+            startTimelineRefresh();
 
             // Initial config fetch (once on page load)
             fetchConfig();

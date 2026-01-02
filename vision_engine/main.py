@@ -92,6 +92,103 @@ GRADIO_CONFIDENCE_THRESHOLD = 0.25
 latest_detections = []
 latest_detections_timestamp = 0.0
 
+# Timeline buffer for camera history view (lightweight alternative to stitching)
+# Stores small thumbnails of recent frames per camera
+from collections import deque
+import threading
+
+TIMELINE_THUMBNAIL_WIDTH = 120   # Small thumbnails for speed
+TIMELINE_THUMBNAIL_HEIGHT = 90
+TIMELINE_MAX_ROWS = 20          # Number of time points to show
+timeline_buffer = {}            # {camera_id: deque of (timestamp, thumbnail_bytes)}
+timeline_lock = threading.Lock()
+timeline_frame_counter = 0
+
+# Detection events queue for audio notifications
+detection_events = deque(maxlen=100)  # Store recent detection events
+detection_events_lock = threading.Lock()
+
+def add_detection_event(event_type: str, details: dict = None):
+    """Add a detection event for audio notification."""
+    with detection_events_lock:
+        detection_events.append({
+            "type": event_type,  # "ok", "ng", "datamatrix", "object"
+            "details": details or {},
+            "timestamp": time.time()
+        })
+
+def add_frame_to_timeline(camera_id: str, frame):
+    """Add a frame thumbnail to the timeline buffer."""
+    global timeline_frame_counter
+    if frame is None:
+        return
+    try:
+        # Resize to small thumbnail
+        thumb = cv2.resize(frame, (TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT))
+        # Encode as JPEG bytes (fast, small)
+        _, jpeg = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 50])
+
+        with timeline_lock:
+            if camera_id not in timeline_buffer:
+                timeline_buffer[camera_id] = deque(maxlen=TIMELINE_MAX_ROWS)
+            timeline_buffer[camera_id].append((time.time(), jpeg.tobytes()))
+            timeline_frame_counter += 1
+    except Exception as e:
+        logger.debug(f"Timeline add frame error: {e}")
+
+def get_timeline_composite():
+    """Generate a composite image showing all cameras over time.
+
+    Layout: columns = cameras, rows = time (newest at bottom)
+    Returns JPEG bytes or None.
+    """
+    with timeline_lock:
+        if not timeline_buffer:
+            return None
+
+        camera_ids = sorted(timeline_buffer.keys())
+        num_cameras = len(camera_ids)
+        if num_cameras == 0:
+            return None
+
+        # Find max rows across all cameras
+        max_rows = max(len(timeline_buffer[cid]) for cid in camera_ids)
+        if max_rows == 0:
+            return None
+
+        # Create composite image
+        composite_height = max_rows * TIMELINE_THUMBNAIL_HEIGHT
+        composite_width = num_cameras * TIMELINE_THUMBNAIL_WIDTH
+        composite = np.zeros((composite_height, composite_width, 3), dtype=np.uint8)
+        composite[:] = (40, 40, 40)  # Dark gray background
+
+        for col, cam_id in enumerate(camera_ids):
+            frames = list(timeline_buffer[cam_id])
+            # Pad with empty rows at top if needed
+            start_row = max_rows - len(frames)
+
+            for i, (ts, jpeg_bytes) in enumerate(frames):
+                row = start_row + i
+                try:
+                    # Decode thumbnail
+                    thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+                    if thumb is not None:
+                        y = row * TIMELINE_THUMBNAIL_HEIGHT
+                        x = col * TIMELINE_THUMBNAIL_WIDTH
+                        composite[y:y+TIMELINE_THUMBNAIL_HEIGHT, x:x+TIMELINE_THUMBNAIL_WIDTH] = thumb
+                except:
+                    pass
+
+        # Add camera labels at bottom
+        for col, cam_id in enumerate(camera_ids):
+            x = col * TIMELINE_THUMBNAIL_WIDTH + 5
+            y = composite_height - 5
+            cv2.putText(composite, f"Cam {cam_id}", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        # Encode final composite
+        _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        return jpeg.tobytes()
+
 # Database connection pool
 db_connection_pool = None
 
@@ -2173,8 +2270,19 @@ async def status_stream():
                         "redis": "connected" if (watcher_instance and watcher_instance.redis_connection and watcher_instance.redis_connection.redis_connection) else "disconnected",
                         "gradio_needs_restart": False,  # Will be updated if needed
                     },
+                    # Latest detection event for audio notification
+                    "detection_event": None,
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
+
+                # Check for new detection events
+                with detection_events_lock:
+                    if detection_events:
+                        # Get most recent event that's less than 2 seconds old
+                        for event in reversed(detection_events):
+                            if time.time() - event["timestamp"] < 2.0:
+                                current_data["detection_event"] = event
+                                break
 
                 # Only send if data changed or every 5 seconds as heartbeat
                 data_json = json.dumps(current_data)
@@ -2317,6 +2425,41 @@ async def video_feed_detections():
                 logger.error(f"Detection stream error: {e}")
                 time.sleep(1)
     return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.get("/timeline_feed")
+async def timeline_feed():
+    """MJPEG stream showing camera timeline (history view).
+
+    Shows a grid: columns = cameras, rows = time (newest at bottom).
+    Lightweight alternative to full stitching service.
+    """
+    def generate():
+        while True:
+            try:
+                composite = get_timeline_composite()
+                if composite:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + composite + b'\r\n')
+                time.sleep(0.5)  # Update 2 FPS for timeline
+            except Exception as e:
+                logger.error(f"Timeline feed error: {e}")
+                time.sleep(1)
+
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.get("/timeline_image")
+async def timeline_image():
+    """Single snapshot of the camera timeline grid."""
+    composite = get_timeline_composite()
+    if composite:
+        return Response(content=composite, media_type="image/jpeg")
+    else:
+        # Return placeholder
+        placeholder = np.zeros((180, 240, 3), dtype=np.uint8)
+        placeholder[:] = (60, 60, 60)
+        cv2.putText(placeholder, "No frames yet", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+        _, jpeg = cv2.imencode('.jpg', placeholder)
+        return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
 @app.get("/latest_detection_image")
 async def latest_detection_image():
@@ -4296,6 +4439,16 @@ def req_predict(image):
 
             logger.info(f"Cached {len(normalized_detections)} detections at timestamp {latest_detections_timestamp}")
 
+            # Add detection event for audio notification
+            if normalized_detections:
+                # Extract detection types for audio
+                detection_names = [d.get('name', 'unknown') for d in normalized_detections]
+                has_datamatrix = any('matrix' in n.lower() or 'dm' in n.lower() for n in detection_names)
+                add_detection_event(
+                    "datamatrix" if has_datamatrix else "object",
+                    {"count": len(normalized_detections), "classes": list(set(detection_names))}
+                )
+
             # Track inference time and update timestamp
             elapsed = (time.time() - start_time) * 1000  # Convert to ms
             inference_times.append(elapsed)
@@ -5342,7 +5495,11 @@ class ArduinoSocket:
                                 if cam and cam.success:
                                     # Track capture timestamp for FPS calculation
                                     capture_ts = time.time()
-                                    grabbed_frames.append((cam_id, cam.read()))
+                                    frame = cam.read()
+                                    grabbed_frames.append((cam_id, frame))
+
+                                    # Add to timeline buffer for history view
+                                    add_frame_to_timeline(str(cam_id), frame)
 
                                     # Store capture timestamp in Redis for FPS tracking
                                     try:
