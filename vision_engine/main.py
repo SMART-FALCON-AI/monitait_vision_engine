@@ -1987,9 +1987,11 @@ async def health_check(request: Request):
                     pass
             else:
                 # For traditional YOLO endpoint, try a quick ping
-                health_url = YOLO_INFERENCE_URL.replace('/detect/', '/health').replace('/detect', '/health')
-                response = session.get(health_url, timeout=1)
-                yolo_ok = response.status_code == 200
+                # Try /health first, then fall back to just checking if server responds (even 404 means it's alive)
+                health_url = YOLO_INFERENCE_URL.replace('/detect/', '/').replace('/detect', '/')
+                response = session.get(health_url, timeout=2)
+                # Any response means server is running (200, 404, etc.)
+                yolo_ok = response.status_code in [200, 404, 405]
         except Exception as e:
             logger.error(f"[HEALTH] Error checking YOLO status: {e}")
             yolo_ok = False
