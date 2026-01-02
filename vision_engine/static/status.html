@@ -767,17 +767,6 @@
                         <span style="font-size: 11px; color: var(--text-secondary); white-space: nowrap;">Last saved: <strong id="last-saved-time">Never</strong></span>
                         <span class="data-source" id="dataSource" style="font-size: 11px;">Loading...</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 6px; margin-left: auto;">
-                        <label for="refresh-interval" style="font-size: 11px; color: var(--text-secondary);">Refresh:</label>
-                        <select id="refresh-interval" class="control-input" style="width: auto; margin: 0; padding: 3px 6px; font-size: 11px;">
-                            <option value="100">0.1s</option>
-                            <option value="500" selected>0.5s</option>
-                            <option value="1000">1s</option>
-                            <option value="2000">2s</option>
-                            <option value="4000">4s</option>
-                            <option value="never">Never</option>
-                        </select>
-                    </div>
                 </div>
             </div>
 
@@ -1255,18 +1244,6 @@
                             <input type="number" class="control-input" id="downtime-threshold" min="1" value="10">
                             <button class="control-button" onclick="sendCommand('SET_DOWNTIME', document.getElementById('downtime-threshold').value)">Set Threshold</button>
                             <div class="control-response" id="cmd-SET_DOWNTIME-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Baud Rate</div>
-                            <select class="control-input" id="baud-rate">
-                                <option value="9600">9600</option>
-                                <option value="19200">19200</option>
-                                <option value="38400">38400</option>
-                                <option value="57600" selected>57600</option>
-                                <option value="115200">115200</option>
-                            </select>
-                            <button class="control-button" onclick="sendCommand('SET_BAUD_RATE', document.getElementById('baud-rate').value)">Set Baud Rate</button>
-                            <div class="control-response" id="cmd-SET_BAUD_RATE-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label">External Reset</div>
@@ -1858,101 +1835,10 @@
                         ℹ️ <strong>Note:</strong> Use the "💾 Save" button at the top of the page to save both service config and data file.
                     </div>
                 </div>
-
-                <div class="control-section">
-                    <h3>Watcher Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label">Downtime Threshold (seconds)</div>
-                            <input type="number" class="control-input" id="downtime-threshold" min="1" value="10">
-                            <button class="control-button" onclick="sendCommand('SET_DOWNTIME', document.getElementById('downtime-threshold').value)">Set Threshold</button>
-                            <div class="control-response" id="cmd-SET_DOWNTIME-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Baud Rate</div>
-                            <select class="control-input" id="baud-rate">
-                                <option value="9600">9600</option>
-                                <option value="19200">19200</option>
-                                <option value="38400">38400</option>
-                                <option value="57600" selected>57600</option>
-                                <option value="115200">115200</option>
-                            </select>
-                            <button class="control-button" onclick="sendCommand('SET_BAUD_RATE', document.getElementById('baud-rate').value)">Set Baud Rate</button>
-                            <div class="control-response" id="cmd-SET_BAUD_RATE-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">External Reset</div>
-                            <select class="control-input" id="external-reset">
-                                <option value="0">Off</option>
-                                <option value="1">On</option>
-                            </select>
-                            <button class="control-button" onclick="sendCommand('SET_EXTERNAL_RESET', document.getElementById('external-reset').value)">Set External Reset</button>
-                            <div class="control-response" id="cmd-SET_EXTERNAL_RESET-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Verbose Mode</div>
-                            <select class="control-input" id="verbose-mode">
-                                <option value="0">Off</option>
-                                <option value="1">On</option>
-                            </select>
-                            <button class="control-button" onclick="sendCommand('SET_VERBOSE', document.getElementById('verbose-mode').value)">Set Verbose Mode</button>
-                            <div class="control-response" id="cmd-SET_VERBOSE-response"></div>
-                        </div>
-                    </div>
-                    <div class="verbose-panel" style="margin-top: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Watcher Verbose Configuration (Read-only)</h4>
-                        <div class="verbose-grid">
-                            <div>
-                                <div class="verbose-item-label">OK Offset Delay (OOD)</div>
-                                <div class="verbose-item-value" id="v-ood">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">OK Duration Pulses (ODP)</div>
-                                <div class="verbose-item-value" id="v-odp">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">OK Duration Percent (ODL)</div>
-                                <div class="verbose-item-value" id="v-odl">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">OK Encoder Factor (OEF)</div>
-                                <div class="verbose-item-value" id="v-oef">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">NG Offset Delay (NOD)</div>
-                                <div class="verbose-item-value" id="v-nod">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">NG Duration Pulses (NDP)</div>
-                                <div class="verbose-item-value" id="v-ndp">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">NG Duration Percent (NDL)</div>
-                                <div class="verbose-item-value" id="v-ndl">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">NG Encoder Factor (NEF)</div>
-                                <div class="verbose-item-value" id="v-nef">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">External Reset (EXT)</div>
-                                <div class="verbose-item-value" id="v-ext">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">Baud Rate (BUD)</div>
-                                <div class="verbose-item-value" id="v-bud">-</div>
-                            </div>
-                            <div>
-                                <div class="verbose-item-label">Downtime Threshold (DWT)</div>
-                                <div class="verbose-item-value" id="v-dwt">-</div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             </div>
             <!-- End Advanced Tab -->
 
-            <p class="timestamp-footer" id="refresh-footer">Page auto-refreshes every 0.5 seconds</p>
+            <p class="timestamp-footer" id="refresh-footer">Real-time updates via Server-Sent Events</p>
         </div>
 
         <script>
@@ -2290,178 +2176,165 @@
         </script>
 
         <script>
-            function fetchStatus() {
-                // Fetch health data
+            // Update UI with status data (used by SSE stream)
+            function updateStatusUI(data) {
+                document.getElementById('encoder-value').textContent = data.encoder_value || 0;
+                document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
+                document.getElementById('pps-value').textContent = data.pps || 0;
+                document.getElementById('ok-counter').textContent = data.ok_counter || 0;
+                document.getElementById('ng-counter').textContent = data.ng_counter || 0;
+                document.getElementById('downtime-value').textContent = data.downtime_seconds || 0;
+                document.getElementById('analog-value').textContent = data.analog_value || 0;
+                document.getElementById('power-value').textContent = data.power_value || 0;
+                const shipmentText = document.getElementById('shipment-text');
+                if (shipmentText) {
+                    shipmentText.textContent = data.shipment || 'no_shipment';
+                }
+                document.getElementById('ejector-queue').textContent = data.ejector_queue_length || 0;
+                document.getElementById('ejector-running').textContent = data.ejector_running ? 'Yes' : 'No';
+                document.getElementById('ejector-enabled').textContent = data.ejector_enabled ? 'Yes' : 'No';
+                document.getElementById('ejector-offset').textContent = data.ejector_offset || 0;
+                document.getElementById('timestamp').textContent = data.timestamp;
+
+                // Update movement status
+                const movementIndicator = document.getElementById('movement-indicator');
+                const movementValue = document.getElementById('movement-value');
+                if (data.is_moving) {
+                    movementIndicator.className = 'movement-indicator movement-moving';
+                    movementValue.textContent = 'Moving';
+                } else {
+                    movementIndicator.className = 'movement-indicator movement-stopped';
+                    movementValue.textContent = 'Stopped';
+                }
+
+                // Update U/B/Warning status circles
+                const status = data.status || {};
+                const uEl = document.getElementById('U-status');
+                const bEl = document.getElementById('B-status');
+                const wEl = document.getElementById('warning-status');
+                if (uEl) uEl.className = 'status-circle U' + (status.U ? ' active' : '');
+                if (bEl) bEl.className = 'status-circle B' + (status.B ? ' active' : '');
+                if (wEl) wEl.className = 'status-circle warning' + (status.warning ? ' active' : '');
+
+                // Update serial device status
+                const serialDevice = data.serial_device || {};
+                const serialDot = document.getElementById('serial-device-dot');
+                const serialText = document.getElementById('serial-device-text');
+                const serialInfo = document.getElementById('serial-device-info');
+                if (serialDot && serialText && serialInfo) {
+                    if (serialDevice.connected) {
+                        serialDot.style.background = '#28a745';
+                        serialText.textContent = 'Connected';
+                        serialText.style.color = '#28a745';
+                        serialInfo.textContent = `${serialDevice.port} @ ${serialDevice.baudrate} (${serialDevice.mode})`;
+                    } else {
+                        serialDot.style.background = '#dc3545';
+                        serialText.textContent = 'Disconnected';
+                        serialText.style.color = '#dc3545';
+                        serialInfo.textContent = `${serialDevice.port} not accessible`;
+                    }
+                }
+
+                // Update connection status
+                const connectionStatus = document.getElementById('connection-status');
+                const deviceStatus = document.getElementById('device-status');
+                if (serialDevice.connected) {
+                    connectionStatus.textContent = 'Connected';
+                    connectionStatus.className = 'status-box-value connected';
+                    deviceStatus.textContent = 'Device connected and accessible';
+                    deviceStatus.className = 'device-status connected';
+                } else {
+                    connectionStatus.textContent = 'Camera Only';
+                    connectionStatus.className = 'status-box-value';
+                    deviceStatus.textContent = 'Serial not connected';
+                    deviceStatus.className = 'device-status';
+                }
+
+                // Update verbose configuration values
+                const v = data.verbose_data || {};
+                const setVerbose = (id, key) => {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = (v[key] === undefined || v[key] === null) ? '-' : v[key];
+                };
+                setVerbose('v-ood', 'OOD');
+                setVerbose('v-odp', 'ODP');
+                setVerbose('v-odl', 'ODL');
+                setVerbose('v-oef', 'OEF');
+                setVerbose('v-nod', 'NOD');
+                setVerbose('v-ndp', 'NDP');
+                setVerbose('v-ndl', 'NDL');
+                setVerbose('v-nef', 'NEF');
+                setVerbose('v-ext', 'EXT');
+                setVerbose('v-bud', 'BUD');
+                setVerbose('v-dwt', 'DWT');
+            }
+
+            // Server-Sent Events for real-time status updates
+            let statusEventSource = null;
+
+            function startStatusStream() {
+                if (statusEventSource) {
+                    statusEventSource.close();
+                }
+
+                statusEventSource = new EventSource('/api/status/stream');
+                const dataSource = document.getElementById('dataSource');
+
+                statusEventSource.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        updateStatusUI(data);
+                    } catch (e) {
+                        console.error('Error parsing SSE data:', e);
+                    }
+                };
+
+                statusEventSource.onerror = function(error) {
+                    console.log('SSE reconnecting...');
+                    dataSource.textContent = 'RECONNECTING';
+                    dataSource.className = 'data-source';
+                };
+
+                statusEventSource.onopen = function() {
+                    console.log('SSE connected');
+                    dataSource.textContent = 'LIVE';
+                    dataSource.className = 'data-source serial';
+                };
+            }
+
+            // Fetch health data (infrastructure status) - called periodically
+            function fetchHealth() {
                 fetch('/health')
                     .then(response => response.json())
                     .then(data => {
-                        // Update connection status
-                        const connectionStatus = document.getElementById('connection-status');
-                        const deviceStatus = document.getElementById('device-status');
-                        const dataSource = document.getElementById('dataSource');
-
-                        if (data.status === 'healthy') {
-                            connectionStatus.textContent = 'Connected';
-                            connectionStatus.className = 'status-box-value connected';
-                            deviceStatus.textContent = 'Device connected and accessible';
-                            deviceStatus.className = 'device-status connected';
-                            dataSource.textContent = 'ONLINE';
-                            dataSource.className = 'data-source serial';
-                        } else {
-                            connectionStatus.textContent = 'Disconnected';
-                            connectionStatus.className = 'status-box-value disconnected';
-                            deviceStatus.textContent = 'Device not connected';
-                            deviceStatus.className = 'device-status error';
-                            dataSource.textContent = 'OFFLINE';
-                            dataSource.className = 'data-source none';
-                        }
-
-                        document.getElementById('timestamp').textContent = data.timestamp;
-
-                        // Check if Gradio needs restart
                         const restartWarning = document.getElementById('gradio-restart-warning');
-                        if (restartWarning && data.gradio_needs_restart) {
-                            restartWarning.style.display = 'inline';
-                        } else if (restartWarning) {
-                            restartWarning.style.display = 'none';
+                        if (restartWarning) {
+                            restartWarning.style.display = data.gradio_needs_restart ? 'inline' : 'none';
                         }
-
-                        // Update camera table
                         if (data.cameras) {
                             updateCameraTable(data.cameras);
                         }
-                    })
-                    .catch(error => {
-                        console.error('Error fetching health:', error);
-                        document.getElementById('dataSource').textContent = 'ERROR';
-                        document.getElementById('dataSource').className = 'data-source none';
-                    });
-
-                // Fetch API status data
-                fetch('/api/status')
-                    .then(response => response.json())
-                    .then(data => {
-                        document.getElementById('encoder-value').textContent = data.encoder_value || 0;
-                        document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
-                        document.getElementById('pps-value').textContent = data.pps || 0;
-                        document.getElementById('ok-counter').textContent = data.ok_counter || 0;
-                        document.getElementById('ng-counter').textContent = data.ng_counter || 0;
-                        document.getElementById('downtime-value').textContent = data.downtime_seconds || 0;
-                        document.getElementById('analog-value').textContent = data.analog_value || 0;
-                        document.getElementById('power-value').textContent = data.power_value || 0;
-                        const shipmentText = document.getElementById('shipment-text');
-                        if (shipmentText) {
-                            shipmentText.textContent = data.shipment || 'no_shipment';
-                        }
-                        document.getElementById('ejector-queue').textContent = data.ejector_queue_length || 0;
-                        document.getElementById('ejector-running').textContent = data.ejector_running ? 'Yes' : 'No';
-                        document.getElementById('ejector-enabled').textContent = data.ejector_enabled ? 'Yes' : 'No';
-                        document.getElementById('ejector-offset').textContent = data.ejector_offset || 0;
-
-                        // Update movement status
-                        const movementIndicator = document.getElementById('movement-indicator');
-                        const movementValue = document.getElementById('movement-value');
-                        if (data.is_moving) {
-                            movementIndicator.className = 'movement-indicator movement-moving';
-                            movementValue.textContent = 'Moving';
-                        } else {
-                            movementIndicator.className = 'movement-indicator movement-stopped';
-                            movementValue.textContent = 'Stopped';
-                        }
-
-                        // Update U/B/Warning status circles from STS bits (if provided)
-                        const status = data.status || {};
-                        const uActive = !!status.U;
-                        const bActive = !!status.B;
-                        const warningActive = !!status.warning;
-
-                        const uEl = document.getElementById('U-status');
-                        const bEl = document.getElementById('B-status');
-                        const wEl = document.getElementById('warning-status');
-
-                        if (uEl) {
-                            uEl.className = 'status-circle U' + (uActive ? ' active' : '');
-                        }
-                        if (bEl) {
-                            bEl.className = 'status-circle B' + (bActive ? ' active' : '');
-                        }
-                        if (wEl) {
-                            wEl.className = 'status-circle warning' + (warningActive ? ' active' : '');
-                        }
-
-                        // Update serial device status
-                        const serialDevice = data.serial_device || {};
-                        const serialConnected = serialDevice.connected || false;
-                        const serialDot = document.getElementById('serial-device-dot');
-                        const serialText = document.getElementById('serial-device-text');
-                        const serialInfo = document.getElementById('serial-device-info');
-
-                        if (serialDot && serialText && serialInfo) {
-                            if (serialConnected) {
-                                serialDot.style.background = '#28a745';
-                                serialText.textContent = 'Connected';
-                                serialText.style.color = '#28a745';
-                                serialInfo.textContent = `${serialDevice.port} @ ${serialDevice.baudrate} (${serialDevice.mode})`;
-                            } else {
-                                serialDot.style.background = '#dc3545';
-                                serialText.textContent = 'Disconnected';
-                                serialText.style.color = '#dc3545';
-                                serialInfo.textContent = `${serialDevice.port} not accessible (camera-only mode)`;
-                            }
-                        }
-
-                        // Update infrastructure status (Redis and YOLO)
                         const updateInfraStatus = (prefix, available) => {
                             const dot = document.getElementById(`${prefix}-dot`);
                             const text = document.getElementById(`${prefix}-text`);
                             if (dot && text) {
-                                if (available) {
-                                    dot.style.background = '#28a745';
-                                    text.textContent = 'Connected';
-                                    text.style.color = '#28a745';
-                                } else {
-                                    dot.style.background = '#6c757d';
-                                    text.textContent = 'Not Available';
-                                    text.style.color = '#6c757d';
-                                }
+                                dot.style.background = available ? '#28a745' : '#6c757d';
+                                text.textContent = available ? 'Connected' : 'Not Available';
+                                text.style.color = available ? '#28a745' : '#6c757d';
                             }
                         };
-
-                        // Note: We'll get redis/yolo status from /health endpoint
-                        fetch('/health')
-                            .then(r => r.json())
-                            .then(health => {
-                                updateInfraStatus('redis', health.redis === 'connected');
-                                updateInfraStatus('yolo', health.yolo === 'connected');
-                            })
-                            .catch(() => {
-                                updateInfraStatus('redis', false);
-                                updateInfraStatus('yolo', false);
-                            });
-
-                        // Update verbose configuration values (if present)
-                        const v = data.verbose_data || {};
-                        const setVerbose = (id, key) => {
-                            const el = document.getElementById(id);
-                            if (el) {
-                                const val = v[key];
-                                el.textContent = (val === undefined || val === null) ? '-' : val;
-                            }
-                        };
-                        setVerbose('v-ood', 'OOD');
-                        setVerbose('v-odp', 'ODP');
-                        setVerbose('v-odl', 'ODL');
-                        setVerbose('v-oef', 'OEF');
-                        setVerbose('v-nod', 'NOD');
-                        setVerbose('v-ndp', 'NDP');
-                        setVerbose('v-ndl', 'NDL');
-                        setVerbose('v-nef', 'NEF');
-                        setVerbose('v-ext', 'EXT');
-                        setVerbose('v-bud', 'BUD');
-                        setVerbose('v-dwt', 'DWT');
+                        updateInfraStatus('redis', data.redis === 'connected');
+                        updateInfraStatus('yolo', data.yolo === 'connected');
                     })
-                    .catch(error => console.error('Error fetching API status:', error));
+                    .catch(error => console.error('Error fetching health:', error));
+            }
 
+            // Legacy polling fallback (not used with SSE)
+            function fetchStatus() {
+                fetch('/api/status')
+                    .then(response => response.json())
+                    .then(data => updateStatusUI(data))
+                    .catch(error => console.error('Error fetching status:', error));
             }
 
             // Separate function to fetch config - only called once on page load
@@ -2787,32 +2660,6 @@
                     }
                 }
             }
-
-            // Refresh interval management
-            let refreshIntervalId = null;
-
-            function updateRefreshInterval() {
-                const select = document.getElementById('refresh-interval');
-                const footer = document.getElementById('refresh-footer');
-                const value = select.value;
-
-                // Clear existing interval
-                if (refreshIntervalId) {
-                    clearInterval(refreshIntervalId);
-                    refreshIntervalId = null;
-                }
-
-                if (value === 'never') {
-                    footer.textContent = 'Auto-refresh disabled';
-                } else {
-                    const seconds = parseInt(value) / 1000;
-                    footer.textContent = `Page auto-refreshes every ${seconds} second${seconds !== 1 ? 's' : ''}`;
-                    refreshIntervalId = setInterval(fetchStatus, parseInt(value));
-                }
-            }
-
-            // Listen for refresh interval changes
-            document.getElementById('refresh-interval').addEventListener('change', updateRefreshInterval);
 
             // ===== CAMERA MONITORING FUNCTIONS =====
             // Direct camera control through counter service API
@@ -4309,18 +4156,21 @@
             fetchInferenceStats();
             setInterval(fetchInferenceStats, 3000);
 
-            // Initial fetch
-            fetchStatus();
-            fetchConfig();  // Only fetch config once on page load
+            // Start Server-Sent Events for real-time status updates
+            startStatusStream();
+
+            // Fetch health data periodically (for infrastructure status)
+            fetchHealth();
+            setInterval(fetchHealth, 5000);
+
+            // Initial config fetch (once on page load)
+            fetchConfig();
             loadDataFile();
-            refreshStates();  // Load state management data
-            refreshInferenceConfig();  // Load inference module data
+            refreshStates();
+            refreshInferenceConfig();
 
             // Set default API type fields (Gradio with HuggingFace URL)
             updateAPITypeFields();
-
-            // Start with default refresh interval (0.5s)
-            updateRefreshInterval();
         </script>
     </body>
 </html>

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh:*)",
+      "Bash(echo:*)",
+      "Bash(~/.ssh/config)",
+      "Bash(cat:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd USB camera auto-detection and simplify inference module management\n\n- Auto-detect USB cameras from /dev/video* when no env vars are set\n- Store camera_metadata for USB cameras at initialization\n- Include camera names and types in saved configuration\n- Simplify inference UI from pipeline-based to module-based approach\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(git commit:*)",
+      "Bash(scp:*)"
+    ]
+  }
+}

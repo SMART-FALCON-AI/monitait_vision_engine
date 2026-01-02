@@ -2094,11 +2094,87 @@ async def api_status():
                 "DWT": getattr(watcher_instance, "downtime_threshold", 0) if watcher_instance else 0,
             },
             "data": watcher_instance.data if watcher_instance else {},
+            "serial_device": {
+                "connected": getattr(watcher_instance, "serial_available", False) if watcher_instance else False,
+                "port": getattr(watcher_instance, "serial_port", WATCHER_USB) if watcher_instance else WATCHER_USB,
+                "baudrate": getattr(watcher_instance, "serial_baudrate", SERIAL_BAUDRATE) if watcher_instance else SERIAL_BAUDRATE,
+                "mode": getattr(watcher_instance, "serial_mode", SERIAL_MODE) if watcher_instance else SERIAL_MODE,
+            },
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
     except Exception as e:
         logger.error(f"API status error: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.get("/api/status/stream")
+async def status_stream():
+    """Server-Sent Events stream for real-time status updates."""
+    def generate():
+        last_data = None
+        while True:
+            try:
+                # Build current status data
+                current_data = {
+                    "encoder_value": watcher_instance.encoder_value if watcher_instance else 0,
+                    "pps": getattr(watcher_instance, "pulses_per_second", 0) if watcher_instance else 0,
+                    "ppm": getattr(watcher_instance, "pulses_per_minute", 0) if watcher_instance else 0,
+                    "downtime_seconds": getattr(watcher_instance, "downtime_seconds", 0) if watcher_instance else 0,
+                    "ok_counter": getattr(watcher_instance, "ok_counter", 0) if watcher_instance else 0,
+                    "ng_counter": getattr(watcher_instance, "ng_counter", 0) if watcher_instance else 0,
+                    "analog_value": getattr(watcher_instance, "analog_value", 0) if watcher_instance else 0,
+                    "power_value": getattr(watcher_instance, "power_value", 0) if watcher_instance else 0,
+                    "is_moving": watcher_instance.is_moving if watcher_instance else False,
+                    "shipment": watcher_instance.shipment if watcher_instance else "no_shipment",
+                    "ejector_queue_length": len(watcher_instance.ejection_queue) if watcher_instance else 0,
+                    "ejector_running": watcher_instance.ejector_running if watcher_instance else False,
+                    "status": {
+                        "U": getattr(watcher_instance, "u_status", False) if watcher_instance else False,
+                        "B": getattr(watcher_instance, "b_status", False) if watcher_instance else False,
+                        "warning": getattr(watcher_instance, "warning_status", False) if watcher_instance else False,
+                        "raw": getattr(watcher_instance, "status_value", 0) if watcher_instance else 0,
+                    },
+                    "verbose_data": {
+                        "OOD": getattr(watcher_instance, "ok_offset_delay", 0) if watcher_instance else 0,
+                        "ODP": getattr(watcher_instance, "ok_duration_pulses", 0) if watcher_instance else 0,
+                        "ODL": getattr(watcher_instance, "ok_duration_percent", 0) if watcher_instance else 0,
+                        "OEF": getattr(watcher_instance, "ok_encoder_factor", 0) if watcher_instance else 0,
+                        "NOD": getattr(watcher_instance, "ng_offset_delay", 0) if watcher_instance else 0,
+                        "NDP": getattr(watcher_instance, "ng_duration_pulses", 0) if watcher_instance else 0,
+                        "NDL": getattr(watcher_instance, "ng_duration_percent", 0) if watcher_instance else 0,
+                        "NEF": getattr(watcher_instance, "ng_encoder_factor", 0) if watcher_instance else 0,
+                        "EXT": getattr(watcher_instance, "external_reset", 0) if watcher_instance else 0,
+                        "BUD": getattr(watcher_instance, "baud_rate", SERIAL_BAUDRATE) if watcher_instance else SERIAL_BAUDRATE,
+                        "DWT": getattr(watcher_instance, "downtime_threshold", 0) if watcher_instance else 0,
+                    },
+                    "serial_device": {
+                        "connected": getattr(watcher_instance, "serial_available", False) if watcher_instance else False,
+                        "port": getattr(watcher_instance, "serial_port", WATCHER_USB) if watcher_instance else WATCHER_USB,
+                        "baudrate": getattr(watcher_instance, "serial_baudrate", SERIAL_BAUDRATE) if watcher_instance else SERIAL_BAUDRATE,
+                        "mode": getattr(watcher_instance, "serial_mode", SERIAL_MODE) if watcher_instance else SERIAL_MODE,
+                    },
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+
+                # Only send if data changed or every 5 seconds as heartbeat
+                data_json = json.dumps(current_data)
+                if data_json != last_data:
+                    yield f"data: {data_json}\n\n"
+                    last_data = data_json
+
+                time.sleep(0.1)  # Check for changes every 100ms
+            except Exception as e:
+                logger.error(f"SSE status stream error: {e}")
+                time.sleep(1)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 @app.get("/video_feed")
 async def video_feed():
@@ -2572,13 +2648,19 @@ async def update_config(config: Dict[str, Any]):
         # Shipment ID
         if "shipment" in config:
             shipment_id = str(config["shipment"])
-            # Store in Redis
-            if redis_client:
-                redis_client.set("shipment", shipment_id)
+            # Store in Redis and update watcher instance
+            if watcher_instance and watcher_instance.redis_connection:
+                watcher_instance.redis_connection.redis_connection.set("shipment", shipment_id)
+                watcher_instance.shipment = shipment_id
                 updated["shipment"] = shipment_id
                 logger.info(f"Updated shipment ID to {shipment_id}")
+            elif watcher_instance:
+                # No Redis, just update watcher instance
+                watcher_instance.shipment = shipment_id
+                updated["shipment"] = shipment_id
+                logger.info(f"Updated shipment ID to {shipment_id} (no Redis)")
             else:
-                logger.warning("Redis not available, cannot update shipment ID")
+                logger.warning("Watcher not available, cannot update shipment ID")
 
         if not updated:
             raise HTTPException(status_code=400, detail="No valid configuration keys provided")
