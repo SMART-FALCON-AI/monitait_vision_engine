@@ -1838,7 +1838,7 @@
             </div>
             <!-- End Advanced Tab -->
 
-            <p class="timestamp-footer" id="refresh-footer">Real-time updates via Server-Sent Events</p>
+            <p class="timestamp-footer" id="refresh-footer">Real-time updates via SSE</p>
         </div>
 
         <script>
@@ -2284,6 +2284,41 @@
                     try {
                         const data = JSON.parse(event.data);
                         updateStatusUI(data);
+
+                        // Update cameras from SSE
+                        if (data.cameras) {
+                            updateCameraTable(data.cameras);
+                        }
+
+                        // Update inference stats from SSE
+                        if (data.inference) {
+                            const inf = data.inference;
+                            const avgTimeEl = document.getElementById('avg-inference-time');
+                            const avgIntervalEl = document.getElementById('avg-frame-interval');
+                            const fpsEl = document.getElementById('inference-fps');
+                            if (avgTimeEl) avgTimeEl.textContent = inf.avg_time_ms.toFixed(1) + ' ms';
+                            if (avgIntervalEl) avgIntervalEl.textContent = inf.avg_interval_ms.toFixed(1) + ' ms';
+                            if (fpsEl) fpsEl.textContent = inf.fps.toFixed(1) + ' FPS';
+                        }
+
+                        // Update health/infrastructure from SSE
+                        if (data.health) {
+                            const updateInfraStatus = (prefix, available) => {
+                                const dot = document.getElementById(`${prefix}-dot`);
+                                const text = document.getElementById(`${prefix}-text`);
+                                if (dot && text) {
+                                    dot.style.background = available ? '#28a745' : '#6c757d';
+                                    text.textContent = available ? 'Connected' : 'Not Available';
+                                    text.style.color = available ? '#28a745' : '#6c757d';
+                                }
+                            };
+                            updateInfraStatus('redis', data.health.redis === 'connected');
+
+                            const restartWarning = document.getElementById('gradio-restart-warning');
+                            if (restartWarning) {
+                                restartWarning.style.display = data.health.gradio_needs_restart ? 'inline' : 'none';
+                            }
+                        }
                     } catch (e) {
                         console.error('Error parsing SSE data:', e);
                     }
@@ -4089,12 +4124,9 @@
                 }
             }
 
-            // Start camera monitoring
+            // Initial camera status fetch (SSE will handle updates)
             fetchCameraStatus();
             checkServiceConfigStatus();  // Check if saved service config exists
-            cameraRefreshInterval = setInterval(() => {
-                fetchCameraStatus();
-            }, 3000);  // Refresh camera data every 3 seconds
 
             // Fetch and update inference stats
             async function fetchInferenceStats() {
@@ -4152,16 +4184,8 @@
                 }
             }
 
-            // Refresh inference stats every 3 seconds
-            fetchInferenceStats();
-            setInterval(fetchInferenceStats, 3000);
-
-            // Start Server-Sent Events for real-time status updates
+            // Start Server-Sent Events for real-time status updates (replaces all polling)
             startStatusStream();
-
-            // Fetch health data periodically (for infrastructure status)
-            fetchHealth();
-            setInterval(fetchHealth, 5000);
 
             // Initial config fetch (once on page load)
             fetchConfig();

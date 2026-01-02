@@ -2152,6 +2152,27 @@ async def status_stream():
                         "baudrate": getattr(watcher_instance, "serial_baudrate", SERIAL_BAUDRATE) if watcher_instance else SERIAL_BAUDRATE,
                         "mode": getattr(watcher_instance, "serial_mode", SERIAL_MODE) if watcher_instance else SERIAL_MODE,
                     },
+                    # Camera status
+                    "cameras": {
+                        name: {
+                            "active": hasattr(cam, 'frame') and cam.frame is not None,
+                            "name": getattr(cam, 'name', name),
+                            "type": getattr(cam, 'camera_type', 'unknown'),
+                        }
+                        for name, cam in (watcher_instance.cameras.items() if watcher_instance and watcher_instance.cameras else {})
+                    },
+                    # Inference stats
+                    "inference": {
+                        "avg_time_ms": sum(inference_times) / len(inference_times) if inference_times else 0,
+                        "avg_interval_ms": sum(frame_intervals) / len(frame_intervals) if frame_intervals else 0,
+                        "fps": 1000.0 / (sum(frame_intervals) / len(frame_intervals)) if frame_intervals and sum(frame_intervals) > 0 else 0,
+                        "samples": len(inference_times),
+                    },
+                    # Health status
+                    "health": {
+                        "redis": "connected" if (watcher_instance and watcher_instance.redis_connection and watcher_instance.redis_connection.redis_connection) else "disconnected",
+                        "gradio_needs_restart": False,  # Will be updated if needed
+                    },
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
 
