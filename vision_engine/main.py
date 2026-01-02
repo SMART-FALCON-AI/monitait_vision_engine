@@ -3375,31 +3375,46 @@ async def delete_model(model_id: str):
 
 @app.get("/api/gradio/models")
 async def get_gradio_models(url: str):
-    """Fetch available models from a Gradio API endpoint (HuggingFace Spaces compatible)."""
+    """Fetch available models from a Gradio/FastAPI endpoint (HuggingFace Spaces compatible)."""
     try:
         base_url = url.rstrip('/')
         models = []
 
-        # For HuggingFace Spaces, try the /api endpoint first
-        # Format: https://user-space.hf.space/ -> https://user-space.hf.space/api/
+        # Try multiple endpoints in order of preference
         endpoints_to_try = [
-            f"{base_url}/api/",  # Gradio 4.x API info
-            f"{base_url}/info",  # Legacy Gradio
-            f"{base_url}/config",  # Gradio config
+            (f"{base_url}/models", "fastapi_models"),  # Our unified API format (hg-codes api.py)
+            (f"{base_url}/", "root"),  # Root endpoint with models list
+            (f"{base_url}/api/", "gradio_api"),  # Gradio 4.x API info
+            (f"{base_url}/info", "gradio_info"),  # Legacy Gradio
+            (f"{base_url}/config", "gradio_config"),  # Gradio config
         ]
 
-        for endpoint in endpoints_to_try:
+        for endpoint, source in endpoints_to_try:
             try:
                 response = requests.get(endpoint, timeout=10)
                 if response.status_code == 200:
-                    data = response.json()
+                    try:
+                        data = response.json()
+                    except:
+                        continue  # Not JSON, skip
+
+                    # Our unified FastAPI format: {"models": {"key": "Display Name"}}
+                    if "models" in data and isinstance(data["models"], dict):
+                        # Return display names (values)
+                        models = list(data["models"].values())
+                        if models:
+                            return JSONResponse(content={"models": models, "source": source})
+
+                    # Our unified FastAPI format: {"models": ["name1", "name2"]} or root with models list
+                    if "models" in data and isinstance(data["models"], list):
+                        return JSONResponse(content={"models": data["models"], "source": source})
 
                     # Gradio 4.x API format - look for named_endpoints
                     if "named_endpoints" in data:
                         for ep_name in data["named_endpoints"]:
                             models.append(ep_name.strip('/'))
                         if models:
-                            return JSONResponse(content={"models": models, "source": "api"})
+                            return JSONResponse(content={"models": models, "source": source})
 
                     # Check for components with choices (dropdowns)
                     if "components" in data:
@@ -3409,17 +3424,13 @@ async def get_gradio_models(url: str):
                                 if isinstance(choices, list):
                                     models.extend([c if isinstance(c, str) else c[0] for c in choices])
                         if models:
-                            return JSONResponse(content={"models": models, "source": "config"})
+                            return JSONResponse(content={"models": models, "source": source})
 
-                    # Direct models key
-                    if "models" in data:
-                        return JSONResponse(content={"models": data["models"], "source": "info"})
             except Exception as e:
                 logger.debug(f"Endpoint {endpoint} failed: {e}")
                 continue
 
         # Try to infer from common patterns
-        # For HuggingFace DataMatrix reader, the model name is usually the function name
         if "datamatrix" in base_url.lower() or "data-matrix" in base_url.lower():
             models = ["Data Matrix", "predict"]
         else:
