@@ -1497,10 +1497,12 @@
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Model Name (for Gradio)</div>
-                                    <select class="control-input" id="model-gradio-name-input">
-                                        <option value="N/A">N/A</option>
-                                        <option value="Data Matrix">Data Matrix</option>
-                                    </select>
+                                    <input type="text" class="control-input" id="model-gradio-name-input" list="model-suggestions" placeholder="e.g., Data Matrix, predict" value="Data Matrix">
+                                    <datalist id="model-suggestions">
+                                        <option value="Data Matrix">
+                                        <option value="predict">
+                                        <option value="N/A">
+                                    </datalist>
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Min Confidence (0-1)</div>
@@ -3803,7 +3805,8 @@
 
             async function fetchModelsFromGradio() {
                 const url = document.getElementById('model-url-input').value.trim();
-                const select = document.getElementById('model-gradio-name-input');
+                const input = document.getElementById('model-gradio-name-input');
+                const datalist = document.getElementById('model-suggestions');
                 const btn = event.target;
 
                 if (!url) {
@@ -3821,22 +3824,28 @@
                     const data = await response.json();
 
                     if (data.models && data.models.length > 0) {
-                        select.innerHTML = '';
+                        // Update datalist with fetched models
+                        datalist.innerHTML = '';
                         data.models.forEach(model => {
                             const option = document.createElement('option');
                             option.value = model;
-                            option.textContent = model + (data.note ? ' *' : '');
-                            select.appendChild(option);
+                            datalist.appendChild(option);
                         });
+                        // Set first model as default value
+                        input.value = data.models[0];
+
                         if (data.note) {
                             console.log('Note:', data.note);
                         }
+                        if (data.source) {
+                            console.log('Models fetched from:', data.source);
+                        }
                     } else {
-                        alert('No models found from Gradio API');
+                        alert('No models found. You can type the model name manually.');
                     }
                 } catch (error) {
                     console.error('Error fetching models:', error);
-                    alert('Failed to fetch models: ' + error.message);
+                    alert('Failed to fetch models. You can type the model name manually.');
                 } finally {
                     btn.textContent = originalText;
                     btn.disabled = false;
@@ -3845,12 +3854,15 @@
 
             function handleModelTypeChange() {
                 const type = document.getElementById('model-type-input').value;
-                const modelSelect = document.getElementById('model-gradio-name-input');
+                const modelInput = document.getElementById('model-gradio-name-input');
+                const datalist = document.getElementById('model-suggestions');
 
                 if (type === 'yolo') {
-                    modelSelect.innerHTML = '<option value="N/A">N/A</option>';
+                    modelInput.value = 'N/A';
+                    datalist.innerHTML = '<option value="N/A">';
                 } else if (type === 'gradio') {
-                    modelSelect.innerHTML = '<option value="N/A">N/A</option><option value="Data Matrix">Data Matrix</option>';
+                    modelInput.value = 'Data Matrix';
+                    datalist.innerHTML = '<option value="Data Matrix"><option value="predict"><option value="N/A">';
                 }
             }
 
