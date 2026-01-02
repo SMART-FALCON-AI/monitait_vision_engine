@@ -1386,10 +1386,10 @@
                                 </span>
                             </div>
                             <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-weight: bold;">YOLO:</span>
-                                <span id="yolo-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
-                                    <span id="yolo-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
-                                    <span id="yolo-text">Checking...</span>
+                                <span style="font-weight: bold;">Pipeline:</span>
+                                <span id="pipeline-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
+                                    <span id="pipeline-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
+                                    <span id="pipeline-text">Checking...</span>
                                 </span>
                             </div>
                         </div>
@@ -2616,17 +2616,52 @@
                         if (data.cameras) {
                             updateCameraTable(data.cameras);
                         }
-                        const updateInfraStatus = (prefix, available) => {
-                            const dot = document.getElementById(`${prefix}-dot`);
-                            const text = document.getElementById(`${prefix}-text`);
-                            if (dot && text) {
-                                dot.style.background = available ? '#28a745' : '#6c757d';
-                                text.textContent = available ? 'Connected' : 'Not Available';
-                                text.style.color = available ? '#28a745' : '#6c757d';
+
+                        // Update Redis status
+                        const redisDot = document.getElementById('redis-dot');
+                        const redisText = document.getElementById('redis-text');
+                        if (redisDot && redisText) {
+                            const redisOk = data.redis === 'connected';
+                            redisDot.style.background = redisOk ? '#28a745' : '#6c757d';
+                            redisText.textContent = redisOk ? 'Connected' : 'Not Available';
+                            redisText.style.color = redisOk ? '#28a745' : '#6c757d';
+                        }
+
+                        // Update Pipeline status (YOLO/Gradio)
+                        const pipelineDot = document.getElementById('pipeline-dot');
+                        const pipelineText = document.getElementById('pipeline-text');
+                        if (pipelineDot && pipelineText) {
+                            const pipelineOk = data.yolo === 'connected';
+                            const gradioStatus = data.gradio_status || '';
+
+                            if (pipelineOk) {
+                                // Show more detailed status for Gradio
+                                if (gradioStatus === 'healthy') {
+                                    pipelineDot.style.background = '#28a745';
+                                    pipelineText.textContent = 'Healthy';
+                                    pipelineText.style.color = '#28a745';
+                                } else if (gradioStatus === 'warning' || gradioStatus === 'idle') {
+                                    pipelineDot.style.background = '#ffc107';
+                                    pipelineText.textContent = gradioStatus === 'idle' ? 'Idle' : 'Warning';
+                                    pipelineText.style.color = '#856404';
+                                } else {
+                                    pipelineDot.style.background = '#28a745';
+                                    pipelineText.textContent = 'Connected';
+                                    pipelineText.style.color = '#28a745';
+                                }
+                            } else {
+                                // Not connected
+                                if (gradioStatus === 'offline' || gradioStatus === 'stale') {
+                                    pipelineDot.style.background = '#dc3545';
+                                    pipelineText.textContent = gradioStatus === 'stale' ? 'Stale' : 'Offline';
+                                    pipelineText.style.color = '#dc3545';
+                                } else {
+                                    pipelineDot.style.background = '#6c757d';
+                                    pipelineText.textContent = 'Not Available';
+                                    pipelineText.style.color = '#6c757d';
+                                }
                             }
-                        };
-                        updateInfraStatus('redis', data.redis === 'connected');
-                        updateInfraStatus('yolo', data.yolo === 'connected');
+                        }
                     })
                     .catch(error => console.error('Error fetching health:', error));
             }
