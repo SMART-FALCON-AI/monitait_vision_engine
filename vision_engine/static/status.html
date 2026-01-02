@@ -1497,12 +1497,18 @@
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Model Name (for Gradio)</div>
-                                    <input type="text" class="control-input" id="model-gradio-name-input" list="model-suggestions" placeholder="e.g., Data Matrix, predict" value="Data Matrix">
-                                    <datalist id="model-suggestions">
-                                        <option value="Data Matrix">
-                                        <option value="predict">
-                                        <option value="N/A">
-                                    </datalist>
+                                    <select class="control-input" id="model-gradio-name-input">
+                                        <option value="Data Matrix">Data Matrix</option>
+                                        <option value="Dental Implant">Dental Implant</option>
+                                        <option value="Ball Pen">Ball Pen</option>
+                                        <option value="Knit Up">Knit Up</option>
+                                        <option value="Knit Back">Knit Back</option>
+                                        <option value="Jean Back">Jean Back</option>
+                                        <option value="Jean Up">Jean Up</option>
+                                        <option value="Tire Cord">Tire Cord</option>
+                                        <option value="predict">predict</option>
+                                        <option value="N/A">N/A</option>
+                                    </select>
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Min Confidence (0-1)</div>
@@ -3805,8 +3811,7 @@
 
             async function fetchModelsFromGradio() {
                 const url = document.getElementById('model-url-input').value.trim();
-                const input = document.getElementById('model-gradio-name-input');
-                const datalist = document.getElementById('model-suggestions');
+                const select = document.getElementById('model-gradio-name-input');
                 const btn = event.target;
 
                 if (!url) {
@@ -3824,15 +3829,14 @@
                     const data = await response.json();
 
                     if (data.models && data.models.length > 0) {
-                        // Update datalist with fetched models
-                        datalist.innerHTML = '';
+                        // Update select with fetched models
+                        select.innerHTML = '';
                         data.models.forEach(model => {
                             const option = document.createElement('option');
                             option.value = model;
-                            datalist.appendChild(option);
+                            option.textContent = model;
+                            select.appendChild(option);
                         });
-                        // Set first model as default value
-                        input.value = data.models[0];
 
                         if (data.note) {
                             console.log('Note:', data.note);
@@ -3841,11 +3845,11 @@
                             console.log('Models fetched from:', data.source);
                         }
                     } else {
-                        alert('No models found. You can type the model name manually.');
+                        alert('No models found from API. Using default list.');
                     }
                 } catch (error) {
                     console.error('Error fetching models:', error);
-                    alert('Failed to fetch models. You can type the model name manually.');
+                    alert('Failed to fetch models. Using default list.');
                 } finally {
                     btn.textContent = originalText;
                     btn.disabled = false;
@@ -3854,15 +3858,23 @@
 
             function handleModelTypeChange() {
                 const type = document.getElementById('model-type-input').value;
-                const modelInput = document.getElementById('model-gradio-name-input');
-                const datalist = document.getElementById('model-suggestions');
+                const select = document.getElementById('model-gradio-name-input');
 
                 if (type === 'yolo') {
-                    modelInput.value = 'N/A';
-                    datalist.innerHTML = '<option value="N/A">';
+                    select.innerHTML = '<option value="N/A">N/A</option>';
                 } else if (type === 'gradio') {
-                    modelInput.value = 'Data Matrix';
-                    datalist.innerHTML = '<option value="Data Matrix"><option value="predict"><option value="N/A">';
+                    select.innerHTML = `
+                        <option value="Data Matrix">Data Matrix</option>
+                        <option value="Dental Implant">Dental Implant</option>
+                        <option value="Ball Pen">Ball Pen</option>
+                        <option value="Knit Up">Knit Up</option>
+                        <option value="Knit Back">Knit Back</option>
+                        <option value="Jean Back">Jean Back</option>
+                        <option value="Jean Up">Jean Up</option>
+                        <option value="Tire Cord">Tire Cord</option>
+                        <option value="predict">predict</option>
+                        <option value="N/A">N/A</option>
+                    `;
                 }
             }
 
