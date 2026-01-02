@@ -3804,11 +3804,17 @@
             async function fetchModelsFromGradio() {
                 const url = document.getElementById('model-url-input').value.trim();
                 const select = document.getElementById('model-gradio-name-input');
+                const btn = event.target;
 
                 if (!url) {
                     alert('Please enter a Gradio URL first');
                     return;
                 }
+
+                // Show loading state
+                const originalText = btn.textContent;
+                btn.textContent = 'Loading...';
+                btn.disabled = true;
 
                 try {
                     const response = await fetch(`/api/gradio/models?url=${encodeURIComponent(url)}`);
@@ -3819,15 +3825,21 @@
                         data.models.forEach(model => {
                             const option = document.createElement('option');
                             option.value = model;
-                            option.textContent = model;
+                            option.textContent = model + (data.note ? ' *' : '');
                             select.appendChild(option);
                         });
+                        if (data.note) {
+                            console.log('Note:', data.note);
+                        }
                     } else {
                         alert('No models found from Gradio API');
                     }
                 } catch (error) {
                     console.error('Error fetching models:', error);
                     alert('Failed to fetch models: ' + error.message);
+                } finally {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
                 }
             }
 

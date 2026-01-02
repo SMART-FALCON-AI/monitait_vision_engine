@@ -3375,43 +3375,66 @@ async def delete_model(model_id: str):
 
 @app.get("/api/gradio/models")
 async def get_gradio_models(url: str):
-    """Fetch available models from a Gradio API endpoint."""
+    """Fetch available models from a Gradio API endpoint (HuggingFace Spaces compatible)."""
     try:
-        # Try to fetch models from Gradio API
-        # Most Gradio apps expose model list through /info endpoint or as part of the main interface
-        response = requests.get(f"{url.rstrip('/')}/info", timeout=5)
-        if response.status_code == 200:
-            info = response.json()
-            # Extract model names if available
-            if "models" in info:
-                return JSONResponse(content={"models": info["models"]})
+        base_url = url.rstrip('/')
+        models = []
 
-        # Fallback: Try to get from config endpoint
-        response = requests.get(f"{url.rstrip('/')}/config", timeout=5)
-        if response.status_code == 200:
-            config = response.json()
-            # Look for model dropdown in components
-            models = []
-            if "components" in config:
-                for comp in config["components"]:
-                    if comp.get("type") == "dropdown" and "choices" in comp:
-                        # Assume first dropdown with choices is the model selector
-                        models = comp["choices"]
-                        break
-            if models:
-                return JSONResponse(content={"models": models})
+        # For HuggingFace Spaces, try the /api endpoint first
+        # Format: https://user-space.hf.space/ -> https://user-space.hf.space/api/
+        endpoints_to_try = [
+            f"{base_url}/api/",  # Gradio 4.x API info
+            f"{base_url}/info",  # Legacy Gradio
+            f"{base_url}/config",  # Gradio config
+        ]
 
-        # If no specific endpoint works, return common default models
+        for endpoint in endpoints_to_try:
+            try:
+                response = requests.get(endpoint, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+
+                    # Gradio 4.x API format - look for named_endpoints
+                    if "named_endpoints" in data:
+                        for ep_name in data["named_endpoints"]:
+                            models.append(ep_name.strip('/'))
+                        if models:
+                            return JSONResponse(content={"models": models, "source": "api"})
+
+                    # Check for components with choices (dropdowns)
+                    if "components" in data:
+                        for comp in data["components"]:
+                            if comp.get("type") == "dropdown" and "choices" in comp.get("props", {}):
+                                choices = comp["props"]["choices"]
+                                if isinstance(choices, list):
+                                    models.extend([c if isinstance(c, str) else c[0] for c in choices])
+                        if models:
+                            return JSONResponse(content={"models": models, "source": "config"})
+
+                    # Direct models key
+                    if "models" in data:
+                        return JSONResponse(content={"models": data["models"], "source": "info"})
+            except Exception as e:
+                logger.debug(f"Endpoint {endpoint} failed: {e}")
+                continue
+
+        # Try to infer from common patterns
+        # For HuggingFace DataMatrix reader, the model name is usually the function name
+        if "datamatrix" in base_url.lower() or "data-matrix" in base_url.lower():
+            models = ["Data Matrix", "predict"]
+        else:
+            models = ["predict", "N/A"]
+
         return JSONResponse(content={
-            "models": ["Data Matrix", "N/A"],
-            "note": "Could not fetch from Gradio API, showing defaults"
+            "models": models,
+            "note": "Could not auto-detect models, showing common defaults"
         })
     except Exception as e:
         logger.error(f"Error fetching Gradio models from {url}: {e}")
         return JSONResponse(content={
-            "models": ["Data Matrix", "N/A"],
+            "models": ["Data Matrix", "predict", "N/A"],
             "error": str(e)
-        }, status_code=500)
+        }, status_code=200)  # Return 200 with defaults instead of 500
 
 @app.post("/api/cameras/config/upload")
 async def upload_config(request: Request):
