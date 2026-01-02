@@ -4490,9 +4490,13 @@
 
             // Initial config fetch (once on page load)
             fetchConfig();
+            fetchHealth();  // Get YOLO status
             loadDataFile();
             refreshStates();
             refreshInferenceConfig();
+
+            // Refresh health status periodically (for YOLO status)
+            setInterval(fetchHealth, 10000);
 
             // Set default API type fields (Gradio with HuggingFace URL)
             updateAPITypeFields();
