@@ -4685,6 +4685,8 @@ class ArduinoSocket:
         threading.Thread(target=self.stream_results).start()
         time.sleep(0.5)
         threading.Thread(target=self.write_production_metrics_loop).start()
+        time.sleep(0.5)
+        threading.Thread(target=self.run_barcode_scanner, daemon=True).start()
 
 
     def on_up_down_off(self):
@@ -4792,6 +4794,167 @@ class ArduinoSocket:
 
     def led(self, t):
         ...
+
+    def find_barcode_scanner(self):
+        """Dynamically find barcode scanner device."""
+        import glob
+        import subprocess
+
+        # First try /dev/input/by-id/ (works on host or if mounted)
+        scanner_patterns = [
+            "/dev/input/by-id/*[Bb]ar[Cc]ode*event*",
+            "/dev/input/by-id/*[Ss]canner*event*",
+        ]
+        for pattern in scanner_patterns:
+            devices = glob.glob(pattern)
+            if devices:
+                device_path = os.path.realpath(devices[0])
+                return device_path
+
+        # Fallback: scan all event devices and check their names
+        try:
+            for event_file in sorted(glob.glob("/dev/input/event*")):
+                try:
+                    # Try to read device name from /sys
+                    event_num = event_file.split("event")[-1]
+                    name_path = f"/sys/class/input/event{event_num}/device/name"
+                    if os.path.exists(name_path):
+                        with open(name_path, 'r') as f:
+                            name = f.read().strip().lower()
+                            if 'barcode' in name or 'scanner' in name or '2d' in name:
+                                logger.info(f"Found barcode scanner: {event_file} ({name})")
+                                return event_file
+                except:
+                    pass
+        except Exception as e:
+            logger.debug(f"Error scanning input devices: {e}")
+
+        return None
+
+    def run_barcode_scanner(self):
+        """Thread to read barcode scanner input and set shipment ID."""
+        import struct
+        import select
+
+        # Key code to character mapping (US keyboard layout)
+        KEY_MAP = {
+            2: '1', 3: '2', 4: '3', 5: '4', 6: '5', 7: '6', 8: '7', 9: '8', 10: '9', 11: '0',
+            16: 'q', 17: 'w', 18: 'e', 19: 'r', 20: 't', 21: 'y', 22: 'u', 23: 'i', 24: 'o', 25: 'p',
+            30: 'a', 31: 's', 32: 'd', 33: 'f', 34: 'g', 35: 'h', 36: 'j', 37: 'k', 38: 'l',
+            44: 'z', 45: 'x', 46: 'c', 47: 'v', 48: 'b', 49: 'n', 50: 'm',
+            12: '-', 13: '=', 26: '[', 27: ']', 39: ';', 40: "'", 41: '`',
+            43: '\\', 51: ',', 52: '.', 53: '/',
+            57: ' ',  # Space
+        }
+        KEY_MAP_SHIFT = {
+            2: '!', 3: '@', 4: '#', 5: '$', 6: '%', 7: '^', 8: '&', 9: '*', 10: '(', 11: ')',
+            12: '_', 13: '+',
+        }
+
+        EVENT_SIZE = struct.calcsize('llHHI')
+        EV_KEY = 0x01
+        KEY_ENTER = 28
+
+        barcode_buffer = ""
+        scanner_device = None
+        scanner_fd = None
+        last_scan_check = 0
+
+        while not self.stop_thread:
+            try:
+                # Periodically check for scanner device (every 5 seconds)
+                if scanner_fd is None or time.time() - last_scan_check > 5:
+                    last_scan_check = time.time()
+                    new_device = self.find_barcode_scanner()
+
+                    if new_device and new_device != scanner_device:
+                        # Close old device if open
+                        if scanner_fd:
+                            try:
+                                os.close(scanner_fd)
+                            except:
+                                pass
+
+                        # Open new device
+                        try:
+                            scanner_fd = os.open(new_device, os.O_RDONLY | os.O_NONBLOCK)
+                            scanner_device = new_device
+                            logger.info(f"Barcode scanner connected: {scanner_device}")
+                        except Exception as e:
+                            logger.warning(f"Cannot open barcode scanner {new_device}: {e}")
+                            scanner_fd = None
+                            scanner_device = None
+                    elif not new_device and scanner_fd:
+                        # Scanner disconnected
+                        try:
+                            os.close(scanner_fd)
+                        except:
+                            pass
+                        scanner_fd = None
+                        scanner_device = None
+                        logger.info("Barcode scanner disconnected")
+
+                if scanner_fd is None:
+                    time.sleep(1)
+                    continue
+
+                # Use select to wait for data with timeout
+                readable, _, _ = select.select([scanner_fd], [], [], 0.5)
+                if not readable:
+                    continue
+
+                # Read events
+                try:
+                    data = os.read(scanner_fd, EVENT_SIZE * 10)
+                except OSError as e:
+                    if e.errno == 11:  # EAGAIN - no data available
+                        continue
+                    raise
+
+                # Process events
+                for i in range(0, len(data), EVENT_SIZE):
+                    if i + EVENT_SIZE > len(data):
+                        break
+
+                    _, _, ev_type, code, value = struct.unpack('llHHI', data[i:i+EVENT_SIZE])
+
+                    if ev_type != EV_KEY or value != 1:  # Only key press events
+                        continue
+
+                    if code == KEY_ENTER:
+                        # Barcode complete - set shipment ID
+                        if barcode_buffer.strip():
+                            new_shipment = barcode_buffer.strip()
+                            logger.info(f"Barcode scanned: {new_shipment}")
+
+                            # Update shipment
+                            self.shipment = new_shipment
+                            if self.redis_connection:
+                                try:
+                                    self.redis_connection.redis_connection.set("shipment", new_shipment)
+                                except Exception as e:
+                                    logger.warning(f"Failed to set shipment in Redis: {e}")
+
+                            # Create directory for shipment
+                            try:
+                                os.makedirs(f"raw_images/{new_shipment}", exist_ok=True)
+                            except Exception as e:
+                                logger.warning(f"Failed to create shipment directory: {e}")
+
+                        barcode_buffer = ""
+                    elif code in KEY_MAP:
+                        barcode_buffer += KEY_MAP[code]
+
+            except Exception as e:
+                logger.error(f"Barcode scanner error: {e}")
+                if scanner_fd:
+                    try:
+                        os.close(scanner_fd)
+                    except:
+                        pass
+                scanner_fd = None
+                scanner_device = None
+                time.sleep(2)
 
     def signal_captured(self):
         """Check if capture should be triggered based on encoder change and state thresholds.
