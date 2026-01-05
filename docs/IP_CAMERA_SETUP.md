@@ -19,23 +19,42 @@ https://192.168.1.100/mjpg/video.mjpg
 
 ## Configuration
 
-### Option 1: Auto-Discovery (Easiest)
+### Option 1: Auto-Discovery (Two-Step Process)
 
-Let MonitaQC automatically scan your network for IP cameras:
+**Step 1: Discover cameras on your network**
+
+Enable auto-discovery to scan for cameras:
 
 ```yaml
 environment:
-  # Auto-discover cameras on local network
   - IP_CAMERAS=auto
 ```
 
 This will:
 - Scan the local subnet (e.g., 192.168.1.0/24)
-- Check common camera ports (554, 8554, 80, 8080, 3702)
-- Detect RTSP and HTTP cameras
-- Add discovered cameras automatically
+- Check common camera ports (554, 8554, 80, 8080)
+- Detect RTSP and HTTP camera services
+- Test common camera paths (Hikvision, Dahua, Axis, Reolink, etc.)
+- Log discovered camera IPs and ports
 
-**Note**: Auto-discovery uses common default paths. For best results, configure cameras manually with exact URLs.
+**Step 2: Add credentials for discovered cameras**
+
+After discovery, check the logs to see which cameras were found:
+```bash
+docker logs monitait_vision_engine | grep "Discovered"
+```
+
+Then configure them manually with credentials:
+```yaml
+environment:
+  # Replace with your discovered cameras
+  - IP_CAMERAS=rtsp://admin:yourpassword@192.168.0.108:554/stream1
+  # Or provide default credentials for auto-discovery
+  - IP_CAMERA_USER=admin
+  - IP_CAMERA_PASS=yourpassword
+```
+
+**Note**: If you provide `IP_CAMERA_USER` and `IP_CAMERA_PASS`, auto-discovery will automatically test cameras with these credentials and only add working cameras.
 
 ### Option 2: Manual Configuration (Recommended)
 

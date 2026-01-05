@@ -32,3 +32,9 @@ async def set_model(request: Request, model_path: str = Form(...)):
     model_path = form_data.get('model_path')
     detector.set_model(model_path)
     return {'message': 'ok'}
+
+
+@app.get(os.path.join(DETECTION_URL, 'health'))
+async def health_check():
+    """Health check endpoint for monitoring."""
+    return {'status': 'healthy', 'service': 'YOLO Inference'}
