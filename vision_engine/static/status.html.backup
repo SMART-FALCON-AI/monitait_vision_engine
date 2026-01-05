@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
     <head>
-        <title>Monitait Vision Engine - Status Monitor</title>
+        <title>MonitaQC Vision Engine - Status Monitor</title>
         <style>
             :root {
                 --primary-color: #4f46e5;
@@ -25,17 +25,17 @@
             body {
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 margin: 0;
-                padding: 10px;
+                padding: 20px;
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 min-height: 100vh;
             }
 
             .container {
-                max-width: 100%;
+                max-width: 1400px;
                 margin: 0 auto;
                 background: var(--card-bg);
-                padding: 16px;
-                border-radius: 12px;
+                padding: 30px;
+                border-radius: 16px;
                 box-shadow: var(--shadow-xl);
             }
 
@@ -59,10 +59,10 @@
             }
             .status-box {
                 background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
-                padding: 12px;
-                border-radius: 8px;
+                padding: 24px;
+                border-radius: 12px;
                 box-shadow: var(--shadow-md);
-                margin-bottom: 12px;
+                margin-bottom: 24px;
                 border: 1px solid var(--border-color);
                 transition: all 0.3s ease;
             }
@@ -681,22 +681,22 @@
             .tab-navigation {
                 display: flex;
                 flex-wrap: wrap;
-                gap: 4px;
+                gap: 6px;
                 border-bottom: none;
-                margin-bottom: 0;
+                margin-bottom: 20px;
                 background: linear-gradient(135deg, var(--light-bg), #e0e7ff);
-                padding: 8px;
-                border-radius: 8px;
+                padding: 12px;
+                border-radius: 12px;
                 box-shadow: var(--shadow-sm);
             }
 
             .tab-button {
-                padding: 6px 12px;
+                padding: 10px 16px;
                 background: white;
                 border: none;
-                border-radius: 4px;
+                border-radius: 6px;
                 cursor: pointer;
-                font-size: 11px;
+                font-size: 13px;
                 font-weight: 600;
                 color: var(--text-secondary);
                 transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -754,70 +754,63 @@
     </head>
     <body>
         <div class="container">
-            <!-- Compact Header: 3-column layout -->
-            <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color);">
+            <div class="header-container">
+                <h1 class="header-title">MonitaQC Vision Engine</h1>
 
-                <!-- LEFT: Monitait Title (3 lines, compact) -->
-                <div style="min-width: 200px;">
-                    <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
-                        Monitait<br>Vision<br>Engine
+                <!-- Connection Status & Last Update -->
+                <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 10px; padding: 6px 12px; background: rgba(255,255,255,0.1); border-radius: 6px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: rgba(255,255,255,0.8);">Connection Status:</span>
+                        <span style="font-size: 12px; font-weight: 600; color: var(--success-color);" id="connection-status">Connecting...</span>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 6px; margin-top: 4px;">
-                        <span style="font-size: 10px; color: var(--text-secondary);">Status:</span>
-                        <span style="font-size: 11px; font-weight: 600; color: var(--success-color);" id="connection-status">●</span>
-                    </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">
-                        <span id="timestamp">-</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: rgba(255,255,255,0.8);">Last Update:</span>
+                        <span style="font-size: 11px; font-weight: 500; color: white;" id="timestamp">-</span>
                     </div>
                 </div>
 
-                <!-- CENTER: Tab Navigation -->
-                <div class="tab-navigation" style="margin: 0;">
-                    <button class="tab-button active" onclick="switchTab('dashboard')">📊 Dashboard</button>
-                    <button class="tab-button" onclick="switchTab('cameras')">📷 Cameras</button>
-                    <button class="tab-button" onclick="switchTab('control')">🎛️ Control Panel</button>
-                    <button class="tab-button" onclick="switchTab('counter')">⚙️ Ejector/Counter</button>
-                    <button class="tab-button" onclick="switchTab('hardware')">🔧 Hardware</button>
-                    <button class="tab-button" onclick="switchTab('infrastructure')">🏗️ Infrastructure</button>
-                    <button class="tab-button" onclick="switchTab('gallery')">🖼️ Gallery</button>
-                    <button class="tab-button" onclick="switchTab('grafana')">📈 Charts</button>
-                    <button class="tab-button" onclick="switchTab('ai')">🤖 AI Assistant</button>
-                    <button class="tab-button" onclick="switchTab('advanced')">⚡ Advanced</button>
-                </div>
-
-                <!-- RIGHT: Config Buttons & Data Source -->
-                <div style="min-width: 200px; display: flex; flex-direction: column; gap: 8px;">
-                    <!-- Config Buttons (top right) -->
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
-                        <button onclick="saveAllServiceConfig()" style="padding: 6px 8px; background: var(--success-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
+                <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <div style="display: flex; align-items: center; gap: 6px; background: var(--light-bg); padding: 6px 10px; border-radius: 6px;">
+                        <span style="font-weight: 600; font-size: 12px; color: var(--text-primary);">Config:</span>
+                        <button onclick="saveAllServiceConfig()" style="padding: 4px 10px; background: var(--success-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
                             💾 Save
                         </button>
-                        <button onclick="loadServiceConfig()" style="padding: 6px 8px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
+                        <button onclick="loadServiceConfig()" style="padding: 4px 10px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
                             📂 Load
                         </button>
-                        <button onclick="exportServiceConfig()" style="padding: 6px 8px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
+                        <button onclick="exportServiceConfig()" style="padding: 4px 10px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
                             ⬇️ Export
                         </button>
-                        <button onclick="importServiceConfig()" style="padding: 6px 8px; background: var(--warning-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
+                        <button onclick="importServiceConfig()" style="padding: 4px 10px; background: var(--warning-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
                             ⬆️ Import
                         </button>
                     </div>
-
-                    <!-- Data Source & Last Saved -->
-                    <div style="display: flex; flex-direction: column; gap: 2px;">
-                        <div class="data-source" id="dataSource" style="font-size: 10px; text-align: center; padding: 4px; background: var(--light-bg); border-radius: 4px;">Loading...</div>
-                        <div style="font-size: 9px; color: var(--text-secondary); text-align: center;">
-                            Last saved: <strong id="last-saved-time">Never</strong>
-                        </div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: var(--text-secondary); white-space: nowrap;">Last saved: <strong id="last-saved-time">Never</strong></span>
+                        <span class="data-source" id="dataSource" style="font-size: 11px;">Loading...</span>
                     </div>
                 </div>
             </div>
 
+            <!-- Tab Navigation -->
+            <div class="tab-navigation">
+                <button class="tab-button active" onclick="switchTab('dashboard')">📊 Dashboard</button>
+                <button class="tab-button" onclick="switchTab('cameras')">📷 Cameras</button>
+                <button class="tab-button" onclick="switchTab('control')">🎛️ Control Panel</button>
+                <button class="tab-button" onclick="switchTab('counter')">⚙️ Ejector/Counter</button>
+                <button class="tab-button" onclick="switchTab('hardware')">🔧 Hardware</button>
+                <button class="tab-button" onclick="switchTab('infrastructure')">🏗️ Infrastructure</button>
+                <button class="tab-button" onclick="switchTab('gallery')">🖼️ Gallery</button>
+                <button class="tab-button" onclick="switchTab('grafana')">📈 Charts</button>
+                <button class="tab-button" onclick="switchTab('ai')">🤖 AI Assistant</button>
+                <button class="tab-button" onclick="switchTab('advanced')">⚡ Advanced</button>
+            </div>
+
             <!-- Dashboard Tab -->
             <div id="tab-dashboard" class="tab-content active">
-                <div style="display: grid; grid-template-columns: 300px 1fr; gap: 16px;">
+                <div style="display: grid; grid-template-columns: 350px 1fr; gap: 24px;">
                     <!-- Left Column: Status Info -->
-                    <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
                         <!-- Shipment -->
                         <div class="status-box" style="padding: 8px;">
                             <div>
@@ -940,8 +933,8 @@
 
                             <!-- Slideshow Container -->
                             <div id="timeline-slideshow-container" style="position: relative; background: #111; border: 2px solid var(--border-color); border-radius: 8px; overflow: hidden;">
-                                <div id="timeline-slide-wrapper" style="width: 100%; height: 500px; overflow: hidden; display: flex; align-items: center; justify-content: center;">
-                                    <img id="timeline-slide" src="/timeline_image?page=0" style="max-width: 100%; max-height: 100%; width: auto; height: auto; user-select: none; display: block; object-fit: contain;" alt="Timeline" draggable="false" />
+                                <div id="timeline-slide-wrapper" style="width: 100%; height: 500px; overflow: auto; display: flex; align-items: flex-start; justify-content: flex-start;">
+                                    <img id="timeline-slide" src="/timeline_image" style="height: 100%; width: auto; user-select: none; display: block;" alt="Timeline" draggable="false" />
                                 </div>
 
                                 <!-- Navigation Footer -->
@@ -956,7 +949,7 @@
                                     <button id="timeline-zoom-out" class="timeline-nav-btn" title="Zoom Out">–</button>
                                     <span style="width: 1px; height: 20px; background: var(--border-color); margin: 0 4px;"></span>
                                     <button id="timeline-toggle-auto" class="timeline-nav-btn" title="Stop/Resume Auto-Update">Stop</button>
-                                    <span id="timeline-counter" style="font-size: 13px; font-weight: bold; color: #fff; margin-left: 8px;">1 / 1</span>
+                                    <span id="timeline-counter" style="font-size: 13px; font-weight: bold; color: var(--text-primary); margin-left: 8px;">1 / 1</span>
                                 </div>
                             </div>
 
@@ -1740,7 +1733,7 @@
 
                         <div class="control-item">
                             <div class="control-label">Rows per Slide: <strong id="timeline-rows-value">10</strong></div>
-                            <input type="range" id="timeline-rows" min="1" max="100" value="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
+                            <input type="range" id="timeline-rows" min="5" max="20" value="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
                         </div>
 
                         <div class="control-item" style="grid-column: span 2;">
@@ -2087,9 +2080,7 @@
 
             // Handle detection event from SSE
             function handleDetectionEvent(event) {
-                if (!event) return;
-
-                console.log('[Audio] Detection event received:', event);
+                if (!event || !audioSettings.enabled) return;
 
                 // Debounce: don't play sounds for same timestamp
                 if (event.timestamp === lastEventTimestamp) return;
@@ -2100,57 +2091,15 @@
 
                 switch (event.type) {
                     case 'ok':
-                        if (audioSettings.enabled) playOkSound();
+                        playOkSound();
                         break;
                     case 'ng':
-                        if (audioSettings.enabled) playNgSound();
+                        playNgSound();
                         break;
                     case 'object':
-                        console.log('[Audio] Object event detected, audioSettings.enabled:', audioSettings.enabled);
-                        console.log('[Audio] Event details:', event.details);
-                        if (audioSettings.enabled) playObjectSound();
-                        // Always speak the detected objects (even if beep sound is disabled)
-                        if (event.details && event.details.objects) {
-                            console.log('[Audio] Calling speakText with:', event.details.objects);
-                            speakText(event.details.objects);
-                        }
-                        break;
                     case 'datamatrix':
-                        if (audioSettings.enabled) playObjectSound();
+                        playObjectSound();
                         break;
-                }
-            }
-
-            // Text-to-speech function
-            function speakText(text) {
-                console.log('[TTS] speakText called with:', text);
-                if (!text) {
-                    console.warn('[TTS] No text provided');
-                    return;
-                }
-
-                // Check if browser supports speech synthesis
-                if ('speechSynthesis' in window) {
-                    console.log('[TTS] Speech synthesis supported');
-                    // Cancel any ongoing speech
-                    window.speechSynthesis.cancel();
-
-                    // Create utterance
-                    const utterance = new SpeechSynthesisUtterance(text);
-                    utterance.rate = 1.0;
-                    utterance.pitch = 1.0;
-                    utterance.volume = 1.0;
-
-                    console.log('[TTS] Speaking:', text);
-                    // Speak
-                    window.speechSynthesis.speak(utterance);
-
-                    // Add event listeners for debugging
-                    utterance.onstart = () => console.log('[TTS] Speech started');
-                    utterance.onend = () => console.log('[TTS] Speech ended');
-                    utterance.onerror = (e) => console.error('[TTS] Speech error:', e);
-                } else {
-                    console.warn('[TTS] Text-to-speech not supported in this browser');
                 }
             }
 
@@ -2248,54 +2197,12 @@
                 // Initialize Panzoom on the timeline image
                 const panzoom = Panzoom(slide, { maxScale: 40 });
 
-                // Timeline pagination (navigate through pages of concatenated frames)
-                let currentPage = 0;
-                let totalPages = 0;
-                let totalFrames = 0;
-                let rowsPerPage = 10;
-
-                async function updatePageCount() {
-                    try {
-                        const response = await fetch('/api/timeline_count');
-                        const data = await response.json();
-                        totalFrames = data.total_frames;
-                        totalPages = data.total_pages;
-                        rowsPerPage = data.rows_per_page;
-                        updateCounter();
-                    } catch (error) {
-                        console.error('Error fetching page count:', error);
-                    }
-                }
-
-                function updateCounter() {
-                    if (totalPages > 0) {
-                        if (autoUpdate) {
-                            counter.textContent = `1 / ${totalPages}`;
-                        } else {
-                            counter.textContent = `${currentPage + 1} / ${totalPages}`;
-                        }
-                    } else {
-                        counter.textContent = "0 / 0";
-                    }
-                }
-
-                function loadPage(page) {
-                    if (page < 0 || page >= totalPages) return;
-                    currentPage = page;
-                    const timestamp = new Date().getTime();
-                    slide.src = `/timeline_image?page=${page}&t=${timestamp}`;
-                    updateCounter();
-                    panzoom.reset();
-                }
-
-                // Auto-refresh functionality (reload latest page)
-                async function refreshImage() {
+                // Auto-refresh functionality (reload image every 5 seconds)
+                function refreshImage() {
                     if (autoUpdate) {
-                        await updatePageCount();
-                        currentPage = 0; // Always show latest page
                         const timestamp = new Date().getTime();
-                        slide.src = `/timeline_image?page=0&t=${timestamp}`;
-                        updateCounter();
+                        slide.src = `/timeline_image?t=${timestamp}`;
+                        counter.textContent = "Live (Auto-refresh)";
                     }
                 }
 
@@ -2318,7 +2225,6 @@
                     if (autoUpdate) {
                         toggleBtn.textContent = "Stop";
                         toggleBtn.classList.remove("stopped");
-                        currentPage = 0;
                         startAutoRefresh();
                         refreshImage();
                     } else {
@@ -2329,38 +2235,12 @@
                     }
                 };
 
-                // Navigation buttons (page navigation)
-                document.getElementById("timeline-first").addEventListener('click', () => {
-                    stopAutoRefresh();
-                    autoUpdate = false;
-                    toggleBtn.textContent = "Resume";
-                    loadPage(totalPages - 1); // Oldest page
-                });
-
-                document.getElementById("timeline-prev").addEventListener('click', () => {
-                    stopAutoRefresh();
-                    autoUpdate = false;
-                    toggleBtn.textContent = "Resume";
-                    loadPage(Math.min(totalPages - 1, currentPage + 1)); // Older page
-                });
-
-                document.getElementById("timeline-next").addEventListener('click', () => {
-                    stopAutoRefresh();
-                    autoUpdate = false;
-                    toggleBtn.textContent = "Resume";
-                    loadPage(Math.max(0, currentPage - 1)); // Newer page
-                });
-
-                document.getElementById("timeline-last").addEventListener('click', () => {
-                    stopAutoRefresh();
-                    autoUpdate = false;
-                    toggleBtn.textContent = "Resume";
-                    loadPage(0); // Latest page
-                });
-
-                // Update page count periodically
-                setInterval(updatePageCount, 5000);
-                updatePageCount();
+                // Note: First/Prev/Next/Last are disabled for single-image mode
+                // (Timeline shows a single concatenated grid image)
+                document.getElementById("timeline-first").disabled = true;
+                document.getElementById("timeline-prev").disabled = true;
+                document.getElementById("timeline-next").disabled = true;
+                document.getElementById("timeline-last").disabled = true;
 
                 // Zoom controls
                 document.getElementById("timeline-zoom-in").addEventListener('click', panzoom.zoomIn);
@@ -2376,9 +2256,8 @@
                 });
 
                 // Start auto-refresh on load
-                updatePageCount();
                 startAutoRefresh();
-                refreshImage();
+                counter.textContent = "Live (Auto-refresh)";
             })();
 
             // ========================================
@@ -2390,37 +2269,6 @@
                 const rowsSlider = document.getElementById('timeline-rows');
                 const rowsValue = document.getElementById('timeline-rows-value');
                 const applyBtn = document.getElementById('timeline-apply-config');
-
-                // Load saved configuration from server
-                async function loadSavedConfig() {
-                    try {
-                        const response = await fetch('/api/timeline_count');
-                        const data = await response.json();
-                        if (data.rows_per_page) {
-                            rowsSlider.value = data.rows_per_page;
-                            rowsValue.textContent = data.rows_per_page;
-                        }
-                        // Note: Quality is stored in timeline_config but not returned by timeline_count API
-                        // We'll load it from the data file via getData API
-                        const configResponse = await fetch('/api/getData');
-                        const configData = await configResponse.json();
-                        if (configData.timeline_config) {
-                            if (configData.timeline_config.image_quality) {
-                                qualitySlider.value = configData.timeline_config.image_quality;
-                                qualityValue.textContent = configData.timeline_config.image_quality + '%';
-                            }
-                            if (configData.timeline_config.num_rows) {
-                                rowsSlider.value = configData.timeline_config.num_rows;
-                                rowsValue.textContent = configData.timeline_config.num_rows;
-                            }
-                        }
-                    } catch (error) {
-                        console.error('Error loading timeline config:', error);
-                    }
-                }
-
-                // Load config on page load
-                loadSavedConfig();
 
                 // Update slider value displays
                 qualitySlider.addEventListener('input', () => {
@@ -3254,10 +3102,7 @@
             }
 
             function updateAPITypeFields() {
-                const apiTypeEl = document.getElementById('api-type-select');
-                if (!apiTypeEl) return;  // Element not found, exit early
-
-                const apiType = apiTypeEl.value;
+                const apiType = document.getElementById('api-type-select').value;
                 const urlLabel = document.getElementById('yolo-url-label');
                 const urlInput = document.getElementById('yolo-url-input');
                 const modelSelector = document.getElementById('gradio-model-selector');
@@ -3895,16 +3740,13 @@
                     const response = await fetch('/api/cameras/config');
                     const data = await response.json();
                     const statusEl = document.getElementById('camera-config-status');
-                    if (statusEl) {
-                        if (data.exists && data.config) {
-                            statusEl.textContent = `Last saved: ${data.config.saved_at || 'unknown'}`;
-                        } else {
-                            statusEl.textContent = 'No saved config';
-                        }
+                    if (data.exists && data.config) {
+                        statusEl.textContent = `Last saved: ${data.config.saved_at || 'unknown'}`;
+                    } else {
+                        statusEl.textContent = 'No saved config';
                     }
                 } catch (error) {
-                    const statusEl = document.getElementById('camera-config-status');
-                    if (statusEl) statusEl.textContent = '';
+                    document.getElementById('camera-config-status').textContent = '';
                 }
             }
 
@@ -4936,10 +4778,6 @@
 
             // Start timeline image refresh
             startTimelineRefresh();
-
-            // Initial inference stats fetch and set up refresh interval
-            fetchInferenceStats();
-            setInterval(fetchInferenceStats, 2000);  // Update every 2 seconds
 
             // Initial config fetch (once on page load)
             fetchConfig();

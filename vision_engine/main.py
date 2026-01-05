@@ -93,16 +93,17 @@ latest_detections = []
 latest_detections_timestamp = 0.0
 
 # Timeline buffer for camera history view (lightweight alternative to stitching)
-# Stores small thumbnails of recent frames per camera
+# Stores small thumbnails of recent frames per camera using Redis for cross-process sharing
 from collections import deque
 import threading
+import pickle
 
 TIMELINE_THUMBNAIL_WIDTH = 120   # Small thumbnails for speed
 TIMELINE_THUMBNAIL_HEIGHT = 90
-TIMELINE_MAX_ROWS = 20          # Number of time points to show
-timeline_buffer = {}            # {camera_id: deque of (timestamp, thumbnail_bytes)}
-timeline_lock = threading.Lock()
 timeline_frame_counter = 0
+
+# Redis keys for timeline storage (works across ProcessPoolExecutor workers)
+TIMELINE_REDIS_PREFIX = "timeline:"  # timeline:1, timeline:2, etc.
 
 # Detection events queue for audio notifications
 detection_events = deque(maxlen=100)  # Store recent detection events
@@ -117,77 +118,91 @@ def add_detection_event(event_type: str, details: dict = None):
             "timestamp": time.time()
         })
 
-def add_frame_to_timeline(camera_id: str, frame):
-    """Add a frame thumbnail to the timeline buffer."""
+def add_frame_to_timeline(camera_id, frame):
+    """Add a frame thumbnail to the timeline buffer (stored in Redis for cross-process access)."""
     global timeline_frame_counter
     if frame is None:
+        logger.warning("add_frame_to_timeline: frame is None")
         return
     try:
+        # Get configuration (with defaults)
+        try:
+            config = app.state.timeline_config
+            num_rows = config.get('num_rows', 20)
+            quality = config.get('image_quality', 85)
+        except:
+            num_rows = 20
+            quality = 85
+
         # Resize to small thumbnail
         thumb = cv2.resize(frame, (TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT))
-        # Encode as JPEG bytes (fast, small)
-        _, jpeg = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        # Encode as JPEG bytes with configured quality
+        _, jpeg = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
-        with timeline_lock:
-            if camera_id not in timeline_buffer:
-                timeline_buffer[camera_id] = deque(maxlen=TIMELINE_MAX_ROWS)
-            timeline_buffer[camera_id].append((time.time(), jpeg.tobytes()))
-            timeline_frame_counter += 1
+        # Create Redis connection (each process needs its own connection)
+        redis_client = Redis("redis", 6379, db=0)
+
+        # Store in Redis list (FIFO with max length)
+        redis_key = f"{TIMELINE_REDIS_PREFIX}{camera_id}"
+        frame_data = pickle.dumps((time.time(), jpeg.tobytes()))
+
+        # Use Redis pipeline for atomic operations
+        pipe = redis_client.pipeline()
+        pipe.rpush(redis_key, frame_data)  # Add to right (newest)
+        pipe.ltrim(redis_key, -num_rows, -1)  # Keep only last N frames (from config)
+        pipe.execute()
+
+        timeline_frame_counter += 1
+        logger.info(f"Timeline: Added frame for camera {camera_id} to Redis (keeping last {num_rows} frames)")
     except Exception as e:
-        logger.debug(f"Timeline add frame error: {e}")
+        logger.error(f"Timeline add frame error: {e}", exc_info=True)
 
 def get_timeline_composite():
-    """Generate a composite image showing all cameras over time.
+    """Concatenate all processed frames horizontally over time (oldest to newest)."""
+    try:
+        # Get configuration (with defaults)
+        try:
+            config = app.state.timeline_config
+            quality = config.get('image_quality', 85)
+        except:
+            quality = 85
 
-    Layout: columns = cameras, rows = time (newest at bottom)
-    Returns JPEG bytes or None.
-    """
-    with timeline_lock:
-        if not timeline_buffer:
+        # Create Redis connection
+        redis_client = Redis("redis", 6379, db=0)
+
+        # Get timeline key for camera 1 (assuming single camera for now)
+        timeline_key = f"{TIMELINE_REDIS_PREFIX}1"
+
+        # Get all frames from oldest to newest
+        frames_raw = redis_client.lrange(timeline_key, 0, -1)
+        if not frames_raw:
+            logger.debug("Timeline: No frames in Redis")
             return None
 
-        camera_ids = sorted(timeline_buffer.keys())
-        num_cameras = len(camera_ids)
-        if num_cameras == 0:
+        # Decode all frames
+        frames_to_concat = []
+        for frame_data in frames_raw:
+            ts, jpeg_bytes = pickle.loads(frame_data)
+            thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if thumb is not None:
+                frames_to_concat.append(thumb)
+
+        if not frames_to_concat:
+            logger.debug("Timeline: No valid frames")
             return None
 
-        # Find max rows across all cameras
-        max_rows = max(len(timeline_buffer[cid]) for cid in camera_ids)
-        if max_rows == 0:
-            return None
+        # Concatenate horizontally (left = oldest, right = newest)
+        composite = np.hstack(frames_to_concat)
 
-        # Create composite image
-        composite_height = max_rows * TIMELINE_THUMBNAIL_HEIGHT
-        composite_width = num_cameras * TIMELINE_THUMBNAIL_WIDTH
-        composite = np.zeros((composite_height, composite_width, 3), dtype=np.uint8)
-        composite[:] = (40, 40, 40)  # Dark gray background
+        logger.info(f"Timeline: Concatenated {len(frames_to_concat)} frames over time")
 
-        for col, cam_id in enumerate(camera_ids):
-            frames = list(timeline_buffer[cam_id])
-            # Pad with empty rows at top if needed
-            start_row = max_rows - len(frames)
-
-            for i, (ts, jpeg_bytes) in enumerate(frames):
-                row = start_row + i
-                try:
-                    # Decode thumbnail
-                    thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
-                    if thumb is not None:
-                        y = row * TIMELINE_THUMBNAIL_HEIGHT
-                        x = col * TIMELINE_THUMBNAIL_WIDTH
-                        composite[y:y+TIMELINE_THUMBNAIL_HEIGHT, x:x+TIMELINE_THUMBNAIL_WIDTH] = thumb
-                except:
-                    pass
-
-        # Add camera labels at bottom
-        for col, cam_id in enumerate(camera_ids):
-            x = col * TIMELINE_THUMBNAIL_WIDTH + 5
-            y = composite_height - 5
-            cv2.putText(composite, f"Cam {cam_id}", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
-        # Encode final composite
-        _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        # Encode final composite with configured quality
+        _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
         return jpeg.tobytes()
+
+    except Exception as e:
+        logger.error(f"Error generating timeline composite: {e}", exc_info=True)
+        return None
 
 # Database connection pool
 db_connection_pool = None
@@ -1639,6 +1654,20 @@ def apply_config_settings(config, watcher_inst=None):
         STORE_ANNOTATION_ENABLED = config["store_annotation"].get("enabled", STORE_ANNOTATION_ENABLED)
         settings_applied["store_annotation"] = True
 
+    # Apply timeline configuration
+    if "timeline_config" in config:
+        app.state.timeline_config = config["timeline_config"]
+        settings_applied["timeline_config"] = True
+        logger.info(f"Timeline config loaded: {config['timeline_config']}")
+    else:
+        # Initialize with defaults if not in config
+        app.state.timeline_config = {
+            'show_bounding_boxes': True,
+            'camera_order': 'normal',
+            'image_quality': 85,
+            'num_rows': 20
+        }
+
     # Apply/load cameras from unified cameras structure
     cameras_loaded = 0
     if "cameras" in config and watcher_inst is not None:
@@ -2450,18 +2479,285 @@ async def timeline_feed():
     return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.get("/timeline_image")
-async def timeline_image():
-    """Single snapshot of the camera timeline grid."""
-    composite = get_timeline_composite()
-    if composite:
-        return Response(content=composite, media_type="image/jpeg")
-    else:
-        # Return placeholder
+async def timeline_image(page: int = 0):
+    """Get concatenated timeline frames for a specific page.
+
+    Args:
+        page: Page number (0=latest frames, 1=previous page, etc.)
+    """
+    try:
+        # Get configuration (with defaults)
+        try:
+            config = app.state.timeline_config
+            quality = config.get('image_quality', 85)
+            rows_per_page = config.get('num_rows', 10)
+        except:
+            quality = 85
+            rows_per_page = 10
+
+        # Create Redis connection
+        redis_client = Redis("redis", 6379, db=0)
+        timeline_key = f"{TIMELINE_REDIS_PREFIX}1"
+
+        # Get all frames from Redis
+        all_frames = redis_client.lrange(timeline_key, 0, -1)
+        if not all_frames:
+            # Return placeholder
+            placeholder = np.zeros((180, 240, 3), dtype=np.uint8)
+            placeholder[:] = (60, 60, 60)
+            cv2.putText(placeholder, "No frames yet", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+            _, jpeg = cv2.imencode('.jpg', placeholder)
+            return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+        total_frames = len(all_frames)
+        total_pages = (total_frames + rows_per_page - 1) // rows_per_page
+
+        # Page 0 is the latest (rightmost) frames
+        # Calculate which frames to show for this page
+        if page < 0 or page >= total_pages:
+            page = 0  # Default to latest page
+
+        # Get frames for this page (newest to oldest pages)
+        # Page 0: last N frames, Page 1: previous N frames, etc.
+        end_index = total_frames - (page * rows_per_page)
+        start_index = max(0, end_index - rows_per_page)
+
+        page_frames = all_frames[start_index:end_index]
+
+        # Decode and concatenate frames horizontally
+        frames_to_concat = []
+        for frame_data in page_frames:
+            ts, jpeg_bytes = pickle.loads(frame_data)
+            thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if thumb is not None:
+                frames_to_concat.append(thumb)
+
+        if not frames_to_concat:
+            # Return placeholder
+            placeholder = np.zeros((180, 240, 3), dtype=np.uint8)
+            placeholder[:] = (60, 60, 60)
+            cv2.putText(placeholder, "No frames", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+            _, jpeg = cv2.imencode('.jpg', placeholder)
+            return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+        # Concatenate horizontally (left = oldest in page, right = newest in page)
+        composite = np.hstack(frames_to_concat)
+
+        logger.info(f"Timeline page {page}: showing {len(frames_to_concat)} frames (indices {start_index}-{end_index-1})")
+
+        # Encode final composite with configured quality
+        _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+    except Exception as e:
+        logger.error(f"Error getting timeline image: {e}")
         placeholder = np.zeros((180, 240, 3), dtype=np.uint8)
         placeholder[:] = (60, 60, 60)
-        cv2.putText(placeholder, "No frames yet", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
         _, jpeg = cv2.imencode('.jpg', placeholder)
         return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+@app.get("/api/timeline_count")
+async def timeline_count():
+    """Get the total number of frames and pages in the timeline."""
+    try:
+        # Get configuration
+        try:
+            config = app.state.timeline_config
+            rows_per_page = config.get('num_rows', 10)
+        except:
+            rows_per_page = 10
+
+        redis_client = Redis("redis", 6379, db=0)
+        timeline_key = f"{TIMELINE_REDIS_PREFIX}1"
+        total_frames = redis_client.llen(timeline_key)
+        total_pages = (total_frames + rows_per_page - 1) // rows_per_page if total_frames > 0 else 0
+
+        return {
+            "total_frames": total_frames,
+            "total_pages": total_pages,
+            "rows_per_page": rows_per_page
+        }
+    except Exception as e:
+        logger.error(f"Error getting timeline count: {e}")
+        return {"total_frames": 0, "total_pages": 0, "rows_per_page": 10}
+
+@app.post("/api/timeline_clear")
+async def timeline_clear():
+    """Clear all frames from the timeline buffer."""
+    try:
+        redis_client = Redis("redis", 6379, db=0)
+        # Clear all timeline keys
+        timeline_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        if timeline_keys:
+            redis_client.delete(*timeline_keys)
+            logger.info(f"Cleared {len(timeline_keys)} timeline buffers")
+        return {"success": True, "cleared": len(timeline_keys)}
+    except Exception as e:
+        logger.error(f"Error clearing timeline: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.post("/api/timeline_config")
+async def update_timeline_config(request: Request):
+    """Update timeline configuration (bounding boxes, camera order, quality, rows)."""
+    try:
+        data = await request.json()
+
+        # Extract configuration values
+        show_bounding_boxes = data.get('show_bounding_boxes', True)
+        camera_order = data.get('camera_order', 'normal')
+        image_quality = data.get('image_quality', 85)
+        num_rows = data.get('num_rows', 10)
+
+        # Store configuration in app state
+        app.state.timeline_config = {
+            'show_bounding_boxes': show_bounding_boxes,
+            'camera_order': camera_order,
+            'image_quality': image_quality,
+            'num_rows': num_rows
+        }
+
+        # Save to DATA_FILE
+        file_data = load_data_file()
+        file_data['timeline_config'] = app.state.timeline_config
+        save_data_file(file_data)
+
+        # Clear timeline buffer so new frames with new quality settings are captured
+        redis_client = Redis("redis", 6379, db=0)
+        timeline_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        if timeline_keys:
+            redis_client.delete(*timeline_keys)
+            logger.info(f"Cleared {len(timeline_keys)} timeline buffers to apply new settings")
+
+        logger.info(f"Timeline config saved: bbox={show_bounding_boxes}, order={camera_order}, quality={image_quality}, rows={num_rows}")
+
+        return {
+            'success': True,
+            'message': 'Timeline configuration updated successfully. Buffer cleared - new frames will use new settings.',
+            'config': app.state.timeline_config
+        }
+    except Exception as e:
+        logger.error(f"Error updating timeline config: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={'success': False, 'error': str(e)}
+        )
+
+@app.get("/timeline_slideshow")
+async def timeline_slideshow():
+    """Timeline slideshow page with pan/zoom controls (inspired by FabriQC slideshow service)."""
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Camera Timeline Slideshow</title>
+  <meta http-equiv="refresh" content="5">
+  <style>
+    body {
+      margin: 0;
+      background: #000;
+      color: #fff;
+      width: 100%;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    #app {
+      position: relative;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    #slide-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: auto;
+      background: #111;
+    }
+    #slide {
+      max-width: 100%;
+      max-height: 100%;
+      user-select: none;
+      transform-origin: center center;
+      display: block;
+    }
+    #footer {
+      height: 50px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.8);
+      gap: 10px;
+      padding: 0 20px;
+    }
+    button {
+      font-size: 1.2em;
+      font-weight: bold;
+      padding: 6px 12px;
+      cursor: pointer;
+      background: #222;
+      color: #fff;
+      border: 1px solid #555;
+      border-radius: 4px;
+    }
+    button:hover { background: #444; }
+    #info {
+      color: #aaa;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="slide-container">
+      <img id="slide" src="/timeline_image" alt="Camera Timeline" draggable="false" />
+    </div>
+    <div id="footer">
+      <button id="zoom-in" onclick="zoomIn()">+</button>
+      <button id="reset-zoom" onclick="resetZoom()">Reset</button>
+      <button id="zoom-out" onclick="zoomOut()">–</button>
+      <button id="fullscreen" onclick="toggleFullscreen()">⛶ Fullscreen</button>
+      <span id="info">Auto-refresh every 5 seconds | Columns = Cameras | Rows = Time (newest at top)</span>
+    </div>
+  </div>
+
+  <!-- Panzoom library (embedded for offline use) -->
+  <script>((t,e)=>{"object"==typeof exports&&"undefined"!=typeof module?module.exports=e():"function"==typeof define&&define.amd?define(e):(t="undefined"!=typeof globalThis?globalThis:t||self).Panzoom=e()})(this,function(){var a,X=function(){return(X=Object.assign||function(t){for(var e,n=1,o=arguments.length;n<o;n++)for(var r in e=arguments[n])Object.prototype.hasOwnProperty.call(e,r)&&(t[r]=e[r]);return t}).apply(this,arguments)},i=("undefined"!=typeof window&&(window.NodeList&&!NodeList.prototype.forEach&&(NodeList.prototype.forEach=Array.prototype.forEach),"function"!=typeof window.CustomEvent)&&(window.CustomEvent=function(t,e){e=e||{bubbles:!1,cancelable:!1,detail:null};var n=document.createEvent("CustomEvent");return n.initCustomEvent(t,e.bubbles,e.cancelable,e.detail),n}),"undefined"!=typeof document&&!!document.documentMode);var c=["webkit","moz","ms"],l={};function Y(t){if(l[t])return l[t];var e=a=a||document.createElement("div").style;if(t in e)return l[t]=t;for(var n=t[0].toUpperCase()+t.slice(1),o=c.length;o--;){var r="".concat(c[o]).concat(n);if(r in e)return l[t]=r}}function o(t,e){return parseFloat(e[Y(t)])||0}function s(t,e,n){void 0===n&&(n=window.getComputedStyle(t));t="border"===e?"Width":"";return{left:o("".concat(e,"Left").concat(t),n),right:o("".concat(e,"Right").concat(t),n),top:o("".concat(e,"Top").concat(t),n),bottom:o("".concat(e,"Bottom").concat(t),n)}}function C(t,e,n){t.style[Y(e)]=n}function N(t){var e=t.parentNode,n=window.getComputedStyle(t),o=window.getComputedStyle(e),r=t.getBoundingClientRect(),a=e.getBoundingClientRect();return{elem:{style:n,width:r.width,height:r.height,top:r.top,bottom:r.bottom,left:r.left,right:r.right,margin:s(t,"margin",n),border:s(t,"border",n)},parent:{style:o,width:a.width,height:a.height,top:a.top,bottom:a.bottom,left:a.left,right:a.right,padding:s(e,"padding",o),border:s(e,"border",o)}}}var T={down:"mousedown",move:"mousemove",up:"mouseup mouseleave"};function L(t,e,n,o){T[t].split(" ").forEach(function(t){e.addEventListener(t,n,o)})}function V(t,e,n){T[t].split(" ").forEach(function(t){e.removeEventListener(t,n)})}function G(t,e){for(var n=t.length;n--;)if(t[n].pointerId===e.pointerId)return n;return-1}function I(t,e){if(e.touches)for(var n=0,o=0,r=e.touches;o<r.length;o++){var a=r[o];a.pointerId=n++,I(t,a)}else-1<(n=G(t,e))&&t.splice(n,1),t.push(e)}function R(t){for(var e,n=(t=t.slice(0)).pop();e=t.pop();)n={clientX:(e.clientX-n.clientX)/2+n.clientX,clientY:(e.clientY-n.clientY)/2+n.clientY};return n}function W(t){var e;return t.length<2?0:(e=t[0],t=t[1],Math.sqrt(Math.pow(Math.abs(t.clientX-e.clientX),2)+Math.pow(Math.abs(t.clientY-e.clientY),2)))}"undefined"!=typeof window&&("function"==typeof window.PointerEvent?T={down:"pointerdown",move:"pointermove",up:"pointerup pointerleave pointercancel"}:"function"==typeof window.TouchEvent&&(T={down:"touchstart",move:"touchmove",up:"touchend touchcancel"}));var Z=/^http:[\w\.\/]+svg$/;var q={animate:!1,canvas:!1,cursor:"move",disablePan:!1,disableZoom:!1,disableXAxis:!1,disableYAxis:!1,duration:200,easing:"ease-in-out",exclude:[],excludeClass:"panzoom-exclude",handleStartEvent:function(t){t.preventDefault(),t.stopPropagation()},maxScale:40,minScale:.125,overflow:"hidden",panOnlyWhenZoomed:!1,pinchAndPan:!1,relative:!1,setTransform:function(t,e,n){var o=e.x,r=e.y,a=e.isSVG;C(t,"transform","scale(".concat(e.scale,") translate(").concat(o,"px, ").concat(r,"px)")),a&&i&&(e=window.getComputedStyle(t).getPropertyValue("transform"),t.setAttribute("transform",e))},startX:0,startY:0,startScale:1,step:.3,touchAction:"none"};function t(u,f){if(!u)throw new Error("Panzoom requires an element as an argument");if(1!==u.nodeType)throw new Error("Panzoom requires an element with a nodeType of 1");if(!(t=>{for(var e=t;e&&e.parentNode;){if(e.parentNode===document)return 1;e=e.parentNode instanceof ShadowRoot?e.parentNode.host:e.parentNode}})(u))throw new Error("Panzoom should be called on elements that have been attached to the DOM");f=X(X({},q),f);t=u;var t,l=Z.test(t.namespaceURI)&&"svg"!==t.nodeName.toLowerCase(),n=u.parentNode;n.style.overflow=f.overflow,n.style.userSelect="none",n.style.touchAction=f.touchAction,(f.canvas?n:u).style.cursor=f.cursor,u.style.userSelect="none",u.style.touchAction=f.touchAction,C(u,"transformOrigin","string"==typeof f.origin?f.origin:l?"0 0":"50% 50%");var r,a,i,c,s,d,m=0,h=0,v=1,p=!1;function g(t,e,n){n.silent||(n=new CustomEvent(t,{detail:e}),u.dispatchEvent(n))}function y(o,r,t){var a={x:m,y:h,scale:v,isSVG:l,originalEvent:t};return requestAnimationFrame(function(){var t,e,n;"boolean"==typeof r.animate&&(r.animate?(t=u,e=r,n=Y("transform"),C(t,"transition","".concat(n," ").concat(e.duration,"ms ").concat(e.easing))):C(u,"transition","none")),r.setTransform(u,a,r),g(o,a,r),g("panzoomchange",a,r)}),a}function w(t,e,n,o){var r,a,i,c,l,s,d,o=X(X({},f),o),p={x:m,y:h,opts:o};return!o.force&&(o.disablePan||o.panOnlyWhenZoomed&&v===o.startScale)||(t=parseFloat(t),e=parseFloat(e),o.disableXAxis||(p.x=(o.relative?m:0)+t),o.disableYAxis||(p.y=(o.relative?h:0)+e),o.contain&&(e=((r=(e=(t=N(u)).elem.width/v)*n)-e)/2,i=((a=(i=t.elem.height/v)*n)-i)/2,"inside"===o.contain?(c=(-t.elem.margin.left-t.parent.padding.left+e)/n,l=(t.parent.width-r-t.parent.padding.left-t.elem.margin.left-t.parent.border.left-t.parent.border.right+e)/n,p.x=Math.max(Math.min(p.x,l),c),s=(-t.elem.margin.top-t.parent.padding.top+i)/n,d=(t.parent.height-a-t.parent.padding.top-t.elem.margin.top-t.parent.border.top-t.parent.border.bottom+i)/n,p.y=Math.max(Math.min(p.y,d),s)):"outside"===o.contain&&(c=(-(r-t.parent.width)-t.parent.padding.left-t.parent.border.left-t.parent.border.right+e)/n,l=(e-t.parent.padding.left)/n,p.x=Math.max(Math.min(p.x,l),c),s=(-(a-t.parent.height)-t.parent.padding.top-t.parent.border.top-t.parent.border.bottom+i)/n,d=(i-t.parent.padding.top)/n,p.y=Math.max(Math.min(p.y,d),s))),o.roundPixels&&(p.x=Math.round(p.x),p.y=Math.round(p.y))),p}function b(t,e){var n,o,r,a,e=X(X({},f),e),i={scale:v,opts:e};return!e.force&&e.disableZoom||(n=f.minScale,o=f.maxScale,e.contain&&(a=(e=N(u)).elem.width/v,r=e.elem.height/v,1<a)&&1<r&&(a=(e.parent.width-e.parent.border.left-e.parent.border.right)/a,e=(e.parent.height-e.parent.border.top-e.parent.border.bottom)/r,"inside"===f.contain?o=Math.min(o,a,e):"outside"===f.contain&&(n=Math.max(n,a,e))),i.scale=Math.min(Math.max(t,n),o)),i}function x(t,e,n,o){t=w(t,e,v,n);return m!==t.x||h!==t.y?(m=t.x,h=t.y,y("panzoompan",t.opts,o)):{x:m,y:h,scale:v,isSVG:l,originalEvent:o}}function S(t,e,n){var o,r,e=b(t,e),a=e.opts;if(a.force||!a.disableZoom)return t=e.scale,e=m,o=h,a.focal&&(e=((r=a.focal).x/t-r.x/v+m*t)/t,o=(r.y/t-r.y/v+h*t)/t),r=w(e,o,t,{relative:!1,force:!0}),m=r.x,h=r.y,v=t,y("panzoomzoom",a,n)}function e(t,e){e=X(X(X({},f),{animate:!0}),e);return S(v*Math.exp((t?1:-1)*e.step),e)}function E(t,e,n,o){var r=N(u),a=r.parent.width-r.parent.padding.left-r.parent.padding.right-r.parent.border.left-r.parent.border.right,i=r.parent.height-r.parent.padding.top-r.parent.padding.bottom-r.parent.border.top-r.parent.border.bottom,c=e.clientX-r.parent.left-r.parent.padding.left-r.parent.border.left-r.elem.margin.left,e=e.clientY-r.parent.top-r.parent.padding.top-r.parent.border.top-r.elem.margin.top,r=(l||(c-=r.elem.width/v/2,e-=r.elem.height/v/2),{x:c/a*(a*t),y:e/i*(i*t)});return S(t,X(X({},n),{animate:!1,focal:r}),o)}S(f.startScale,{animate:!1,force:!0}),setTimeout(function(){x(f.startX,f.startY,{animate:!1,force:!0})});var M=[];function o(t){((t,e)=>{for(var n,o,r=t;null!=r;r=r.parentNode)if(n=r,o=e.excludeClass,1===n.nodeType&&-1<" ".concat((n.getAttribute("class")||"").trim()," ").indexOf(" ".concat(o," "))||-1<e.exclude.indexOf(r))return 1})(t.target,f)||(I(M,t),p=!0,f.handleStartEvent(t),g("panzoomstart",{x:r=m,y:a=h,scale:v,isSVG:l,originalEvent:t},f),t=R(M),i=t.clientX,c=t.clientY,s=v,d=W(M))}function A(t){var e,n,o;p&&void 0!==r&&void 0!==a&&void 0!==i&&void 0!==c&&(I(M,t),e=R(M),n=1<M.length,o=v,n&&(0===d&&(d=W(M)),E(o=b((W(M)-d)*f.step/80+s).scale,e,{animate:!1},t)),n&&!f.pinchAndPan||x(r+(e.clientX-i)/o,a+(e.clientY-c)/o,{animate:!1},t))}function P(t){1===M.length&&g("panzoomend",{x:m,y:h,scale:v,isSVG:l,originalEvent:t},f);var e=M;if(t.touches)for(;e.length;)e.pop();else{t=G(e,t);-1<t&&e.splice(t,1)}p&&(p=!1,r=a=i=c=void 0)}var O=!1;function z(){O||(O=!0,L("down",f.canvas?n:u,o),L("move",document,A,{passive:!0}),L("up",document,P,{passive:!0}))}return f.noBind||z(),{bind:z,destroy:function(){O=!1,V("down",f.canvas?n:u,o),V("move",document,A),V("up",document,P)},eventNames:T,getPan:function(){return{x:m,y:h}},getScale:function(){return v},getOptions:function(){var t,e=f,n={};for(t in e)e.hasOwnProperty(t)&&(n[t]=e[t]);return n},handleDown:o,handleMove:A,handleUp:P,pan:x,reset:function(t){var t=X(X(X({},f),{animate:!0,force:!0}),t),e=(v=b(t.startScale,t).scale,w(t.startX,t.startY,v,t));return m=e.x,h=e.y,y("panzoomreset",t)},resetStyle:function(){n.style.overflow="",n.style.userSelect="",n.style.touchAction="",n.style.cursor="",u.style.cursor="",u.style.userSelect="",u.style.touchAction="",C(u,"transformOrigin","")},setOptions:function(t){for(var e in t=void 0===t?{}:t)t.hasOwnProperty(e)&&(f[e]=t[e]);(t.hasOwnProperty("cursor")||t.hasOwnProperty("canvas"))&&(n.style.cursor=u.style.cursor="",(f.canvas?n:u).style.cursor=f.cursor),t.hasOwnProperty("overflow")&&(n.style.overflow=t.overflow),t.hasOwnProperty("touchAction")&&(n.style.touchAction=t.touchAction,u.style.touchAction=t.touchAction)},setStyle:function(t,e){return C(u,t,e)},zoom:S,zoomIn:function(t){return e(!0,t)},zoomOut:function(t){return e(!1,t)},zoomToPoint:E,zoomWithWheel:function(t,e){t.preventDefault();var e=X(X(X({},f),e),{animate:!1}),n=0===t.deltaY&&t.deltaX?t.deltaX:t.deltaY;return E(b(v*Math.exp((n<0?1:-1)*e.step/3),e).scale,t,e,t)}}}return t.defaultOptions=q,t});</script>
+
+  <script>
+    const slide = document.getElementById("slide");
+    const container = document.getElementById("slide-container");
+
+    const panzoom = Panzoom(slide, { maxScale: 40 });
+
+    function zoomIn() { panzoom.zoomIn(); }
+    function zoomOut() { panzoom.zoomOut(); }
+    function resetZoom() { panzoom.reset(); }
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) document.getElementById('app').requestFullscreen();
+      else document.exitFullscreen();
+    }
+
+    container.addEventListener("wheel", panzoom.zoomWithWheel);
+    slide.addEventListener("dblclick", () => {
+      panzoom.zoom(panzoom.getScale() === 1 ? 2 : 1);
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener("keydown", e => {
+      if (e.key === "+") zoomIn();
+      if (e.key === "-") zoomOut();
+      if (e.ctrlKey && e.key === "0") resetZoom();
+      if (e.key === "f") toggleFullscreen();
+    });
+  </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
 
 @app.get("/latest_detection_image")
 async def latest_detection_image():
@@ -3054,6 +3350,52 @@ async def get_camera_snapshot(camera_id: int):
     except Exception as e:
         logger.error(f"Error getting snapshot from camera {camera_id}: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.get("/api/camera/{camera_id}/stream")
+async def get_camera_stream(camera_id: int):
+    """Get live MJPEG stream from a camera."""
+    if watcher_instance is None:
+        logger.error("Stream request but watcher not initialized")
+        return JSONResponse(content={"error": "Watcher not initialized"}, status_code=503)
+
+    # Use dynamic cameras dict
+    cam = watcher_instance.cameras.get(camera_id)
+    if cam is None:
+        logger.error(f"Stream request for camera {camera_id} but camera not found")
+        return JSONResponse(content={"error": f"Camera {camera_id} not available"}, status_code=404)
+
+    # Check if camera has success attribute and is working
+    if hasattr(cam, 'success') and not cam.success:
+        logger.error(f"Camera {camera_id} is not successfully initialized")
+        return JSONResponse(content={"error": f"Camera {camera_id} not initialized"}, status_code=503)
+
+    async def generate():
+        frame_count = 0
+        try:
+            while True:
+                frame = cam.read()
+                if frame is not None:
+                    # Encode frame as JPEG
+                    success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if success:
+                        frame_count += 1
+                        if frame_count % 100 == 0:
+                            logger.debug(f"Camera {camera_id} stream: {frame_count} frames sent")
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                    else:
+                        logger.warning(f"Failed to encode frame for camera {camera_id}")
+                else:
+                    if frame_count == 0:
+                        logger.warning(f"Camera {camera_id} returning None frames")
+                await asyncio.sleep(0.033)  # ~30 FPS
+        except GeneratorExit:
+            logger.info(f"Camera {camera_id} stream closed by client (sent {frame_count} frames)")
+        except Exception as e:
+            logger.error(f"Error streaming from camera {camera_id}: {e}", exc_info=True)
+
+    logger.info(f"Starting MJPEG stream for camera {camera_id}")
+    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @app.post("/api/cameras/config/save")
 async def save_all_config():
@@ -5534,8 +5876,8 @@ class ArduinoSocket:
                                     frame = cam.read()
                                     grabbed_frames.append((cam_id, frame))
 
-                                    # Add to timeline buffer for history view
-                                    add_frame_to_timeline(str(cam_id), frame)
+                                    # Note: Timeline frames are added AFTER inference with bounding boxes
+                                    # See inference function where add_timeline_frame() is called with annotated_image
 
                                     # Store capture timestamp in Redis for FPS tracking
                                     try:
@@ -6407,6 +6749,38 @@ def process_frame(frame, capture_mode):
             annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")
             cv2.imwrite(annotated_path, annotated_image)
             logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections (model: {model_name_used})")
+
+            # Add audio notification with detected object names
+            try:
+                if yolo_res:
+                    logger.info(f"Processing {len(yolo_res)} detections for audio notification")
+                    # Extract class names from detections (use 'name' if available, fallback to 'Class X')
+                    detected_names = [det.get('name', f"Class {det.get('class', 'Unknown')}") for det in yolo_res]
+                    logger.info(f"Detected names: {detected_names}")
+
+                    # Count occurrences of each class name
+                    from collections import Counter
+                    name_counts = Counter(detected_names)
+
+                    # Create announcement text
+                    objects_text = ", ".join([f"{count} {name}" for name, count in name_counts.items()])
+                    logger.info(f"Audio notification text: {objects_text}")
+
+                    add_detection_event("object", {
+                        "objects": objects_text,
+                        "count": len(yolo_res),
+                        "frame_id": frame_id
+                    })
+                    logger.info(f"Detection event added successfully")
+            except Exception as e:
+                logger.error(f"Error creating detection event: {e}", exc_info=True)
+
+            # Add annotated image to timeline for visual history (Redis-based, works across processes)
+            try:
+                camera_id = int(frame_id.split('_')[-1])
+                add_frame_to_timeline(camera_id, annotated_image)
+            except Exception as e:
+                logger.error(f"Could not add frame to timeline (frame_id={frame_id}): {e}", exc_info=True)
 
             # Write inference result to database with model name
             if watcher:
