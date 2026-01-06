@@ -12,6 +12,7 @@ from datetime import datetime
 from redis import Redis
 from pylibdmtx import pylibdmtx
 import math
+import psutil
 import psycopg2
 from psycopg2.extras import Json
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -105,18 +106,26 @@ timeline_frame_counter = 0
 # Redis keys for timeline storage (works across ProcessPoolExecutor workers)
 TIMELINE_REDIS_PREFIX = "timeline:"  # timeline:1, timeline:2, etc.
 
-# Detection events queue for audio notifications
-detection_events = deque(maxlen=100)  # Store recent detection events
-detection_events_lock = threading.Lock()
+# Detection events queue for audio notifications (using Redis for cross-process access)
+DETECTION_EVENTS_REDIS_KEY = "detection_events"
+DETECTION_EVENTS_MAX_SIZE = 100
 
 def add_detection_event(event_type: str, details: dict = None):
-    """Add a detection event for audio notification."""
-    with detection_events_lock:
-        detection_events.append({
-            "type": event_type,  # "ok", "ng", "datamatrix", "object"
-            "details": details or {},
-            "timestamp": time.time()
-        })
+    """Add a detection event for audio notification (cross-process via Redis)."""
+    try:
+        # Use global watcher_instance's redis connection
+        if watcher_instance and watcher_instance.redis_connection and watcher_instance.redis_connection.redis_connection:
+            event = {
+                "type": event_type,  # "ok", "ng", "datamatrix", "object"
+                "details": details or {},
+                "timestamp": time.time()
+            }
+            # Add to Redis list (LPUSH adds to front)
+            watcher_instance.redis_connection.redis_connection.lpush(DETECTION_EVENTS_REDIS_KEY, json.dumps(event))
+            # Trim to max size
+            watcher_instance.redis_connection.redis_connection.ltrim(DETECTION_EVENTS_REDIS_KEY, 0, DETECTION_EVENTS_MAX_SIZE - 1)
+    except Exception as e:
+        logger.error(f"Error adding detection event to Redis: {e}")
 
 def add_frame_to_timeline(camera_id, frame):
     """Add a frame thumbnail to the timeline buffer (stored in Redis for cross-process access)."""
@@ -128,16 +137,52 @@ def add_frame_to_timeline(camera_id, frame):
         # Get configuration (with defaults)
         try:
             config = app.state.timeline_config
-            num_rows = config.get('num_rows', 20)
+            base_buffer_size = config.get('buffer_size', 20)  # User-configured buffer size
             quality = config.get('image_quality', 85)
         except:
-            num_rows = 20
+            base_buffer_size = 20
             quality = 85
 
-        # Resize to small thumbnail
-        thumb = cv2.resize(frame, (TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT))
+        # Dynamically adjust max buffer size based on quality to manage memory
+        # Higher quality = lower max buffer, lower quality = higher max buffer
+        if quality >= 95:
+            # Very high quality (95-100%): cap at 100 frames to save memory
+            max_buffer_size = 100
+        elif quality >= 85:
+            # High quality (85-94%): cap at 300 frames
+            max_buffer_size = 300
+        elif quality >= 70:
+            # Medium quality (70-84%): cap at 500 frames (baseline)
+            max_buffer_size = 500
+        else:
+            # Low quality (<70%): allow larger buffer (1000 frames)
+            max_buffer_size = 1000
+
+        # Use the smaller of user's configured size or quality-based limit
+        buffer_size = min(base_buffer_size, max_buffer_size)
+
+        # Scale image based on quality percentage
+        # 100% = original size, lower % = smaller thumbnail
+        if quality == 100:
+            # Keep original full-resolution image
+            image_to_encode = frame
+        else:
+            # Calculate scale factor based on quality percentage
+            # At 85%, use standard thumbnail size (120x90)
+            # Scale proportionally for other quality levels
+            scale_factor = quality / 85.0  # 85% is baseline for standard thumbnail
+            target_width = int(TIMELINE_THUMBNAIL_WIDTH * scale_factor)
+            target_height = int(TIMELINE_THUMBNAIL_HEIGHT * scale_factor)
+
+            # Ensure minimum size of at least the standard thumbnail
+            target_width = max(target_width, TIMELINE_THUMBNAIL_WIDTH)
+            target_height = max(target_height, TIMELINE_THUMBNAIL_HEIGHT)
+
+            # Resize to calculated dimensions
+            image_to_encode = cv2.resize(frame, (target_width, target_height))
+
         # Encode as JPEG bytes with configured quality
-        _, jpeg = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        _, jpeg = cv2.imencode('.jpg', image_to_encode, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
         # Create Redis connection (each process needs its own connection)
         redis_client = Redis("redis", 6379, db=0)
@@ -149,11 +194,14 @@ def add_frame_to_timeline(camera_id, frame):
         # Use Redis pipeline for atomic operations
         pipe = redis_client.pipeline()
         pipe.rpush(redis_key, frame_data)  # Add to right (newest)
-        pipe.ltrim(redis_key, -num_rows, -1)  # Keep only last N frames (from config)
+        pipe.ltrim(redis_key, -buffer_size, -1)  # Keep only last N frames (from config)
         pipe.execute()
 
         timeline_frame_counter += 1
-        logger.info(f"Timeline: Added frame for camera {camera_id} to Redis (keeping last {num_rows} frames)")
+        if buffer_size < base_buffer_size:
+            logger.info(f"Timeline: Added frame for camera {camera_id} to Redis (keeping last {buffer_size} frames, capped from {base_buffer_size} due to quality={quality}%)")
+        else:
+            logger.info(f"Timeline: Added frame for camera {camera_id} to Redis (keeping last {buffer_size} frames)")
     except Exception as e:
         logger.error(f"Timeline add frame error: {e}", exc_info=True)
 
@@ -1541,10 +1589,15 @@ load_camera_config = load_service_config
 save_camera_config = save_service_config
 
 
-def apply_config_settings(config, watcher_inst=None):
+def apply_config_settings(config, watcher_inst=None, full_data=None):
     """Apply configuration settings from a config dict.
 
     This is a helper function used by startup loading, API endpoints, and config upload.
+
+    Args:
+        config: Service configuration dict
+        watcher_inst: Watcher instance
+        full_data: Full data file (including root-level keys like timeline_config)
     Returns tuple of (settings_applied: dict, cameras_loaded: int).
     """
     global EJECTOR_ENABLED, EJECTOR_OFFSET, EJECTOR_DURATION, EJECTOR_POLL_INTERVAL
@@ -1654,19 +1707,22 @@ def apply_config_settings(config, watcher_inst=None):
         STORE_ANNOTATION_ENABLED = config["store_annotation"].get("enabled", STORE_ANNOTATION_ENABLED)
         settings_applied["store_annotation"] = True
 
-    # Apply timeline configuration
-    if "timeline_config" in config:
-        app.state.timeline_config = config["timeline_config"]
+    # Apply timeline configuration (stored at root level, not in service_config)
+    if full_data and "timeline_config" in full_data:
+        app.state.timeline_config = full_data["timeline_config"]
         settings_applied["timeline_config"] = True
-        logger.info(f"Timeline config loaded: {config['timeline_config']}")
+        logger.info(f"Timeline config loaded: {full_data['timeline_config']}")
     else:
         # Initialize with defaults if not in config
         app.state.timeline_config = {
             'show_bounding_boxes': True,
             'camera_order': 'normal',
             'image_quality': 85,
-            'num_rows': 20
+            'num_rows': 20,
+            'buffer_size': 20
         }
+        if full_data is None:
+            logger.debug("Timeline config: full_data not provided, using defaults")
 
     # Apply/load cameras from unified cameras structure
     cameras_loaded = 0
@@ -1740,15 +1796,18 @@ def apply_config_settings(config, watcher_inst=None):
 def apply_saved_config_at_startup(watcher_inst):
     """Load and apply saved service configuration at startup."""
     try:
-        config = load_service_config()
+        # Load both service_config and root-level configs (like timeline_config)
+        full_data = load_data_file()
+        config = full_data.get("service_config", {})
+
         if not config:
             logger.info("No saved configuration found - using defaults")
             return False
 
         logger.info(f"Loading saved configuration from {DATA_FILE} (saved at: {config.get('saved_at', 'unknown')})")
 
-        # Use the helper function to apply all settings
-        settings_applied, cameras_loaded = apply_config_settings(config, watcher_inst)
+        # Use the helper function to apply all settings (pass full_data for root-level configs)
+        settings_applied, cameras_loaded = apply_config_settings(config, watcher_inst, full_data)
 
         # Log what was applied
         for setting in settings_applied:
@@ -2074,15 +2133,23 @@ async def health_check(request: Request):
 @app.get("/api/inference/stats")
 async def get_inference_stats():
     """Get inference performance statistics."""
-    global inference_times, frame_intervals, YOLO_INFERENCE_URL, watcher
+    global inference_times, frame_intervals, YOLO_INFERENCE_URL, watcher, pipeline_manager, state_manager
 
-    # Determine service type
-    if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+    # Get pipeline name from pipeline manager (or fallback to URL-based detection)
+    if pipeline_manager and pipeline_manager.current_pipeline:
+        pipeline_name = pipeline_manager.current_pipeline.name if hasattr(pipeline_manager.current_pipeline, 'name') else str(pipeline_manager.current_pipeline)
+        service_type = pipeline_name
+        service_url = YOLO_INFERENCE_URL
+    elif "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
         service_type = "Gradio (Cloud)"
         service_url = YOLO_INFERENCE_URL
     else:
         service_type = "YOLO (Local)"
         service_url = YOLO_INFERENCE_URL
+
+    # Get current state name and shipment
+    state_name = state_manager.current_state.name if state_manager and state_manager.current_state else "unknown"
+    shipment_id = watcher.shipment if watcher else "unknown"
 
     # Try to get timing data from Redis (cross-process)
     redis_inference_times = []
@@ -2148,6 +2215,8 @@ async def get_inference_stats():
     return JSONResponse(content={
         "service_type": service_type,
         "service_url": service_url,
+        "state_name": state_name,
+        "shipment_id": shipment_id,
         # Processing time (from capture to result)
         "avg_inference_time_ms": round(avg_inference, 1),
         "min_inference_time_ms": round(min_inference, 1),
@@ -2166,6 +2235,53 @@ async def get_inference_stats():
         "capture_sample_count": len(redis_capture_timestamps),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
+
+@app.get("/api/system/metrics")
+async def get_system_metrics():
+    """Get system resource usage (CPU, RAM, Disk)."""
+    try:
+        # CPU usage
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        cpu_count_logical = psutil.cpu_count(logical=True)
+        cpu_count_physical = psutil.cpu_count(logical=False)
+
+        # Memory (RAM) usage
+        mem = psutil.virtual_memory()
+        mem_total_gb = mem.total / (1024**3)
+        mem_used_gb = mem.used / (1024**3)
+        mem_available_gb = mem.available / (1024**3)
+        mem_percent = mem.percent
+
+        # Disk usage (root partition)
+        disk = psutil.disk_usage('/')
+        disk_total_gb = disk.total / (1024**3)
+        disk_used_gb = disk.used / (1024**3)
+        disk_free_gb = disk.free / (1024**3)
+        disk_percent = disk.percent
+
+        return JSONResponse(content={
+            "cpu": {
+                "percent": round(cpu_percent, 1),
+                "cores_logical": cpu_count_logical,
+                "cores_physical": cpu_count_physical
+            },
+            "memory": {
+                "total_gb": round(mem_total_gb, 2),
+                "used_gb": round(mem_used_gb, 2),
+                "available_gb": round(mem_available_gb, 2),
+                "percent": round(mem_percent, 1)
+            },
+            "disk": {
+                "total_gb": round(disk_total_gb, 2),
+                "used_gb": round(disk_used_gb, 2),
+                "free_gb": round(disk_free_gb, 2),
+                "percent": round(disk_percent, 1)
+            },
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        })
+    except Exception as e:
+        logger.error(f"Error getting system metrics: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/")
 async def root_redirect():
@@ -2306,18 +2422,29 @@ async def status_stream():
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
 
-                # Check for new detection events
-                with detection_events_lock:
-                    if detection_events:
-                        # Get most recent event that's less than 2 seconds old
-                        for event in reversed(detection_events):
-                            if time.time() - event["timestamp"] < 2.0:
-                                current_data["detection_event"] = event
-                                break
+                # Check for new detection events from Redis
+                try:
+                    if watcher_instance and watcher_instance.redis_connection and watcher_instance.redis_connection.redis_connection:
+                        # Get recent events from Redis (LRANGE gets from front of list)
+                        raw_events = watcher_instance.redis_connection.redis_connection.lrange(DETECTION_EVENTS_REDIS_KEY, 0, 10)
+                        if raw_events:
+                            current_time = time.time()
+                            # Parse events and find most recent one less than 5 seconds old
+                            for raw_event in raw_events:
+                                try:
+                                    event = json.loads(raw_event)
+                                    age = current_time - event.get("timestamp", 0)
+                                    if age < 5.0:
+                                        current_data["detection_event"] = event
+                                        break
+                                except json.JSONDecodeError:
+                                    continue
+                except Exception as e:
+                    logger.error(f"[SSE] Error reading detection events from Redis: {e}")
 
-                # Only send if data changed or every 5 seconds as heartbeat
+                # Send data if changed or if there's a detection event
                 data_json = json.dumps(current_data)
-                if data_json != last_data:
+                if data_json != last_data or current_data["detection_event"]:
                     yield f"data: {data_json}\n\n"
                     last_data = data_json
 
@@ -2335,6 +2462,32 @@ async def status_stream():
             "X-Accel-Buffering": "no"
         }
     )
+
+@app.get("/api/latest_detections")
+async def get_latest_detections():
+    """Get the most recent detection events for audio notification (polling fallback)."""
+    try:
+        if watcher_instance and watcher_instance.redis_connection and watcher_instance.redis_connection.redis_connection:
+            # Get most recent events from Redis
+            raw_events = watcher_instance.redis_connection.redis_connection.lrange(DETECTION_EVENTS_REDIS_KEY, 0, 10)
+            if raw_events:
+                current_time = time.time()
+                for raw_event in raw_events:
+                    try:
+                        event = json.loads(raw_event)
+                        age = current_time - event.get("timestamp", 0)
+                        if age < 5.0:
+                            return {
+                                "has_detection": True,
+                                "event": event
+                            }
+                    except json.JSONDecodeError:
+                        continue
+
+        return {"has_detection": False}
+    except Exception as e:
+        logger.error(f"Error getting latest detections: {e}")
+        return {"has_detection": False, "error": str(e)}
 
 @app.get("/video_feed")
 async def video_feed():
@@ -2598,7 +2751,7 @@ async def timeline_clear():
 
 @app.post("/api/timeline_config")
 async def update_timeline_config(request: Request):
-    """Update timeline configuration (bounding boxes, camera order, quality, rows)."""
+    """Update timeline configuration (bounding boxes, camera order, quality, rows, buffer size)."""
     try:
         data = await request.json()
 
@@ -2607,13 +2760,15 @@ async def update_timeline_config(request: Request):
         camera_order = data.get('camera_order', 'normal')
         image_quality = data.get('image_quality', 85)
         num_rows = data.get('num_rows', 10)
+        buffer_size = data.get('buffer_size', 20)  # Total frames to store
 
         # Store configuration in app state
         app.state.timeline_config = {
             'show_bounding_boxes': show_bounding_boxes,
             'camera_order': camera_order,
             'image_quality': image_quality,
-            'num_rows': num_rows
+            'num_rows': num_rows,
+            'buffer_size': buffer_size
         }
 
         # Save to DATA_FILE
@@ -2628,7 +2783,7 @@ async def update_timeline_config(request: Request):
             redis_client.delete(*timeline_keys)
             logger.info(f"Cleared {len(timeline_keys)} timeline buffers to apply new settings")
 
-        logger.info(f"Timeline config saved: bbox={show_bounding_boxes}, order={camera_order}, quality={image_quality}, rows={num_rows}")
+        logger.info(f"Timeline config saved: bbox={show_bounding_boxes}, order={camera_order}, quality={image_quality}, rows={num_rows}, buffer={buffer_size}")
 
         return {
             'success': True,
@@ -3623,9 +3778,18 @@ async def activate_pipeline(pipeline_name: str):
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
 
     if pipeline_manager.set_current_pipeline(pipeline_name):
+        # Auto-save pipeline configuration to DATA_FILE
+        try:
+            config = load_service_config() or {}
+            config["pipeline_config"] = pipeline_manager.to_config()
+            save_service_config(config)
+            logger.info(f"Pipeline '{pipeline_name}' activated and saved to DATA_FILE")
+        except Exception as save_err:
+            logger.error(f"Error saving after pipeline activation to DATA_FILE: {save_err}")
+
         return JSONResponse(content={
             "success": True,
-            "message": f"Activated pipeline: {pipeline_name}",
+            "message": f"Activated pipeline: {pipeline_name} (saved)",
             "current_model": pipeline_manager.get_current_model().to_dict() if pipeline_manager.get_current_model() else None
         })
     return JSONResponse(content={"error": f"Pipeline not found: {pipeline_name}"}, status_code=404)
@@ -3643,9 +3807,18 @@ async def create_or_update_pipeline(request: Request):
         pipeline = Pipeline.from_dict(body)
 
         if pipeline_manager.add_pipeline(pipeline):
+            # Auto-save pipeline configuration to DATA_FILE
+            try:
+                config = load_service_config() or {}
+                config["pipeline_config"] = pipeline_manager.to_config()
+                save_service_config(config)
+                logger.info(f"Pipeline '{pipeline.name}' added and saved to DATA_FILE")
+            except Exception as save_err:
+                logger.error(f"Error saving pipeline to DATA_FILE: {save_err}")
+
             return JSONResponse(content={
                 "success": True,
-                "message": f"Pipeline '{pipeline.name}' created/updated",
+                "message": f"Pipeline '{pipeline.name}' created/updated and saved",
                 "pipeline": pipeline.to_dict()
             })
         return JSONResponse(content={"error": "Failed to add pipeline"}, status_code=500)
@@ -3662,7 +3835,16 @@ async def delete_pipeline(pipeline_name: str):
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
 
     if pipeline_manager.remove_pipeline(pipeline_name):
-        return JSONResponse(content={"success": True, "message": f"Pipeline '{pipeline_name}' deleted"})
+        # Auto-save pipeline configuration to DATA_FILE
+        try:
+            config = load_service_config() or {}
+            config["pipeline_config"] = pipeline_manager.to_config()
+            save_service_config(config)
+            logger.info(f"Pipeline '{pipeline_name}' deleted and saved to DATA_FILE")
+        except Exception as save_err:
+            logger.error(f"Error saving after pipeline deletion to DATA_FILE: {save_err}")
+
+        return JSONResponse(content={"success": True, "message": f"Pipeline '{pipeline_name}' deleted and saved"})
     return JSONResponse(content={"error": f"Cannot delete pipeline: {pipeline_name}"}, status_code=400)
 
 
@@ -3694,9 +3876,19 @@ async def create_or_update_model(request: Request):
         model = InferenceModel.from_dict(body)
 
         if pipeline_manager.add_model(model_id, model):
+            # Auto-save pipeline configuration to DATA_FILE
+            try:
+                config = load_service_config() or {}
+                config["pipeline_config"] = pipeline_manager.to_config()
+                save_service_config(config)
+                logger.info(f"Model '{model_id}' added and saved to DATA_FILE")
+            except Exception as save_err:
+                logger.error(f"Error saving model to DATA_FILE: {save_err}")
+                # Don't fail the request if save fails, just log it
+
             return JSONResponse(content={
                 "success": True,
-                "message": f"Model '{model_id}' created/updated",
+                "message": f"Model '{model_id}' created/updated and saved",
                 "model": model.to_dict()
             })
         return JSONResponse(content={"error": "Failed to add model"}, status_code=500)
@@ -3713,7 +3905,16 @@ async def delete_model(model_id: str):
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
 
     if pipeline_manager.remove_model(model_id):
-        return JSONResponse(content={"success": True, "message": f"Model '{model_id}' deleted"})
+        # Auto-save pipeline configuration to DATA_FILE
+        try:
+            config = load_service_config() or {}
+            config["pipeline_config"] = pipeline_manager.to_config()
+            save_service_config(config)
+            logger.info(f"Model '{model_id}' deleted and saved to DATA_FILE")
+        except Exception as save_err:
+            logger.error(f"Error saving after model deletion to DATA_FILE: {save_err}")
+
+        return JSONResponse(content={"success": True, "message": f"Model '{model_id}' deleted and saved"})
     return JSONResponse(content={"error": f"Cannot delete model: {model_id}"}, status_code=400)
 
 
@@ -4080,6 +4281,16 @@ async def create_or_update_state(request: Request):
         success = state_manager.add_state(state)
 
         if success:
+            # Auto-save states to DATA_FILE
+            try:
+                config = load_service_config() or {}
+                config["states"] = {name: s.to_dict() for name, s in state_manager.states.items()}
+                config["current_state_name"] = state_manager.current_state.name if state_manager.current_state else "default"
+                save_service_config(config)
+                logger.info(f"State '{state.name}' created/updated and saved to DATA_FILE")
+            except Exception as save_error:
+                logger.error(f"Failed to auto-save states: {save_error}")
+
             return JSONResponse(content={
                 "success": True,
                 "state": state.to_dict(),
@@ -4104,6 +4315,16 @@ async def delete_state(state_name: str):
 
     success = state_manager.remove_state(state_name)
     if success:
+        # Auto-save states to DATA_FILE after deletion
+        try:
+            config = load_service_config() or {}
+            config["states"] = {name: s.to_dict() for name, s in state_manager.states.items()}
+            config["current_state_name"] = state_manager.current_state.name if state_manager.current_state else "default"
+            save_service_config(config)
+            logger.info(f"State '{state_name}' deleted and changes saved to DATA_FILE")
+        except Exception as save_error:
+            logger.error(f"Failed to auto-save states after deletion: {save_error}")
+
         return JSONResponse(content={"success": True, "message": f"State '{state_name}' deleted"})
     else:
         return JSONResponse(content={"error": f"State '{state_name}' not found"}, status_code=404)
@@ -4117,6 +4338,16 @@ async def activate_state(state_name: str):
 
     success = state_manager.set_current_state(state_name)
     if success:
+        # Auto-save states to DATA_FILE after activation (to save current_state_name)
+        try:
+            config = load_service_config() or {}
+            config["states"] = {name: s.to_dict() for name, s in state_manager.states.items()}
+            config["current_state_name"] = state_manager.current_state.name if state_manager.current_state else "default"
+            save_service_config(config)
+            logger.info(f"State '{state_name}' activated and saved to DATA_FILE")
+        except Exception as save_error:
+            logger.error(f"Failed to auto-save states after activation: {save_error}")
+
         return JSONResponse(content={
             "success": True,
             "message": f"State '{state_name}' activated",
@@ -4372,11 +4603,26 @@ async def query_ai(request: Dict[str, Any]):
         }
 
         # Build concise AI prompt
-        system_prompt = f"""AI assistant for MonitaQC quality control system.
+        system_prompt = f"""You are an AI assistant for the MonitaQC quality control system.
 
-Current: Encoder={system_context['real_time_data']['encoder_value']}, OK={system_context['real_time_data']['ok_counter']}, NG={system_context['real_time_data']['ng_counter']}, Shipment={system_context['real_time_data']['shipment']}, Moving={'Yes' if system_context['real_time_data']['is_moving'] else 'No'}
+Current Status: Encoder={system_context['real_time_data']['encoder_value']}, OK={system_context['real_time_data']['ok_counter']}, NG={system_context['real_time_data']['ng_counter']}, Shipment={system_context['real_time_data']['shipment']}, Moving={'Yes' if system_context['real_time_data']['is_moving'] else 'No'}
 
-Use tools to query TimescaleDB (timescaledb:5432/monitaqc) for historical data. Provide actionable insights."""
+Use the database query tools to fetch historical data from TimescaleDB (timescaledb:5432/monitaqc).
+
+IMPORTANT FORMATTING RULES:
+1. Write responses in clear, natural language - avoid technical jargon
+2. Use bullet points (•) and numbered lists for readability
+3. Include concrete numbers and percentages
+4. When referring to "Class 0" or "Class 1", explain what these represent (e.g., "Class 0 (major defects)" or ask user to clarify)
+5. Use emojis sparingly for visual clarity (✅ ❌ 📊 ⚠️)
+6. Break long responses into clear sections with headers
+7. Provide actionable insights and recommendations
+8. Keep responses concise but informative
+
+When showing data:
+- Use tables for comparisons
+- Highlight key findings
+- Explain trends in simple terms"""
 
         # Call AI API based on model
         ai_response = await call_ai_model(model, api_key, system_prompt, user_query)
@@ -6766,12 +7012,23 @@ def process_frame(frame, capture_mode):
                     objects_text = ", ".join([f"{count} {name}" for name, count in name_counts.items()])
                     logger.info(f"Audio notification text: {objects_text}")
 
+                    # Format detections with class_name field for frontend
+                    formatted_detections = [
+                        {
+                            "class_name": det.get('name', f"Class {det.get('class', 'Unknown')}"),
+                            "confidence": det.get('confidence', 0),
+                            "bbox": det.get('box', [])
+                        }
+                        for det in yolo_res
+                    ]
+
                     add_detection_event("object", {
                         "objects": objects_text,
                         "count": len(yolo_res),
-                        "frame_id": frame_id
+                        "frame_id": frame_id,
+                        "detections": formatted_detections  # Add formatted detections array
                     })
-                    logger.info(f"Detection event added successfully")
+                    logger.info(f"Detection event added successfully with {len(formatted_detections)} detections")
             except Exception as e:
                 logger.error(f"Error creating detection event: {e}", exc_info=True)
 

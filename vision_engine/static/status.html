@@ -1,42 +1,47 @@
 <!DOCTYPE html>
 <html>
     <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
         <title>Monitait Vision Engine - Status Monitor</title>
         <style>
             :root {
-                --primary-color: #4f46e5;
-                --primary-hover: #4338ca;
+                --primary-color: #3b82f6;
+                --primary-hover: #2563eb;
                 --secondary-color: #06b6d4;
                 --success-color: #10b981;
                 --warning-color: #f59e0b;
                 --danger-color: #ef4444;
-                --dark-bg: #1e293b;
-                --light-bg: #f8fafc;
-                --card-bg: #ffffff;
-                --text-primary: #0f172a;
-                --text-secondary: #64748b;
-                --border-color: #e2e8f0;
-                --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-                --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-                --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-                --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+                --dark-bg: #0f172a;
+                --darker-bg: #020617;
+                --light-bg: #1e293b;
+                --card-bg: rgba(30, 41, 59, 0.6);
+                --text-primary: #f8fafc;
+                --text-secondary: #94a3b8;
+                --border-color: rgba(51, 65, 85, 0.6);
+                --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.12);
+                --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.15);
+                --shadow-lg: 0 10px 20px rgba(0, 0, 0, 0.2);
             }
 
             body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
                 margin: 0;
                 padding: 10px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: linear-gradient(to bottom, #0f172a 0%, #1e293b 100%);
                 min-height: 100vh;
+                color: var(--text-primary);
             }
 
             .container {
                 max-width: 100%;
                 margin: 0 auto;
-                background: var(--card-bg);
-                padding: 16px;
-                border-radius: 12px;
-                box-shadow: var(--shadow-xl);
+                background: rgba(15, 23, 42, 0.8);
+                backdrop-filter: blur(8px);
+                padding: 14px;
+                border-radius: 10px;
+                border: 1px solid rgba(59, 130, 246, 0.1);
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
             }
 
             .header-container {
@@ -50,26 +55,25 @@
 
             .header-title {
                 margin: 0;
-                font-size: 32px;
+                font-size: 26px;
                 font-weight: 700;
-                background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                background-clip: text;
+                color: var(--text-primary);
+                letter-spacing: -0.5px;
             }
             .status-box {
-                background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+                background: rgba(30, 41, 59, 0.4);
+                backdrop-filter: blur(4px);
                 padding: 12px;
                 border-radius: 8px;
-                box-shadow: var(--shadow-md);
                 margin-bottom: 12px;
-                border: 1px solid var(--border-color);
-                transition: all 0.3s ease;
+                border: 1px solid rgba(51, 65, 85, 0.5);
+                transition: all 0.2s ease;
             }
 
             .status-box:hover {
-                box-shadow: var(--shadow-lg);
-                transform: translateY(-2px);
+                background: rgba(30, 41, 59, 0.6);
+                border-color: rgba(59, 130, 246, 0.3);
+                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
             }
             .status-box-grid {
                 display: grid;
@@ -103,23 +107,24 @@
                 margin-bottom: 30px;
             }
             .status-item {
-                background-color: #f8f9fa;
+                background: rgba(30, 41, 59, 0.5);
                 padding: 15px;
-                border-radius: 6px;
-                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                border: 1px solid rgba(51, 65, 85, 0.6);
             }
             .status-item h3 {
                 margin: 0 0 10px 0;
-                color: #495057;
+                color: var(--text-primary);
+                font-weight: 600;
             }
             .status-value {
                 font-size: 24px;
                 font-weight: bold;
-                color: #212529;
+                color: var(--text-primary);
             }
             .status-unit {
                 font-size: 14px;
-                color: #666;
+                color: var(--text-secondary);
             }
             .range-bar {
                 width: 100%;
@@ -254,9 +259,10 @@
             }
             .control-section h3 {
                 margin: 0 0 15px 0;
-                color: #495057;
-                border-bottom: 2px solid #dee2e6;
+                color: var(--text-primary);
+                border-bottom: 2px solid rgba(51, 65, 85, 0.6);
                 padding-bottom: 8px;
+                font-weight: 600;
             }
             .control-grid {
                 display: grid;
@@ -264,52 +270,57 @@
                 gap: 15px;
             }
             .control-item {
-                background: white;
+                background: rgba(30, 41, 59, 0.5);
                 padding: 15px;
-                border-radius: 6px;
-                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                border: 1px solid rgba(51, 65, 85, 0.6);
             }
             .control-label {
                 font-size: 14px;
-                color: #666;
+                color: var(--text-secondary);
                 margin-bottom: 8px;
+                font-weight: 500;
             }
             .control-input {
                 width: 100%;
                 padding: 8px;
-                border: 1px solid #ced4da;
+                border: 1px solid rgba(51, 65, 85, 0.6);
+                background: rgba(15, 23, 42, 0.5);
+                color: var(--text-primary);
                 border-radius: 4px;
                 margin-bottom: 8px;
                 box-sizing: border-box;
             }
             .control-button {
                 width: 100%;
-                padding: 8px;
-                border: none;
-                border-radius: 4px;
-                background-color: #007bff;
+                padding: 10px;
+                border: 1px solid var(--border-color);
+                border-radius: 6px;
+                background: var(--primary-color);
                 color: white;
                 cursor: pointer;
-                transition: background-color 0.2s;
+                transition: all 0.2s ease;
+                font-weight: 500;
             }
             .control-button:hover {
-                background-color: #0056b3;
+                background: var(--primary-hover);
             }
             .control-button:disabled {
-                background-color: #6c757d;
+                background: #475569;
                 cursor: not-allowed;
+                opacity: 0.6;
             }
             .control-response {
                 font-size: 12px;
-                color: #666;
+                color: var(--text-secondary);
                 margin-top: 5px;
                 min-height: 20px;
             }
             .control-response.success {
-                color: #28a745;
+                color: var(--success-color);
             }
             .control-response.error {
-                color: #dc3545;
+                color: var(--danger-color);
             }
             .camera-table {
                 width: 100%;
@@ -319,22 +330,23 @@
             .camera-table th, .camera-table td {
                 padding: 12px;
                 text-align: left;
-                border-bottom: 1px solid #dee2e6;
+                border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+                color: var(--text-primary);
             }
             .camera-table th {
-                background-color: #f8f9fa;
-                font-weight: bold;
+                background: rgba(30, 41, 59, 0.5);
+                font-weight: 600;
             }
-            .camera-ok { color: #28a745; font-weight: bold; }
-            .camera-fail { color: #dc3545; font-weight: bold; }
+            .camera-ok { color: var(--success-color); font-weight: bold; }
+            .camera-fail { color: var(--danger-color); font-weight: bold; }
 
             /* Camera Discovery Styles */
             .discovery-section {
-                background: white;
+                background: rgba(30, 41, 59, 0.4);
+                border: 1px solid rgba(51, 65, 85, 0.6);
                 border-radius: 10px;
                 padding: 20px;
                 margin-bottom: 20px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             }
             .discovery-controls {
                 display: grid;
@@ -350,32 +362,35 @@
             }
             .discovery-input-group label {
                 font-size: 14px;
-                color: #666;
+                color: var(--text-secondary);
                 font-weight: 500;
             }
             .discovery-input {
                 padding: 8px 12px;
-                border: 1px solid #ddd;
-                border-radius: 4px;
+                border: 1px solid rgba(51, 65, 85, 0.6);
+                border-radius: 6px;
                 font-size: 14px;
+                background: rgba(15, 23, 42, 0.5);
+                color: var(--text-primary);
             }
             .discovery-button {
                 padding: 10px 20px;
-                background: #007bff;
+                background: var(--primary-color);
                 color: white;
                 border: none;
-                border-radius: 4px;
+                border-radius: 6px;
                 cursor: pointer;
                 font-size: 14px;
                 font-weight: 500;
-                transition: background 0.2s;
+                transition: all 0.2s;
             }
             .discovery-button:hover {
-                background: #0056b3;
+                background: var(--primary-hover);
             }
             .discovery-button:disabled {
-                background: #6c757d;
+                background: #475569;
                 cursor: not-allowed;
+                opacity: 0.6;
             }
             .discovery-status {
                 padding: 10px;
@@ -501,11 +516,11 @@
 
             /* Camera Monitoring Styles */
             .camera-monitor-section {
-                background: white;
+                background: rgba(30, 41, 59, 0.4);
+                border: 1px solid rgba(51, 65, 85, 0.6);
                 border-radius: 10px;
                 padding: 20px;
                 margin-bottom: 20px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             }
             .section-header {
                 display: flex;
@@ -513,25 +528,27 @@
                 align-items: center;
                 margin-bottom: 20px;
                 padding-bottom: 10px;
-                border-bottom: 2px solid #e0e0e0;
+                border-bottom: 2px solid rgba(51, 65, 85, 0.6);
             }
             .section-header h2 {
                 margin: 0;
-                color: #333;
+                color: var(--text-primary);
+                font-weight: 600;
             }
             .camera-refresh-status {
                 padding: 4px 10px;
                 border-radius: 12px;
                 font-size: 12px;
-                background-color: #28a745;
+                background-color: var(--success-color);
                 color: white;
+                font-weight: 500;
             }
             .camera-refresh-status.paused {
-                background-color: #ffc107;
+                background-color: var(--warning-color);
                 color: #000;
             }
             .camera-refresh-status.error {
-                background-color: #dc3545;
+                background-color: var(--danger-color);
             }
             .camera-grid {
                 display: grid;
@@ -539,10 +556,10 @@
                 gap: 20px;
             }
             .camera-card {
-                background: #f8f9fa;
+                background: rgba(30, 41, 59, 0.5);
                 border-radius: 8px;
                 padding: 15px;
-                border: 1px solid #e0e0e0;
+                border: 1px solid rgba(51, 65, 85, 0.6);
             }
             .camera-card-header {
                 display: flex;
@@ -550,21 +567,22 @@
                 align-items: center;
                 margin-bottom: 12px;
                 padding-bottom: 8px;
-                border-bottom: 1px solid #dee2e6;
+                border-bottom: 1px solid rgba(51, 65, 85, 0.6);
             }
             .camera-card-title {
                 font-size: 16px;
-                font-weight: bold;
-                color: #333;
+                font-weight: 600;
+                color: var(--text-primary);
             }
             .camera-status-badge {
                 padding: 4px 10px;
                 border-radius: 12px;
                 font-size: 11px;
                 color: white;
+                font-weight: 500;
             }
-            .camera-status-badge.running { background-color: #28a745; }
-            .camera-status-badge.stopped { background-color: #dc3545; }
+            .camera-status-badge.running { background-color: var(--success-color); }
+            .camera-status-badge.stopped { background-color: var(--danger-color); }
             .camera-card-content {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
@@ -576,17 +594,17 @@
             .camera-image {
                 max-width: 100%;
                 max-height: 200px;
-                border: 2px solid #ddd;
+                border: 2px solid rgba(51, 65, 85, 0.6);
                 border-radius: 6px;
                 object-fit: contain;
-                background: #f0f0f0;
+                background: rgba(15, 23, 42, 0.3);
             }
             .camera-no-image {
                 padding: 40px 15px;
-                background: #f0f0f0;
-                border: 2px dashed #ccc;
+                background: rgba(30, 41, 59, 0.3);
+                border: 2px dashed rgba(51, 65, 85, 0.6);
                 border-radius: 6px;
-                color: #666;
+                color: var(--text-secondary);
                 font-style: italic;
                 font-size: 13px;
             }
@@ -599,16 +617,17 @@
                 display: flex;
                 justify-content: space-between;
                 padding: 6px 10px;
-                background: white;
+                background: rgba(15, 23, 42, 0.5);
+                border: 1px solid rgba(51, 65, 85, 0.6);
                 border-radius: 4px;
                 font-size: 13px;
             }
-            .camera-info-label { color: #666; }
-            .camera-info-value { font-weight: bold; color: #333; }
+            .camera-info-label { color: var(--text-secondary); }
+            .camera-info-value { font-weight: bold; color: var(--text-primary); }
             .camera-config-section {
                 margin-top: 12px;
                 padding-top: 12px;
-                border-top: 1px solid #dee2e6;
+                border-top: 1px solid rgba(51, 65, 85, 0.6);
             }
             .camera-config-grid {
                 display: grid;
@@ -622,12 +641,14 @@
             }
             .camera-config-item label {
                 font-size: 11px;
-                color: #666;
+                color: var(--text-secondary);
                 margin-bottom: 3px;
             }
             .camera-config-item input {
                 padding: 5px 8px;
-                border: 1px solid #ccc;
+                border: 1px solid rgba(51, 65, 85, 0.6);
+                background: rgba(15, 23, 42, 0.5);
+                color: var(--text-primary);
                 border-radius: 4px;
                 font-size: 12px;
             }
@@ -644,15 +665,16 @@
                 cursor: pointer;
                 font-size: 12px;
                 transition: all 0.2s;
+                font-weight: 500;
             }
-            .camera-btn-primary { background-color: #007bff; color: white; }
-            .camera-btn-primary:hover { background-color: #0056b3; }
-            .camera-btn-success { background-color: #28a745; color: white; }
-            .camera-btn-success:hover { background-color: #218838; }
-            .camera-btn-danger { background-color: #dc3545; color: white; }
-            .camera-btn-danger:hover { background-color: #c82333; }
-            .camera-btn-secondary { background-color: #6c757d; color: white; }
-            .camera-btn-secondary:hover { background-color: #545b62; }
+            .camera-btn-primary { background-color: var(--primary-color); color: white; }
+            .camera-btn-primary:hover { background-color: var(--primary-hover); }
+            .camera-btn-success { background-color: var(--success-color); color: white; }
+            .camera-btn-success:hover { background-color: #059669; }
+            .camera-btn-danger { background-color: var(--danger-color); color: white; }
+            .camera-btn-danger:hover { background-color: #dc2626; }
+            .camera-btn-secondary { background-color: rgba(100, 116, 139, 0.8); color: white; }
+            .camera-btn-secondary:hover { background-color: rgba(71, 85, 105, 0.9); }
             .camera-message {
                 padding: 6px 10px;
                 border-radius: 4px;
@@ -660,13 +682,13 @@
                 font-size: 12px;
                 display: none;
             }
-            .camera-message.success { background-color: #d4edda; color: #155724; display: block; }
-            .camera-message.error { background-color: #f8d7da; color: #721c24; display: block; }
-            .camera-message.info { background-color: #d1ecf1; color: #0c5460; display: block; }
+            .camera-message.success { background-color: rgba(16, 185, 129, 0.2); color: var(--success-color); border: 1px solid var(--success-color); display: block; }
+            .camera-message.error { background-color: rgba(239, 68, 68, 0.2); color: var(--danger-color); border: 1px solid var(--danger-color); display: block; }
+            .camera-message.info { background-color: rgba(59, 130, 246, 0.2); color: var(--primary-color); border: 1px solid var(--primary-color); display: block; }
             .camera-loading {
                 text-align: center;
                 padding: 40px;
-                color: #666;
+                color: var(--text-secondary);
                 font-style: italic;
             }
 
@@ -680,42 +702,60 @@
             /* Tab Navigation Styles */
             .tab-navigation {
                 display: flex;
-                flex-wrap: wrap;
-                gap: 4px;
+                flex-wrap: nowrap;
+                gap: 6px;
                 border-bottom: none;
                 margin-bottom: 0;
-                background: linear-gradient(135deg, var(--light-bg), #e0e7ff);
+                background: rgba(30, 41, 59, 0.3);
                 padding: 8px;
                 border-radius: 8px;
-                box-shadow: var(--shadow-sm);
+                overflow-x: auto;
+                overflow-y: hidden;
+                -webkit-overflow-scrolling: touch;
+                scrollbar-width: thin;
+                scrollbar-color: rgba(59, 130, 246, 0.3) transparent;
+            }
+
+            .tab-navigation::-webkit-scrollbar {
+                height: 4px;
+            }
+
+            .tab-navigation::-webkit-scrollbar-track {
+                background: transparent;
+            }
+
+            .tab-navigation::-webkit-scrollbar-thumb {
+                background: rgba(59, 130, 246, 0.3);
+                border-radius: 2px;
             }
 
             .tab-button {
-                padding: 6px 12px;
-                background: white;
-                border: none;
-                border-radius: 4px;
+                padding: 9px 18px;
+                background: rgba(30, 41, 59, 0.3);
+                border: 1px solid rgba(51, 65, 85, 0.4);
+                border-radius: 7px;
                 cursor: pointer;
-                font-size: 11px;
-                font-weight: 600;
+                font-size: 12px;
+                font-weight: 500;
                 color: var(--text-secondary);
-                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                transition: all 0.25s ease;
                 white-space: nowrap;
                 position: relative;
                 flex-shrink: 0;
             }
 
             .tab-button:hover {
-                color: var(--primary-color);
-                transform: translateY(-2px);
-                box-shadow: var(--shadow-md);
-                background: white;
+                color: var(--text-primary);
+                background: rgba(30, 41, 59, 0.5);
+                border-color: rgba(59, 130, 246, 0.3);
+                transform: translateY(-1px);
             }
 
             .tab-button.active {
                 color: white;
-                background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-                box-shadow: var(--shadow-md);
+                background: var(--primary-color);
+                border-color: var(--primary-color);
+                box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
             }
             .tab-content {
                 display: none;
@@ -750,6 +790,125 @@
             #timeline-toggle-auto.stopped {
                 background: #800;
             }
+
+            /* Responsive Design for Mobile */
+            @media (max-width: 768px) {
+                body {
+                    padding: 6px;
+                }
+
+                .container {
+                    padding: 10px;
+                    border-radius: 8px;
+                }
+
+                .header-container {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 12px;
+                    margin-bottom: 20px;
+                    padding-bottom: 12px;
+                }
+
+                .header-title {
+                    font-size: 20px;
+                }
+
+                /* Stack dashboard layout vertically on mobile */
+                #tab-dashboard > div:first-child {
+                    grid-template-columns: 1fr !important;
+                    gap: 12px !important;
+                }
+
+                /* Make tabs scrollable horizontally */
+                .tab-navigation {
+                    overflow-x: auto;
+                    overflow-y: hidden;
+                    -webkit-overflow-scrolling: touch;
+                    scrollbar-width: none;
+                    gap: 6px !important;
+                }
+
+                .tab-navigation::-webkit-scrollbar {
+                    display: none;
+                }
+
+                .tab-button {
+                    padding: 8px 14px;
+                    font-size: 11px;
+                    white-space: nowrap;
+                }
+
+                /* Adjust status boxes */
+                .status-box {
+                    padding: 10px;
+                }
+
+                /* Timeline adjustments */
+                #timeline-slide-wrapper {
+                    height: 300px !important;
+                }
+
+                .timeline-nav-btn {
+                    padding: 4px 8px;
+                    font-size: 12px;
+                }
+
+                #timeline-counter {
+                    font-size: 11px !important;
+                }
+
+                /* Control buttons */
+                .control-button {
+                    padding: 10px;
+                    font-size: 14px;
+                }
+
+                /* Serial data grid - 2 columns on mobile */
+                .status-box [style*="grid-template-columns: repeat(3"] {
+                    grid-template-columns: repeat(2, 1fr) !important;
+                }
+
+                /* System resources - stack vertically */
+                .status-box [style*="grid-template-columns: 1fr 1fr 1fr"] {
+                    grid-template-columns: 1fr !important;
+                }
+
+                /* Save button adjustments */
+                .header-container > div:last-child {
+                    width: 100%;
+                }
+
+                .header-container > div:last-child button {
+                    width: 100%;
+                }
+            }
+
+            @media (max-width: 480px) {
+                .header-title {
+                    font-size: 18px;
+                }
+
+                .tab-button {
+                    padding: 7px 12px;
+                    font-size: 10px;
+                }
+
+                .status-box {
+                    padding: 8px;
+                    font-size: 11px;
+                }
+
+                #timeline-slide-wrapper {
+                    height: 250px !important;
+                }
+
+                /* Audio section - stack vertically */
+                .status-box [style*="display: flex"][style*="gap: 4px"] {
+                    flex-direction: column !important;
+                    align-items: flex-start !important;
+                }
+            }
         </style>
     </head>
     <body>
@@ -757,186 +916,171 @@
             <!-- Compact Header: 3-column layout -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color);">
 
-                <!-- LEFT: Monitait Title (3 lines, compact) -->
-                <div style="min-width: 200px;">
+                <!-- LEFT: Monitait Title (compact) -->
+                <div style="min-width: 150px;">
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 6px; margin-top: 4px;">
-                        <span style="font-size: 10px; color: var(--text-secondary);">Status:</span>
-                        <span style="font-size: 11px; font-weight: 600; color: var(--success-color);" id="connection-status">●</span>
-                    </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">
-                        <span id="timestamp">-</span>
                     </div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
-                <div class="tab-navigation" style="margin: 0;">
+                <div class="tab-navigation" style="margin: 0; flex: 1;">
                     <button class="tab-button active" onclick="switchTab('dashboard')">📊 Dashboard</button>
-                    <button class="tab-button" onclick="switchTab('cameras')">📷 Cameras</button>
-                    <button class="tab-button" onclick="switchTab('control')">🎛️ Control Panel</button>
-                    <button class="tab-button" onclick="switchTab('counter')">⚙️ Ejector/Counter</button>
-                    <button class="tab-button" onclick="switchTab('hardware')">🔧 Hardware</button>
-                    <button class="tab-button" onclick="switchTab('infrastructure')">🏗️ Infrastructure</button>
+                    <button class="tab-button" onclick="switchTab('ai')">🤖 AI Assistant</button>
                     <button class="tab-button" onclick="switchTab('gallery')">🖼️ Gallery</button>
                     <button class="tab-button" onclick="switchTab('grafana')">📈 Charts</button>
-                    <button class="tab-button" onclick="switchTab('ai')">🤖 AI Assistant</button>
+                    <button class="tab-button" onclick="switchTab('hardware')">🔧 Hardware</button>
+                    <button class="tab-button" onclick="switchTab('cameras')">📷 Cameras</button>
+                    <button class="tab-button" onclick="switchTab('infrastructure')">🔮 Inference</button>
                     <button class="tab-button" onclick="switchTab('advanced')">⚡ Advanced</button>
                 </div>
 
-                <!-- RIGHT: Config Buttons & Data Source -->
-                <div style="min-width: 200px; display: flex; flex-direction: column; gap: 8px;">
-                    <!-- Config Buttons (top right) -->
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
-                        <button onclick="saveAllServiceConfig()" style="padding: 6px 8px; background: var(--success-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
-                            💾 Save
-                        </button>
-                        <button onclick="loadServiceConfig()" style="padding: 6px 8px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
-                            📂 Load
-                        </button>
-                        <button onclick="exportServiceConfig()" style="padding: 6px 8px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
-                            ⬇️ Export
-                        </button>
-                        <button onclick="importServiceConfig()" style="padding: 6px 8px; background: var(--warning-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px; white-space: nowrap;">
-                            ⬆️ Import
-                        </button>
-                    </div>
-
-                    <!-- Data Source & Last Saved -->
-                    <div style="display: flex; flex-direction: column; gap: 2px;">
-                        <div class="data-source" id="dataSource" style="font-size: 10px; text-align: center; padding: 4px; background: var(--light-bg); border-radius: 4px;">Loading...</div>
-                        <div style="font-size: 9px; color: var(--text-secondary); text-align: center;">
-                            Last saved: <strong id="last-saved-time">Never</strong>
-                        </div>
+                <!-- RIGHT: Save Button -->
+                <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-end;">
+                    <button onclick="saveAllServiceConfig()" style="padding: 8px 12px; background: var(--success-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
+                        💾 Save All Configuration
+                    </button>
+                    <div style="font-size: 9px; color: var(--text-secondary);">
+                        Last: <strong id="last-saved-time" style="color: var(--text-primary);">Never</strong>
                     </div>
                 </div>
             </div>
 
             <!-- Dashboard Tab -->
             <div id="tab-dashboard" class="tab-content active">
-                <div style="display: grid; grid-template-columns: 300px 1fr; gap: 16px;">
-                    <!-- Left Column: Status Info -->
-                    <div style="display: flex; flex-direction: column; gap: 6px;">
-                        <!-- Shipment -->
-                        <div class="status-box" style="padding: 8px;">
-                            <div>
-                                <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 2px;">Current Shipment</div>
-                                <div id="shipment-value" style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 11px; font-weight: 600;" onclick="editShipmentId()">
+                <div style="display: grid; grid-template-columns: 10% 90%; gap: 8px;">
+                    <!-- Left Column: Compact Stats Grid (10% width) -->
+                    <div style="display: flex; flex-direction: column; gap: 5px;">
+                        <!-- Shipment & Status Row -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
+                            <!-- Shipment -->
+                            <div class="status-box" style="padding: 5px;">
+                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;">Shipment</div>
+                                <div id="shipment-value" style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600;" onclick="editShipmentId()">
                                     <span id="shipment-text">-</span>
-                                    <span style="font-size: 10px; opacity: 0.6;">✏️</span>
+                                    <span style="font-size: 9px; opacity: 0.6;">✏️</span>
                                 </div>
-                                <input type="text" id="shipment-input" style="display: none; padding: 4px; border: 2px solid var(--primary-color); border-radius: 4px; font-weight: bold; font-size: 11px; width: 100%;" placeholder="Enter shipment ID">
-                                <div style="display: none; gap: 4px; margin-top: 4px;" id="shipment-buttons">
-                                    <button onclick="saveShipmentId()" style="padding: 3px 10px; background: var(--success-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px;">✓</button>
-                                    <button onclick="cancelEditShipment()" style="padding: 3px 10px; background: var(--text-secondary); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 10px;">✗</button>
+                                <input type="text" id="shipment-input" style="display: none; padding: 3px; border: 2px solid var(--primary-color); border-radius: 3px; font-weight: bold; font-size: 10px; width: 100%;" placeholder="Shipment ID">
+                                <div style="display: none; gap: 3px; margin-top: 3px;" id="shipment-buttons">
+                                    <button onclick="saveShipmentId()" style="padding: 2px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✓</button>
+                                    <button onclick="cancelEditShipment()" style="padding: 2px 8px; background: var(--text-secondary); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✗</button>
+                                </div>
+                                <div style="font-size: 8px; color: var(--text-secondary); margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border-color);" id="device-status">Checking...</div>
+                            </div>
+
+                            <!-- Connection Status -->
+                            <div class="status-box" style="padding: 5px;">
+                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;">Status</div>
+                                <div class="data-source" id="dataSource" style="font-size: 9px; padding: 2px; background: var(--light-bg); border-radius: 3px; margin-bottom: 3px;">Loading...</div>
+                                <div style="font-size: 8px; color: var(--text-secondary);">
+                                    Last: <strong id="last-saved-time">Never</strong>
                                 </div>
                             </div>
-                            <div style="font-size: 9px; color: var(--text-secondary); margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-color);" id="device-status">Checking...</div>
                         </div>
 
-                        <!-- Stats Columns -->
-                        <div class="status-box" style="padding: 8px;">
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
+                        <!-- System Resources -->
+                        <div class="status-box" style="padding: 5px;">
+                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 3px;">💻 System</div>
+                            <div style="font-size: 9px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
+                                <div>CPU: <strong id="system-cpu-value" style="color: var(--primary-color);">...</strong><br><span id="system-cpu-cores" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div>RAM: <strong id="system-ram-value" style="color: var(--primary-color);">...</strong><br><span id="system-ram-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div>Disk: <strong id="system-disk-value" style="color: var(--primary-color);">...</strong><br><span id="system-disk-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                            </div>
+                        </div>
+
+                        <!-- Serial Data Grid (3 columns) -->
+                        <div class="status-box" style="padding: 5px;">
+                            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;">
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Encoder Value</div>
-                                    <div style="font-size: 13px; font-weight: 700; color: var(--text-primary);" id="encoder-value">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Encoder</div>
+                                    <div style="font-size: 10px; font-weight: 700; color: var(--text-primary);" id="encoder-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Speed (PPM)</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="speed-value">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Speed</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="speed-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Pulses / Second</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="pps-value">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Pulses/s</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="pps-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Movement Status</div>
-                                    <div style="display: flex; align-items: center; gap: 3px;">
-                                        <span class="movement-indicator" id="movement-indicator" style="width: 8px; height: 8px;"></span>
-                                        <span style="font-size: 11px; font-weight: 600;" id="movement-value">-</span>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Movement</div>
+                                    <div style="display: flex; align-items: center; gap: 2px;">
+                                        <span class="movement-indicator" id="movement-indicator" style="width: 7px; height: 7px;"></span>
+                                        <span style="font-size: 9px; font-weight: 600;" id="movement-value">-</span>
                                     </div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Ejector Queue</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="ejector-queue">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Queue</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-queue">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Ejector Active</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="ejector-running">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Active</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-running">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Ejector Enabled</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="ejector-enabled">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Enable</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Ejector Offset</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="ejector-offset">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Offset</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-offset">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">OK Counter</div>
-                                    <div style="font-size: 12px; font-weight: 600; color: var(--success-color);" id="ok-counter">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">OK</div>
+                                    <div style="font-size: 10px; font-weight: 600; color: var(--success-color);" id="ok-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">NG Counter</div>
-                                    <div style="font-size: 12px; font-weight: 600; color: var(--danger-color);" id="ng-counter">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">NG</div>
+                                    <div style="font-size: 10px; font-weight: 600; color: var(--danger-color);" id="ng-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Downtime</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="downtime-value">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Downtime</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="downtime-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Analog (ANG)</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="analog-value">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Analog</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="analog-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 9px; color: var(--text-secondary);">Power (PWR)</div>
-                                    <div style="font-size: 11px; font-weight: 600;" id="power-value">-</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Power</div>
+                                    <div style="font-size: 9px; font-weight: 600;" id="power-value">-</div>
                                 </div>
                             </div>
                         </div>
 
-                        <!-- Audio Notifications -->
-                        <div class="status-box" style="padding: 15px;">
-                            <h3 style="margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
-                                <span>🔊</span> Audio Notifications
-                            </h3>
-                            <div style="display: flex; flex-direction: column; gap: 10px;">
-                                <div style="display: flex; align-items: center; gap: 10px;">
-                                    <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
-                                        <input type="checkbox" id="audio-enabled" onchange="toggleAudio()" style="width: 18px; height: 18px; cursor: pointer;">
-                                        <span style="font-weight: 600;">Enable Audio</span>
-                                    </label>
-                                    <button onclick="testAudio()" style="padding: 4px 10px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px;">Test</button>
-                                </div>
-                                <div style="display: flex; align-items: center; gap: 10px;">
-                                    <span style="font-size: 12px; color: var(--text-secondary); min-width: 50px;">Volume:</span>
-                                    <input type="range" id="audio-volume" min="0" max="100" value="50" onchange="updateVolume()" style="flex: 1; cursor: pointer;">
-                                    <span id="audio-volume-display" style="font-size: 12px; min-width: 35px;">50%</span>
-                                </div>
-                                <div style="display: flex; gap: 15px; flex-wrap: wrap;">
-                                    <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
-                                        <input type="checkbox" id="audio-ok" checked onchange="updateSoundType('ok')">
-                                        <span style="color: var(--success-color);">OK</span>
-                                    </label>
-                                    <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
-                                        <input type="checkbox" id="audio-ng" checked onchange="updateSoundType('ng')">
-                                        <span style="color: var(--danger-color);">NG</span>
-                                    </label>
-                                    <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px;">
-                                        <input type="checkbox" id="audio-object" onchange="updateSoundType('object')">
-                                        <span style="color: var(--primary-color);">Object</span>
-                                    </label>
-                                </div>
+                        <!-- Live Inference Stats -->
+                        <div class="status-box" style="padding: 5px;">
+                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
+                                <strong>Capture:</strong> <span id="inference-state-name" style="color: var(--primary-color); font-weight: 700;">...</span>
+                                <span id="capture-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
+                            </div>
+                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
+                                <strong>Inference:</strong>
+                                <strong id="inference-service-name" style="color: var(--primary-color);">...</strong>
+                                <span id="inference-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
+                                <span id="gradio-restart-warning" style="display: none; color: var(--danger-color); font-weight: bold;"> ⚠️</span>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px;">
+                                <div>Proc: <strong id="inference-time-value">...</strong></div>
+                                <div>Int: <strong id="frame-interval-value">...</strong></div>
+                                <div>Inf: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
+                                <div>Cap: <strong id="capture-fps-value">...</strong></div>
+                            </div>
+                            <!-- Queue Status Indicator -->
+                            <div id="queue-status-bar" style="margin-top: 6px; padding: 4px 8px; border-radius: 4px; font-size: 9px; font-weight: 600; display: none; align-items: center; gap: 6px;">
+                                <span id="queue-icon">⚠️</span>
+                                <span id="queue-message">Queue building up</span>
+                                <span id="queue-ratio" style="margin-left: auto; font-size: 8px;"></span>
                             </div>
                         </div>
+
                     </div>
 
-                    <!-- Right Column: Camera Streams -->
+                    <!-- Right Column: Camera Timeline -->
                     <div style="display: flex; flex-direction: column; gap: 20px;">
                         <!-- Camera Timeline Slideshow with Embedded Controls -->
-                        <div class="status-box" style="padding: 20px;">
-                            <h3 style="margin: 0 0 15px 0; font-size: 18px; font-weight: 700; color: var(--text-primary);">🕐 Camera Timeline</h3>
+                        <div class="status-box" style="padding: 15px;">
 
                             <!-- Slideshow Container -->
                             <div id="timeline-slideshow-container" style="position: relative; background: #111; border: 2px solid var(--border-color); border-radius: 8px; overflow: hidden;">
@@ -957,29 +1101,6 @@
                                     <span style="width: 1px; height: 20px; background: var(--border-color); margin: 0 4px;"></span>
                                     <button id="timeline-toggle-auto" class="timeline-nav-btn" title="Stop/Resume Auto-Update">Stop</button>
                                     <span id="timeline-counter" style="font-size: 13px; font-weight: bold; color: #fff; margin-left: 8px;">1 / 1</span>
-                                </div>
-                            </div>
-
-                            <!-- Inference Stats -->
-                            <div style="margin-top: 12px; padding: 12px; background: var(--light-bg); border-radius: 8px; font-size: 13px; color: var(--text-secondary);">
-                                <div style="margin-bottom: 8px;">
-                                    🔴 <strong>Live Inference Stats</strong> |
-                                    <span id="inference-service">Service: <strong id="inference-service-name" style="color: var(--primary-color);">...</strong></span>
-                                    <span id="gradio-restart-warning" style="display: none; color: var(--danger-color); font-weight: bold;"> ⚠️ May Need Restart</span>
-                                </div>
-                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px;">
-                                    <div>
-                                        <span id="inference-time">Processing: <strong id="inference-time-value">...</strong></span>
-                                    </div>
-                                    <div>
-                                        <span id="frame-interval">Interval: <strong id="frame-interval-value">...</strong></span>
-                                    </div>
-                                    <div>
-                                        <span id="inference-fps">Inference FPS: <strong id="inference-fps-value">...</strong></span>
-                                    </div>
-                                    <div>
-                                        <span id="capture-fps">Capture FPS: <strong id="capture-fps-value">...</strong></span>
-                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1063,14 +1184,198 @@
                         <tr><td colspan="2">Loading...</td></tr>
                     </tbody>
                 </table>
+
+                <div class="control-section">
+                    <h3>Image Processing Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label">Parent Object List (comma-separated, use _root for no parent requirement)</div>
+                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
+                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
+                            <div class="control-response" id="config-parent_object_list-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Remove Raw Image After DM Decode</div>
+                            <select class="control-input" id="remove-raw-image-input">
+                                <option value="false">No</option>
+                                <option value="true">Yes</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
+                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>DataMatrix Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Valid DM Char Sizes (comma-separated)</div>
+                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
+                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
+                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Confidence Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
+                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
+                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Overlap Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
+                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
+                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>Feature Toggles</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Histogram Feature</div>
+                            <select class="control-input" id="histogram-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Save Histogram Images</div>
+                            <select class="control-input" id="histogram-save-image-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_save_image-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Class Count Check (equal counts)</div>
+                            <select class="control-input" id="check-class-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Classes to Check (comma-separated)</div>
+                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
+                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Class Count Confidence Threshold</div>
+                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Light Status Check (closed-loop)</div>
+                            <select class="control-input" id="light-status-check-input">
+                                <option value="false" selected>Disabled (open-loop, faster)</option>
+                                <option value="true">Enabled (verify via serial)</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
+                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3>State Management (Camera Capture Control)</h3>
+                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <span style="font-weight: bold; color: #333;">Current State:</span>
+                            <span id="current-state-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
+                            <span id="capture-state-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <button class="camera-btn camera-btn-success" onclick="triggerCapture()">Trigger Capture</button>
+                            <button class="camera-btn camera-btn-primary" onclick="refreshStates()">Refresh</button>
+                        </div>
+                        <div id="state-message" style="margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; display: none;"></div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Available States</h4>
+                        <div id="states-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <span style="color: #666; font-style: italic;">Loading states...</span>
+                        </div>
+                    </div>
+
+                    <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Create/Edit State (Multi-Phase Capture)</h4>
+                        <div class="control-grid" style="margin-bottom: 15px;">
+                            <div class="control-item">
+                                <div class="control-label">State Name</div>
+                                <input type="text" class="control-input" id="state-name-input" placeholder="e.g., default">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Enabled</div>
+                                <select class="control-input" id="state-enabled-input">
+                                    <option value="true">Yes</option>
+                                    <option value="false">No</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; padding: 10px; margin-bottom: 10px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                <h5 style="margin: 0; color: #495057;">Capture Phases</h5>
+                                <button class="camera-btn camera-btn-success" onclick="addPhase()" style="padding: 4px 10px; font-size: 11px;">+ Add Phase</button>
+                            </div>
+
+                            <div id="phases-container">
+                                <!-- Phase 1 (default) - all cameras -->
+                                <div class="phase-row" id="phase-row-0" style="display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(51, 65, 85, 0.4); border-radius: 4px;">
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Light Mode</label>
+                                        <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
+                                            <option value="U_ON_B_OFF" selected>U On, B Off</option>
+                                            <option value="U_OFF_B_ON">U Off, B On</option>
+                                            <option value="U_ON_B_ON">U On, B On</option>
+                                            <option value="U_OFF_B_OFF">U Off, B Off</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Delay (s)</label>
+                                        <input type="number" class="control-input phase-delay" value="0.1" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Cameras</label>
+                                        <input type="text" class="control-input phase-cameras" value="1,2,3,4" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Steps (-1=loop)</label>
+                                        <input type="number" class="control-input phase-steps" value="1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 10px; color: #666;">Analog (-1=off)</label>
+                                        <input type="number" class="control-input phase-analog" value="-1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
+                                    </div>
+                                    <button class="camera-btn camera-btn-danger" onclick="removePhase(0)" style="padding: 4px 8px; font-size: 11px;">✕</button>
+                                </div>
+                            </div>
+                            <p style="font-size: 10px; color: #888; margin: 8px 0 0 0;">Steps: -1=infinite loop, 1=every step, N=every N steps. Analog: -1=disabled, N=trigger when analog≥N.</p>
+                        </div>
+
+                        <div style="margin-top: 10px; display: flex; gap: 8px;">
+                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateState()">Create/Update State</button>
+                            <button class="control-button" style="background-color: #dc3545;" onclick="deleteCurrentState()">Delete State</button>
+                        </div>
+                        <div class="control-response" id="state-config-response"></div>
+                    </div>
+                </div>
             </div>
             </div>
             <!-- End Cameras Tab -->
 
-            <!-- Control Panel Tab -->
-            <div id="tab-control" class="tab-content">
-            <div class="control-panel">
-                <h2>Control Panel</h2>
+            <!-- Hardware Tab -->
+            <div id="tab-hardware" class="tab-content">
+                <h2 style="margin: 0 0 20px 0; color: var(--text-primary); font-weight: 600;">Hardware Configuration</h2>
 
                 <!-- Status Indicators -->
                 <div class="control-section">
@@ -1093,6 +1398,7 @@
                     </div>
                 </div>
 
+                <!-- Basic Controls -->
                 <div class="control-section">
                     <h3>Basic Controls</h3>
                     <div class="control-grid" style="grid-template-columns: 1fr 1fr;">
@@ -1142,12 +1448,8 @@
                         </div>
                     </div>
                 </div>
-            </div>
-            </div>
-            <!-- End Control Panel Tab -->
 
-            <!-- Ejector/Counter Tab -->
-            <div id="tab-counter" class="tab-content">
+                <!-- OK Configuration -->
                 <div class="control-section">
                     <h3>OK Configuration</h3>
                     <div class="control-grid">
@@ -1267,21 +1569,18 @@
                         </div>
                     </div>
                 </div>
-            </div>
-            <!-- End Ejector/Counter Tab -->
 
-            <!-- Hardware Tab -->
-            <div id="tab-hardware" class="tab-content">
+                <!-- Serial Port Configuration -->
                 <div class="control-section">
                     <h3>Serial Port Configuration</h3>
-                    <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 10px; margin-bottom: 15px;">
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <span style="font-weight: bold;">Device Status:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);">Device Status:</span>
                             <span id="serial-device-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
                                 <span id="serial-device-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
-                                <span id="serial-device-text">Checking...</span>
+                                <span id="serial-device-text" style="color: var(--text-primary);">Checking...</span>
                             </span>
-                            <span id="serial-device-info" style="font-size: 12px; color: #6c757d;"></span>
+                            <span id="serial-device-info" style="font-size: 12px; color: var(--text-secondary);"></span>
                         </div>
                     </div>
                     <div class="control-grid">
@@ -1313,7 +1612,7 @@
                             <div class="control-response" id="config-serial_mode-response"></div>
                         </div>
                     </div>
-                    <div style="background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 4px; padding: 10px; margin-top: 10px; font-size: 12px; color: #0c5460;">
+                    <div style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 4px; padding: 10px; margin-top: 10px; font-size: 12px; color: var(--primary-color);">
                         ℹ️ <strong>Auto-Apply:</strong> Serial port settings are applied immediately when changed. The connection will be reinitialized automatically.
                     </div>
                 </div>
@@ -1399,56 +1698,30 @@
             </div>
             <!-- End Hardware Tab -->
 
-            <!-- Infrastructure Tab -->
+            <!-- Inference Tab -->
             <div id="tab-infrastructure" class="tab-content">
                 <div class="control-section">
-                    <h3>Infrastructure Configuration</h3>
-                    <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 10px; margin-bottom: 15px;">
-                        <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-weight: bold;">Redis:</span>
-                                <span id="redis-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
-                                    <span id="redis-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
-                                    <span id="redis-text">Checking...</span>
-                                </span>
-                            </div>
-                            <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-weight: bold;">Pipeline:</span>
-                                <span id="pipeline-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
-                                    <span id="pipeline-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
-                                    <span id="pipeline-text">Checking...</span>
-                                </span>
-                            </div>
+                    <h3>Inference Status</h3>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-weight: bold; color: var(--text-primary);">Pipeline:</span>
+                            <span id="pipeline-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
+                                <span id="pipeline-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
+                                <span id="pipeline-text" style="color: var(--text-primary);">Checking...</span>
+                            </span>
                         </div>
-                    </div>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label">Redis Host</div>
-                            <input type="text" class="control-input" id="redis-host-input" value="redis" placeholder="redis">
-                            <button class="control-button" onclick="updateConfig('redis_host', document.getElementById('redis-host-input').value)">Set Host</button>
-                            <div class="control-response" id="config-redis_host-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Redis Port</div>
-                            <input type="number" class="control-input" id="redis-port-input" value="6379" placeholder="6379">
-                            <button class="control-button" onclick="updateConfig('redis_port', document.getElementById('redis-port-input').value)">Set Port</button>
-                            <div class="control-response" id="config-redis_port-response"></div>
-                        </div>
-                    </div>
-                    <div style="background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 4px; padding: 10px; margin-top: 10px; font-size: 12px; color: #0c5460;">
-                        ℹ️ <strong>Auto-Apply:</strong> Infrastructure settings are applied immediately when changed. Connections will be reinitialized automatically.
                     </div>
                 </div>
 
                 <div class="control-section">
                     <h3>Inference Pipeline Management</h3>
-                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                    <div style="background: rgba(30, 41, 59, 0.5); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: #333;">Active Pipeline:</span>
-                            <span id="current-pipeline-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
-                            <span style="color: #666;">|</span>
-                            <span style="font-weight: bold; color: #333;">Current Model:</span>
-                            <span id="current-model-name" style="font-size: 16px; font-weight: bold; color: #28a745;">Loading...</span>
+                            <span style="font-weight: bold; color: var(--text-primary);">Active Pipeline:</span>
+                            <span id="current-pipeline-name" style="font-size: 16px; font-weight: bold; color: var(--primary-color);">Loading...</span>
+                            <span style="color: var(--text-secondary);">|</span>
+                            <span style="font-weight: bold; color: var(--text-primary);">Current Model:</span>
+                            <span id="current-model-name" style="font-size: 16px; font-weight: bold; color: var(--success-color);">Loading...</span>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px;">
                             <button class="camera-btn camera-btn-primary" onclick="refreshPipelineConfig()">Refresh</button>
@@ -1456,18 +1729,18 @@
                     </div>
 
                     <!-- PIPELINES SECTION -->
-                    <div style="background: #fff; border: 2px solid #007bff; border-radius: 8px; padding: 15px; margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 15px 0; color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 8px;">Pipeline Configuration</h4>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 2px solid var(--primary-color); border-radius: 8px; padding: 15px; margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 15px 0; color: var(--primary-color); border-bottom: 2px solid var(--primary-color); padding-bottom: 8px;">Pipeline Configuration</h4>
 
                         <div style="margin-bottom: 15px;">
-                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Pipelines</h5>
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Available Pipelines</h5>
                             <div id="pipelines-list" style="display: flex; flex-wrap: wrap; gap: 10px;">
-                                <span style="color: #666; font-style: italic;">Loading pipelines...</span>
+                                <span style="color: var(--text-secondary); font-style: italic;">Loading pipelines...</span>
                             </div>
                         </div>
 
-                        <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px;">
-                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Pipeline</h5>
+                        <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Create/Edit Pipeline</h5>
                             <div class="control-grid" style="margin-bottom: 15px;">
                                 <div class="control-item">
                                     <div class="control-label">Pipeline Name <span style="color: #dc3545;">*</span></div>
@@ -1479,32 +1752,32 @@
                                 </div>
                                 <div class="control-item" style="grid-column: span 2;">
                                     <div class="control-label">Models in Pipeline (select models to include)</div>
-                                    <div id="pipeline-models-checklist" style="display: flex; flex-wrap: wrap; gap: 10px; padding: 8px; background: white; border: 1px solid #ccc; border-radius: 4px;">
-                                        <span style="color: #666; font-style: italic;">Loading models...</span>
+                                    <div id="pipeline-models-checklist" style="display: flex; flex-wrap: wrap; gap: 10px; padding: 8px; background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px;">
+                                        <span style="color: var(--text-secondary); font-style: italic;">Loading models...</span>
                                     </div>
                                 </div>
                             </div>
                             <div style="display: flex; gap: 8px;">
-                                <button class="control-button" style="background-color: #007bff;" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
-                                <button class="control-button" style="background-color: #dc3545;" onclick="deletePipeline()">Delete Pipeline</button>
+                                <button class="control-button" style="background-color: var(--primary-color);" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
+                                <button class="control-button" style="background-color: var(--danger-color);" onclick="deletePipeline()">Delete Pipeline</button>
                             </div>
                             <div class="control-response" id="pipeline-response"></div>
                         </div>
                     </div>
 
                     <!-- MODELS SECTION -->
-                    <div style="background: #fff; border: 2px solid #28a745; border-radius: 8px; padding: 15px;">
-                        <h4 style="margin: 0 0 15px 0; color: #28a745; border-bottom: 2px solid #28a745; padding-bottom: 8px;">Inference Models</h4>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 2px solid var(--success-color); border-radius: 8px; padding: 15px;">
+                        <h4 style="margin: 0 0 15px 0; color: var(--success-color); border-bottom: 2px solid var(--success-color); padding-bottom: 8px;">Inference Models</h4>
 
                         <div style="margin-bottom: 15px;">
-                            <h5 style="margin: 0 0 10px 0; color: #495057;">Available Models</h5>
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Available Models</h5>
                             <div id="models-list" style="display: flex; flex-direction: column; gap: 10px;">
-                                <span style="color: #666; font-style: italic;">Loading models...</span>
+                                <span style="color: var(--text-secondary); font-style: italic;">Loading models...</span>
                             </div>
                         </div>
 
-                        <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px;">
-                            <h5 style="margin: 0 0 10px 0; color: #495057;">Create/Edit Model</h5>
+                        <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Create/Edit Model</h5>
                             <div class="control-grid" style="margin-bottom: 15px;">
                                 <div class="control-item">
                                     <div class="control-label">Model Name <span style="color: #dc3545;">*</span></div>
@@ -1551,7 +1824,7 @@
                     </div>
                 </div>
             </div>
-            <!-- End Infrastructure Tab -->
+            <!-- End Inference Tab -->
 
             <!-- Gallery Tab -->
             <div id="tab-gallery" class="tab-content">
@@ -1592,20 +1865,25 @@
 
             <!-- AI Assistant Tab -->
             <div id="tab-ai" class="tab-content">
-                <div style="display: grid; grid-template-columns: 1fr 350px; gap: 20px; height: calc(100vh - 200px);">
-                    <!-- Left: Chat Interface -->
-                    <div style="display: flex; flex-direction: column; background: white; border-radius: 8px; box-shadow: var(--shadow-md); overflow: hidden;">
+                <div style="height: calc(100vh - 150px);">
+                    <!-- Chat Interface -->
+                    <div style="display: flex; flex-direction: column; background: rgba(30, 41, 59, 0.4); border-radius: 8px; box-shadow: var(--shadow-md); overflow: hidden; height: 100%; border: 1px solid rgba(51, 65, 85, 0.6);">
                         <!-- Chat Header -->
-                        <div style="padding: 15px 20px; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); color: white;">
-                            <h3 style="margin: 0; font-size: 18px;">🤖 AI Analytics Assistant</h3>
-                            <p style="margin: 5px 0 0 0; font-size: 13px; opacity: 0.9;">Ask me about production data, defects, and quality metrics</p>
+                        <div style="padding: 15px 20px; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); color: white; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <h3 style="margin: 0; font-size: 18px;">🤖 AI Analytics Assistant</h3>
+                                <p style="margin: 5px 0 0 0; font-size: 13px; opacity: 0.9;">Ask me about production data, defects, and quality metrics</p>
+                            </div>
+                            <button onclick="clearChatHistory()" style="padding: 6px 12px; background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; color: white; cursor: pointer; font-size: 12px; font-weight: 500; transition: all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
+                                🗑️ Clear History
+                            </button>
                         </div>
 
                         <!-- Chat Messages -->
-                        <div id="ai-chat-messages" style="flex: 1; overflow-y: auto; padding: 20px; background: #f8fafc;">
-                            <div style="padding: 15px; background: white; border-radius: 8px; border-left: 4px solid var(--primary-color); margin-bottom: 15px; box-shadow: var(--shadow-sm);">
+                        <div id="ai-chat-messages" style="flex: 1; overflow-y: auto; padding: 20px; background: rgba(15, 23, 42, 0.3);">
+                            <div style="padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); margin-bottom: 15px; box-shadow: var(--shadow-sm);">
                                 <p style="margin: 0 0 10px 0; font-weight: 600; color: var(--text-primary);">👋 Welcome! Try asking:</p>
-                                <ul style="margin: 0; padding-left: 20px; font-size: 14px; color: var(--text-secondary); line-height: 1.8;">
+                                <ul style="margin: 0; padding-left: 20px; font-size: 14px; color: var(--text-primary); line-height: 1.8;">
                                     <li>What's the defect rate for the last hour?</li>
                                     <li>Show me the most common defect types today</li>
                                     <li>Compare production speed vs quality metrics</li>
@@ -1615,7 +1893,7 @@
                         </div>
 
                         <!-- Input Area -->
-                        <div style="padding: 15px; background: white; border-top: 1px solid var(--border-color);">
+                        <div style="padding: 15px; background: rgba(30, 41, 59, 0.6); border-top: 1px solid rgba(51, 65, 85, 0.6);">
                             <div style="display: flex; gap: 8px; align-items: stretch;">
                                 <input
                                     type="text"
@@ -1629,77 +1907,6 @@
                                     🚀
                                 </button>
                             </div>
-                        </div>
-                    </div>
-
-                    <!-- Right: Configuration Panel -->
-                    <div style="display: flex; flex-direction: column; gap: 15px;">
-                        <!-- AI Model Configuration -->
-                        <div style="background: white; padding: 15px; border-radius: 8px; box-shadow: var(--shadow-sm);">
-                            <h4 style="margin: 0 0 12px 0; font-size: 15px; color: var(--text-primary);">🔑 AI Configuration</h4>
-
-                            <div style="margin-bottom: 12px;">
-                                <label style="font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 5px; font-weight: 600;">Model:</label>
-                                <select id="ai-model" class="control-input" style="margin: 0; font-size: 13px;" onchange="updateAIModelFields()">
-                                    <option value="claude">Claude (Anthropic)</option>
-                                    <option value="chatgpt">ChatGPT (OpenAI)</option>
-                                    <option value="gemini">Gemini (Google)</option>
-                                    <option value="local">Local Model</option>
-                                </select>
-                            </div>
-
-                            <div style="margin-bottom: 12px;">
-                                <label style="font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 5px; font-weight: 600;" id="api-key-label">API Key:</label>
-                                <input
-                                    type="password"
-                                    id="ai-api-key"
-                                    class="control-input"
-                                    placeholder="sk-ant-..."
-                                    style="margin: 0; font-size: 13px;"
-                                >
-                            </div>
-
-                            <button class="control-button" onclick="saveAIConfig()" style="width: 100%; background: var(--success-color); font-size: 13px;">
-                                💾 Save Configuration
-                            </button>
-
-                            <div id="api-link-container" style="margin: 10px 0 0 0; font-size: 11px; color: var(--text-secondary); text-align: center;">
-                                <a href="https://console.anthropic.com/" target="_blank" id="api-link" style="color: var(--primary-color);">Get API Key →</a>
-                            </div>
-                        </div>
-
-                        <!-- Database Configuration -->
-                        <div style="background: white; padding: 15px; border-radius: 8px; box-shadow: var(--shadow-sm);">
-                            <h4 style="margin: 0 0 12px 0; font-size: 15px; color: var(--text-primary);">⚙️ Database Info</h4>
-                            <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
-                                <div style="margin-bottom: 8px;">
-                                    <strong style="color: var(--text-primary);">Host:</strong><br>
-                                    <code style="background: var(--light-bg); padding: 2px 6px; border-radius: 3px; font-size: 11px;">localhost:5432</code>
-                                </div>
-                                <div style="margin-bottom: 8px;">
-                                    <strong style="color: var(--text-primary);">Database:</strong><br>
-                                    <code style="background: var(--light-bg); padding: 2px 6px; border-radius: 3px; font-size: 11px;">monitaqc</code>
-                                </div>
-                                <div style="margin-bottom: 8px;">
-                                    <strong style="color: var(--text-primary);">User:</strong><br>
-                                    <code style="background: var(--light-bg); padding: 2px 6px; border-radius: 3px; font-size: 11px;">monitaqc</code>
-                                </div>
-                                <div>
-                                    <strong style="color: var(--text-primary);">Status:</strong>
-                                    <span id="db-status" style="margin-left: 5px; padding: 2px 8px; background: var(--warning-color); color: white; border-radius: 3px; font-size: 11px; font-weight: 600;">Checking...</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Quick Tips -->
-                        <div style="background: #eff6ff; padding: 12px; border-radius: 8px; border-left: 3px solid var(--primary-color);">
-                            <h5 style="margin: 0 0 8px 0; font-size: 13px; color: var(--primary-color);">💡 Quick Tips</h5>
-                            <ul style="margin: 0; padding-left: 18px; font-size: 11px; color: var(--text-secondary); line-height: 1.6;">
-                                <li>Ask specific time ranges</li>
-                                <li>Request comparisons</li>
-                                <li>Ask for trends & patterns</li>
-                                <li>Query by shipment ID</li>
-                            </ul>
                         </div>
                     </div>
                 </div>
@@ -1739,8 +1946,15 @@
                         </div>
 
                         <div class="control-item">
-                            <div class="control-label">Rows per Slide: <strong id="timeline-rows-value">10</strong></div>
-                            <input type="range" id="timeline-rows" min="1" max="100" value="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
+                            <div class="control-label">Rows per Page: <strong id="timeline-rows-value">10</strong></div>
+                            <input type="range" id="timeline-rows" min="1" max="50" value="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Frames displayed per page</div>
+                        </div>
+
+                        <div class="control-item">
+                            <div class="control-label">Total Frames Stored: <strong id="timeline-buffer-value">20</strong></div>
+                            <input type="range" id="timeline-buffer" min="10" max="5000" value="20" step="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Total frames kept in history (affects pages)</div>
                         </div>
 
                         <div class="control-item" style="grid-column: span 2;">
@@ -1752,213 +1966,172 @@
                     </div>
                 </div>
 
+                <!-- Redis Configuration Section -->
                 <div class="control-section">
-                    <h3>Image Processing Configuration</h3>
+                    <h3>🔴 Redis Configuration</h3>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-weight: bold; color: var(--text-primary);">Redis:</span>
+                            <span id="redis-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
+                                <span id="redis-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
+                                <span id="redis-text" style="color: var(--text-primary);">Checking...</span>
+                            </span>
+                        </div>
+                    </div>
                     <div class="control-grid">
-                        <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Parent Object List (comma-separated, use _root for no parent requirement)</div>
-                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
-                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
-                            <div class="control-response" id="config-parent_object_list-response"></div>
+                        <div class="control-item">
+                            <div class="control-label">Redis Host</div>
+                            <input type="text" class="control-input" id="redis-host-input" value="redis" placeholder="redis">
+                            <button class="control-button" onclick="updateConfig('redis_host', document.getElementById('redis-host-input').value)">Set Host</button>
+                            <div class="control-response" id="config-redis_host-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Remove Raw Image After DM Decode</div>
-                            <select class="control-input" id="remove-raw-image-input">
-                                <option value="false">No</option>
-                                <option value="true">Yes</option>
+                            <div class="control-label">Redis Port</div>
+                            <input type="number" class="control-input" id="redis-port-input" value="6379" placeholder="6379">
+                            <button class="control-button" onclick="updateConfig('redis_port', document.getElementById('redis-port-input').value)">Set Port</button>
+                            <div class="control-response" id="config-redis_port-response"></div>
+                        </div>
+                    </div>
+                    <div style="background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 4px; padding: 10px; margin-top: 10px; font-size: 12px; color: var(--primary-color);">
+                        ℹ️ <strong>Auto-Apply:</strong> Redis settings are applied immediately when changed. Connection will be reinitialized automatically.
+                    </div>
+                </div>
+
+                <!-- AI Configuration Section -->
+                <div class="control-section">
+                    <h3>🔑 AI Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Model</div>
+                            <select id="ai-model" class="control-input" onchange="updateAIModelFields()">
+                                <option value="claude">Claude (Anthropic)</option>
+                                <option value="chatgpt">ChatGPT (OpenAI)</option>
+                                <option value="gemini">Gemini (Google)</option>
+                                <option value="local">Local Model</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
-                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" id="api-key-label">API Key</div>
+                            <input
+                                type="password"
+                                id="ai-api-key"
+                                class="control-input"
+                                placeholder="sk-ant-..."
+                            >
                         </div>
                     </div>
                 </div>
 
+                <!-- Database Configuration Section -->
                 <div class="control-section">
-                    <h3>DataMatrix Configuration</h3>
-                    <div class="control-grid">
+                    <h3>⚙️ Database Info</h3>
+                    <div class="control-grid" style="grid-template-columns: repeat(4, 1fr);">
                         <div class="control-item">
-                            <div class="control-label">Valid DM Char Sizes (comma-separated)</div>
-                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
-                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
-                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
+                            <div class="control-label">Host</div>
+                            <div style="padding: 8px; background: rgba(30, 41, 59, 0.3); border-radius: 4px; font-family: monospace; font-size: 12px; color: var(--text-primary);">localhost:5432</div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Confidence Threshold (0-1)</div>
-                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
-                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
-                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
+                            <div class="control-label">Database</div>
+                            <div style="padding: 8px; background: rgba(30, 41, 59, 0.3); border-radius: 4px; font-family: monospace; font-size: 12px; color: var(--text-primary);">monitaqc</div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Overlap Threshold (0-1)</div>
-                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
-                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
-                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
+                            <div class="control-label">User</div>
+                            <div style="padding: 8px; background: rgba(30, 41, 59, 0.3); border-radius: 4px; font-family: monospace; font-size: 12px; color: var(--text-primary);">monitaqc</div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Status</div>
+                            <div id="db-status" style="padding: 6px 12px; background: var(--warning-color); color: white; border-radius: 4px; font-size: 11px; font-weight: 600; text-align: center;">Checking...</div>
                         </div>
                     </div>
                 </div>
 
+                <!-- Audio Alerts Configuration Section -->
                 <div class="control-section">
-                    <h3>Feature Toggles</h3>
-                    <div class="control-grid">
+                    <h3>🔊 Audio Alerts Configuration</h3>
+
+                    <!-- Global Audio Controls -->
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;">
                         <div class="control-item">
-                            <div class="control-label">Histogram Feature</div>
-                            <select class="control-input" id="histogram-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-histogram_enabled-response"></div>
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                <input type="checkbox" id="audio-narrate" onchange="toggleNarration()" style="width: 16px; height: 16px; cursor: pointer;">
+                                <span style="font-weight: 600;">Enable Voice Narration</span>
+                            </label>
+                            <p style="margin: 5px 0 0 24px; font-size: 12px; color: var(--text-secondary);">Speak detected object names</p>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Save Histogram Images</div>
-                            <select class="control-input" id="histogram-save-image-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
-                            <div class="control-response" id="config-histogram_save_image-response"></div>
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                                <input type="checkbox" id="audio-beep" onchange="toggleBeep()" style="width: 16px; height: 16px; cursor: pointer;">
+                                <span style="font-weight: 600;">Enable Beep Sounds</span>
+                            </label>
+                            <p style="margin: 5px 0 0 24px; font-size: 12px; color: var(--text-secondary);">Play alert sound on detection</p>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Class Count Check (equal counts)</div>
-                            <select class="control-input" id="check-class-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
+                            <div style="font-weight: 600; margin-bottom: 5px;">Volume: <span id="audio-volume-display">50%</span></div>
+                            <input type="range" id="audio-volume" min="0" max="100" value="50" onchange="updateVolume()" style="width: 100%; cursor: pointer;">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Classes to Check (comma-separated)</div>
-                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
-                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
-                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
+                            <button onclick="testAudio()" class="control-button" style="background: var(--secondary-color); width: 100%;">🔊 Test Audio</button>
                         </div>
-                        <div class="control-item">
-                            <div class="control-label">Class Count Confidence Threshold</div>
-                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
-                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
-                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
+                    </div>
+
+                    <!-- Per-Object Configuration -->
+                    <div style="background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(51, 65, 85, 0.6);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                            <h4 style="margin: 0; color: var(--text-primary);">Per-Object Configuration</h4>
+                            <button onclick="enableAllObjects()" class="control-button" style="padding: 6px 12px; font-size: 13px;">✅ Enable All</button>
                         </div>
-                        <div class="control-item">
-                            <div class="control-label">Light Status Check (closed-loop)</div>
-                            <select class="control-input" id="light-status-check-input">
-                                <option value="false" selected>Disabled (open-loop, faster)</option>
-                                <option value="true">Enabled (verify via serial)</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
-                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
-                        </div>
-                        <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Store Annotations</div>
-                            <div style="margin-bottom: 10px;">
-                                <input type="text" class="control-input" id="postgres-uri-input" placeholder="postgresql://user:password@host:port/database" value="postgresql://monitaqc:monitaqc2024@timescaledb:5432/monitaqc" style="width: 100%; margin-bottom: 8px;">
-                                <div style="display: flex; gap: 10px;">
-                                    <select class="control-input" id="store-annotation-enabled-input" style="flex: 1;">
-                                        <option value="false">Disabled</option>
-                                        <option value="true">Enabled</option>
-                                    </select>
-                                    <button class="control-button" onclick="updateConfig('store_annotation_enabled', document.getElementById('store-annotation-enabled-input').value)">Set</button>
-                                </div>
+                        <div id="audio-objects-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px;">
+                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
+                                No objects detected yet. Start detection to see objects here.
                             </div>
-                            <div class="control-response" id="config-store_annotation_enabled-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Database Storage Configuration Section -->
+                <div class="control-section">
+                    <h3>💾 Database Storage Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label">PostgreSQL Connection URI</div>
+                            <input type="text" class="control-input" id="postgres-uri-input" placeholder="postgresql://user:password@host:port/database" value="postgresql://monitaqc:monitaqc2024@timescaledb:5432/monitaqc" style="width: 100%;">
                             <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
                                 <strong>Default TimescaleDB:</strong> <code>postgresql://monitaqc:monitaqc2024@timescaledb:5432/monitaqc</code>
                             </div>
                         </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3>State Management (Camera Capture Control)</h3>
-                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
-                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: #333;">Current State:</span>
-                            <span id="current-state-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
-                            <span id="capture-state-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
-                        </div>
-                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <button class="camera-btn camera-btn-success" onclick="triggerCapture()">Trigger Capture</button>
-                            <button class="camera-btn camera-btn-primary" onclick="refreshStates()">Refresh</button>
-                        </div>
-                        <div id="state-message" style="margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 12px; display: none;"></div>
-                    </div>
-
-                    <div style="margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Available States</h4>
-                        <div id="states-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <span style="color: #666; font-style: italic;">Loading states...</span>
-                        </div>
-                    </div>
-
-                    <div style="background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;">Create/Edit State (Multi-Phase Capture)</h4>
-                        <div class="control-grid" style="margin-bottom: 15px;">
-                            <div class="control-item">
-                                <div class="control-label">State Name</div>
-                                <input type="text" class="control-input" id="state-name-input" placeholder="e.g., default">
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label">Enabled</div>
-                                <select class="control-input" id="state-enabled-input">
-                                    <option value="true">Yes</option>
-                                    <option value="false">No</option>
+                        <div class="control-item">
+                            <div class="control-label">Store Annotations to Database</div>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <select class="control-input" id="store-annotation-enabled-input" style="flex: 3; min-width: 150px;">
+                                    <option value="false">Disabled</option>
+                                    <option value="true">Enabled</option>
                                 </select>
+                                <button class="control-button" onclick="updateConfig('store_annotation_enabled', document.getElementById('store-annotation-enabled-input').value)" style="flex: 0 0 80px;">Set</button>
                             </div>
+                            <div class="control-response" id="config-store_annotation_enabled-response"></div>
                         </div>
-
-                        <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; padding: 10px; margin-bottom: 10px;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: #495057;">Capture Phases</h5>
-                                <button class="camera-btn camera-btn-success" onclick="addPhase()" style="padding: 4px 10px; font-size: 11px;">+ Add Phase</button>
-                            </div>
-
-                            <div id="phases-container">
-                                <!-- Phase 1 (default) - all cameras -->
-                                <div class="phase-row" id="phase-row-0" style="display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px;">
-                                    <div>
-                                        <label style="font-size: 10px; color: #666;">Light Mode</label>
-                                        <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
-                                            <option value="U_ON_B_OFF" selected>U On, B Off</option>
-                                            <option value="U_OFF_B_ON">U Off, B On</option>
-                                            <option value="U_ON_B_ON">U On, B On</option>
-                                            <option value="U_OFF_B_OFF">U Off, B Off</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 10px; color: #666;">Delay (s)</label>
-                                        <input type="number" class="control-input phase-delay" value="0.1" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 10px; color: #666;">Cameras</label>
-                                        <input type="text" class="control-input phase-cameras" value="1,2,3,4" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 10px; color: #666;">Steps (-1=loop)</label>
-                                        <input type="number" class="control-input phase-steps" value="1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
-                                    </div>
-                                    <div>
-                                        <label style="font-size: 10px; color: #666;">Analog (-1=off)</label>
-                                        <input type="number" class="control-input phase-analog" value="-1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
-                                    </div>
-                                    <button class="camera-btn camera-btn-danger" onclick="removePhase(0)" style="padding: 4px 8px; font-size: 11px;">✕</button>
-                                </div>
-                            </div>
-                            <p style="font-size: 10px; color: #888; margin: 8px 0 0 0;">Steps: -1=infinite loop, 1=every step, N=every N steps. Analog: -1=disabled, N=trigger when analog≥N.</p>
-                        </div>
-
-                        <div style="margin-top: 10px; display: flex; gap: 8px;">
-                            <button class="control-button" style="background-color: #28a745;" onclick="createOrUpdateState()">Create/Update State</button>
-                            <button class="control-button" style="background-color: #dc3545;" onclick="deleteCurrentState()">Delete State</button>
-                        </div>
-                        <div class="control-response" id="state-config-response"></div>
+                    </div>
+                    <div style="margin-top: 15px; padding: 12px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 6px; font-size: 13px; color: #0c5460;">
+                        <strong>ℹ️ Info:</strong> When enabled, all detection annotations (bounding boxes, labels, confidence scores) are stored in TimescaleDB for historical analysis and Grafana dashboards.
                     </div>
                 </div>
 
+                <!-- Data File Editor Section -->
                 <div class="control-section">
-                    <h3>Data File Editor</h3>
-                    <div style="margin-bottom: 10px;">
-                        <span class="control-label">File: </span><span id="data-file-path">Loading...</span>
-                        <button class="control-button" style="width: auto; margin-left: 10px;" onclick="loadDataFile()">Reload</button>
+                    <h3>📝 Data File Editor</h3>
+                    <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <div>
+                            <span class="control-label">File: </span><span id="data-file-path">Loading...</span>
+                        </div>
+                        <button class="control-button" style="width: auto;" onclick="loadDataFile()">Reload</button>
+                        <div style="flex: 1;"></div>
+                        <button onclick="exportServiceConfig()" style="padding: 8px 12px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
+                            ⬇️ Export Config
+                        </button>
+                        <button onclick="importServiceConfig()" style="padding: 8px 12px; background: var(--warning-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
+                            ⬆️ Import Config
+                        </button>
+                        <div class="data-source" id="dataSource" style="font-size: 11px; padding: 4px 8px; background: var(--light-bg); border-radius: 4px;">Loading...</div>
                     </div>
                     <textarea id="data-file-content" class="control-input" style="width: 100%; height: 300px; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
                     <div style="margin-top: 10px; display: flex; gap: 10px;">
@@ -1971,22 +2144,24 @@
                 </div>
             </div>
             <!-- End Advanced Tab -->
-
-            <p class="timestamp-footer" id="refresh-footer">Real-time updates via SSE</p>
         </div>
 
         <script>
-            // ===== Audio Notification System =====
-            // Settings stored in localStorage and synced with DATA_FILE
+            // ===== Audio Alert System =====
+            // Production line alarm system for real-time object detection
             let audioSettings = {
-                enabled: false,
+                narrate: false,        // Voice narration of detected objects
+                beep: false,           // Beep sound for selected objects
                 volume: 0.5,
-                okSound: true,
-                ngSound: true,
-                objectSound: false
+                enabledObjects: {},    // { "socket": true, "defect": false, ... }
+                objectBeepSounds: {}   // { "socket": "sine", "defect": "square", ... }
             };
             let audioContext = null;
-            let lastEventTimestamp = 0;
+            let detectedObjectClasses = new Set();  // Track all detected objects
+            let lastNarrationTime = 0;
+            let lastBeepTime = 0;
+            const NARRATION_COOLDOWN = 2000;  // 2 seconds between same narrations
+            const BEEP_COOLDOWN = 1000;       // 1 second between beeps
 
             // Load audio settings from localStorage
             function loadAudioSettings() {
@@ -2004,29 +2179,25 @@
             // Save audio settings to localStorage
             function saveAudioSettings() {
                 localStorage.setItem('audioSettings', JSON.stringify(audioSettings));
-                // Also save to server DATA_FILE
-                fetch('/api/config', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ audio: audioSettings })
-                }).catch(e => console.error('Error saving audio settings to server:', e));
             }
 
             // Update UI to reflect current settings
             function updateAudioUI() {
-                const enabledEl = document.getElementById('audio-enabled');
+                const narrateEl = document.getElementById('audio-narrate');
+                const beepEl = document.getElementById('audio-beep');
                 const volumeEl = document.getElementById('audio-volume');
-                const okEl = document.getElementById('audio-ok');
-                const ngEl = document.getElementById('audio-ng');
-                const objectEl = document.getElementById('audio-object');
                 const volumeDisplay = document.getElementById('audio-volume-display');
+                const beepConfig = document.getElementById('audio-beep-config');
 
-                if (enabledEl) enabledEl.checked = audioSettings.enabled;
+                if (narrateEl) narrateEl.checked = audioSettings.narrate;
+                if (beepEl) beepEl.checked = audioSettings.beep;
                 if (volumeEl) volumeEl.value = audioSettings.volume * 100;
-                if (okEl) okEl.checked = audioSettings.okSound;
-                if (ngEl) ngEl.checked = audioSettings.ngSound;
-                if (objectEl) objectEl.checked = audioSettings.objectSound;
                 if (volumeDisplay) volumeDisplay.textContent = Math.round(audioSettings.volume * 100) + '%';
+
+                // Show/hide beep configuration
+                if (beepConfig) {
+                    beepConfig.style.display = audioSettings.beep ? 'block' : 'none';
+                }
             }
 
             // Initialize Web Audio API (must be called after user interaction)
@@ -2039,131 +2210,26 @@
                 }
             }
 
-            // Play a beep sound using Web Audio API
-            function playBeep(frequency, duration, type = 'sine') {
-                if (!audioContext || !audioSettings.enabled) return;
-
-                try {
-                    const oscillator = audioContext.createOscillator();
-                    const gainNode = audioContext.createGain();
-
-                    oscillator.connect(gainNode);
-                    gainNode.connect(audioContext.destination);
-
-                    oscillator.type = type;
-                    oscillator.frequency.value = frequency;
-
-                    gainNode.gain.setValueAtTime(audioSettings.volume, audioContext.currentTime);
-                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + duration);
-
-                    oscillator.start(audioContext.currentTime);
-                    oscillator.stop(audioContext.currentTime + duration);
-                } catch (e) {
-                    console.error('Error playing beep:', e);
-                }
-            }
-
-            // Play OK sound (pleasant ascending tone)
-            function playOkSound() {
-                if (!audioSettings.okSound) return;
-                playBeep(523, 0.15, 'sine');  // C5
-                setTimeout(() => playBeep(659, 0.15, 'sine'), 100);  // E5
-                setTimeout(() => playBeep(784, 0.2, 'sine'), 200);  // G5
-            }
-
-            // Play NG sound (warning descending tone)
-            function playNgSound() {
-                if (!audioSettings.ngSound) return;
-                playBeep(440, 0.2, 'square');  // A4
-                setTimeout(() => playBeep(349, 0.2, 'square'), 150);  // F4
-                setTimeout(() => playBeep(262, 0.3, 'square'), 300);  // C4
-            }
-
-            // Play object detected sound (short beep)
-            function playObjectSound() {
-                if (!audioSettings.objectSound) return;
-                playBeep(880, 0.1, 'sine');  // A5
-            }
-
-            // Handle detection event from SSE
-            function handleDetectionEvent(event) {
-                if (!event) return;
-
-                console.log('[Audio] Detection event received:', event);
-
-                // Debounce: don't play sounds for same timestamp
-                if (event.timestamp === lastEventTimestamp) return;
-                lastEventTimestamp = event.timestamp;
-
-                // Initialize audio context on first event (browsers require user interaction)
-                initAudioContext();
-
-                switch (event.type) {
-                    case 'ok':
-                        if (audioSettings.enabled) playOkSound();
-                        break;
-                    case 'ng':
-                        if (audioSettings.enabled) playNgSound();
-                        break;
-                    case 'object':
-                        console.log('[Audio] Object event detected, audioSettings.enabled:', audioSettings.enabled);
-                        console.log('[Audio] Event details:', event.details);
-                        if (audioSettings.enabled) playObjectSound();
-                        // Always speak the detected objects (even if beep sound is disabled)
-                        if (event.details && event.details.objects) {
-                            console.log('[Audio] Calling speakText with:', event.details.objects);
-                            speakText(event.details.objects);
-                        }
-                        break;
-                    case 'datamatrix':
-                        if (audioSettings.enabled) playObjectSound();
-                        break;
-                }
-            }
-
-            // Text-to-speech function
-            function speakText(text) {
-                console.log('[TTS] speakText called with:', text);
-                if (!text) {
-                    console.warn('[TTS] No text provided');
-                    return;
-                }
-
-                // Check if browser supports speech synthesis
-                if ('speechSynthesis' in window) {
-                    console.log('[TTS] Speech synthesis supported');
-                    // Cancel any ongoing speech
-                    window.speechSynthesis.cancel();
-
-                    // Create utterance
-                    const utterance = new SpeechSynthesisUtterance(text);
-                    utterance.rate = 1.0;
-                    utterance.pitch = 1.0;
-                    utterance.volume = 1.0;
-
-                    console.log('[TTS] Speaking:', text);
-                    // Speak
-                    window.speechSynthesis.speak(utterance);
-
-                    // Add event listeners for debugging
-                    utterance.onstart = () => console.log('[TTS] Speech started');
-                    utterance.onend = () => console.log('[TTS] Speech ended');
-                    utterance.onerror = (e) => console.error('[TTS] Speech error:', e);
-                } else {
-                    console.warn('[TTS] Text-to-speech not supported in this browser');
-                }
-            }
-
-            // Toggle audio enabled
-            function toggleAudio() {
-                const enabledEl = document.getElementById('audio-enabled');
-                audioSettings.enabled = enabledEl.checked;
-                if (audioSettings.enabled) {
-                    initAudioContext();
-                    // Play test sound to confirm audio is working
-                    playBeep(440, 0.1, 'sine');
-                }
+            // Toggle narration
+            function toggleNarration() {
+                const narrateEl = document.getElementById('audio-narrate');
+                audioSettings.narrate = narrateEl.checked;
                 saveAudioSettings();
+                console.log('[Audio] Narration', audioSettings.narrate ? 'enabled' : 'disabled');
+            }
+
+            // Toggle beep
+            function toggleBeep() {
+                const beepEl = document.getElementById('audio-beep');
+                audioSettings.beep = beepEl.checked;
+
+                // Initialize audio context when beep is enabled
+                if (audioSettings.beep) {
+                    initAudioContext();
+                }
+
+                saveAudioSettings();
+                console.log('[Audio] Beep', audioSettings.beep ? 'enabled' : 'disabled');
             }
 
             // Update volume
@@ -2175,23 +2241,236 @@
                 saveAudioSettings();
             }
 
-            // Update sound type toggles
-            function updateSoundType(type) {
-                const el = document.getElementById('audio-' + type);
-                if (type === 'ok') audioSettings.okSound = el.checked;
-                else if (type === 'ng') audioSettings.ngSound = el.checked;
-                else if (type === 'object') audioSettings.objectSound = el.checked;
+            // Toggle object in beep list
+            function toggleObjectBeep(objectName) {
+                audioSettings.enabledObjects[objectName] = !audioSettings.enabledObjects[objectName];
                 saveAudioSettings();
+                updateObjectsList();
+                console.log('[Audio] Object', objectName, audioSettings.enabledObjects[objectName] ? 'enabled' : 'disabled');
+            }
+
+            // Play a beep sound using Web Audio API (non-blocking)
+            function playAlarmBeep() {
+                if (!audioContext || !audioSettings.beep) return;
+
+                // Run audio in next event loop to avoid blocking main thread
+                setTimeout(() => {
+                    try {
+                        const oscillator = audioContext.createOscillator();
+                        const gainNode = audioContext.createGain();
+
+                        oscillator.connect(gainNode);
+                        gainNode.connect(audioContext.destination);
+
+                        oscillator.type = 'sine';
+                        oscillator.frequency.value = 880;  // A5 - attention-grabbing frequency
+
+                        gainNode.gain.setValueAtTime(audioSettings.volume, audioContext.currentTime);
+                        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+
+                        oscillator.start(audioContext.currentTime);
+                        oscillator.stop(audioContext.currentTime + 0.2);
+                    } catch (e) {
+                        console.error('Error playing beep:', e);
+                    }
+                }, 0);
+            }
+
+            // Narrate detected object using Web Speech API (non-blocking)
+            function narrateObject(objectName) {
+                if (!audioSettings.narrate) return;
+
+                // Cooldown check
+                const now = Date.now();
+                if (now - lastNarrationTime < NARRATION_COOLDOWN) {
+                    console.log('[Audio] Narration on cooldown');
+                    return;
+                }
+                lastNarrationTime = now;
+
+                // Run speech synthesis in next event loop to avoid blocking main thread
+                setTimeout(() => {
+                    // Check if browser supports speech synthesis
+                    if ('speechSynthesis' in window) {
+                        // Cancel any ongoing speech
+                        window.speechSynthesis.cancel();
+
+                        // Create utterance
+                        const utterance = new SpeechSynthesisUtterance(objectName);
+                        utterance.rate = 1.0;
+                        utterance.pitch = 1.0;
+                        utterance.volume = audioSettings.volume;
+
+                        console.log('[Audio] Narrating:', objectName);
+                        window.speechSynthesis.speak(utterance);
+                    } else {
+                        console.warn('[Audio] Text-to-speech not supported in this browser');
+                    }
+                }, 0);
+            }
+
+            // Update the objects list in the UI
+            function updateObjectsList() {
+                const listEl = document.getElementById('audio-objects-list');
+                if (!listEl) return;
+
+                // Clear existing list
+                listEl.innerHTML = '';
+
+                // If no objects detected yet
+                if (detectedObjectClasses.size === 0) {
+                    listEl.innerHTML = '<div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">No objects detected yet. Start detection to see objects here.</div>';
+                    return;
+                }
+
+                // Create card for each detected object class
+                const sortedObjects = Array.from(detectedObjectClasses).sort();
+                sortedObjects.forEach(objectName => {
+                    const isEnabled = audioSettings.enabledObjects[objectName] || false;
+                    const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
+
+                    const card = document.createElement('div');
+                    card.style.cssText = 'padding: 12px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; border: 1px solid rgba(51, 65, 85, 0.6);';
+
+                    card.innerHTML = `
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 1;">
+                                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleObjectBeep('${objectName}')" style="width: 16px; height: 16px; cursor: pointer;">
+                                <span style="font-weight: 600; color: var(--text-primary);">${objectName}</span>
+                            </label>
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <select onchange="updateObjectBeepSound('${objectName}', this.value)" style="flex: 1; padding: 4px 8px; background: rgba(30, 41, 59, 0.6); color: var(--text-primary); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; font-size: 12px;">
+                                <option value="sine" ${beepSound === 'sine' ? 'selected' : ''}>🔔 Sine (Bell)</option>
+                                <option value="square" ${beepSound === 'square' ? 'selected' : ''}>📢 Square (Buzzer)</option>
+                                <option value="sawtooth" ${beepSound === 'sawtooth' ? 'selected' : ''}>🎺 Sawtooth (Horn)</option>
+                                <option value="triangle" ${beepSound === 'triangle' ? 'selected' : ''}>🎵 Triangle (Soft)</option>
+                            </select>
+                            <button onclick="testObjectBeep('${objectName}')" style="padding: 4px 10px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap;">▶ Test</button>
+                        </div>
+                    `;
+
+                    listEl.appendChild(card);
+                });
+            }
+
+            // Enable all detected objects
+            function enableAllObjects() {
+                detectedObjectClasses.forEach(objectName => {
+                    audioSettings.enabledObjects[objectName] = true;
+                });
+                saveAudioSettings();
+                updateObjectsList();
+            }
+
+            // Update beep sound for specific object
+            function updateObjectBeepSound(objectName, soundType) {
+                if (!audioSettings.objectBeepSounds) {
+                    audioSettings.objectBeepSounds = {};
+                }
+                audioSettings.objectBeepSounds[objectName] = soundType;
+                saveAudioSettings();
+            }
+
+            // Test beep for specific object
+            function testObjectBeep(objectName) {
+                initAudioContext();
+                const soundType = audioSettings.objectBeepSounds?.[objectName] || 'sine';
+                playBeepWithType(soundType);
+            }
+
+            // Play beep with specific wave type
+            function playBeepWithType(waveType) {
+                if (!audioContext) return;
+
+                setTimeout(() => {
+                    try {
+                        const oscillator = audioContext.createOscillator();
+                        const gainNode = audioContext.createGain();
+
+                        oscillator.connect(gainNode);
+                        gainNode.connect(audioContext.destination);
+
+                        oscillator.type = waveType;
+                        oscillator.frequency.value = 880;
+
+                        gainNode.gain.setValueAtTime(audioSettings.volume, audioContext.currentTime);
+                        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+
+                        oscillator.start(audioContext.currentTime);
+                        oscillator.stop(audioContext.currentTime + 0.2);
+                    } catch (e) {
+                        console.error('Error playing beep:', e);
+                    }
+                }, 0);
+            }
+
+            // Handle detection from timeline data (non-blocking)
+            function processDetectionForAudio(detectionData) {
+                if (!detectionData || !detectionData.detections) {
+                    return;
+                }
+
+                // Process in next event loop to avoid blocking main thread
+                setTimeout(() => {
+                    // Extract unique object classes from detections
+                    detectionData.detections.forEach(det => {
+                        if (det.class_name && det.class_name !== 'Unknown') {
+                            const className = det.class_name;
+
+                            // Add to detected classes set
+                            const wasNew = !detectedObjectClasses.has(className);
+                            detectedObjectClasses.add(className);
+
+                            // Update UI if new object detected
+                            if (wasNew) {
+                                // Initialize as disabled by default
+                                if (audioSettings.enabledObjects[className] === undefined) {
+                                    audioSettings.enabledObjects[className] = false;
+                                }
+                                updateObjectsList();
+                            }
+
+                            // Only play audio if this specific object is enabled
+                            const isEnabled = audioSettings.enabledObjects[className] === true;
+
+                            // Narrate if narration is enabled AND this object is enabled
+                            if (audioSettings.narrate && isEnabled) {
+                                narrateObject(className);
+                            }
+
+                            // Beep if beep is enabled AND this object is enabled
+                            if (audioSettings.beep && isEnabled) {
+                                const now = Date.now();
+                                if (now - lastBeepTime >= BEEP_COOLDOWN) {
+                                    lastBeepTime = now;
+                                    const soundType = audioSettings.objectBeepSounds?.[className] || 'sine';
+                                    playBeepWithType(soundType);
+                                }
+                            }
+                        }
+                    });
+                }, 0);
             }
 
             // Test audio button
             function testAudio() {
                 initAudioContext();
-                const originalEnabled = audioSettings.enabled;
-                audioSettings.enabled = true;
-                playOkSound();
-                setTimeout(() => playNgSound(), 600);
-                audioSettings.enabled = originalEnabled;
+
+                if (audioSettings.narrate) {
+                    narrateObject('Test detection');
+                }
+
+                if (audioSettings.beep) {
+                    playAlarmBeep();
+                }
+
+                // If nothing is enabled, play beep anyway to test volume
+                if (!audioSettings.narrate && !audioSettings.beep) {
+                    audioSettings.beep = true;  // Temporarily enable
+                    playAlarmBeep();
+                    audioSettings.beep = false;
+                }
             }
 
             // Tab switching functionality
@@ -2215,6 +2494,11 @@
 
                 // Save selected tab to localStorage
                 localStorage.setItem('selectedTab', tabName);
+
+                // Load chat history when switching to AI tab
+                if (tabName === 'ai') {
+                    setTimeout(() => loadChatHistory(), 100);
+                }
             }
 
             // Restore last selected tab on page load
@@ -2389,6 +2673,8 @@
                 const qualityValue = document.getElementById('timeline-quality-value');
                 const rowsSlider = document.getElementById('timeline-rows');
                 const rowsValue = document.getElementById('timeline-rows-value');
+                const bufferSlider = document.getElementById('timeline-buffer');
+                const bufferValue = document.getElementById('timeline-buffer-value');
                 const applyBtn = document.getElementById('timeline-apply-config');
 
                 // Load saved configuration from server
@@ -2413,6 +2699,10 @@
                                 rowsSlider.value = configData.timeline_config.num_rows;
                                 rowsValue.textContent = configData.timeline_config.num_rows;
                             }
+                            if (configData.timeline_config.buffer_size) {
+                                bufferSlider.value = configData.timeline_config.buffer_size;
+                                bufferValue.textContent = configData.timeline_config.buffer_size;
+                            }
                         }
                     } catch (error) {
                         console.error('Error loading timeline config:', error);
@@ -2431,12 +2721,17 @@
                     rowsValue.textContent = rowsSlider.value;
                 });
 
+                bufferSlider.addEventListener('input', () => {
+                    bufferValue.textContent = bufferSlider.value;
+                });
+
                 // Apply configuration
                 applyBtn.addEventListener('click', async () => {
                     const showBbox = document.getElementById('timeline-show-bbox').checked;
                     const cameraOrder = document.querySelector('input[name="camera-order"]:checked').value;
                     const quality = qualitySlider.value;
                     const rows = rowsSlider.value;
+                    const buffer = bufferSlider.value;
                     const responseDiv = document.getElementById('timeline-config-response');
 
                     applyBtn.textContent = '⏳ Applying...';
@@ -2452,7 +2747,8 @@
                                 show_bounding_boxes: showBbox,
                                 camera_order: cameraOrder,
                                 image_quality: parseInt(quality),
-                                num_rows: parseInt(rows)
+                                num_rows: parseInt(rows),
+                                buffer_size: parseInt(buffer)
                             })
                         });
 
@@ -2463,6 +2759,9 @@
                             applyBtn.style.background = 'var(--success-color)';
                             responseDiv.textContent = '✓ Configuration applied successfully! Timeline will update on next refresh.';
                             responseDiv.style.color = 'var(--success-color)';
+
+                            // Auto-save to DATA_FILE
+                            await saveAllServiceConfig();
 
                             // Refresh timeline image after config change
                             setTimeout(() => {
@@ -2729,6 +3028,56 @@
                 }
             }
 
+            // Load chat history from localStorage
+            function loadChatHistory() {
+                const chatMessages = document.getElementById('ai-chat-messages');
+                const history = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
+
+                // Clear existing messages (except welcome message)
+                const welcomeMsg = chatMessages.querySelector('div');
+                chatMessages.innerHTML = '';
+                if (welcomeMsg) chatMessages.appendChild(welcomeMsg);
+
+                // Restore messages
+                history.forEach(msg => {
+                    const msgDiv = document.createElement('div');
+                    if (msg.type === 'user') {
+                        msgDiv.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; text-align: right; color: var(--text-primary);';
+                        msgDiv.innerHTML = `<strong>You:</strong> ${msg.content}`;
+                    } else if (msg.type === 'ai') {
+                        msgDiv.style.cssText = 'margin-bottom: 10px; padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); color: var(--text-primary); line-height: 1.6;';
+                        msgDiv.innerHTML = `<div style="margin-bottom: 8px;"><strong style="color: var(--primary-color);">🤖 AI:</strong></div><div>${msg.content}</div>`;
+                    } else if (msg.type === 'error') {
+                        msgDiv.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger-color); border-radius: 8px; color: var(--danger-color);';
+                        msgDiv.innerHTML = `<strong>Error:</strong> ${msg.content}`;
+                    }
+                    chatMessages.appendChild(msgDiv);
+                });
+
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+
+            // Save message to history
+            function saveChatMessage(type, content) {
+                const history = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
+                history.push({ type, content, timestamp: new Date().toISOString() });
+
+                // Keep only last 50 messages to avoid localStorage quota
+                if (history.length > 50) {
+                    history.splice(0, history.length - 50);
+                }
+
+                localStorage.setItem('ai_chat_history', JSON.stringify(history));
+            }
+
+            // Clear chat history
+            function clearChatHistory() {
+                if (confirm('Clear all chat history?')) {
+                    localStorage.removeItem('ai_chat_history');
+                    location.reload();
+                }
+            }
+
             async function sendAIMessage() {
                 const input = document.getElementById('ai-input');
                 const message = input.value.trim();
@@ -2739,9 +3088,12 @@
 
                 // Add user message
                 const userMsg = document.createElement('div');
-                userMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: #e3f2fd; border-radius: 8px; text-align: right;';
+                userMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; text-align: right; color: var(--text-primary);';
                 userMsg.innerHTML = `<strong>You:</strong> ${message}`;
                 chatMessages.appendChild(userMsg);
+
+                // Save to history
+                saveChatMessage('user', message);
 
                 // Clear input
                 input.value = '';
@@ -2749,7 +3101,7 @@
                 // Add loading indicator
                 const loadingMsg = document.createElement('div');
                 loadingMsg.id = 'ai-loading';
-                loadingMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: #f5f5f5; border-radius: 8px;';
+                loadingMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(30, 41, 59, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 8px; color: var(--text-secondary);';
                 loadingMsg.innerHTML = '<strong>AI:</strong> <span style="animation: pulse 1.5s infinite;">Thinking...</span>';
                 chatMessages.appendChild(loadingMsg);
 
@@ -2770,9 +3122,20 @@
 
                     // Add AI response
                     const aiMsg = document.createElement('div');
-                    aiMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: #f0f4f8; border-radius: 8px; border-left: 4px solid var(--primary-color);';
-                    aiMsg.innerHTML = `<strong>AI:</strong> ${data.response || data.error || 'No response'}`;
+                    aiMsg.style.cssText = 'margin-bottom: 10px; padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); color: var(--text-primary); line-height: 1.6;';
+
+                    // Format the response with better line breaks and preserve markdown-like formatting
+                    let formattedResponse = (data.response || data.error || 'No response')
+                        .replace(/\n/g, '<br>')
+                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                        .replace(/• /g, '&nbsp;&nbsp;• ');
+
+                    aiMsg.innerHTML = `<div style="margin-bottom: 8px;"><strong style="color: var(--primary-color);">🤖 AI:</strong></div><div>${formattedResponse}</div>`;
                     chatMessages.appendChild(aiMsg);
+
+                    // Save to history
+                    saveChatMessage('ai', formattedResponse);
 
                     // Scroll to bottom
                     chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -2782,13 +3145,25 @@
                     loadingMsg.remove();
 
                     const errorMsg = document.createElement('div');
-                    errorMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: #ffebee; border-radius: 8px; color: #c62828;';
-                    errorMsg.innerHTML = `<strong>Error:</strong> Failed to get AI response. Please check your configuration.`;
+                    errorMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger-color); border-radius: 8px; color: var(--danger-color);';
+                    const errorContent = 'Failed to get AI response. Please check your configuration.';
+                    errorMsg.innerHTML = `<strong>Error:</strong> ${errorContent}`;
                     chatMessages.appendChild(errorMsg);
+
+                    // Save to history
+                    saveChatMessage('error', errorContent);
 
                     chatMessages.scrollTop = chatMessages.scrollHeight;
                 }
             }
+
+            // Load history when AI tab is opened
+            document.addEventListener('DOMContentLoaded', function() {
+                // Load history if on AI tab
+                if (document.getElementById('tab-ai').style.display !== 'none') {
+                    loadChatHistory();
+                }
+            });
         </script>
 
         <script>
@@ -2810,7 +3185,6 @@
                 document.getElementById('ejector-running').textContent = data.ejector_running ? 'Yes' : 'No';
                 document.getElementById('ejector-enabled').textContent = data.ejector_enabled ? 'Yes' : 'No';
                 document.getElementById('ejector-offset').textContent = data.ejector_offset || 0;
-                document.getElementById('timestamp').textContent = data.timestamp;
 
                 // Update movement status
                 const movementIndicator = document.getElementById('movement-indicator');
@@ -2851,19 +3225,16 @@
                     }
                 }
 
-                // Update connection status
-                const connectionStatus = document.getElementById('connection-status');
+                // Update device status in sidebar
                 const deviceStatus = document.getElementById('device-status');
-                if (serialDevice.connected) {
-                    connectionStatus.textContent = 'Connected';
-                    connectionStatus.className = 'status-box-value connected';
-                    deviceStatus.textContent = 'Device connected and accessible';
-                    deviceStatus.className = 'device-status connected';
-                } else {
-                    connectionStatus.textContent = 'Camera Only';
-                    connectionStatus.className = 'status-box-value';
-                    deviceStatus.textContent = 'Serial not connected';
-                    deviceStatus.className = 'device-status';
+                if (deviceStatus) {
+                    if (serialDevice.connected) {
+                        deviceStatus.textContent = 'Device connected';
+                        deviceStatus.style.color = 'var(--success-color)';
+                    } else {
+                        deviceStatus.textContent = 'Serial not connected';
+                        deviceStatus.style.color = 'var(--text-secondary)';
+                    }
                 }
 
                 // Update verbose configuration values
@@ -2899,6 +3270,12 @@
                 statusEventSource.onmessage = function(event) {
                     try {
                         const data = JSON.parse(event.data);
+
+                        // Debug: Log detection events
+                        if (data.detection_event) {
+                            console.log('[SSE] Detection event received:', data.detection_event);
+                        }
+
                         updateStatusUI(data);
 
                         // Update cameras from SSE
@@ -2915,6 +3292,11 @@
                             if (avgTimeEl) avgTimeEl.textContent = inf.avg_time_ms.toFixed(1) + ' ms';
                             if (avgIntervalEl) avgIntervalEl.textContent = inf.avg_interval_ms.toFixed(1) + ' ms';
                             if (fpsEl) fpsEl.textContent = inf.fps.toFixed(1) + ' FPS';
+
+                            // Process detections for audio alerts
+                            if (inf.last_detection) {
+                                processDetectionForAudio(inf.last_detection);
+                            }
                         }
 
                         // Update health/infrastructure from SSE
@@ -2936,9 +3318,14 @@
                             }
                         }
 
-                        // Handle detection events for audio notification
-                        if (data.detection_event && audioSettings.enabled) {
-                            handleDetectionEvent(data.detection_event);
+                        // Process detection events for audio alerts
+                        if (data.detection_event && data.detection_event.details && data.detection_event.details.detections) {
+                            processDetectionForAudio(data.detection_event.details);
+                        }
+
+                        // Process detections for audio alerts (if detections come directly in data)
+                        if (data.detections) {
+                            processDetectionForAudio(data);
                         }
                     } catch (e) {
                         console.error('Error parsing SSE data:', e);
@@ -4067,7 +4454,7 @@
                 const div = document.createElement('div');
                 div.className = 'phase-row';
                 div.id = `phase-row-${idx}`;
-                div.style.cssText = 'display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: white; border-radius: 4px;';
+                div.style.cssText = 'display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(51, 65, 85, 0.4); border-radius: 4px;';
 
                 const camerasStr = Array.isArray(cameras) ? cameras.join(',') : cameras;
 
@@ -4878,6 +5265,13 @@
                     const response = await fetch('/api/inference/stats');
                     const data = await response.json();
 
+                    // Update state name
+                    const stateNameEl = document.getElementById('inference-state-name');
+                    if (stateNameEl) {
+                        const stateName = data.state_name || 'unknown';
+                        stateNameEl.textContent = stateName;
+                    }
+
                     // Update service name
                     const serviceNameEl = document.getElementById('inference-service-name');
                     if (serviceNameEl) {
@@ -4904,11 +5298,27 @@
                         }
                     }
 
-                    // Update inference FPS (based on processing intervals)
+                    // Update inference FPS (convert ms to FPS: 1000/ms)
                     const inferenceFpsValueEl = document.getElementById('inference-fps-value');
                     if (inferenceFpsValueEl) {
                         if (data.inference_fps > 0) {
-                            inferenceFpsValueEl.textContent = data.inference_fps;
+                            const infMs = parseFloat(data.inference_fps);
+                            const infFps = 1000 / infMs; // Convert ms to FPS
+                            inferenceFpsValueEl.textContent = infFps.toFixed(2);
+
+                            // Color-code based on milliseconds performance
+                            if (infMs < 100) {
+                                inferenceFpsValueEl.style.color = 'var(--success-color)'; // Fast: <100ms (>10 FPS) - green
+                            } else if (infMs < 300) {
+                                inferenceFpsValueEl.style.color = '#FFA500'; // Acceptable: 100-300ms (3-10 FPS) - orange
+                            } else if (infMs < 1000) {
+                                inferenceFpsValueEl.style.color = 'var(--warning-color)'; // Slow: 300-1000ms (1-3 FPS) - yellow
+                            } else {
+                                inferenceFpsValueEl.style.color = 'var(--danger-color)'; // Very slow: >1000ms (<1 FPS) - red
+                            }
+
+                            // Trigger inference heartbeat animation
+                            pulseHeartbeat('inference-heartbeat');
                         } else {
                             inferenceFpsValueEl.textContent = 'N/A';
                         }
@@ -4917,14 +5327,162 @@
                     // Update capture FPS (based on camera capture rate)
                     const captureFpsValueEl = document.getElementById('capture-fps-value');
                     if (captureFpsValueEl) {
-                        if (data.capture_fps > 0) {
-                            captureFpsValueEl.textContent = data.capture_fps;
+                        if (data.capture_fps !== undefined && data.capture_fps !== null) {
+                            captureFpsValueEl.textContent = data.capture_fps.toFixed(2);
+                            // Trigger capture heartbeat animation
+                            pulseHeartbeat('capture-heartbeat');
                         } else {
                             captureFpsValueEl.textContent = 'N/A';
                         }
                     }
+
+                    // Queue Status Monitoring - Compare Capture vs Inference FPS
+                    updateQueueStatus(data);
                 } catch (error) {
                     console.error('Error fetching inference stats:', error);
+                }
+            }
+
+            // Queue Status Monitor - Visual alarm when queue is building up
+            function updateQueueStatus(data) {
+                const queueBar = document.getElementById('queue-status-bar');
+                const queueIcon = document.getElementById('queue-icon');
+                const queueMessage = document.getElementById('queue-message');
+                const queueRatio = document.getElementById('queue-ratio');
+
+                if (!queueBar || !data.inference_fps || !data.capture_fps) return;
+
+                // Calculate FPS values
+                const infMs = parseFloat(data.inference_fps);
+                const inferenceFps = 1000 / infMs; // Convert ms to FPS
+                const captureFps = parseFloat(data.capture_fps);
+
+                // Calculate the ratio: how much faster is capture compared to inference?
+                const ratio = captureFps / inferenceFps;
+
+                // Show warning if capture is faster than inference (queue building up)
+                if (captureFps > inferenceFps && inferenceFps > 0) {
+                    queueBar.style.display = 'flex';
+                    queueRatio.textContent = `Cap/Inf: ${ratio.toFixed(2)}x`;
+
+                    // Severity levels based on ratio
+                    if (ratio > 3) {
+                        // Critical: Capture is 3x faster than inference
+                        queueBar.style.background = 'rgba(239, 68, 68, 0.2)'; // Red
+                        queueBar.style.border = '1px solid var(--danger-color)';
+                        queueBar.style.color = 'var(--danger-color)';
+                        queueIcon.textContent = '🚨';
+                        queueMessage.textContent = 'CRITICAL: Queue overload!';
+                    } else if (ratio > 1.5) {
+                        // Warning: Capture is 1.5x faster
+                        queueBar.style.background = 'rgba(251, 191, 36, 0.2)'; // Yellow
+                        queueBar.style.border = '1px solid var(--warning-color)';
+                        queueBar.style.color = 'var(--warning-color)';
+                        queueIcon.textContent = '⚠️';
+                        queueMessage.textContent = 'WARNING: Queue building up';
+                    } else {
+                        // Minor: Slightly faster
+                        queueBar.style.background = 'rgba(59, 130, 246, 0.2)'; // Blue
+                        queueBar.style.border = '1px solid var(--primary-color)';
+                        queueBar.style.color = 'var(--primary-color)';
+                        queueIcon.textContent = 'ℹ️';
+                        queueMessage.textContent = 'Queue accumulating';
+                    }
+                } else if (inferenceFps > captureFps && captureFps > 0) {
+                    // Good: Inference is faster than capture (ideal)
+                    queueBar.style.display = 'flex';
+                    queueBar.style.background = 'rgba(34, 197, 94, 0.2)'; // Green
+                    queueBar.style.border = '1px solid var(--success-color)';
+                    queueBar.style.color = 'var(--success-color)';
+                    queueIcon.textContent = '✓';
+                    queueMessage.textContent = 'OK: Inference keeping up';
+                    queueRatio.textContent = `Inf/Cap: ${(inferenceFps / captureFps).toFixed(2)}x`;
+                } else {
+                    // Hide if no data or equal rates
+                    queueBar.style.display = 'none';
+                }
+            }
+
+            // Heartbeat pulse animation
+            function pulseHeartbeat(elementId) {
+                const heartbeat = document.getElementById(elementId);
+                if (!heartbeat) return;
+
+                // Fade in quickly, fade out slowly
+                heartbeat.style.transition = 'opacity 0.15s ease-in';
+                heartbeat.style.opacity = '1';
+
+                setTimeout(() => {
+                    heartbeat.style.transition = 'opacity 0.5s ease-out';
+                    heartbeat.style.opacity = '0';
+                }, 150);
+            }
+
+            // Poll for latest detections (fallback for audio when SSE isn't working)
+            let lastProcessedDetectionTime = 0;
+            async function pollLatestDetections() {
+                console.log('[Polling] pollLatestDetections() called');
+                try {
+                    const response = await fetch('/api/latest_detections');
+                    console.log('[Polling] Response received:', response.status);
+                    const data = await response.json();
+                    console.log('[Polling] Data:', data);
+
+                    if (data.has_detection && data.event) {
+                        const event = data.event;
+                        // Only process if we haven't seen this timestamp before
+                        if (event.timestamp !== lastProcessedDetectionTime) {
+                            lastProcessedDetectionTime = event.timestamp;
+                            console.log('[Polling] New detection event:', event);
+
+                            // Process for audio
+                            if (event.details && event.details.detections) {
+                                processDetectionForAudio(event.details);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('[Polling] Error fetching detections:', e);
+                }
+            }
+
+            // Fetch and update system metrics
+            async function fetchSystemMetrics() {
+                try {
+                    const response = await fetch('/api/system/metrics');
+                    const data = await response.json();
+
+                    // Update CPU
+                    const cpuValueEl = document.getElementById('system-cpu-value');
+                    const cpuCoresEl = document.getElementById('system-cpu-cores');
+                    if (cpuValueEl && data.cpu) {
+                        cpuValueEl.textContent = `${data.cpu.percent}%`;
+                        if (cpuCoresEl) {
+                            cpuCoresEl.textContent = `${data.cpu.cores_logical} cores`;
+                        }
+                    }
+
+                    // Update RAM
+                    const ramValueEl = document.getElementById('system-ram-value');
+                    const ramDetailsEl = document.getElementById('system-ram-details');
+                    if (ramValueEl && data.memory) {
+                        ramValueEl.textContent = `${data.memory.percent}%`;
+                        if (ramDetailsEl) {
+                            ramDetailsEl.textContent = `${data.memory.used_gb}GB / ${data.memory.total_gb}GB`;
+                        }
+                    }
+
+                    // Update Disk
+                    const diskValueEl = document.getElementById('system-disk-value');
+                    const diskDetailsEl = document.getElementById('system-disk-details');
+                    if (diskValueEl && data.disk) {
+                        diskValueEl.textContent = `${data.disk.percent}%`;
+                        if (diskDetailsEl) {
+                            diskDetailsEl.textContent = `${data.disk.free_gb}GB free`;
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error fetching system metrics:', error);
                 }
             }
 
@@ -4940,6 +5498,14 @@
             // Initial inference stats fetch and set up refresh interval
             fetchInferenceStats();
             setInterval(fetchInferenceStats, 2000);  // Update every 2 seconds
+
+            // Initial system metrics fetch and set up refresh interval
+            fetchSystemMetrics();
+            setInterval(fetchSystemMetrics, 3000);  // Update every 3 seconds
+
+            // Polling disabled - using SSE for audio alerts now
+            // pollLatestDetections();
+            // setInterval(pollLatestDetections, 1000);
 
             // Initial config fetch (once on page load)
             fetchConfig();
