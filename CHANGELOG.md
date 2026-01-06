@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-01-06
+
+### Added
+- **Comprehensive Documentation**:
+  - 📖 **USER_MANUAL.md**: 72-page complete user guide covering all features
+  - 📊 **AUDIT_REPORT.md**: System audit with optimization recommendations
+  - Installation & quick start guides
+  - Camera setup (USB, IP, multi-camera)
+  - YOLO AI detection configuration
+  - Audio alerts system documentation
+  - Image processing & capture modes
+  - Timeline & review features
+  - Database integration (TimescaleDB + Grafana)
+  - Troubleshooting guide with solutions
+  - Best practices & FAQ
+  - API reference & Docker commands
+
+- **Real-time Audio Alerts System**:
+  - SSE-based detection events via Redis for cross-process communication
+  - Voice narration of detected object names (Text-to-Speech)
+  - Per-object audio control (enable/disable individual objects)
+  - 4 customizable beep sounds per object (sine, square, sawtooth, triangle)
+  - Non-blocking audio processing
+  - Volume control and test functionality
+  - Clean UI in Advanced tab
+
+- **Advanced UI Organization**:
+  - Consolidated Audio Alerts configuration in Advanced tab
+  - Database Storage configuration moved to Advanced tab
+  - Data File Editor relocated to bottom of Advanced tab
+  - Improved responsive layout with proper sizing
+  - Fixed dropdown/button width issues
+
+### Changed
+- **Configuration Management**:
+  - All settings now configurable via web interface at http://localhost:5050/status
+  - Settings persisted to .env.prepared_query_data
+  - Export/Import service configuration functionality
+
+- **Detection Event Architecture**:
+  - Migrated from in-memory deque to Redis for cross-process event sharing
+  - ProcessPoolExecutor workers can now communicate events to main FastAPI process
+  - SSE stream delivers real-time detection events
+  - Polling endpoint available as fallback
+
+### Fixed
+- Audio playing for disabled objects (now respects per-object enable/disable)
+- Detection events not reaching frontend (Redis cross-process solution)
+- SSE stream not showing detection events (proper Redis integration)
+- Dropdown too narrow and button too wide in Database Storage section
+
+### System Audit Findings
+- ✅ All 6 Docker services properly configured and necessary
+- ✅ Configuration files properly synchronized
+- ✅ Clean codebase with no duplicate code
+- ⚠️ Identified 11 unused Python dependencies (~50MB bloat) - removal recommended
+- ⚠️ Timeline buffer capped at 100 frames when quality=100% - documented for future fix
+
+### Performance
+- Low CPU usage during idle operation
+- Efficient Redis LRU eviction for cache management
+- Optimized disk cleanup service with automated space management
+- SSE provides real-time event delivery with minimal overhead
+
+## [1.0.0] - 2026-01-05
+
 ### Added
 - **Unlimited Camera Support**: Updated from fixed 4-camera limit to dynamic camera detection
   - Merged improvements from `zarrin-error-fix` branch
