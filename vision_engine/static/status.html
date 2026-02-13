@@ -7,7 +7,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>Monitait Vision Engine v2.1.0</title>
+        <title>Monitait Vision Engine v2.1.1</title>
         <style>
             @font-face { font-family: 'Inter'; src: url('/static/fonts/Inter.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
             @font-face { font-family: 'Vazir'; src: url('/static/fonts/Vazir.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
@@ -1478,7 +1478,7 @@
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
                     </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.1.0</div>
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.1.1</div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
@@ -2728,34 +2728,6 @@
                                 No objects detected yet. Start detection to see objects here.
                             </div>
                         </div>
-                    </div>
-                </div>
-
-                <!-- Database Storage Configuration Section -->
-                <div class="control-section">
-                    <h3>💾 <span data-i18n="db_storage">Database Storage Configuration</span></h3>
-                    <div class="control-grid">
-                        <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">PostgreSQL Connection URI</div>
-                            <input type="text" class="control-input" id="postgres-uri-input" placeholder="postgresql://user:password@host:port/database" value="postgresql://monitaqc:monitaqc2024@timescaledb:5432/monitaqc" style="width: 100%;">
-                            <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
-                                <strong>Default TimescaleDB:</strong> <code>postgresql://monitaqc:monitaqc2024@timescaledb:5432/monitaqc</code>
-                            </div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Store Annotations to Database</div>
-                            <div style="display: flex; gap: 10px; align-items: center;">
-                                <select class="control-input" id="store-annotation-enabled-input" style="flex: 3; min-width: 150px;">
-                                    <option value="false">Disabled</option>
-                                    <option value="true">Enabled</option>
-                                </select>
-                                <button class="control-button" onclick="updateConfig('store_annotation_enabled', document.getElementById('store-annotation-enabled-input').value)" style="flex: 0 0 80px;">Set</button>
-                            </div>
-                            <div class="control-response" id="config-store_annotation_enabled-response"></div>
-                        </div>
-                    </div>
-                    <div style="margin-top: 15px; padding: 12px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 6px; font-size: 13px; color: #0c5460;">
-                        <strong>ℹ️ Info:</strong> When enabled, all detection annotations (bounding boxes, labels, confidence scores) are stored in TimescaleDB for historical analysis and Grafana dashboards.
                     </div>
                 </div>
 
