@@ -7,7 +7,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>Monitait Vision Engine v2.0.0</title>
+        <title>Monitait Vision Engine v2.1.0</title>
         <style>
             @font-face { font-family: 'Inter'; src: url('/static/fonts/Inter.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
             @font-face { font-family: 'Vazir'; src: url('/static/fonts/Vazir.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
@@ -977,11 +977,16 @@
                     state_name: "State Name", delay: "Delay (s)", cameras: "Cameras",
                     // Hardware
                     hardware_config: "Hardware Configuration",
-                    ok_config: "OK Counter Adjustment", ng_config: "NG Counter Adjustment",
-                    offset_delay: "Offset Delay (milliseconds)", duration_pulses: "Duration Pulses",
+                    status_indicators: "Status Indicators", basic_controls: "Basic Controls",
+                    upper_pwm: "Upper PWM Value (0-255)", bottom_pwm: "Bottom PWM Value (0-255)",
+                    warning_led: "Warning LED",
+                    ok_config: "OK Configuration", ng_config: "NG Configuration",
+                    ok_counter_adj: "OK Counter Adjustment", ng_counter_adj: "NG Counter Adjustment",
+                    offset_delay: "Offset Delay (milliseconds)", duration_pulses: "Duration Pulses (16us each)",
                     duration_percent: "Duration Percent", encoder_factor: "Encoder Factor",
                     set: "Set", adjust: "Adjust",
                     // Counter Service
+                    counter_service_config: "Counter Service Configuration",
                     ejector_enabled: "Ejector Enabled", ejector_offset: "Ejector Offset (encoder counts)",
                     ejector_duration: "Ejector Duration (seconds)", ejector_poll: "Ejector Poll Interval (seconds)",
                     time_between: "Time Between Packages (seconds)",
@@ -990,6 +995,10 @@
                     serial_config: "Serial Port Configuration", serial_port: "Serial Port Device",
                     baud_rate: "Baud Rate", serial_mode: "Serial Mode",
                     auto_apply_serial: "Auto-Apply: Serial port settings are applied immediately when changed",
+                    // Watcher
+                    watcher_config: "Watcher Configuration",
+                    downtime_threshold: "Downtime Threshold (seconds)",
+                    external_reset: "External Reset", verbose_mode: "Verbose Mode",
                     // Inference
                     inference_status: "Inference Status", pipeline: "Pipeline",
                     pipeline_management: "Inference Pipeline Management",
@@ -1026,6 +1035,8 @@
                     grafana_dashboard: "Grafana Dashboard",
                     default_creds: "Default Credentials",
                     connection_info: "TimescaleDB Connection",
+                    // Features
+                    feature_toggles: "Feature Toggles",
                     // Language
                     language: "Language"
                 },
@@ -1057,21 +1068,30 @@
                     class_count_check: "بررسی تعداد کلاس", classes_to_check: "کلاس‌های مورد بررسی",
                     class_confidence: "آستانه اطمینان تعداد کلاس",
                     light_status: "بررسی وضعیت نور",
+                    feature_toggles: "تنظیمات ویژگی‌ها",
                     state_management: "مدیریت وضعیت (کنترل ثبت دوربین)",
                     trigger_capture: "شروع ثبت", available_states: "وضعیت‌های موجود",
                     create_edit_state: "ایجاد/ویرایش وضعیت (ثبت چندمرحله‌ای)",
                     state_name: "نام وضعیت", delay: "تاخیر (ثانیه)", cameras: "دوربین‌ها",
                     hardware_config: "تنظیمات سخت‌افزار",
-                    ok_config: "تنظیم شمارنده سالم", ng_config: "تنظیم شمارنده معیوب",
-                    offset_delay: "تاخیر آفست (میلی‌ثانیه)", duration_pulses: "مدت پالس",
+                    status_indicators: "نشانگرهای وضعیت", basic_controls: "کنترل‌های پایه",
+                    upper_pwm: "مقدار PWM بالا (0-255)", bottom_pwm: "مقدار PWM پایین (0-255)",
+                    warning_led: "LED هشدار",
+                    ok_config: "تنظیمات سالم", ng_config: "تنظیمات معیوب",
+                    ok_counter_adj: "تنظیم شمارنده سالم", ng_counter_adj: "تنظیم شمارنده معیوب",
+                    offset_delay: "تاخیر آفست (میلی‌ثانیه)", duration_pulses: "مدت پالس (16 میکروثانیه)",
                     duration_percent: "درصد مدت", encoder_factor: "ضریب انکودر",
                     set: "تنظیم", adjust: "تنظیم",
+                    counter_service_config: "تنظیمات سرویس شمارنده",
                     ejector_enabled: "خروجی فعال", ejector_offset: "آفست خروجی (شمارش انکودر)",
                     ejector_duration: "مدت خروجی (ثانیه)", ejector_poll: "فاصله نظرسنجی خروجی (ثانیه)",
                     time_between: "زمان بین بسته‌ها (ثانیه)", capture_mode: "حالت ثبت",
                     serial_config: "تنظیمات پورت سریال", serial_port: "دستگاه پورت سریال",
                     baud_rate: "نرخ بود", serial_mode: "حالت سریال",
                     auto_apply_serial: "اعمال خودکار: تنظیمات پورت سریال فوری اعمال می‌شوند",
+                    watcher_config: "تنظیمات ناظر",
+                    downtime_threshold: "آستانه توقف (ثانیه)",
+                    external_reset: "ریست خارجی", verbose_mode: "حالت تفصیلی",
                     inference_status: "وضعیت استنتاج", pipeline: "خط لوله",
                     pipeline_management: "مدیریت خط لوله استنتاج",
                     active_pipeline: "خط لوله فعال", pipeline_config: "تنظیمات خط لوله",
@@ -1134,21 +1154,30 @@
                     histogram_feature: "ميزة الرسم البياني", save_histogram: "حفظ صور الرسم البياني",
                     class_count_check: "فحص عدد الفئات", classes_to_check: "الفئات المراد فحصها",
                     class_confidence: "عتبة ثقة عدد الفئات", light_status: "فحص حالة الضوء",
+                    feature_toggles: "إعدادات الميزات",
                     state_management: "إدارة الحالة (التحكم بالتقاط الكاميرا)",
                     trigger_capture: "بدء الالتقاط", available_states: "الحالات المتاحة",
                     create_edit_state: "إنشاء/تحرير حالة", state_name: "اسم الحالة",
                     delay: "تأخير (ثانية)", cameras: "كاميرات",
                     hardware_config: "إعدادات الأجهزة",
-                    ok_config: "ضبط عداد السليم", ng_config: "ضبط عداد المعيب",
-                    offset_delay: "تأخير الإزاحة (مللي ثانية)", duration_pulses: "نبضات المدة",
+                    status_indicators: "مؤشرات الحالة", basic_controls: "التحكم الأساسي",
+                    upper_pwm: "قيمة PWM العلوي (0-255)", bottom_pwm: "قيمة PWM السفلي (0-255)",
+                    warning_led: "LED التحذير",
+                    ok_config: "إعدادات السليم", ng_config: "إعدادات المعيب",
+                    ok_counter_adj: "ضبط عداد السليم", ng_counter_adj: "ضبط عداد المعيب",
+                    offset_delay: "تأخير الإزاحة (مللي ثانية)", duration_pulses: "نبضات المدة (16 مايكروثانية)",
                     duration_percent: "نسبة المدة", encoder_factor: "معامل المشفر",
                     set: "تعيين", adjust: "ضبط",
+                    counter_service_config: "إعدادات خدمة العداد",
                     ejector_enabled: "الطارد مفعل", ejector_offset: "إزاحة الطارد",
                     ejector_duration: "مدة الطارد (ثانية)", ejector_poll: "فاصل استقصاء الطارد",
                     time_between: "الوقت بين الحزم (ثانية)", capture_mode: "وضع الالتقاط",
                     serial_config: "إعدادات المنفذ التسلسلي", serial_port: "جهاز المنفذ",
                     baud_rate: "معدل البود", serial_mode: "وضع المنفذ",
                     auto_apply_serial: "تطبيق تلقائي: يتم تطبيق إعدادات المنفذ فوراً",
+                    watcher_config: "إعدادات المراقب",
+                    downtime_threshold: "عتبة التوقف (ثانية)",
+                    external_reset: "إعادة تعيين خارجي", verbose_mode: "الوضع التفصيلي",
                     inference_status: "حالة الاستدلال", pipeline: "خط الأنابيب",
                     pipeline_management: "إدارة خطوط الاستدلال",
                     active_pipeline: "خط الأنابيب النشط", pipeline_config: "إعدادات خط الأنابيب",
@@ -1214,16 +1243,24 @@
                     create_edit_state: "Zustand erstellen/bearbeiten", state_name: "Zustandsname",
                     delay: "Verzögerung (s)", cameras: "Kameras",
                     hardware_config: "Hardware-Konfiguration",
-                    ok_config: "OK-Zähler Einstellung", ng_config: "Fehler-Zähler Einstellung",
-                    offset_delay: "Offset-Verzögerung (ms)", duration_pulses: "Dauerimpulse",
+                    status_indicators: "Statusanzeigen", basic_controls: "Grundsteuerung",
+                    upper_pwm: "Oberer PWM-Wert (0-255)", bottom_pwm: "Unterer PWM-Wert (0-255)",
+                    warning_led: "Warn-LED",
+                    ok_config: "OK-Konfiguration", ng_config: "Fehler-Konfiguration",
+                    ok_counter_adj: "OK-Zähler Einstellung", ng_counter_adj: "Fehler-Zähler Einstellung",
+                    offset_delay: "Offset-Verzögerung (ms)", duration_pulses: "Dauerimpulse (16µs je)",
                     duration_percent: "Dauer-Prozent", encoder_factor: "Encoder-Faktor",
                     set: "Setzen", adjust: "Anpassen",
+                    counter_service_config: "Zählerservice-Konfiguration",
                     ejector_enabled: "Auswerfer aktiv", ejector_offset: "Auswerfer-Offset",
                     ejector_duration: "Auswerfer-Dauer (s)", ejector_poll: "Auswerfer-Abfrageintervall",
                     time_between: "Zeit zwischen Paketen (s)", capture_mode: "Erfassungsmodus",
                     serial_config: "Serielle Schnittstelle", serial_port: "Serieller Port",
                     baud_rate: "Baudrate", serial_mode: "Serieller Modus",
                     auto_apply_serial: "Automatisch: Serielle Einstellungen werden sofort angewendet",
+                    watcher_config: "Überwachungskonfiguration",
+                    downtime_threshold: "Stillstandsschwelle (Sekunden)",
+                    external_reset: "Externer Reset", verbose_mode: "Detaillierter Modus",
                     inference_status: "Inferenz-Status", pipeline: "Pipeline",
                     pipeline_management: "Inferenz-Pipeline-Verwaltung",
                     active_pipeline: "Aktive Pipeline", pipeline_config: "Pipeline-Konfiguration",
@@ -1280,9 +1317,23 @@
                     image_processing: "Görüntü İşleme Ayarları",
                     parent_objects: "Ana Nesne Listesi", remove_raw: "DM Çözümlemesinden Sonra Ham Görüntüyü Sil",
                     hardware_config: "Donanım Yapılandırması",
-                    ok_config: "İyi Sayaç Ayarı", ng_config: "Hatalı Sayaç Ayarı",
-                    offset_delay: "Offset Gecikmesi (ms)", set: "Ayarla", adjust: "Ayarla",
-                    serial_config: "Seri Port Yapılandırması", baud_rate: "Baud Hızı",
+                    status_indicators: "Durum Göstergeleri", basic_controls: "Temel Kontroller",
+                    upper_pwm: "Üst PWM Değeri (0-255)", bottom_pwm: "Alt PWM Değeri (0-255)",
+                    warning_led: "Uyarı LED'i",
+                    ok_config: "İyi Yapılandırma", ng_config: "Hatalı Yapılandırma",
+                    ok_counter_adj: "İyi Sayaç Ayarı", ng_counter_adj: "Hatalı Sayaç Ayarı",
+                    offset_delay: "Offset Gecikmesi (ms)", duration_pulses: "Süre Darbeleri (16µs)",
+                    duration_percent: "Süre Yüzdesi", encoder_factor: "Enkoder Faktörü",
+                    set: "Ayarla", adjust: "Ayarla",
+                    counter_service_config: "Sayaç Servis Yapılandırması",
+                    ejector_enabled: "Atıcı Etkin", ejector_offset: "Atıcı Offset",
+                    ejector_duration: "Atıcı Süresi (s)", ejector_poll: "Atıcı Yoklama Aralığı",
+                    time_between: "Paketler Arası Süre (s)", capture_mode: "Yakalama Modu",
+                    serial_config: "Seri Port Yapılandırması", serial_port: "Seri Port Cihazı",
+                    baud_rate: "Baud Hızı", serial_mode: "Seri Mod",
+                    watcher_config: "İzleyici Yapılandırması",
+                    downtime_threshold: "Duruş Eşiği (saniye)",
+                    external_reset: "Harici Sıfırlama", verbose_mode: "Ayrıntılı Mod",
                     inference_status: "Çıkarım Durumu", pipeline: "Boru Hattı",
                     pipeline_management: "Çıkarım Boru Hattı Yönetimi",
                     active_pipeline: "Aktif Boru Hattı",
@@ -1314,9 +1365,23 @@
                     camera_monitoring: "カメラ監視",
                     refresh: "更新", apply: "適用", save: "保存", delete: "削除",
                     hardware_config: "ハードウェア設定",
-                    ok_config: "良品カウンタ調整", ng_config: "不良カウンタ調整",
+                    status_indicators: "ステータスインジケータ", basic_controls: "基本制御",
+                    upper_pwm: "上部PWM値 (0-255)", bottom_pwm: "下部PWM値 (0-255)",
+                    warning_led: "警告LED",
+                    ok_config: "良品設定", ng_config: "不良設定",
+                    ok_counter_adj: "良品カウンタ調整", ng_counter_adj: "不良カウンタ調整",
+                    offset_delay: "オフセット遅延 (ミリ秒)", duration_pulses: "持続パルス (16µs)",
+                    duration_percent: "持続割合", encoder_factor: "エンコーダ係数",
                     set: "設定", adjust: "調整",
-                    serial_config: "シリアルポート設定",
+                    counter_service_config: "カウンタサービス設定",
+                    ejector_enabled: "排出器有効", ejector_offset: "排出器オフセット",
+                    ejector_duration: "排出器持続時間 (秒)", ejector_poll: "排出器ポーリング間隔",
+                    time_between: "パッケージ間時間 (秒)", capture_mode: "キャプチャモード",
+                    serial_config: "シリアルポート設定", serial_port: "シリアルポートデバイス",
+                    baud_rate: "ボーレート", serial_mode: "シリアルモード",
+                    watcher_config: "ウォッチャー設定",
+                    downtime_threshold: "停止閾値 (秒)",
+                    external_reset: "外部リセット", verbose_mode: "詳細モード",
                     inference_status: "推論状態", pipeline: "パイプライン",
                     pipeline_management: "推論パイプライン管理",
                     inference_models: "推論モデル", model_name: "モデル名",
@@ -1346,9 +1411,23 @@
                     camera_monitoring: "Monitoreo de cámaras",
                     refresh: "Actualizar", apply: "Aplicar", save: "Guardar", delete: "Eliminar",
                     hardware_config: "Configuración de hardware",
-                    ok_config: "Ajuste contador OK", ng_config: "Ajuste contador defectos",
+                    status_indicators: "Indicadores de estado", basic_controls: "Controles básicos",
+                    upper_pwm: "Valor PWM superior (0-255)", bottom_pwm: "Valor PWM inferior (0-255)",
+                    warning_led: "LED de advertencia",
+                    ok_config: "Configuración OK", ng_config: "Configuración defectos",
+                    ok_counter_adj: "Ajuste contador OK", ng_counter_adj: "Ajuste contador defectos",
+                    offset_delay: "Retardo de offset (ms)", duration_pulses: "Pulsos de duración (16µs)",
+                    duration_percent: "Porcentaje de duración", encoder_factor: "Factor de codificador",
                     set: "Establecer", adjust: "Ajustar",
-                    serial_config: "Configuración de puerto serie",
+                    counter_service_config: "Configuración del servicio de conteo",
+                    ejector_enabled: "Eyector habilitado", ejector_offset: "Offset del eyector",
+                    ejector_duration: "Duración del eyector (s)", ejector_poll: "Intervalo de consulta",
+                    time_between: "Tiempo entre paquetes (s)", capture_mode: "Modo de captura",
+                    serial_config: "Configuración de puerto serie", serial_port: "Dispositivo de puerto serie",
+                    baud_rate: "Velocidad en baudios", serial_mode: "Modo serie",
+                    watcher_config: "Configuración del vigilante",
+                    downtime_threshold: "Umbral de inactividad (segundos)",
+                    external_reset: "Reinicio externo", verbose_mode: "Modo detallado",
                     inference_status: "Estado de inferencia", pipeline: "Tubería",
                     pipeline_management: "Gestión de tuberías de inferencia",
                     inference_models: "Modelos de inferencia", model_name: "Nombre del modelo",
@@ -1399,7 +1478,7 @@
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
                     </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.0.0</div>
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.1.0</div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
@@ -1677,13 +1756,13 @@
                     <h3 data-i18n="image_processing">Image Processing Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Parent Object List (comma-separated, use _root for no parent requirement)</div>
+                            <div class="control-label" data-i18n="parent_objects">Parent Object List (comma-separated, use _root for no parent requirement)</div>
                             <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
                             <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
                             <div class="control-response" id="config-parent_object_list-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Remove Raw Image After DM Decode</div>
+                            <div class="control-label" data-i18n="remove_raw">Remove Raw Image After DM Decode</div>
                             <select class="control-input" id="remove-raw-image-input">
                                 <option value="false">No</option>
                                 <option value="true">Yes</option>
@@ -1698,19 +1777,19 @@
                     <h3 data-i18n="dm_config">DataMatrix Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Valid DM Char Sizes (comma-separated)</div>
+                            <div class="control-label" data-i18n="valid_dm_sizes">Valid DM Char Sizes (comma-separated)</div>
                             <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
                             <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
                             <div class="control-response" id="config-dm_chars_sizes-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Confidence Threshold (0-1)</div>
+                            <div class="control-label" data-i18n="confidence_threshold">Confidence Threshold (0-1)</div>
                             <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
                             <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
                             <div class="control-response" id="config-dm_confidence_threshold-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Overlap Threshold (0-1)</div>
+                            <div class="control-label" data-i18n="overlap_threshold">Overlap Threshold (0-1)</div>
                             <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
                             <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
                             <div class="control-response" id="config-dm_overlap_threshold-response"></div>
@@ -1719,10 +1798,10 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>Feature Toggles</h3>
+                    <h3 data-i18n="feature_toggles">Feature Toggles</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Histogram Feature</div>
+                            <div class="control-label" data-i18n="histogram_feature">Histogram Feature</div>
                             <select class="control-input" id="histogram-enabled-input">
                                 <option value="false" selected>Disabled</option>
                                 <option value="true">Enabled</option>
@@ -1731,7 +1810,7 @@
                             <div class="control-response" id="config-histogram_enabled-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Save Histogram Images</div>
+                            <div class="control-label" data-i18n="save_histogram">Save Histogram Images</div>
                             <select class="control-input" id="histogram-save-image-input">
                                 <option value="false" selected>Disabled</option>
                                 <option value="true">Enabled</option>
@@ -1740,7 +1819,7 @@
                             <div class="control-response" id="config-histogram_save_image-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Class Count Check (equal counts)</div>
+                            <div class="control-label" data-i18n="class_count_check">Class Count Check (equal counts)</div>
                             <select class="control-input" id="check-class-enabled-input">
                                 <option value="false" selected>Disabled</option>
                                 <option value="true">Enabled</option>
@@ -1749,19 +1828,19 @@
                             <div class="control-response" id="config-check_class_counts_enabled-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Classes to Check (comma-separated)</div>
+                            <div class="control-label" data-i18n="classes_to_check">Classes to Check (comma-separated)</div>
                             <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
                             <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
                             <div class="control-response" id="config-check_class_counts_classes-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Class Count Confidence Threshold</div>
+                            <div class="control-label" data-i18n="class_confidence">Class Count Confidence Threshold</div>
                             <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
                             <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
                             <div class="control-response" id="config-check_class_counts_confidence-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Light Status Check (closed-loop)</div>
+                            <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
                             <select class="control-input" id="light-status-check-input">
                                 <option value="false" selected>Disabled (open-loop, faster)</option>
                                 <option value="true">Enabled (verify via serial)</option>
@@ -1798,11 +1877,11 @@
                         <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Create/Edit State (Multi-Phase Capture)</h4>
                         <div class="control-grid" style="margin-bottom: 15px;">
                             <div class="control-item">
-                                <div class="control-label">State Name</div>
+                                <div class="control-label" data-i18n="state_name">State Name</div>
                                 <input type="text" class="control-input" id="state-name-input" placeholder="e.g., default">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Enabled</div>
+                                <div class="control-label" data-i18n="enabled">Enabled</div>
                                 <select class="control-input" id="state-enabled-input">
                                     <option value="true">Yes</option>
                                     <option value="false">No</option>
@@ -1867,7 +1946,7 @@
 
                 <!-- Status Indicators -->
                 <div class="control-section">
-                    <h3>Status Indicators</h3>
+                    <h3 data-i18n="status_indicators">Status Indicators</h3>
                     <div class="status-box" style="padding: 16px;">
                         <div class="status-indicators" style="justify-content: center; gap: 40px;">
                             <div class="status-indicator">
@@ -1888,7 +1967,7 @@
 
                 <!-- Basic Controls -->
                 <div class="control-section">
-                    <h3>Basic Controls</h3>
+                    <h3 data-i18n="basic_controls">Basic Controls</h3>
                     <div class="control-grid" style="grid-template-columns: 1fr 1fr;">
                         <div class="control-item" style="display: grid; grid-template-rows: repeat(3, 1fr); gap: 10px;">
                             <div class="control-item">
@@ -1910,13 +1989,13 @@
                                 <div class="control-response" id="cmd-B_OFF_U_OFF-response"></div>
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Upper PWM Value (0-255)</div>
+                                <div class="control-label" data-i18n="upper_pwm">Upper PWM Value (0-255)</div>
                                 <input type="number" class="control-input" id="pwm-up" min="0" max="255" value="255">
                                 <button class="control-button" onclick="sendCommand('U_SET_PWM', document.getElementById('pwm-up').value)">Set Upper PWM</button>
                                 <div class="control-response" id="cmd-U_SET_PWM-response"></div>
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Bottom PWM Value (0-255)</div>
+                                <div class="control-label" data-i18n="bottom_pwm">Bottom PWM Value (0-255)</div>
                                 <input type="number" class="control-input" id="pwm-down" min="0" max="255" value="255">
                                 <button class="control-button" onclick="sendCommand('B_SET_PWM', document.getElementById('pwm-down').value)">Set Bottom PWM</button>
                                 <div class="control-response" id="cmd-B_SET_PWM-response"></div>
@@ -1928,7 +2007,7 @@
                                 <div class="control-response" id="cmd-RESET_ENCODER-response"></div>
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Warning LED</div>
+                                <div class="control-label" data-i18n="warning_led">Warning LED</div>
                                 <button class="control-button" onclick="sendCommand('WARNING_ON')">Warning On</button>
                                 <button class="control-button" onclick="sendCommand('WARNING_OFF')" style="margin-top: 5px;">Warning Off</button>
                                 <div class="control-response" id="cmd-WARNING-response"></div>
@@ -1939,34 +2018,34 @@
 
                 <!-- OK Configuration -->
                 <div class="control-section">
-                    <h3>OK Configuration</h3>
+                    <h3 data-i18n="ok_config">OK Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">OK Counter Adjustment</div>
+                            <div class="control-label" data-i18n="ok_counter_adj">OK Counter Adjustment</div>
                             <input type="number" class="control-input" id="ok-adjust" value="0">
                             <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)">Adjust OK Counter</button>
                             <div class="control-response" id="cmd-OK_ADJUST-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Offset Delay (milliseconds)</div>
+                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds)</div>
                             <input type="number" class="control-input" id="ok-offset-delay" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)">Set Offset Delay</button>
                             <div class="control-response" id="cmd-OK_OFFSET_DELAY-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Duration Pulses (16us each)</div>
+                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each)</div>
                             <input type="number" class="control-input" id="ok-duration-pulses" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)">Set Duration Pulses</button>
                             <div class="control-response" id="cmd-OK_DURATION_PULSES-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Duration Percent</div>
+                            <div class="control-label" data-i18n="duration_percent">Duration Percent</div>
                             <input type="number" class="control-input" id="ok-duration-percent" min="0" max="100" value="0">
                             <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)">Set Duration Percent</button>
                             <div class="control-response" id="cmd-OK_DURATION_PERCENT-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Encoder Factor</div>
+                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor</div>
                             <input type="number" class="control-input" id="ok-encoder-factor" value="0">
                             <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)">Set Encoder Factor</button>
                             <div class="control-response" id="cmd-OK_ENCODER_FACTOR-response"></div>
@@ -1975,34 +2054,34 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>NG Configuration</h3>
+                    <h3 data-i18n="ng_config">NG Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">NG Counter Adjustment</div>
+                            <div class="control-label" data-i18n="ng_counter_adj">NG Counter Adjustment</div>
                             <input type="number" class="control-input" id="ng-adjust" value="0">
                             <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)">Adjust NG Counter</button>
                             <div class="control-response" id="cmd-NG_ADJUST-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Offset Delay (milliseconds)</div>
+                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds)</div>
                             <input type="number" class="control-input" id="ng-offset-delay" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)">Set Offset Delay</button>
                             <div class="control-response" id="cmd-NG_OFFSET_DELAY-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Duration Pulses (16us each)</div>
+                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each)</div>
                             <input type="number" class="control-input" id="ng-duration-pulses" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)">Set Duration Pulses</button>
                             <div class="control-response" id="cmd-NG_DURATION_PULSES-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Duration Percent</div>
+                            <div class="control-label" data-i18n="duration_percent">Duration Percent</div>
                             <input type="number" class="control-input" id="ng-duration-percent" min="0" max="100" value="0">
                             <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)">Set Duration Percent</button>
                             <div class="control-response" id="cmd-NG_DURATION_PERCENT-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Encoder Factor</div>
+                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor</div>
                             <input type="number" class="control-input" id="ng-encoder-factor" value="0">
                             <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)">Set Encoder Factor</button>
                             <div class="control-response" id="cmd-NG_ENCODER_FACTOR-response"></div>
@@ -2011,10 +2090,10 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>Counter Service Configuration</h3>
+                    <h3 data-i18n="counter_service_config">Counter Service Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Ejector Enabled</div>
+                            <div class="control-label" data-i18n="ejector_enabled">Ejector Enabled</div>
                             <select class="control-input" id="ejector-enabled-input">
                                 <option value="true">Enabled</option>
                                 <option value="false">Disabled</option>
@@ -2023,31 +2102,31 @@
                             <div class="control-response" id="config-ejector_enabled-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Ejector Offset (encoder counts)</div>
+                            <div class="control-label" data-i18n="ejector_offset">Ejector Offset (encoder counts)</div>
                             <input type="number" class="control-input" id="ejector-offset-input" min="0" value="0">
                             <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)">Set Offset</button>
                             <div class="control-response" id="config-ejector_offset-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Ejector Duration (seconds)</div>
+                            <div class="control-label" data-i18n="ejector_duration">Ejector Duration (seconds)</div>
                             <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.1" value="0.4">
                             <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>
                             <div class="control-response" id="config-ejector_duration-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Ejector Poll Interval (seconds)</div>
+                            <div class="control-label" data-i18n="ejector_poll">Ejector Poll Interval (seconds)</div>
                             <input type="number" class="control-input" id="ejector-poll-input" min="0.001" step="0.01" value="0.03">
                             <button class="control-button" onclick="updateConfig('ejector_poll_interval', document.getElementById('ejector-poll-input').value)">Set Poll Interval</button>
                             <div class="control-response" id="config-ejector_poll_interval-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Time Between Packages (seconds)</div>
+                            <div class="control-label" data-i18n="time_between">Time Between Packages (seconds)</div>
                             <input type="number" class="control-input" id="time-between-packages-input" min="0" step="0.001" value="0.305">
                             <button class="control-button" onclick="updateConfig('time_between_packages', document.getElementById('time-between-packages-input').value)">Set Time</button>
                             <div class="control-response" id="config-time_between_packages-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Capture Mode</div>
+                            <div class="control-label" data-i18n="capture_mode">Capture Mode</div>
                             <select class="control-input" id="capture-mode-input">
                                 <option value="single">Single</option>
                                 <option value="multiple">Multiple</option>
@@ -2073,13 +2152,13 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Serial Port Device</div>
+                            <div class="control-label" data-i18n="serial_port">Serial Port Device</div>
                             <input type="text" class="control-input" id="watcher-usb-input" value="/dev/ttyUSB0" placeholder="/dev/ttyUSB0">
                             <button class="control-button" onclick="updateConfig('watcher_usb', document.getElementById('watcher-usb-input').value)">Set Port</button>
                             <div class="control-response" id="config-watcher_usb-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Baud Rate</div>
+                            <div class="control-label" data-i18n="baud_rate">Baud Rate</div>
                             <select class="control-input" id="baud-rate-input">
                                 <option value="9600">9600</option>
                                 <option value="19200">19200</option>
@@ -2091,7 +2170,7 @@
                             <div class="control-response" id="config-baud_rate-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Serial Mode</div>
+                            <div class="control-label" data-i18n="serial_mode">Serial Mode</div>
                             <select class="control-input" id="serial-mode-input">
                                 <option value="new" selected>Normal</option>
                                 <option value="legacy">Legacy</option>
@@ -2106,16 +2185,16 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>Watcher Configuration</h3>
+                    <h3 data-i18n="watcher_config">Watcher Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Downtime Threshold (seconds)</div>
+                            <div class="control-label" data-i18n="downtime_threshold">Downtime Threshold (seconds)</div>
                             <input type="number" class="control-input" id="downtime-threshold" min="1" value="10">
                             <button class="control-button" onclick="sendCommand('SET_DOWNTIME', document.getElementById('downtime-threshold').value)">Set Threshold</button>
                             <div class="control-response" id="cmd-SET_DOWNTIME-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">External Reset</div>
+                            <div class="control-label" data-i18n="external_reset">External Reset</div>
                             <select class="control-input" id="external-reset">
                                 <option value="0">Off</option>
                                 <option value="1">On</option>
@@ -2124,7 +2203,7 @@
                             <div class="control-response" id="cmd-SET_EXTERNAL_RESET-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Verbose Mode</div>
+                            <div class="control-label" data-i18n="verbose_mode">Verbose Mode</div>
                             <select class="control-input" id="verbose-mode">
                                 <option value="0">Off</option>
                                 <option value="1">On</option>
@@ -2436,7 +2515,7 @@
                         </div>
 
                         <div class="control-item">
-                            <div class="control-label">Camera Order (Columns)</div>
+                            <div class="control-label" data-i18n="camera_order">Camera Order (Columns)</div>
                             <div style="display: flex; gap: 12px; margin-top: 8px;">
                                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
                                     <input type="radio" name="camera-order" value="normal" checked>
@@ -2489,13 +2568,13 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Redis Host</div>
+                            <div class="control-label" data-i18n="redis_host">Redis Host</div>
                             <input type="text" class="control-input" id="redis-host-input" value="redis" placeholder="redis">
                             <button class="control-button" onclick="updateConfig('redis_host', document.getElementById('redis-host-input').value)">Set Host</button>
                             <div class="control-response" id="config-redis_host-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Redis Port</div>
+                            <div class="control-label" data-i18n="redis_port">Redis Port</div>
                             <input type="number" class="control-input" id="redis-port-input" value="6379" placeholder="6379">
                             <button class="control-button" onclick="updateConfig('redis_port', document.getElementById('redis-port-input').value)">Set Port</button>
                             <div class="control-response" id="config-redis_port-response"></div>
@@ -2528,11 +2607,11 @@
                         <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Add / Edit Model</h4>
                         <div class="control-grid">
                             <div class="control-item">
-                                <div class="control-label">Model Name</div>
+                                <div class="control-label" data-i18n="model_name">Model Name</div>
                                 <input type="text" class="control-input" id="ai-model-name" placeholder="e.g., My ChatGPT">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Provider</div>
+                                <div class="control-label" data-i18n="provider">Provider</div>
                                 <select id="ai-model-provider" class="control-input" onchange="updateAIModelFields()">
                                     <option value="claude">Claude (Anthropic)</option>
                                     <option value="chatgpt">ChatGPT (OpenAI)</option>
@@ -2541,7 +2620,7 @@
                                 </select>
                             </div>
                             <div class="control-item">
-                                <div class="control-label" id="api-key-label">API Key</div>
+                                <div class="control-label" id="api-key-label" data-i18n="api_key">API Key</div>
                                 <input type="password" id="ai-api-key" class="control-input" placeholder="sk-ant-...">
                             </div>
                         </div>
@@ -2578,27 +2657,27 @@
                         <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Add / Edit Profile</h4>
                         <div class="control-grid" style="grid-template-columns: repeat(3, 1fr);">
                             <div class="control-item">
-                                <div class="control-label">Profile Name</div>
+                                <div class="control-label" data-i18n="profile_name">Profile Name</div>
                                 <input type="text" class="control-input" id="db-profile-name" placeholder="e.g., Production">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Host</div>
+                                <div class="control-label" data-i18n="host">Host</div>
                                 <input type="text" class="control-input" id="db-host" placeholder="timescaledb">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Port</div>
+                                <div class="control-label" data-i18n="port">Port</div>
                                 <input type="number" class="control-input" id="db-port" value="5432">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Database</div>
+                                <div class="control-label" data-i18n="database">Database</div>
                                 <input type="text" class="control-input" id="db-database" placeholder="monitaqc">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">User</div>
+                                <div class="control-label" data-i18n="user">User</div>
                                 <input type="text" class="control-input" id="db-user" placeholder="monitaqc">
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Password</div>
+                                <div class="control-label" data-i18n="password">Password</div>
                                 <input type="password" class="control-input" id="db-password" placeholder="***">
                             </div>
                         </div>
@@ -5537,7 +5616,7 @@
                 modelIds.forEach(id => {
                     const model = models[id];
                     const label = document.createElement('label');
-                    label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: #e9ecef; border-radius: 4px; cursor: pointer;';
+                    label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: rgba(30, 41, 59, 0.6); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; color: var(--text-primary);';
                     label.innerHTML = `
                         <input type="checkbox" name="pipeline-model" value="${id}">
                         <span>${model.name}</span>
