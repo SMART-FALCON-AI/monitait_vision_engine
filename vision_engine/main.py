@@ -2,7 +2,6 @@ import cv2
 import time
 import json
 import requests
-from PIL import Image
 import threading
 import os
 import numpy as np
@@ -12,6 +11,7 @@ from datetime import datetime
 from redis import Redis
 from pylibdmtx import pylibdmtx
 import math
+import pickle
 import psutil
 import psycopg2
 from psycopg2.extras import Json
@@ -19,7 +19,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from multiprocessing import Pool, cpu_count
 import logging
 from fastapi import FastAPI, HTTPException, Request, File, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response, FileResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List, Set
 import uvicorn
@@ -96,8 +96,6 @@ latest_detections_timestamp = 0.0
 # Timeline buffer for camera history view (lightweight alternative to stitching)
 # Stores small thumbnails of recent frames per camera using Redis for cross-process sharing
 from collections import deque
-import threading
-import pickle
 
 TIMELINE_THUMBNAIL_WIDTH = 120   # Small thumbnails for speed
 TIMELINE_THUMBNAIL_HEIGHT = 90
@@ -139,7 +137,8 @@ def add_frame_to_timeline(camera_id, frame):
             config = app.state.timeline_config
             base_buffer_size = config.get('buffer_size', 20)  # User-configured buffer size
             quality = config.get('image_quality', 85)
-        except:
+        except Exception as e:
+            logger.debug(f"Could not load timeline config, using defaults: {e}")
             base_buffer_size = 20
             quality = 85
 
@@ -206,43 +205,68 @@ def add_frame_to_timeline(camera_id, frame):
         logger.error(f"Timeline add frame error: {e}", exc_info=True)
 
 def get_timeline_composite():
-    """Concatenate all processed frames horizontally over time (oldest to newest)."""
+    """Concatenate all camera frames: horizontal axis = time, vertical axis = cameras."""
     try:
         # Get configuration (with defaults)
         try:
             config = app.state.timeline_config
             quality = config.get('image_quality', 85)
-        except:
+        except Exception as e:
+            logger.debug(f"Could not load timeline config for stitching, using defaults: {e}")
             quality = 85
 
         # Create Redis connection
         redis_client = Redis("redis", 6379, db=0)
 
-        # Get timeline key for camera 1 (assuming single camera for now)
-        timeline_key = f"{TIMELINE_REDIS_PREFIX}1"
-
-        # Get all frames from oldest to newest
-        frames_raw = redis_client.lrange(timeline_key, 0, -1)
-        if not frames_raw:
+        # Find all camera timeline keys (timeline:1, timeline:2, ...)
+        all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        if not all_keys:
             logger.debug("Timeline: No frames in Redis")
             return None
 
-        # Decode all frames
-        frames_to_concat = []
-        for frame_data in frames_raw:
-            ts, jpeg_bytes = pickle.loads(frame_data)
-            thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
-            if thumb is not None:
-                frames_to_concat.append(thumb)
+        # Sort keys numerically by camera ID
+        def extract_cam_id(key):
+            k = key.decode() if isinstance(key, bytes) else key
+            try:
+                return int(k.split(":")[-1])
+            except ValueError:
+                return 0
+        all_keys.sort(key=extract_cam_id)
 
-        if not frames_to_concat:
+        # Build one horizontal row per camera (left=oldest, right=newest)
+        camera_rows = []
+        for key in all_keys:
+            frames_raw = redis_client.lrange(key, 0, -1)
+            if not frames_raw:
+                continue
+            row_frames = []
+            for frame_data in frames_raw:
+                ts, jpeg_bytes = pickle.loads(frame_data)
+                thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if thumb is not None:
+                    # Rotate 90° clockwise: landscape (1280x700) -> portrait (700x1280)
+                    thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                    row_frames.append(thumb)
+            if row_frames:
+                camera_rows.append(np.hstack(row_frames))
+
+        if not camera_rows:
             logger.debug("Timeline: No valid frames")
             return None
 
-        # Concatenate horizontally (left = oldest, right = newest)
-        composite = np.hstack(frames_to_concat)
+        # Pad all rows to the same width before vertical stacking
+        max_width = max(row.shape[1] for row in camera_rows)
+        padded_rows = []
+        for row in camera_rows:
+            if row.shape[1] < max_width:
+                pad = np.zeros((row.shape[0], max_width - row.shape[1], 3), dtype=np.uint8)
+                row = np.hstack([row, pad])
+            padded_rows.append(row)
 
-        logger.info(f"Timeline: Concatenated {len(frames_to_concat)} frames over time")
+        # Stack vertically: camera 1 on top, camera 2 below, etc.
+        composite = np.vstack(padded_rows)
+
+        logger.info(f"Timeline: Stitched {len(camera_rows)} camera row(s) into composite")
 
         # Encode final composite with configured quality
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
@@ -285,9 +309,11 @@ def release_db_connection(conn):
         db_connection_pool.putconn(conn)
 
 def write_inference_to_db(shipment, image_path, detections, inference_time_ms, model_used="yolov8"):
-    """Write inference result to TimescaleDB."""
-    if not STORE_ANNOTATION_ENABLED:
-        return
+    """Write inference result to TimescaleDB.
+
+    Always writes inference results regardless of STORE_ANNOTATION_ENABLED,
+    as this data is needed for AI analytics and defect tracking.
+    """
 
     conn = get_db_connection()
     if not conn:
@@ -1453,8 +1479,8 @@ class PipelineManager:
                 # Clean up temp file
                 try:
                     os.unlink(tmp_path)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Could not delete temp file {tmp_path}: {e}")
 
         except Exception as e:
             logger.error(f"Gradio inference error: {e}")
@@ -1530,11 +1556,10 @@ app = FastAPI(
 
 # Mount static files
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 try:
     app.mount("/static", StaticFiles(directory="static"), name="static")
-except:
-    pass  # Static directory might not exist
+except Exception as e:
+    logger.warning(f"Could not mount static directory: {e}")
 
 # Global reference to watcher instance (set after ArduinoSocket initialization)
 watcher_instance = None
@@ -2011,17 +2036,21 @@ async def health_check(request: Request):
         serial_available = watcher.serial_available if watcher else False
 
         # Check YOLO/Gradio inference availability
+        # Use pipeline manager's current model URL if available (more accurate than static global)
         yolo_ok = False
+        active_inference_url = YOLO_INFERENCE_URL
+        if pipeline_manager and pipeline_manager.get_current_model():
+            active_inference_url = pipeline_manager.get_current_model().inference_url
         try:
             # Check if Gradio client is initialized (for HuggingFace URLs)
-            if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+            if "hf.space" in active_inference_url or "huggingface" in active_inference_url:
                 gradio_health_status = "unknown"
                 gradio_needs_restart = False
 
                 # Try comprehensive health check
                 try:
                     # 1. Check if health endpoint responds
-                    base_url = YOLO_INFERENCE_URL.split('/api/')[0] if '/api/' in YOLO_INFERENCE_URL else YOLO_INFERENCE_URL.rsplit('/', 1)[0]
+                    base_url = active_inference_url.split('/api/')[0] if '/api/' in active_inference_url else active_inference_url.rsplit('/', 1)[0]
                     health_url = f"{base_url}/api/health"
 
                     health_response = session.get(health_url, timeout=5)
@@ -2076,7 +2105,7 @@ async def health_check(request: Request):
             else:
                 # For traditional YOLO endpoint, try a quick ping
                 # Try /health first, then fall back to just checking if server responds (even 404 means it's alive)
-                health_url = YOLO_INFERENCE_URL.replace('/detect/', '/').replace('/detect', '/')
+                health_url = active_inference_url.replace('/detect/', '/').replace('/detect', '/')
                 response = requests.get(health_url, timeout=2)
                 # Any response means server is running (200, 404, etc.)
                 yolo_ok = response.status_code in [200, 404, 405]
@@ -2089,7 +2118,7 @@ async def health_check(request: Request):
 
         # Get Gradio-specific health info from Redis
         gradio_health_info = {}
-        if "hf.space" in YOLO_INFERENCE_URL or "huggingface" in YOLO_INFERENCE_URL:
+        if "hf.space" in active_inference_url or "huggingface" in active_inference_url:
             try:
                 if watcher and watcher.redis_connection:
                     health_status = watcher.redis_connection.redis_connection.get("gradio_health_status")
@@ -2157,18 +2186,20 @@ async def get_inference_stats():
     redis_capture_timestamps = []
 
     try:
-        if watcher and watcher.redis_connection:
-            # Get inference times from Redis
-            times_raw = watcher.redis_connection.redis_connection.lrange("inference_times", 0, -1)
-            redis_inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
+        # Always use direct Redis connection for reliability
+        redis_conn = Redis("redis", 6379, db=0)
 
-            # Get frame intervals from Redis
-            intervals_raw = watcher.redis_connection.redis_connection.lrange("frame_intervals", 0, -1)
-            redis_frame_intervals = [float(i.decode('utf-8')) for i in intervals_raw if i]
+        # Get inference times from Redis
+        times_raw = redis_conn.lrange("inference_times", 0, -1)
+        redis_inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
 
-            # Get capture timestamps from Redis
-            capture_raw = watcher.redis_connection.redis_connection.lrange("capture_timestamps", 0, -1)
-            redis_capture_timestamps = [float(t.decode('utf-8')) for t in capture_raw if t]
+        # Get frame intervals from Redis
+        intervals_raw = redis_conn.lrange("frame_intervals", 0, -1)
+        redis_frame_intervals = [float(i.decode('utf-8')) for i in intervals_raw if i]
+
+        # Get capture timestamps from Redis
+        capture_raw = redis_conn.lrange("capture_timestamps", 0, -1)
+        redis_capture_timestamps = [float(t.decode('utf-8')) for t in capture_raw if t]
     except Exception as e:
         logger.warning(f"Failed to read timing from Redis: {e}")
 
@@ -2286,14 +2317,17 @@ async def get_system_metrics():
 @app.get("/")
 async def root_redirect():
     """Redirect root to status page."""
-    from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/status")
 
 @app.get("/status")
 async def status_page():
     """Serve the status page with control panel."""
     try:
-        return FileResponse("static/status.html")
+        return FileResponse("static/status.html", headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        })
     except Exception as e:
         logger.error(f"Status page error: {e}")
         return HTMLResponse(content=f"<h1>Error</h1><p>{str(e)}</p>", status_code=500)
@@ -2491,55 +2525,65 @@ async def get_latest_detections():
 
 @app.get("/video_feed")
 async def video_feed():
-    """Lightweight MJPEG stream from first available camera with detection overlays."""
+    """Lightweight MJPEG stream from all cameras stacked vertically with detection overlays."""
     def generate():
         frame_count = 0
         last_log_time = time.time()
         while True:
             try:
                 if watcher_instance and watcher_instance.cameras:
-                    # Get first available camera
-                    cam = next((c for c in watcher_instance.cameras.values() if hasattr(c, 'frame')), None)
-                    if cam and hasattr(cam, 'frame') and cam.frame is not None:
-                        # Make a copy of the frame to draw on
-                        frame = cam.frame.copy()
+                    # Collect frames from all cameras (sorted by camera ID)
+                    camera_frames = []
+                    for cam_id in sorted(watcher_instance.cameras.keys()):
+                        cam = watcher_instance.cameras[cam_id]
+                        if hasattr(cam, 'frame') and cam.frame is not None:
+                            # Rotate 90° clockwise: landscape -> portrait
+                            camera_frames.append(cv2.rotate(cam.frame.copy(), cv2.ROTATE_90_CLOCKWISE))
+
+                    if camera_frames:
                         frame_count += 1
 
-                        # Draw bounding boxes from latest detections (if recent) from module globals
+                        # Draw bounding boxes on the first camera frame (detections are from the capture pipeline)
                         global latest_detections, latest_detections_timestamp
                         detections = latest_detections
                         timestamp = latest_detections_timestamp
 
                         # Log periodically
                         if time.time() - last_log_time > 5.0:
-                            logger.info(f"[VIDEO_FEED] Frame #{frame_count}, latest_detections={len(detections) if detections else 0}, age={time.time() - timestamp if timestamp else 'N/A'}s")
+                            logger.info(f"[VIDEO_FEED] Frame #{frame_count}, {len(camera_frames)} cam(s), latest_detections={len(detections) if detections else 0}, age={time.time() - timestamp if timestamp else 'N/A'}s")
                             last_log_time = time.time()
                         if detections and timestamp:
                             detection_age = time.time() - timestamp
-                            # Only show detections if they're less than 10 seconds old
                             if detection_age < 10.0:
                                 for det in detections:
                                     try:
-                                        # Get coordinates (YOLO format: xmin, ymin, xmax, ymax)
                                         x1 = int(det.get('xmin', 0))
                                         y1 = int(det.get('ymin', 0))
                                         x2 = int(det.get('xmax', 0))
                                         y2 = int(det.get('ymax', 0))
                                         confidence = det.get('confidence', 0)
                                         name = det.get('name', f"Class {det.get('class', 0)}")
-
-                                        # Draw thick green rectangle
-                                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-                                        # Draw label with background
+                                        cv2.rectangle(camera_frames[0], (x1, y1), (x2, y2), (0, 255, 0), 3)
                                         label = f"{name} {confidence:.2f}"
                                         (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                                        cv2.rectangle(frame, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
-                                        cv2.putText(frame, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                                        cv2.rectangle(camera_frames[0], (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
+                                        cv2.putText(camera_frames[0], label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
                                     except Exception as e:
                                         logger.error(f"Error drawing detection box: {e}")
 
-                        # Encode with lower quality for lightweight streaming
+                        # Stack all camera frames vertically
+                        if len(camera_frames) > 1:
+                            max_width = max(f.shape[1] for f in camera_frames)
+                            resized = []
+                            for f in camera_frames:
+                                if f.shape[1] != max_width:
+                                    scale = max_width / f.shape[1]
+                                    f = cv2.resize(f, (max_width, int(f.shape[0] * scale)))
+                                resized.append(f)
+                            frame = np.vstack(resized)
+                        else:
+                            frame = camera_frames[0]
+
                         ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
                         if ret:
                             yield (b'--frame\r\n'
@@ -2633,7 +2677,7 @@ async def timeline_feed():
 
 @app.get("/timeline_image")
 async def timeline_image(page: int = 0):
-    """Get concatenated timeline frames for a specific page.
+    """Get timeline frames for a specific page. Horizontal = time, vertical = cameras.
 
     Args:
         page: Page number (0=latest frames, 1=previous page, etc.)
@@ -2643,62 +2687,86 @@ async def timeline_image(page: int = 0):
         try:
             config = app.state.timeline_config
             quality = config.get('image_quality', 85)
-            rows_per_page = config.get('num_rows', 10)
+            frames_per_page = config.get('num_rows', 10)
         except:
             quality = 85
-            rows_per_page = 10
+            frames_per_page = 10
 
         # Create Redis connection
         redis_client = Redis("redis", 6379, db=0)
-        timeline_key = f"{TIMELINE_REDIS_PREFIX}1"
 
-        # Get all frames from Redis
-        all_frames = redis_client.lrange(timeline_key, 0, -1)
-        if not all_frames:
-            # Return placeholder
+        # Find all camera timeline keys
+        all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        if not all_keys:
             placeholder = np.zeros((180, 240, 3), dtype=np.uint8)
             placeholder[:] = (60, 60, 60)
             cv2.putText(placeholder, "No frames yet", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
             _, jpeg = cv2.imencode('.jpg', placeholder)
             return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
-        total_frames = len(all_frames)
-        total_pages = (total_frames + rows_per_page - 1) // rows_per_page
+        # Sort keys numerically by camera ID
+        def extract_cam_id(key):
+            k = key.decode() if isinstance(key, bytes) else key
+            try:
+                return int(k.split(":")[-1])
+            except ValueError:
+                return 0
+        all_keys.sort(key=extract_cam_id)
 
-        # Page 0 is the latest (rightmost) frames
-        # Calculate which frames to show for this page
+        # Determine pagination from the camera with the most frames
+        max_total_frames = 0
+        camera_frames_raw = {}
+        for key in all_keys:
+            frames_raw = redis_client.lrange(key, 0, -1)
+            cam_id = extract_cam_id(key)
+            camera_frames_raw[cam_id] = frames_raw if frames_raw else []
+            max_total_frames = max(max_total_frames, len(camera_frames_raw[cam_id]))
+
+        total_pages = max(1, (max_total_frames + frames_per_page - 1) // frames_per_page)
         if page < 0 or page >= total_pages:
-            page = 0  # Default to latest page
+            page = 0
 
-        # Get frames for this page (newest to oldest pages)
-        # Page 0: last N frames, Page 1: previous N frames, etc.
-        end_index = total_frames - (page * rows_per_page)
-        start_index = max(0, end_index - rows_per_page)
+        # Build one horizontal row per camera for this page
+        camera_rows = []
+        for cam_id in sorted(camera_frames_raw.keys()):
+            frames_raw = camera_frames_raw[cam_id]
+            total = len(frames_raw)
+            end_index = total - (page * frames_per_page)
+            start_index = max(0, end_index - frames_per_page)
+            page_slice = frames_raw[start_index:end_index] if end_index > 0 else []
 
-        page_frames = all_frames[start_index:end_index]
+            row_frames = []
+            for frame_data in page_slice:
+                ts, jpeg_bytes = pickle.loads(frame_data)
+                thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if thumb is not None:
+                    # Rotate 90° clockwise: landscape (1280x700) -> portrait (700x1280)
+                    thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                    row_frames.append(thumb)
 
-        # Decode and concatenate frames horizontally
-        frames_to_concat = []
-        for frame_data in page_frames:
-            ts, jpeg_bytes = pickle.loads(frame_data)
-            thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
-            if thumb is not None:
-                frames_to_concat.append(thumb)
+            if row_frames:
+                camera_rows.append(np.hstack(row_frames))
 
-        if not frames_to_concat:
-            # Return placeholder
+        if not camera_rows:
             placeholder = np.zeros((180, 240, 3), dtype=np.uint8)
             placeholder[:] = (60, 60, 60)
             cv2.putText(placeholder, "No frames", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
             _, jpeg = cv2.imencode('.jpg', placeholder)
             return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
-        # Concatenate horizontally (left = oldest in page, right = newest in page)
-        composite = np.hstack(frames_to_concat)
+        # Pad all rows to same width and vstack (cameras stacked vertically)
+        max_width = max(row.shape[1] for row in camera_rows)
+        padded_rows = []
+        for row in camera_rows:
+            if row.shape[1] < max_width:
+                pad = np.zeros((row.shape[0], max_width - row.shape[1], 3), dtype=np.uint8)
+                row = np.hstack([row, pad])
+            padded_rows.append(row)
 
-        logger.info(f"Timeline page {page}: showing {len(frames_to_concat)} frames (indices {start_index}-{end_index-1})")
+        composite = np.vstack(padded_rows)
 
-        # Encode final composite with configured quality
+        logger.info(f"Timeline page {page}: {len(camera_rows)} camera(s), {max_total_frames} max frames")
+
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
         return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
@@ -2711,7 +2779,7 @@ async def timeline_image(page: int = 0):
 
 @app.get("/api/timeline_count")
 async def timeline_count():
-    """Get the total number of frames and pages in the timeline."""
+    """Get the total number of frames and pages in the timeline (across all cameras)."""
     try:
         # Get configuration
         try:
@@ -2721,14 +2789,26 @@ async def timeline_count():
             rows_per_page = 10
 
         redis_client = Redis("redis", 6379, db=0)
-        timeline_key = f"{TIMELINE_REDIS_PREFIX}1"
-        total_frames = redis_client.llen(timeline_key)
-        total_pages = (total_frames + rows_per_page - 1) // rows_per_page if total_frames > 0 else 0
+        all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        # Use the camera with most frames to determine page count
+        max_frames = 0
+        total_all = 0
+        num_cameras = 0
+        for key in all_keys:
+            n = redis_client.llen(key)
+            if n > 0:
+                num_cameras += 1
+                total_all += n
+                if n > max_frames:
+                    max_frames = n
+        total_pages = (max_frames + rows_per_page - 1) // rows_per_page if max_frames > 0 else 0
 
         return {
-            "total_frames": total_frames,
+            "total_frames": total_all,
             "total_pages": total_pages,
-            "rows_per_page": rows_per_page
+            "rows_per_page": rows_per_page,
+            "num_cameras": num_cameras,
+            "max_frames_per_camera": max_frames
         }
     except Exception as e:
         logger.error(f"Error getting timeline count: {e}")
@@ -3265,19 +3345,16 @@ async def update_config(config: Dict[str, Any]):
         # Shipment ID
         if "shipment" in config:
             shipment_id = str(config["shipment"])
-            # Store in Redis and update watcher instance
-            if watcher_instance and watcher_instance.redis_connection:
-                watcher_instance.redis_connection.redis_connection.set("shipment", shipment_id)
+            # Store in Redis (direct connection - works across processes)
+            try:
+                r = Redis("redis", 6379, db=0)
+                r.set("shipment", shipment_id)
+            except Exception as e:
+                logger.warning(f"Failed to set shipment in Redis: {e}")
+            if watcher_instance:
                 watcher_instance.shipment = shipment_id
-                updated["shipment"] = shipment_id
-                logger.info(f"Updated shipment ID to {shipment_id}")
-            elif watcher_instance:
-                # No Redis, just update watcher instance
-                watcher_instance.shipment = shipment_id
-                updated["shipment"] = shipment_id
-                logger.info(f"Updated shipment ID to {shipment_id} (no Redis)")
-            else:
-                logger.warning("Watcher not available, cannot update shipment ID")
+            updated["shipment"] = shipment_id
+            logger.info(f"Updated shipment ID to {shipment_id}")
 
         if not updated:
             raise HTTPException(status_code=400, detail="No valid configuration keys provided")
@@ -3552,9 +3629,8 @@ async def get_camera_stream(camera_id: int):
     logger.info(f"Starting MJPEG stream for camera {camera_id}")
     return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
-@app.post("/api/cameras/config/save")
-async def save_all_config():
-    """Save all service configurations (cameras + settings) to data file."""
+def build_current_service_config():
+    """Build current service configuration from runtime state (global variables and watcher instance)."""
     global EJECTOR_ENABLED, EJECTOR_OFFSET, EJECTOR_DURATION, EJECTOR_POLL_INTERVAL
     global CAPTURE_MODE, TIME_BETWEEN_TWO_PACKAGE, REMOVE_RAW_IMAGE_WHEN_DM_DECODED
     global PARENT_OBJECT_LIST, HISTOGRAM_ENABLED, HISTOGRAM_SAVE_IMAGE
@@ -3563,105 +3639,118 @@ async def save_all_config():
     global STORE_ANNOTATION_ENABLED
 
     if watcher_instance is None:
+        return None
+
+    # Get AI configuration from Redis (if available)
+    ai_data = _get_ai_models_from_redis()
+    ai_config = {}
+    if ai_data.get("active") and ai_data["active"] in ai_data.get("models", {}):
+        active = ai_data["models"][ai_data["active"]]
+        ai_config = {
+            "model": active["provider"],
+            "api_key": active["api_key"],
+            "active_name": ai_data["active"],
+            "all_models": {n: {"provider": m["provider"]} for n, m in ai_data["models"].items()}
+        }
+
+    config = {
+        "cameras": {},
+        "infrastructure": {
+            "redis_host": REDIS_HOST,
+            "redis_port": REDIS_PORT,
+            "serial_port": WATCHER_USB,
+            "serial_baudrate": SERIAL_BAUDRATE,
+            "serial_mode": SERIAL_MODE,
+            "postgres_host": POSTGRES_HOST,
+            "postgres_port": POSTGRES_PORT,
+            "postgres_db": POSTGRES_DB,
+            "postgres_user": POSTGRES_USER
+        },
+        "inference": {
+            "current_module": "gradio_hf",  # Currently active module
+            "modules": {
+                "gradio_hf": {
+                    "name": "Gradio HuggingFace",
+                    "inference_url": "https://smartfalcon-ai-industrial-defect-detection.hf.space",
+                    "inference_model": "Data Matrix",
+                    "inference_min_confidence": 0.25,
+                    "type": "gradio"
+                },
+                "local_yolo": {
+                    "name": "Local YOLO",
+                    "inference_url": "http://yolo_inference:4442/v1/object-detection/yolov5s/detect/",
+                    "inference_model": "N/A",
+                    "inference_min_confidence": 0.25,
+                    "type": "yolo"
+                }
+            }
+        },
+        "ai": ai_config if ai_config else {
+            "model": "claude",
+            "api_key": ""
+        },
+        "ejector": {
+            "enabled": EJECTOR_ENABLED,
+            "offset": EJECTOR_OFFSET,
+            "duration": EJECTOR_DURATION,
+            "poll_interval": EJECTOR_POLL_INTERVAL
+        },
+        "capture": {
+            "mode": CAPTURE_MODE,
+            "time_between_packages": TIME_BETWEEN_TWO_PACKAGE
+        },
+        "image_processing": {
+            "remove_raw_image_when_dm_decoded": REMOVE_RAW_IMAGE_WHEN_DM_DECODED,
+            "parent_object_list": PARENT_OBJECT_LIST
+        },
+        "histogram": {
+            "enabled": HISTOGRAM_ENABLED,
+            "save_image": HISTOGRAM_SAVE_IMAGE
+        },
+        "class_count_check": {
+            "enabled": CHECK_CLASS_COUNTS_ENABLED,
+            "classes": CHECK_CLASS_COUNTS_CLASSES,
+            "confidence": CHECK_CLASS_COUNTS_CONFIDENCE
+        },
+        "datamatrix": {
+            "chars_sizes": DM_CHARS_SIZES,
+            "confidence_threshold": DM_CONFIDENCE_THRESHOLD,
+            "overlap_threshold": DM_OVERLAP_THRESHOLD
+        },
+        "store_annotation": {
+            "enabled": STORE_ANNOTATION_ENABLED
+        }
+    }
+
+    # Add camera configs dynamically
+    camera_metadata = getattr(watcher_instance, 'camera_metadata', {})
+    for cam_id, cam in watcher_instance.cameras.items():
+        cam_config = get_camera_config_for_save(cam, cam_id, camera_metadata)
+        if cam_config:
+            config["cameras"][str(cam_id)] = cam_config
+
+    # Add states configuration
+    if state_manager:
+        config["states"] = {name: s.to_dict() for name, s in state_manager.states.items()}
+        config["current_state_name"] = state_manager.current_state.name if state_manager.current_state else "default"
+
+    # Add pipeline configuration
+    if pipeline_manager:
+        config["pipeline_config"] = pipeline_manager.to_config()
+
+    return config
+
+
+@app.post("/api/cameras/config/save")
+async def save_all_config():
+    """Save all service configurations (cameras + settings) to data file."""
+    if watcher_instance is None:
         return JSONResponse(content={"error": "Watcher not initialized"}, status_code=503)
 
     try:
-        # Get AI configuration from Redis (if available)
-        ai_config = {}
-        if watcher_instance.redis_connection:
-            r = watcher_instance.redis_connection.redis_connection
-            ai_model = r.get("ai_model")
-            ai_api_key = r.get("ai_api_key")
-            if ai_model or ai_api_key:
-                ai_config = {
-                    "model": ai_model.decode('utf-8') if isinstance(ai_model, bytes) else (ai_model or "claude"),
-                    "api_key": ai_api_key.decode('utf-8') if isinstance(ai_api_key, bytes) else (ai_api_key or "")
-                }
-
-        config = {
-            "cameras": {},
-            "infrastructure": {
-                "redis_host": REDIS_HOST,
-                "redis_port": REDIS_PORT,
-                "serial_port": WATCHER_USB,
-                "serial_baudrate": SERIAL_BAUDRATE,
-                "serial_mode": SERIAL_MODE,
-                "postgres_host": POSTGRES_HOST,
-                "postgres_port": POSTGRES_PORT,
-                "postgres_db": POSTGRES_DB,
-                "postgres_user": POSTGRES_USER
-            },
-            "inference": {
-                "current_module": "gradio_hf",  # Currently active module
-                "modules": {
-                    "gradio_hf": {
-                        "name": "Gradio HuggingFace",
-                        "inference_url": "https://smartfalcon-ai-industrial-defect-detection.hf.space",
-                        "inference_model": "Data Matrix",
-                        "inference_min_confidence": 0.25,
-                        "type": "gradio"
-                    },
-                    "local_yolo": {
-                        "name": "Local YOLO",
-                        "inference_url": "http://yolo_inference:4442/v1/object-detection/yolov5s/detect/",
-                        "inference_model": "N/A",
-                        "inference_min_confidence": 0.25,
-                        "type": "yolo"
-                    }
-                }
-            },
-            "ai": ai_config if ai_config else {
-                "model": "claude",
-                "api_key": ""
-            },
-            "ejector": {
-                "enabled": EJECTOR_ENABLED,
-                "offset": EJECTOR_OFFSET,
-                "duration": EJECTOR_DURATION,
-                "poll_interval": EJECTOR_POLL_INTERVAL
-            },
-            "capture": {
-                "mode": CAPTURE_MODE,
-                "time_between_packages": TIME_BETWEEN_TWO_PACKAGE
-            },
-            "image_processing": {
-                "remove_raw_image_when_dm_decoded": REMOVE_RAW_IMAGE_WHEN_DM_DECODED,
-                "parent_object_list": PARENT_OBJECT_LIST
-            },
-            "histogram": {
-                "enabled": HISTOGRAM_ENABLED,
-                "save_image": HISTOGRAM_SAVE_IMAGE
-            },
-            "class_count_check": {
-                "enabled": CHECK_CLASS_COUNTS_ENABLED,
-                "classes": CHECK_CLASS_COUNTS_CLASSES,
-                "confidence": CHECK_CLASS_COUNTS_CONFIDENCE
-            },
-            "datamatrix": {
-                "chars_sizes": DM_CHARS_SIZES,
-                "confidence_threshold": DM_CONFIDENCE_THRESHOLD,
-                "overlap_threshold": DM_OVERLAP_THRESHOLD
-            },
-            "store_annotation": {
-                "enabled": STORE_ANNOTATION_ENABLED
-            }
-        }
-
-        # Add camera configs dynamically
-        camera_metadata = getattr(watcher_instance, 'camera_metadata', {})
-        for cam_id, cam in watcher_instance.cameras.items():
-            cam_config = get_camera_config_for_save(cam, cam_id, camera_metadata)
-            if cam_config:
-                config["cameras"][str(cam_id)] = cam_config
-
-        # Add states configuration
-        if state_manager:
-            config["states"] = {name: s.to_dict() for name, s in state_manager.states.items()}
-            config["current_state_name"] = state_manager.current_state.name if state_manager.current_state else "default"
-
-        # Add pipeline configuration
-        if pipeline_manager:
-            config["pipeline_config"] = pipeline_manager.to_config()
+        config = build_current_service_config()
+        if config is None:
+            return JSONResponse(content={"error": "Watcher not initialized"}, status_code=503)
 
         if save_service_config(config):
             return JSONResponse(content={
@@ -4155,8 +4244,8 @@ async def save_camera(request: Request):
 
         logger.info(f"Saving camera: {camera_name} ({camera_ip}) - {camera_url}")
 
-        # Load existing service config or create new one
-        config = load_service_config()
+        # Build current service config from runtime state (preserves unsaved changes)
+        config = build_current_service_config()
         if not config:
             config = {}
 
@@ -4438,7 +4527,10 @@ async def load_states():
 async def api_save_service_config():
     """Save current service configuration to file."""
     try:
-        config = load_service_config() or {}
+        # Build current config from runtime state (preserves unsaved changes)
+        config = build_current_service_config()
+        if not config:
+            config = load_service_config() or {}
         if save_service_config(config):
             return JSONResponse(content={"success": True, "message": "Service configuration saved"})
         else:
@@ -4452,7 +4544,10 @@ async def api_save_service_config():
 async def api_save_data_file():
     """Save current data file (same as service config)."""
     try:
-        config = load_service_config() or {}
+        # Build current config from runtime state (preserves unsaved changes)
+        config = build_current_service_config()
+        if not config:
+            config = load_service_config() or {}
         if save_service_config(config):
             return JSONResponse(content={"success": True, "message": "Data file saved"})
         else:
@@ -4483,9 +4578,6 @@ async def api_export_service_config():
         config = load_service_config() or {}
 
         # Create JSON response with proper headers for download
-        from fastapi.responses import Response
-        import json
-
         json_str = json.dumps(config, indent=2)
         filename = f"monitaqc_config_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
 
@@ -4528,36 +4620,309 @@ async def api_export_service_config():
 # AI ASSISTANT ENDPOINTS
 # =============================================================================
 
+def _get_ai_models_from_redis():
+    """Load all AI models from Redis. Returns dict: {"models": {...}, "active": "name"}."""
+    try:
+        r = Redis("redis", 6379, db=0)
+        raw = r.get("ai_models")
+        if raw:
+            data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+            if "models" in data:
+                return data
+        # Migration: check legacy single-model keys
+        legacy_model = r.get("ai_model")
+        legacy_key = r.get("ai_api_key")
+        if legacy_model and legacy_key:
+            provider = legacy_model.decode('utf-8') if isinstance(legacy_model, bytes) else legacy_model
+            api_key = legacy_key.decode('utf-8') if isinstance(legacy_key, bytes) else legacy_key
+            name = provider.capitalize()
+            data = {"models": {name: {"provider": provider, "api_key": api_key}}, "active": name}
+            r.set("ai_models", json.dumps(data))
+            return data
+    except Exception as e:
+        logger.warning(f"Failed to load AI models from Redis: {e}")
+    return {"models": {}, "active": None}
+
+
+def _save_ai_models_to_redis(data):
+    """Save all AI models to Redis."""
+    try:
+        r = Redis("redis", 6379, db=0)
+        r.set("ai_models", json.dumps(data))
+        # Also set legacy keys for backward compatibility with ai_query
+        active_name = data.get("active")
+        if active_name and active_name in data.get("models", {}):
+            m = data["models"][active_name]
+            r.set("ai_model", m["provider"])
+            r.set("ai_api_key", m["api_key"])
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save AI models to Redis: {e}")
+        return False
+
+
+@app.get("/api/ai_config")
+async def get_ai_config():
+    """Get all configured AI models and active model."""
+    try:
+        data = _get_ai_models_from_redis()
+        # Strip API keys for display (show only last 4 chars)
+        safe_models = {}
+        for name, cfg in data.get("models", {}).items():
+            key = cfg.get("api_key", "")
+            masked = f"***{key[-4:]}" if len(key) > 4 else "***"
+            safe_models[name] = {"provider": cfg["provider"], "api_key_masked": masked}
+        return JSONResponse(content={"models": safe_models, "active": data.get("active")})
+    except Exception as e:
+        logger.error(f"Error getting AI config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @app.post("/api/ai_config")
 async def save_ai_config(config: Dict[str, Any]):
-    """Save AI model configuration to DATA_FILE and Redis (for runtime use)."""
+    """Save/update an AI model configuration."""
     try:
-        model = config.get("model", "claude")
+        name = config.get("name", "").strip()
+        provider = config.get("provider", "")
         api_key = config.get("api_key", "")
 
+        if not name:
+            return JSONResponse(content={"error": "Model name is required"}, status_code=400)
+        if not provider:
+            return JSONResponse(content={"error": "Provider is required"}, status_code=400)
         if not api_key:
             return JSONResponse(content={"error": "API key is required"}, status_code=400)
 
-        # Store in Redis for runtime use
-        if watcher and watcher.redis_connection:
-            watcher.redis_connection.redis_connection.set("ai_model", model)
-            watcher.redis_connection.redis_connection.set("ai_api_key", api_key)
+        data = _get_ai_models_from_redis()
+        data["models"][name] = {"provider": provider, "api_key": api_key}
 
-        # Load existing config and update AI section
-        existing_config = load_service_config() or {}
-        existing_config["ai"] = {
-            "model": model,
-            "api_key": api_key
-        }
+        # Auto-activate if it's the first model
+        if not data.get("active") or len(data["models"]) == 1:
+            data["active"] = name
 
-        # Save to DATA_FILE for persistence
-        if save_service_config(existing_config):
-            logger.info(f"AI configuration saved to {DATA_FILE}: model={model}")
-            return JSONResponse(content={"success": True, "message": f"AI configuration saved ({model})"})
+        if _save_ai_models_to_redis(data):
+            logger.info(f"AI model saved: {name} ({provider})")
+            return JSONResponse(content={"success": True, "message": f"Model '{name}' saved", "active": data["active"]})
         else:
-            return JSONResponse(content={"error": "Failed to save AI configuration to file"}, status_code=500)
+            return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
     except Exception as e:
         logger.error(f"Error saving AI config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/ai_config/activate")
+async def activate_ai_model(config: Dict[str, Any]):
+    """Activate a specific AI model by name."""
+    try:
+        name = config.get("name", "").strip()
+        if not name:
+            return JSONResponse(content={"error": "Model name is required"}, status_code=400)
+
+        data = _get_ai_models_from_redis()
+        if name not in data.get("models", {}):
+            return JSONResponse(content={"error": f"Model '{name}' not found"}, status_code=404)
+
+        data["active"] = name
+        if _save_ai_models_to_redis(data):
+            logger.info(f"AI model activated: {name}")
+            return JSONResponse(content={"success": True, "message": f"Model '{name}' activated"})
+        else:
+            return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error activating AI model: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/ai_config/{model_name}")
+async def delete_ai_model(model_name: str):
+    """Delete an AI model configuration."""
+    try:
+        data = _get_ai_models_from_redis()
+        if model_name not in data.get("models", {}):
+            return JSONResponse(content={"error": f"Model '{model_name}' not found"}, status_code=404)
+
+        del data["models"][model_name]
+
+        # If deleted model was active, activate first remaining or set None
+        if data.get("active") == model_name:
+            remaining = list(data["models"].keys())
+            data["active"] = remaining[0] if remaining else None
+
+        if _save_ai_models_to_redis(data):
+            logger.info(f"AI model deleted: {model_name}")
+            return JSONResponse(content={"success": True, "message": f"Model '{model_name}' deleted", "active": data["active"]})
+        else:
+            return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error deleting AI model: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# =============================================================================
+# DATABASE CONFIGURATION ENDPOINTS (multi-profile)
+# =============================================================================
+
+def _get_db_profiles_from_redis():
+    """Load all DB profiles from Redis. Returns dict: {"profiles": {...}, "active": "name"}."""
+    try:
+        r = Redis("redis", 6379, db=0)
+        raw = r.get("db_profiles")
+        if raw:
+            data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
+            if "profiles" in data:
+                return data
+        # Default: create a profile from current hardcoded values
+        default_profile = {
+            "host": "timescaledb", "port": 5432,
+            "database": "monitaqc", "user": "monitaqc", "password": "monitaqc2024"
+        }
+        data = {"profiles": {"Default": default_profile}, "active": "Default"}
+        r.set("db_profiles", json.dumps(data))
+        return data
+    except Exception as e:
+        logger.warning(f"Failed to load DB profiles from Redis: {e}")
+    return {"profiles": {}, "active": None}
+
+
+def _save_db_profiles_to_redis(data):
+    """Save all DB profiles to Redis."""
+    try:
+        r = Redis("redis", 6379, db=0)
+        r.set("db_profiles", json.dumps(data))
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save DB profiles to Redis: {e}")
+        return False
+
+
+def _reconnect_db_pool():
+    """Reconnect the database pool using the active profile."""
+    global db_connection_pool, POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+    data = _get_db_profiles_from_redis()
+    active_name = data.get("active")
+    if not active_name or active_name not in data.get("profiles", {}):
+        return False
+    p = data["profiles"][active_name]
+    POSTGRES_HOST = p.get("host", "timescaledb")
+    POSTGRES_PORT = int(p.get("port", 5432))
+    POSTGRES_DB = p.get("database", "monitaqc")
+    POSTGRES_USER = p.get("user", "monitaqc")
+    POSTGRES_PASSWORD = p.get("password", "monitaqc2024")
+    # Close existing pool
+    if db_connection_pool:
+        try:
+            db_connection_pool.closeall()
+        except Exception:
+            pass
+        db_connection_pool = None
+    # New pool will be created on next get_db_connection() call
+    logger.info(f"Database pool will reconnect to {POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}")
+    return True
+
+
+@app.get("/api/db_config")
+async def get_db_config():
+    """Get all configured database profiles and active profile."""
+    try:
+        data = _get_db_profiles_from_redis()
+        # Mask passwords
+        safe_profiles = {}
+        for name, cfg in data.get("profiles", {}).items():
+            pwd = cfg.get("password", "")
+            masked = f"***{pwd[-2:]}" if len(pwd) > 2 else "***"
+            safe_profiles[name] = {
+                "host": cfg.get("host", ""),
+                "port": cfg.get("port", 5432),
+                "database": cfg.get("database", ""),
+                "user": cfg.get("user", ""),
+                "password_masked": masked
+            }
+        return JSONResponse(content={"profiles": safe_profiles, "active": data.get("active")})
+    except Exception as e:
+        logger.error(f"Error getting DB config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/db_config")
+async def save_db_config(config: Dict[str, Any]):
+    """Save/update a database profile."""
+    try:
+        name = config.get("name", "").strip()
+        host = config.get("host", "").strip()
+        port = int(config.get("port", 5432))
+        database = config.get("database", "").strip()
+        user = config.get("user", "").strip()
+        password = config.get("password", "").strip()
+
+        if not name:
+            return JSONResponse(content={"error": "Profile name is required"}, status_code=400)
+        if not host:
+            return JSONResponse(content={"error": "Host is required"}, status_code=400)
+
+        data = _get_db_profiles_from_redis()
+        data["profiles"][name] = {
+            "host": host, "port": port, "database": database,
+            "user": user, "password": password
+        }
+        if not data.get("active") or len(data["profiles"]) == 1:
+            data["active"] = name
+
+        if _save_db_profiles_to_redis(data):
+            logger.info(f"DB profile saved: {name} ({host}:{port}/{database})")
+            return JSONResponse(content={"success": True, "message": f"Profile '{name}' saved", "active": data["active"]})
+        else:
+            return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error saving DB config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/db_config/activate")
+async def activate_db_profile(config: Dict[str, Any]):
+    """Activate a database profile and reconnect."""
+    try:
+        name = config.get("name", "").strip()
+        if not name:
+            return JSONResponse(content={"error": "Profile name is required"}, status_code=400)
+
+        data = _get_db_profiles_from_redis()
+        if name not in data.get("profiles", {}):
+            return JSONResponse(content={"error": f"Profile '{name}' not found"}, status_code=404)
+
+        data["active"] = name
+        if _save_db_profiles_to_redis(data):
+            _reconnect_db_pool()
+            logger.info(f"DB profile activated: {name}")
+            return JSONResponse(content={"success": True, "message": f"Profile '{name}' activated. DB reconnecting."})
+        else:
+            return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error activating DB profile: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/db_config/{profile_name}")
+async def delete_db_profile(profile_name: str):
+    """Delete a database profile."""
+    try:
+        data = _get_db_profiles_from_redis()
+        if profile_name not in data.get("profiles", {}):
+            return JSONResponse(content={"error": f"Profile '{profile_name}' not found"}, status_code=404)
+
+        del data["profiles"][profile_name]
+        if data.get("active") == profile_name:
+            remaining = list(data["profiles"].keys())
+            data["active"] = remaining[0] if remaining else None
+
+        if _save_db_profiles_to_redis(data):
+            if data.get("active"):
+                _reconnect_db_pool()
+            logger.info(f"DB profile deleted: {profile_name}")
+            return JSONResponse(content={"success": True, "message": f"Profile '{profile_name}' deleted", "active": data["active"]})
+        else:
+            return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error deleting DB profile: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
@@ -4569,60 +4934,100 @@ async def query_ai(request: Dict[str, Any]):
         if not user_query:
             return JSONResponse(content={"error": "Query is required"}, status_code=400)
 
-        # Get AI configuration from Redis
-        if not watcher or not watcher.redis_connection:
-            return JSONResponse(content={"error": "Redis not available"}, status_code=503)
-
-        r = watcher.redis_connection.redis_connection
-        model = r.get("ai_model")
-        api_key = r.get("ai_api_key")
-
-        if not model or not api_key:
+        # Get active AI model from multi-model storage
+        ai_data = _get_ai_models_from_redis()
+        active_name = ai_data.get("active")
+        if not active_name or active_name not in ai_data.get("models", {}):
             return JSONResponse(content={
-                "error": "AI not configured. Please set your API key in the AI Configuration panel."
+                "error": "AI not configured. Please add and activate a model in the AI Configuration panel."
             }, status_code=400)
 
-        model = model.decode('utf-8') if isinstance(model, bytes) else model
-        api_key = api_key.decode('utf-8') if isinstance(api_key, bytes) else api_key
+        active_model = ai_data["models"][active_name]
+        model = active_model["provider"]
+        api_key = active_model["api_key"]
 
-        # Gather current system context
-        system_context = {
-            "current_time": datetime.now().isoformat(),
-            "real_time_data": {
-                "encoder_value": r.get("encoder") or 0,
-                "ok_counter": r.get("ok_counter") or 0,
-                "ng_counter": r.get("ng_counter") or 0,
-                "shipment": r.get("shipment") or "no_shipment",
-                "is_moving": r.get("is_moving") == b"true",
-                "downtime_seconds": r.get("downtime_seconds") or 0,
-            },
-            "inference_stats": {
-                "service_type": "YOLO" if YOLO_INFERENCE_URL else "Gradio",
-                "service_url": YOLO_INFERENCE_URL or f"https://{GRADIO_MODEL}.hf.space",
-            }
-        }
+        r = Redis("redis", 6379, db=0)
 
-        # Build concise AI prompt
-        system_prompt = f"""You are an AI assistant for the MonitaQC quality control system.
+        # Gather current system context from Redis
+        def _r_get(key, default="N/A"):
+            v = r.get(key)
+            if v is None:
+                return default
+            return v.decode('utf-8') if isinstance(v, bytes) else v
 
-Current Status: Encoder={system_context['real_time_data']['encoder_value']}, OK={system_context['real_time_data']['ok_counter']}, NG={system_context['real_time_data']['ng_counter']}, Shipment={system_context['real_time_data']['shipment']}, Moving={'Yes' if system_context['real_time_data']['is_moving'] else 'No'}
+        # Build comprehensive camera info
+        camera_info = "No cameras"
+        if watcher_instance and watcher_instance.cameras:
+            cam_details = []
+            for cid in sorted(watcher_instance.cameras.keys()):
+                cam = watcher_instance.cameras[cid]
+                has_frame = hasattr(cam, 'frame') and cam.frame is not None
+                cam_details.append(f"Camera {cid}: {'active' if has_frame else 'no frame'}")
+            camera_info = "; ".join(cam_details)
 
-Use the database query tools to fetch historical data from TimescaleDB (timescaledb:5432/monitaqc).
+        # Build comprehensive AI prompt with full schema and context
+        system_prompt = f"""You are a powerful AI assistant embedded in the MonitaQC industrial quality control system. You have full access to query the database, read real-time sensor data, check camera status, and analyze system health.
 
-IMPORTANT FORMATTING RULES:
-1. Write responses in clear, natural language - avoid technical jargon
-2. Use bullet points (•) and numbered lists for readability
-3. Include concrete numbers and percentages
-4. When referring to "Class 0" or "Class 1", explain what these represent (e.g., "Class 0 (major defects)" or ask user to clarify)
-5. Use emojis sparingly for visual clarity (✅ ❌ 📊 ⚠️)
-6. Break long responses into clear sections with headers
-7. Provide actionable insights and recommendations
-8. Keep responses concise but informative
+## Current System State
+- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+- Encoder: {_r_get('encoder', '0')} | OK: {_r_get('ok_counter', '0')} | NG: {_r_get('ng_counter', '0')}
+- Shipment: {_r_get('shipment', 'none')} | Moving: {_r_get('is_moving', 'false')}
+- Downtime: {_r_get('downtime_seconds', '0')}s
+- Cameras: {camera_info}
+- Inference: {'YOLO (' + YOLO_INFERENCE_URL + ')' if YOLO_INFERENCE_URL else 'Gradio HuggingFace'}
 
-When showing data:
-- Use tables for comparisons
-- Highlight key findings
-- Explain trends in simple terms"""
+## Database Schema (TimescaleDB - PostgreSQL)
+You MUST use these exact table and column names:
+
+### Table: production_metrics (hypertable, partitioned by time)
+| Column | Type | Description |
+|--------|------|-------------|
+| time | TIMESTAMPTZ | Timestamp (auto-set, use for time queries) |
+| encoder_value | INTEGER | Conveyor encoder position |
+| ok_counter | INTEGER | Cumulative OK product count |
+| ng_counter | INTEGER | Cumulative NG (defective) product count |
+| shipment | TEXT | Current shipment/batch identifier |
+| is_moving | BOOLEAN | Whether conveyor is moving |
+| downtime_seconds | INTEGER | Accumulated downtime |
+
+### Table: inference_results (hypertable, partitioned by time)
+| Column | Type | Description |
+|--------|------|-------------|
+| time | TIMESTAMPTZ | When inference ran |
+| shipment | TEXT | Shipment/batch identifier |
+| image_path | TEXT | Path to the inspected image |
+| detections | JSONB | Array of detection objects (class, confidence, bbox) |
+| detection_count | INTEGER | Number of objects detected |
+| inference_time_ms | INTEGER | How long inference took in ms |
+| model_used | TEXT | Which AI model was used |
+| pipeline_name | TEXT | Pipeline that produced this result |
+| module_id | TEXT | Inference module identifier |
+| phase_id | INTEGER | Capture phase number |
+
+### Common Query Patterns
+- Recent defects: `SELECT time, detections, detection_count, inference_time_ms FROM inference_results ORDER BY time DESC LIMIT 20`
+- Defect rate last hour: `SELECT COUNT(*) FILTER (WHERE detection_count > 0) as defective, COUNT(*) as total FROM inference_results WHERE time > NOW() - INTERVAL '1 hour'`
+- Production summary: `SELECT shipment, MAX(ok_counter) as ok, MAX(ng_counter) as ng FROM production_metrics WHERE time > NOW() - INTERVAL '24 hours' GROUP BY shipment`
+- Detections JSON example: each item in detections array has: {{"class": "defect_name", "confidence": 0.95, "bbox": [x1,y1,x2,y2]}}
+- To parse JSONB: `SELECT jsonb_array_elements(detections)->>'class' as defect_class FROM inference_results WHERE detection_count > 0`
+
+## Available Redis Keys (real-time data)
+encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds, inference_times (list), frame_intervals (list), capture_timestamps (list), detection_events (list of JSON)
+
+## Tools Available
+1. **query_database** - Execute any SQL query on TimescaleDB
+2. **get_redis_data** - Read real-time values from Redis
+3. **get_system_status** - Get full system status (cameras, inference, config)
+4. **call_api_endpoint** - Call any internal API endpoint for data or actions
+
+## Formatting Rules
+- Write clear, natural language. Avoid unnecessary jargon.
+- Use bullet points and numbered lists for readability.
+- Include concrete numbers, percentages, and time references.
+- Use emojis sparingly: ✅ ❌ 📊 ⚠️ 🔍
+- When showing data, use tables for comparisons.
+- Provide actionable insights and recommendations.
+- Keep responses concise but complete."""
 
         # Call AI API based on model
         ai_response = await call_ai_model(model, api_key, system_prompt, user_query)
@@ -4639,13 +5044,13 @@ def get_ai_tools():
     return [
         {
             "name": "query_database",
-            "description": "Execute SQL query on TimescaleDB to retrieve production data, metrics, defects, or any historical data. Returns query results as JSON.",
+            "description": "Execute SQL query on TimescaleDB. Tables: production_metrics (time, encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds), inference_results (time, shipment, image_path, detections JSONB, detection_count, inference_time_ms, model_used, pipeline_name, module_id, phase_id). Both are time-partitioned hypertables.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "SQL query to execute. Can query tables like production_metrics, inference_results, etc."
+                        "description": "PostgreSQL SQL query. Use NOW() - INTERVAL for time ranges. Detections is JSONB array with {class, confidence, bbox}."
                     }
                 },
                 "required": ["query"]
@@ -4653,36 +5058,55 @@ def get_ai_tools():
         },
         {
             "name": "get_redis_data",
-            "description": "Get current real-time data from Redis cache. Returns current values for encoder, counters, shipment, movement status, etc.",
+            "description": "Get real-time values from Redis. Keys: encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds. List keys: inference_times, frame_intervals, capture_timestamps, detection_events.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "keys": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Redis keys to retrieve. Common keys: encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds"
+                        "description": "Redis keys to retrieve (string keys use GET, list keys use LRANGE)"
                     }
                 },
                 "required": ["keys"]
             }
         },
         {
-            "name": "get_system_logs",
-            "description": "Retrieve recent application logs to diagnose issues or understand system behavior.",
+            "name": "get_system_status",
+            "description": "Get comprehensive system status: cameras, inference config, pipelines, states, system metrics (CPU/memory/disk), and current configuration.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "lines": {
-                        "type": "integer",
-                        "description": "Number of recent log lines to retrieve",
-                        "default": 50
-                    },
-                    "filter": {
-                        "type": "string",
-                        "description": "Optional filter pattern to match in logs"
+                    "sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Which sections to include: cameras, inference, pipelines, states, metrics, config. Omit for all."
                     }
                 },
                 "required": []
+            }
+        },
+        {
+            "name": "call_api_endpoint",
+            "description": "Call any internal MonitaQC API endpoint. GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/gradio/models. POST endpoints: /api/cameras/discover, /api/timeline_clear.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method: GET or POST",
+                        "enum": ["GET", "POST"]
+                    },
+                    "endpoint": {
+                        "type": "string",
+                        "description": "API path, e.g., /api/cameras or /api/inference/stats"
+                    },
+                    "body": {
+                        "type": "object",
+                        "description": "Optional JSON body for POST requests"
+                    }
+                },
+                "required": ["method", "endpoint"]
             }
         }
     ]
@@ -4692,54 +5116,124 @@ def execute_tool(tool_name: str, tool_input: dict) -> str:
     """Execute a tool and return results."""
     try:
         if tool_name == "query_database":
-            # Execute TimescaleDB query
+            # Use active DB profile for connection
+            db_data = _get_db_profiles_from_redis()
+            active = db_data.get("active")
+            if active and active in db_data.get("profiles", {}):
+                p = db_data["profiles"][active]
+                db_host, db_port = p.get("host", "timescaledb"), p.get("port", 5432)
+                db_name, db_user = p.get("database", "monitaqc"), p.get("user", "monitaqc")
+                db_pass = p.get("password", "monitaqc2024")
+            else:
+                db_host, db_port, db_name, db_user, db_pass = "timescaledb", 5432, "monitaqc", "monitaqc", "monitaqc2024"
+
             import psycopg2
-            conn = psycopg2.connect(
-                host="timescaledb",
-                port=5432,
-                database="monitaqc",
-                user="monitaqc",
-                password="monitaqc2024"
-            )
+            conn = psycopg2.connect(host=db_host, port=db_port, database=db_name, user=db_user, password=db_pass)
             cursor = conn.cursor()
-            cursor.execute(tool_input["query"])
-            results = cursor.fetchall()
-            column_names = [desc[0] for desc in cursor.description]
+            query = tool_input["query"]
+            # Safety: limit results to prevent massive responses
+            if "LIMIT" not in query.upper():
+                query = query.rstrip(";") + " LIMIT 100"
+            cursor.execute(query)
+
+            if cursor.description:
+                results = cursor.fetchall()
+                column_names = [desc[0] for desc in cursor.description]
+                formatted_results = [dict(zip(column_names, row)) for row in results]
+                output = json.dumps(formatted_results, default=str)
+            else:
+                output = json.dumps({"message": "Query executed successfully", "rowcount": cursor.rowcount})
             cursor.close()
             conn.close()
-
-            # Format as JSON
-            formatted_results = []
-            for row in results:
-                formatted_results.append(dict(zip(column_names, row)))
-            return json.dumps(formatted_results, default=str)
+            return output
 
         elif tool_name == "get_redis_data":
-            # Get Redis data
-            if not watcher or not watcher.redis_connection:
-                return json.dumps({"error": "Redis not available"})
-
-            r = watcher.redis_connection.redis_connection
+            # Use direct Redis connection (not broken watcher chain)
+            r = Redis("redis", 6379, db=0)
+            list_keys = {"inference_times", "frame_intervals", "capture_timestamps", "detection_events"}
             results = {}
             for key in tool_input["keys"]:
-                value = r.get(key)
-                if value:
-                    results[key] = value.decode('utf-8') if isinstance(value, bytes) else value
+                if key in list_keys:
+                    raw = r.lrange(key, 0, 49)
+                    results[key] = [v.decode('utf-8') if isinstance(v, bytes) else v for v in raw]
                 else:
-                    results[key] = None
-            return json.dumps(results)
+                    value = r.get(key)
+                    results[key] = value.decode('utf-8') if isinstance(value, bytes) and value else None
+            return json.dumps(results, default=str)
 
-        elif tool_name == "get_system_logs":
-            # Get recent logs (simplified - returns last N log entries)
-            lines = tool_input.get("lines", 50)
-            filter_pattern = tool_input.get("filter")
+        elif tool_name == "get_system_status":
+            sections = tool_input.get("sections") or ["cameras", "inference", "pipelines", "states", "metrics", "config"]
+            status = {}
 
-            # For now, return a simple status message
-            # In production, this would read from actual log files
-            return json.dumps({
-                "message": f"Log retrieval with {lines} lines" + (f" filtered by '{filter_pattern}'" if filter_pattern else ""),
-                "note": "Full log integration pending"
-            })
+            if "cameras" in sections and watcher_instance:
+                cams = {}
+                for cid in sorted(watcher_instance.cameras.keys()):
+                    cam = watcher_instance.cameras[cid]
+                    cams[str(cid)] = {
+                        "has_frame": hasattr(cam, 'frame') and cam.frame is not None,
+                        "frame_shape": list(cam.frame.shape) if hasattr(cam, 'frame') and cam.frame is not None else None,
+                        "source": getattr(cam, 'source', 'unknown'),
+                    }
+                status["cameras"] = cams
+
+            if "inference" in sections:
+                status["inference"] = {
+                    "yolo_url": YOLO_INFERENCE_URL,
+                    "gradio_model": GRADIO_MODEL,
+                    "gradio_confidence": GRADIO_CONFIDENCE_THRESHOLD,
+                    "service_type": "YOLO" if YOLO_INFERENCE_URL else "Gradio",
+                }
+
+            if "metrics" in sections:
+                try:
+                    import psutil
+                    status["system_metrics"] = {
+                        "cpu_percent": psutil.cpu_percent(interval=0.1),
+                        "memory_percent": psutil.virtual_memory().percent,
+                        "disk_percent": psutil.disk_usage('/').percent,
+                    }
+                except Exception:
+                    status["system_metrics"] = {"error": "psutil unavailable"}
+
+            if "config" in sections:
+                status["config"] = {
+                    "capture_mode": CAPTURE_MODE,
+                    "ejector_enabled": EJECTOR_ENABLED,
+                    "histogram_enabled": HISTOGRAM_ENABLED,
+                    "check_class_counts_enabled": CHECK_CLASS_COUNTS_ENABLED,
+                    "check_class_counts_classes": CHECK_CLASS_COUNTS_CLASSES,
+                    "parent_object_list": PARENT_OBJECT_LIST,
+                    "store_annotation_enabled": STORE_ANNOTATION_ENABLED,
+                }
+
+            if "states" in sections and watcher_instance:
+                states_config = getattr(watcher_instance, 'states_config', {})
+                current_state = getattr(watcher_instance, 'current_state', None)
+                status["states"] = {
+                    "current_state": current_state.name if current_state and hasattr(current_state, 'name') else str(current_state),
+                    "available_states": list(states_config.keys()) if states_config else [],
+                }
+
+            return json.dumps(status, default=str)
+
+        elif tool_name == "call_api_endpoint":
+            # Call internal API endpoint via HTTP
+            import requests as req
+            method = tool_input.get("method", "GET").upper()
+            endpoint = tool_input.get("endpoint", "")
+            body = tool_input.get("body")
+            url = f"http://127.0.0.1:5050{endpoint}"
+
+            if method == "POST":
+                resp = req.post(url, json=body, timeout=10)
+            else:
+                resp = req.get(url, timeout=10)
+
+            # Truncate large responses
+            text = resp.text
+            if len(text) > 8000:
+                text = text[:8000] + "\n... [truncated]"
+            return text
 
         else:
             return json.dumps({"error": f"Unknown tool: {tool_name}"})
@@ -4764,7 +5258,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             max_iterations = 5
             for iteration in range(max_iterations):
                 response = client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
+                    model="claude-sonnet-4-5-20250929",
                     max_tokens=4096,
                     system=system_prompt,
                     messages=messages,
@@ -4981,8 +5475,6 @@ def req_predict(image):
         try:
             from gradio_client import Client, handle_file
             import tempfile
-            import cv2
-            import numpy as np
 
             # Initialize Gradio client (cached globally for reuse)
             if not hasattr(req_predict, 'gradio_client'):
@@ -5015,8 +5507,8 @@ def req_predict(image):
             # Clean up temp file
             try:
                 os.unlink(tmp_path)
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not delete temp file {tmp_path}: {e}")
 
             logger.info(f"Gradio API response: {len(result) if isinstance(result, list) else 0} detection(s)")
             logger.info(f"Gradio result type: {type(result)}")
@@ -5157,8 +5649,6 @@ except Exception as e:
     prepared_query_data = []
 
 set_model_url = "http://yolo_inference:4442/v1/object-detection/yolov5s/set-model"
-
-# res = requests.post(set_model_url, data={"model_path":"best.pt"})
 
 class CameraBuffer:
     def __init__(self, source, exposure, gain) -> None:
@@ -6881,10 +7371,10 @@ def inference_worker_thread():
 
                             # Log processed frame result
                             classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
-                            print(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
+                            logger.info(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
 
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Non-critical error in frame processing: {e}")
             except Exception as e:
                 logger.error(f"Processing error: {e}")
                 continue
@@ -6897,12 +7387,6 @@ def inference_worker_thread():
 inference_thread = threading.Thread(target=inference_worker_thread, daemon=True)
 inference_thread.start()
 logger.info("Inference worker thread started")
-
-# scanner = Scanner(watcher)
-
-ejector_start_ts = time.time()
-# res = requests.post(set_model_url, data={"model_path":"best.pt"})
-signal_counter = 0
 
 blank_image, green_image, red_image = create_dynamic_images(720)
 
@@ -6962,6 +7446,17 @@ def process_frame(frame, capture_mode):
             model_name_used = "legacy"
 
         processing_time = time.time() - start_time
+        elapsed_ms = processing_time * 1000
+
+        # Track inference timing in Redis (cross-process safe)
+        try:
+            redis_client = Redis("redis", 6379, db=0)
+            redis_client.lpush("inference_times", str(elapsed_ms))
+            redis_client.ltrim("inference_times", 0, 9)  # Keep last 10
+            redis_client.lpush("frame_intervals", str(elapsed_ms))
+            redis_client.ltrim("frame_intervals", 0, 9)
+        except Exception as e:
+            logger.debug(f"Failed to track inference timing in Redis: {e}")
 
         # Cache frame_id for video feed to display processed image
         global watcher_instance
@@ -7032,23 +7527,33 @@ def process_frame(frame, capture_mode):
             except Exception as e:
                 logger.error(f"Error creating detection event: {e}", exc_info=True)
 
-            # Add annotated image to timeline for visual history (Redis-based, works across processes)
-            try:
-                camera_id = int(frame_id.split('_')[-1])
-                add_frame_to_timeline(camera_id, annotated_image)
-            except Exception as e:
-                logger.error(f"Could not add frame to timeline (frame_id={frame_id}): {e}", exc_info=True)
-
             # Write inference result to database with model name
-            if watcher:
+            try:
                 inference_time_ms = int(processing_time * 1000)
+                # Get shipment from Redis (works across processes, unlike watcher object)
+                try:
+                    r = Redis("redis", 6379, db=0)
+                    shipment_val = r.get("shipment")
+                    shipment_str = shipment_val.decode('utf-8') if isinstance(shipment_val, bytes) and shipment_val else "no_shipment"
+                except Exception:
+                    shipment_str = "no_shipment"
                 write_inference_to_db(
-                    shipment=watcher.shipment or "no_shipment",
+                    shipment=shipment_str,
                     image_path=annotated_path,
                     detections=yolo_res,
                     inference_time_ms=inference_time_ms,
                     model_used=model_name_used
                 )
+            except Exception as e:
+                logger.error(f"Failed to write inference to DB: {e}")
+
+        # Add frame to timeline regardless of detections (use annotated if available, otherwise original)
+        try:
+            camera_id = int(frame_id.split('_')[-1])
+            timeline_img = annotated_image if (yolo_res and len(yolo_res) > 0) else image
+            add_frame_to_timeline(camera_id, timeline_img)
+        except Exception as e:
+            logger.error(f"Could not add frame to timeline (frame_id={frame_id}): {e}", exc_info=True)
 
         frame_data = [frame_id, image, yolo_res, 5]
 

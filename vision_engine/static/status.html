@@ -3,7 +3,11 @@
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>Monitait Vision Engine - Status Monitor</title>
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
+        <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+        <title>Monitait Vision Engine v2.0.0</title>
         <style>
             :root {
                 --primary-color: #3b82f6;
@@ -912,15 +916,32 @@
         </style>
     </head>
     <body>
+        <script>
+            // Diagnostic: identify blocking element (temporary - remove after debugging)
+            document.addEventListener('click', function(e) {
+                var el = document.elementFromPoint(e.clientX, e.clientY);
+                var info = 'Clicked element: <' + (el ? el.tagName : 'null') + '>';
+                if (el && el.id) info += ' id="' + el.id + '"';
+                if (el && el.className) info += ' class="' + el.className + '"';
+                info += ' at (' + e.clientX + ',' + e.clientY + ')';
+                var parents = [];
+                var p = el;
+                while (p && p !== document.body) { parents.push(p.tagName + (p.id ? '#'+p.id : '') + (p.className ? '.'+String(p.className).split(' ')[0] : '')); p = p.parentElement; }
+                console.log(info + ' | Chain: ' + parents.join(' > '));
+                // Show as title tooltip for easy viewing
+                document.title = info;
+            }, true);
+        </script>
         <div class="container">
-            <!-- Compact Header: 3-column layout -->
-            <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color);">
+            <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
+            <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
 
                 <!-- LEFT: Monitait Title (compact) -->
                 <div style="min-width: 150px;">
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
                     </div>
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.0.0</div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
@@ -1826,28 +1847,18 @@
             </div>
             <!-- End Inference Tab -->
 
-            <!-- Gallery Tab -->
+            <!-- Gallery Tab (iframe created dynamically - no static iframe in DOM) -->
             <div id="tab-gallery" class="tab-content">
-                <div style="width: 100%; height: calc(100vh - 200px); min-height: 600px;">
-                    <iframe
-                        src="http://localhost:5000"
-                        style="width: 100%; height: 100%; border: none; border-radius: 8px; box-shadow: var(--shadow-lg);"
-                        title="Image Gallery - Pigallery2"
-                        allow="fullscreen">
-                    </iframe>
+                <div id="gallery-iframe-container" style="width: 100%; height: calc(100vh - 120px); min-height: 400px;">
+                    <!-- iframe injected dynamically by loadIframeForTab() -->
                 </div>
             </div>
             <!-- End Gallery Tab -->
 
-            <!-- Grafana Tab -->
+            <!-- Grafana Tab (iframe created dynamically - no static iframe in DOM) -->
             <div id="tab-grafana" class="tab-content">
-                <div style="width: 100%; height: calc(100vh - 200px); min-height: 600px;">
-                    <iframe
-                        src="http://localhost:3000"
-                        style="width: 100%; height: 100%; border: none; border-radius: 8px; box-shadow: var(--shadow-lg);"
-                        title="Grafana Dashboard"
-                        allow="fullscreen">
-                    </iframe>
+                <div id="grafana-iframe-container" style="width: 100%; height: calc(100vh - 120px); min-height: 400px;">
+                    <!-- iframe injected dynamically by loadIframeForTab() -->
                 </div>
                 <div style="margin-top: 15px; padding: 15px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 8px;">
                     <h4 style="margin: 0 0 10px 0; color: #0c5460;">📊 Grafana Dashboard</h4>
@@ -1861,6 +1872,37 @@
                     </p>
                 </div>
             </div>
+            <script>
+                // Dynamic iframe management - iframes are CREATED when tab opens and DESTROYED when leaving
+                // This prevents any phantom iframe from blocking the page
+                var iframeConfig = {
+                    'gallery': { containerId: 'gallery-iframe-container', port: 5000 },
+                    'grafana': { containerId: 'grafana-iframe-container', port: 3000 }
+                };
+
+                function loadIframeForTab(tabName) {
+                    // Create iframe for active tab
+                    var cfg = iframeConfig[tabName];
+                    if (cfg) {
+                        var url = 'http://' + window.location.hostname + ':' + cfg.port;
+                        var container = document.getElementById(cfg.containerId);
+                        if (container && !container.querySelector('iframe')) {
+                            var iframe = document.createElement('iframe');
+                            iframe.src = url;
+                            iframe.style.cssText = 'width: 100%; height: 100%; border: 2px solid var(--border-color); border-radius: 8px;';
+                            iframe.allow = 'fullscreen';
+                            container.appendChild(iframe);
+                        }
+                    }
+                    // DESTROY iframes in other tabs completely
+                    Object.keys(iframeConfig).forEach(function(t) {
+                        if (t !== tabName) {
+                            var cont = document.getElementById(iframeConfig[t].containerId);
+                            if (cont) { cont.innerHTML = ''; }
+                        }
+                    });
+                }
+            </script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -2000,47 +2042,102 @@
                 <!-- AI Configuration Section -->
                 <div class="control-section">
                     <h3>🔑 AI Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label">Model</div>
-                            <select id="ai-model" class="control-input" onchange="updateAIModelFields()">
-                                <option value="claude">Claude (Anthropic)</option>
-                                <option value="chatgpt">ChatGPT (OpenAI)</option>
-                                <option value="gemini">Gemini (Google)</option>
-                                <option value="local">Local Model</option>
-                            </select>
+                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <span style="font-weight: bold; color: #333;">Active Model:</span>
+                            <span id="ai-active-model-name" style="font-size: 16px; font-weight: bold; color: #007bff;">None</span>
+                            <span id="ai-active-model-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
                         </div>
-                        <div class="control-item">
-                            <div class="control-label" id="api-key-label">API Key</div>
-                            <input
-                                type="password"
-                                id="ai-api-key"
-                                class="control-input"
-                                placeholder="sk-ant-..."
-                            >
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Configured Models</h4>
+                        <div id="ai-models-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <span style="color: #666; font-style: italic;">Loading models...</span>
+                        </div>
+                    </div>
+
+                    <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Add / Edit Model</h4>
+                        <div class="control-grid">
+                            <div class="control-item">
+                                <div class="control-label">Model Name</div>
+                                <input type="text" class="control-input" id="ai-model-name" placeholder="e.g., My ChatGPT">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Provider</div>
+                                <select id="ai-model-provider" class="control-input" onchange="updateAIModelFields()">
+                                    <option value="claude">Claude (Anthropic)</option>
+                                    <option value="chatgpt">ChatGPT (OpenAI)</option>
+                                    <option value="gemini">Gemini (Google)</option>
+                                    <option value="local">Local Model (Ollama)</option>
+                                </select>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label" id="api-key-label">API Key</div>
+                                <input type="password" id="ai-api-key" class="control-input" placeholder="sk-ant-...">
+                            </div>
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
+                            <button class="camera-btn camera-btn-success" onclick="saveAIModel()">Save Model</button>
+                            <button class="camera-btn camera-btn-secondary" onclick="clearAIModelForm()">Clear</button>
+                            <span style="margin-left: auto; font-size: 12px; color: var(--text-secondary);">
+                                <a id="ai-api-link" href="https://console.anthropic.com/" target="_blank" style="color: var(--primary-color);">Get API Key</a>
+                            </span>
                         </div>
                     </div>
                 </div>
 
                 <!-- Database Configuration Section -->
                 <div class="control-section">
-                    <h3>⚙️ Database Info</h3>
-                    <div class="control-grid" style="grid-template-columns: repeat(4, 1fr);">
-                        <div class="control-item">
-                            <div class="control-label">Host</div>
-                            <div style="padding: 8px; background: rgba(30, 41, 59, 0.3); border-radius: 4px; font-family: monospace; font-size: 12px; color: var(--text-primary);">localhost:5432</div>
+                    <h3>⚙️ Database Configuration</h3>
+                    <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
+                        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <span style="font-weight: bold; color: #333;">Active Profile:</span>
+                            <span id="db-active-profile-name" style="font-size: 16px; font-weight: bold; color: #007bff;">None</span>
+                            <span id="db-active-profile-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
+                            <div id="db-status" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background: var(--warning-color); color: white;">Checking...</div>
                         </div>
-                        <div class="control-item">
-                            <div class="control-label">Database</div>
-                            <div style="padding: 8px; background: rgba(30, 41, 59, 0.3); border-radius: 4px; font-family: monospace; font-size: 12px; color: var(--text-primary);">monitaqc</div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <h4 style="margin: 0 0 10px 0; color: #495057;">Configured Profiles</h4>
+                        <div id="db-profiles-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            <span style="color: #666; font-style: italic;">Loading profiles...</span>
                         </div>
-                        <div class="control-item">
-                            <div class="control-label">User</div>
-                            <div style="padding: 8px; background: rgba(30, 41, 59, 0.3); border-radius: 4px; font-family: monospace; font-size: 12px; color: var(--text-primary);">monitaqc</div>
+                    </div>
+
+                    <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Add / Edit Profile</h4>
+                        <div class="control-grid" style="grid-template-columns: repeat(3, 1fr);">
+                            <div class="control-item">
+                                <div class="control-label">Profile Name</div>
+                                <input type="text" class="control-input" id="db-profile-name" placeholder="e.g., Production">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Host</div>
+                                <input type="text" class="control-input" id="db-host" placeholder="timescaledb">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Port</div>
+                                <input type="number" class="control-input" id="db-port" value="5432">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Database</div>
+                                <input type="text" class="control-input" id="db-database" placeholder="monitaqc">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">User</div>
+                                <input type="text" class="control-input" id="db-user" placeholder="monitaqc">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Password</div>
+                                <input type="password" class="control-input" id="db-password" placeholder="***">
+                            </div>
                         </div>
-                        <div class="control-item">
-                            <div class="control-label">Status</div>
-                            <div id="db-status" style="padding: 6px 12px; background: var(--warning-color); color: white; border-radius: 4px; font-size: 11px; font-weight: 600; text-align: center;">Checking...</div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
+                            <button class="camera-btn camera-btn-success" onclick="saveDBProfile()">Save Profile</button>
+                            <button class="camera-btn camera-btn-secondary" onclick="clearDBProfileForm()">Clear</button>
                         </div>
                     </div>
                 </div>
@@ -2499,12 +2596,18 @@
                 if (tabName === 'ai') {
                     setTimeout(() => loadChatHistory(), 100);
                 }
+
+                // Lazy-load/unload iframes for gallery and grafana tabs
+                if (typeof loadIframeForTab === 'function') {
+                    loadIframeForTab(tabName);
+                }
             }
 
-            // Restore last selected tab on page load
+            // Restore last selected tab on page load (skip iframe tabs to prevent blocking)
             document.addEventListener('DOMContentLoaded', function() {
                 const savedTab = localStorage.getItem('selectedTab');
-                if (savedTab) {
+                const iframeTabs = ['gallery', 'grafana'];
+                if (savedTab && !iframeTabs.includes(savedTab)) {
                     const tabButton = document.querySelector(`.tab-button[onclick="switchTab('${savedTab}')"]`);
                     if (tabButton) {
                         tabButton.click();
@@ -2871,17 +2974,17 @@
             // Service Configuration functions
             async function saveAllServiceConfig() {
                 try {
-                    // Save service config
-                    const response1 = await fetch('/api/save_service_config', { method: 'POST' });
-                    // Save data file
-                    const response2 = await fetch('/api/save_data_file', { method: 'POST' });
+                    // Save all configuration (cameras + settings) using the correct endpoint
+                    const response = await fetch('/api/cameras/config/save', { method: 'POST' });
 
-                    if (response1.ok && response2.ok) {
+                    if (response.ok) {
+                        const data = await response.json();
                         const timestamp = new Date().toISOString();
                         document.getElementById('last-saved-time').textContent = timestamp;
                         alert('✓ All settings saved successfully!');
                     } else {
-                        alert('❌ Failed to save settings');
+                        const data = await response.json();
+                        alert(`❌ Failed to save settings: ${data.error || 'Unknown error'}`);
                     }
                 } catch (error) {
                     console.error('Error saving config:', error);
@@ -2892,12 +2995,13 @@
             async function loadServiceConfig() {
                 if (!confirm('Load saved service configuration? This will reload the page.')) return;
                 try {
-                    const response = await fetch('/api/load_service_config', { method: 'POST' });
+                    const response = await fetch('/api/cameras/config/load', { method: 'POST' });
                     if (response.ok) {
                         alert('✓ Configuration loaded! Reloading page...');
                         location.reload();
                     } else {
-                        alert('❌ Failed to load configuration');
+                        const data = await response.json();
+                        alert(`❌ Failed to load configuration: ${data.error || 'Unknown error'}`);
                     }
                 } catch (error) {
                     console.error('Error loading config:', error);
@@ -2928,104 +3032,292 @@
             }
 
             function importServiceConfig() {
+                // Trigger file input for the working import function below
                 const input = document.createElement('input');
                 input.type = 'file';
                 input.accept = '.json';
                 input.onchange = async (e) => {
                     const file = e.target.files[0];
                     if (!file) return;
-
-                    const formData = new FormData();
-                    formData.append('file', file);
-
                     try {
-                        const response = await fetch('/api/import_service_config', {
+                        const text = await file.text();
+                        const config = JSON.parse(text);
+                        const response = await fetch('/api/cameras/config/upload', {
                             method: 'POST',
-                            body: formData
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ config })
                         });
-
-                        if (response.ok) {
-                            alert('✓ Configuration imported! Reloading page...');
+                        const result = await response.json();
+                        if (response.ok && result.success) {
+                            alert(`✓ Config imported! (${result.cameras_loaded} cameras loaded)`);
                             location.reload();
                         } else {
-                            alert('❌ Failed to import configuration');
+                            alert(`❌ Failed to import: ${result.error || 'Unknown error'}`);
                         }
                     } catch (error) {
                         console.error('Error importing config:', error);
-                        alert('❌ Error importing configuration');
+                        alert(`❌ Error: ${error.message}`);
                     }
                 };
                 input.click();
             }
 
             // AI Assistant Functions
+            const aiProviderConfigs = {
+                'claude': { label: 'Anthropic API Key:', placeholder: 'sk-ant-...', link: 'https://console.anthropic.com/', linkText: 'Anthropic Console' },
+                'chatgpt': { label: 'OpenAI API Key:', placeholder: 'sk-...', link: 'https://platform.openai.com/api-keys', linkText: 'OpenAI Platform' },
+                'gemini': { label: 'Google API Key:', placeholder: 'AI...', link: 'https://makersuite.google.com/app/apikey', linkText: 'Google AI Studio' },
+                'local': { label: 'Model Endpoint:', placeholder: 'http://localhost:11434', link: 'https://ollama.ai/', linkText: 'Ollama Documentation' }
+            };
+
+            let aiModelsData = { models: {}, active: null };
+
             function updateAIModelFields() {
-                const model = document.getElementById('ai-model').value;
-                const apiKeyLabel = document.getElementById('api-key-label');
-                const apiKeyInput = document.getElementById('ai-api-key');
-                const apiLink = document.getElementById('api-link');
-
-                const modelConfigs = {
-                    'claude': {
-                        label: 'Anthropic API Key:',
-                        placeholder: 'sk-ant-...',
-                        link: 'https://console.anthropic.com/',
-                        linkText: 'Anthropic Console'
-                    },
-                    'chatgpt': {
-                        label: 'OpenAI API Key:',
-                        placeholder: 'sk-...',
-                        link: 'https://platform.openai.com/api-keys',
-                        linkText: 'OpenAI Platform'
-                    },
-                    'gemini': {
-                        label: 'Google API Key:',
-                        placeholder: 'AI...',
-                        link: 'https://makersuite.google.com/app/apikey',
-                        linkText: 'Google AI Studio'
-                    },
-                    'local': {
-                        label: 'Model Endpoint:',
-                        placeholder: 'http://localhost:11434',
-                        link: 'https://ollama.ai/',
-                        linkText: 'Ollama Documentation'
-                    }
-                };
-
-                const config = modelConfigs[model];
-                apiKeyLabel.textContent = config.label;
-                apiKeyInput.placeholder = config.placeholder;
-                apiLink.href = config.link;
-                apiLink.textContent = config.linkText;
+                const provider = document.getElementById('ai-model-provider').value;
+                const cfg = aiProviderConfigs[provider];
+                document.getElementById('api-key-label').textContent = cfg.label;
+                document.getElementById('ai-api-key').placeholder = cfg.placeholder;
+                document.getElementById('ai-api-link').href = cfg.link;
+                document.getElementById('ai-api-link').textContent = cfg.linkText;
             }
 
-            async function saveAIConfig() {
-                const model = document.getElementById('ai-model').value;
-                const apiKey = document.getElementById('ai-api-key').value;
+            async function loadAIModels() {
+                try {
+                    const response = await fetch('/api/ai_config');
+                    const data = await response.json();
+                    aiModelsData = data;
+                    renderAIModelsList(data);
+                    updateAIActiveDisplay(data.active, data.models);
+                } catch (error) {
+                    console.error('Error loading AI models:', error);
+                }
+            }
 
-                if (!apiKey.trim()) {
-                    alert('❌ Please enter an API key or endpoint');
+            function updateAIActiveDisplay(activeName, models) {
+                const nameEl = document.getElementById('ai-active-model-name');
+                const badgeEl = document.getElementById('ai-active-model-badge');
+                if (activeName && models && models[activeName]) {
+                    const provider = models[activeName].provider;
+                    const providerLabels = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini', local: 'Local' };
+                    nameEl.textContent = activeName;
+                    badgeEl.textContent = (providerLabels[provider] || provider).toUpperCase();
+                    badgeEl.style.backgroundColor = '#28a745';
+                } else {
+                    nameEl.textContent = 'None';
+                    badgeEl.textContent = 'NOT SET';
+                    badgeEl.style.backgroundColor = '#6c757d';
+                }
+            }
+
+            function renderAIModelsList(data) {
+                const container = document.getElementById('ai-models-list');
+                const modelNames = Object.keys(data.models || {});
+                if (modelNames.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No models configured. Add one below.</span>';
                     return;
                 }
+                container.innerHTML = '';
+                const providerLabels = { claude: 'Claude', chatgpt: 'ChatGPT', gemini: 'Gemini', local: 'Local' };
+                modelNames.forEach(name => {
+                    const model = data.models[name];
+                    const isActive = data.active === name;
+                    const btn = document.createElement('button');
+                    btn.className = 'camera-btn ' + (isActive ? 'camera-btn-success' : 'camera-btn-secondary');
+                    btn.style.cssText = 'display: flex; flex-direction: column; align-items: center; padding: 8px 12px; min-width: 140px; cursor: pointer; position: relative;';
+                    btn.innerHTML = `
+                        <span style="font-weight: bold;">${name}</span>
+                        <span style="font-size: 10px; opacity: 0.8;">${providerLabels[model.provider] || model.provider}</span>
+                        <span style="font-size: 9px; opacity: 0.7;">${model.api_key_masked || '***'}</span>
+                        ${isActive ? '<span style="font-size: 9px; color: #90ee90;">ACTIVE</span>' : ''}
+                    `;
+                    btn.onclick = () => activateAIModel(name);
+                    btn.title = isActive ? 'Currently active' : 'Click to activate';
+
+                    // Delete button (small X in corner)
+                    const delBtn = document.createElement('span');
+                    delBtn.textContent = 'x';
+                    delBtn.style.cssText = 'position: absolute; top: 2px; right: 6px; font-size: 12px; cursor: pointer; opacity: 0.6; color: #ff6b6b;';
+                    delBtn.title = 'Delete this model';
+                    delBtn.onclick = (e) => { e.stopPropagation(); deleteAIModel(name); };
+                    btn.appendChild(delBtn);
+
+                    container.appendChild(btn);
+                });
+            }
+
+            async function saveAIModel() {
+                const name = document.getElementById('ai-model-name').value.trim();
+                const provider = document.getElementById('ai-model-provider').value;
+                const apiKey = document.getElementById('ai-api-key').value.trim();
+
+                if (!name) { alert('Please enter a model name'); return; }
+                if (!apiKey) { alert('Please enter an API key or endpoint'); return; }
 
                 try {
                     const response = await fetch('/api/ai_config', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ model, api_key: apiKey })
+                        body: JSON.stringify({ name, provider, api_key: apiKey })
                     });
-
                     const data = await response.json();
-
                     if (response.ok) {
-                        alert('✓ AI configuration saved successfully!');
+                        clearAIModelForm();
+                        loadAIModels();
                     } else {
-                        alert(`❌ Failed to save configuration: ${data.error || 'Unknown error'}`);
+                        alert('Failed to save: ' + (data.error || 'Unknown error'));
                     }
                 } catch (error) {
-                    console.error('Error saving AI config:', error);
-                    alert(`❌ Error saving configuration: ${error.message}`);
+                    alert('Error: ' + error.message);
                 }
+            }
+
+            async function activateAIModel(name) {
+                try {
+                    const response = await fetch('/api/ai_config/activate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name })
+                    });
+                    if (response.ok) { loadAIModels(); }
+                    else { const d = await response.json(); alert('Failed: ' + (d.error || 'Unknown')); }
+                } catch (error) { alert('Error: ' + error.message); }
+            }
+
+            async function deleteAIModel(name) {
+                if (!confirm('Delete model "' + name + '"?')) return;
+                try {
+                    const response = await fetch('/api/ai_config/' + encodeURIComponent(name), { method: 'DELETE' });
+                    if (response.ok) { loadAIModels(); }
+                    else { const d = await response.json(); alert('Failed: ' + (d.error || 'Unknown')); }
+                } catch (error) { alert('Error: ' + error.message); }
+            }
+
+            function clearAIModelForm() {
+                document.getElementById('ai-model-name').value = '';
+                document.getElementById('ai-api-key').value = '';
+                document.getElementById('ai-model-provider').selectedIndex = 0;
+                updateAIModelFields();
+            }
+
+            // Database Profile Functions
+            let dbProfilesData = { profiles: {}, active: null };
+
+            async function loadDBProfiles() {
+                try {
+                    const response = await fetch('/api/db_config');
+                    const data = await response.json();
+                    dbProfilesData = data;
+                    renderDBProfilesList(data);
+                    updateDBActiveDisplay(data.active, data.profiles);
+                } catch (error) {
+                    console.error('Error loading DB profiles:', error);
+                }
+            }
+
+            function updateDBActiveDisplay(activeName, profiles) {
+                const nameEl = document.getElementById('db-active-profile-name');
+                const badgeEl = document.getElementById('db-active-profile-badge');
+                if (activeName && profiles && profiles[activeName]) {
+                    const p = profiles[activeName];
+                    nameEl.textContent = activeName;
+                    badgeEl.textContent = `${p.host}:${p.port}`;
+                    badgeEl.style.backgroundColor = '#28a745';
+                } else {
+                    nameEl.textContent = 'None';
+                    badgeEl.textContent = 'NOT SET';
+                    badgeEl.style.backgroundColor = '#6c757d';
+                }
+            }
+
+            function renderDBProfilesList(data) {
+                const container = document.getElementById('db-profiles-list');
+                const names = Object.keys(data.profiles || {});
+                if (names.length === 0) {
+                    container.innerHTML = '<span style="color: #666; font-style: italic;">No profiles configured. Add one below.</span>';
+                    return;
+                }
+                container.innerHTML = '';
+                names.forEach(name => {
+                    const p = data.profiles[name];
+                    const isActive = data.active === name;
+                    const btn = document.createElement('button');
+                    btn.className = 'camera-btn ' + (isActive ? 'camera-btn-success' : 'camera-btn-secondary');
+                    btn.style.cssText = 'display: flex; flex-direction: column; align-items: center; padding: 8px 12px; min-width: 140px; cursor: pointer; position: relative;';
+                    btn.innerHTML = `
+                        <span style="font-weight: bold;">${name}</span>
+                        <span style="font-size: 10px; opacity: 0.8;">${p.host}:${p.port}</span>
+                        <span style="font-size: 9px; opacity: 0.7;">${p.database} (${p.user})</span>
+                        ${isActive ? '<span style="font-size: 9px; color: #90ee90;">ACTIVE</span>' : ''}
+                    `;
+                    btn.onclick = () => activateDBProfile(name);
+                    btn.title = isActive ? 'Currently active' : 'Click to activate';
+
+                    const delBtn = document.createElement('span');
+                    delBtn.textContent = 'x';
+                    delBtn.style.cssText = 'position: absolute; top: 2px; right: 6px; font-size: 12px; cursor: pointer; opacity: 0.6; color: #ff6b6b;';
+                    delBtn.title = 'Delete this profile';
+                    delBtn.onclick = (e) => { e.stopPropagation(); deleteDBProfile(name); };
+                    btn.appendChild(delBtn);
+
+                    container.appendChild(btn);
+                });
+            }
+
+            async function saveDBProfile() {
+                const name = document.getElementById('db-profile-name').value.trim();
+                const host = document.getElementById('db-host').value.trim();
+                const port = parseInt(document.getElementById('db-port').value) || 5432;
+                const database = document.getElementById('db-database').value.trim();
+                const user = document.getElementById('db-user').value.trim();
+                const password = document.getElementById('db-password').value.trim();
+
+                if (!name) { alert('Please enter a profile name'); return; }
+                if (!host) { alert('Please enter a host'); return; }
+
+                try {
+                    const response = await fetch('/api/db_config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name, host, port, database, user, password })
+                    });
+                    const data = await response.json();
+                    if (response.ok) {
+                        clearDBProfileForm();
+                        loadDBProfiles();
+                    } else {
+                        alert('Failed to save: ' + (data.error || 'Unknown error'));
+                    }
+                } catch (error) { alert('Error: ' + error.message); }
+            }
+
+            async function activateDBProfile(name) {
+                try {
+                    const response = await fetch('/api/db_config/activate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name })
+                    });
+                    if (response.ok) { loadDBProfiles(); }
+                    else { const d = await response.json(); alert('Failed: ' + (d.error || 'Unknown')); }
+                } catch (error) { alert('Error: ' + error.message); }
+            }
+
+            async function deleteDBProfile(name) {
+                if (!confirm('Delete profile "' + name + '"?')) return;
+                try {
+                    const response = await fetch('/api/db_config/' + encodeURIComponent(name), { method: 'DELETE' });
+                    if (response.ok) { loadDBProfiles(); }
+                    else { const d = await response.json(); alert('Failed: ' + (d.error || 'Unknown')); }
+                } catch (error) { alert('Error: ' + error.message); }
+            }
+
+            function clearDBProfileForm() {
+                document.getElementById('db-profile-name').value = '';
+                document.getElementById('db-host').value = '';
+                document.getElementById('db-port').value = '5432';
+                document.getElementById('db-database').value = '';
+                document.getElementById('db-user').value = '';
+                document.getElementById('db-password').value = '';
             }
 
             // Load chat history from localStorage
@@ -3157,8 +3449,10 @@
                 }
             }
 
-            // Load history when AI tab is opened
+            // Load history, AI models, and DB profiles on page load
             document.addEventListener('DOMContentLoaded', function() {
+                loadAIModels();
+                loadDBProfiles();
                 // Load history if on AI tab
                 if (document.getElementById('tab-ai').style.display !== 'none') {
                     loadChatHistory();
@@ -3947,7 +4241,7 @@
                         <div class="camera-config-grid">
                             <div class="camera-config-item">
                                 <label>Exposure</label>
-                                <input type="number" id="cam-cfg-exposure-${cameraId}" value="${config.exposure || 100}" min="1" max="10000"
+                                <input type="number" id="cam-cfg-exposure-${cameraId}" value="${config.exposure || 100}" min="1" max="100000"
                                        onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                             </div>
                             <div class="camera-config-item">
@@ -4161,21 +4455,30 @@
             }
 
             // Start continuous live feed updates for all camera feeds
+            // Only runs when cameras tab is visible to avoid server overload
             let liveFeedInterval = null;
             function startLiveFeedUpdates() {
-                if (liveFeedInterval) {
-                    clearInterval(liveFeedInterval);
-                }
+                if (liveFeedInterval) return; // Already running
 
                 liveFeedInterval = setInterval(() => {
-                    // Update all live camera feeds
+                    // Only update when cameras tab is active
+                    const camerasTab = document.getElementById('tab-cameras');
+                    if (!camerasTab || !camerasTab.classList.contains('active')) return;
+
                     document.querySelectorAll('.camera-live-feed').forEach(img => {
                         const cameraId = img.getAttribute('data-camera-id');
                         if (cameraId && cameraData[cameraId] && cameraData[cameraId].connected) {
                             img.src = `/api/camera/${cameraId}/snapshot?t=${Date.now()}`;
                         }
                     });
-                }, 200); // Update every 200ms for ~5 FPS live feed
+                }, 1000); // Update every 1s when cameras tab is active
+            }
+
+            function stopLiveFeedUpdates() {
+                if (liveFeedInterval) {
+                    clearInterval(liveFeedInterval);
+                    liveFeedInterval = null;
+                }
             }
 
             // Start live feed updates when cameras are loaded
@@ -4250,32 +4553,6 @@
                 }
             }
 
-            async function importServiceConfig(event) {
-                const file = event.target.files[0];
-                if (!file) return;
-                try {
-                    const text = await file.text();
-                    const config = JSON.parse(text);
-                    showConfigMessage('Uploading all service configuration...', 'info');
-                    const response = await fetch('/api/cameras/config/upload', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ config })
-                    });
-                    const result = await response.json();
-                    if (response.ok && result.success) {
-                        showConfigMessage(`All config imported! (${result.cameras_loaded} cameras, ${result.states_loaded || 0} states + service settings)`, 'success');
-                        setTimeout(() => fetchCameraStatus(), 500);
-                        checkServiceConfigStatus();
-                        refreshStates();  // Refresh states display
-                    } else {
-                        showConfigMessage(result.error || 'Failed to import', 'error');
-                    }
-                } catch (error) {
-                    showConfigMessage(`Error: ${error.message}`, 'error');
-                }
-                event.target.value = '';  // Reset file input
-            }
 
             async function checkServiceConfigStatus() {
                 try {
@@ -4728,15 +5005,15 @@
                     const pipeline = pipelines[name];
                     const isActive = name === currentPipeline;
                     const pipelineDiv = document.createElement('div');
-                    pipelineDiv.style.cssText = `padding: 10px; background: ${isActive ? '#cce5ff' : '#f8f9fa'}; border: 2px solid ${isActive ? '#007bff' : '#dee2e6'}; border-radius: 6px; min-width: 200px;`;
+                    pipelineDiv.style.cssText = `padding: 10px; background: ${isActive ? 'rgba(59, 130, 246, 0.15)' : 'rgba(30, 41, 59, 0.6)'}; border: 2px solid ${isActive ? 'var(--primary-color)' : 'var(--border-color)'}; border-radius: 6px; min-width: 200px;`;
 
                     const phaseModels = pipeline.phases.map(p => p.model_id).join(' -> ') || 'No models';
                     pipelineDiv.innerHTML = `
                         <div>
-                            <strong style="font-size: 14px;">${pipeline.name}</strong>
-                            ${isActive ? '<span style="margin-left: 8px; padding: 2px 6px; background: #007bff; color: white; border-radius: 3px; font-size: 10px;">ACTIVE</span>' : ''}
-                            <div style="margin-top: 4px; font-size: 11px; color: #666;">${pipeline.description || 'No description'}</div>
-                            <div style="margin-top: 4px; font-size: 10px; color: #888;">Phases: ${phaseModels}</div>
+                            <strong style="font-size: 14px; color: var(--text-primary);">${pipeline.name}</strong>
+                            ${isActive ? '<span style="margin-left: 8px; padding: 2px 6px; background: var(--primary-color); color: white; border-radius: 3px; font-size: 10px;">ACTIVE</span>' : ''}
+                            <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary);">${pipeline.description || 'No description'}</div>
+                            <div style="margin-top: 4px; font-size: 10px; color: var(--text-secondary);">Phases: ${phaseModels}</div>
                             <div style="margin-top: 8px; display: flex; gap: 4px;">
                                 ${!isActive ? `<button onclick="activatePipeline('${name}')" style="padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Activate</button>` : ''}
                                 <button onclick="loadPipelineForEdit('${name}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
@@ -4760,16 +5037,16 @@
                 modelIds.forEach(id => {
                     const model = models[id];
                     const modelDiv = document.createElement('div');
-                    modelDiv.style.cssText = 'padding: 10px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;';
+                    modelDiv.style.cssText = 'padding: 10px; background: rgba(30, 41, 59, 0.6); border: 1px solid var(--border-color); border-radius: 4px;';
                     modelDiv.innerHTML = `
                         <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                             <div style="flex: 1;">
-                                <strong style="font-size: 14px;">${model.name}</strong>
+                                <strong style="font-size: 14px; color: var(--text-primary);">${model.name}</strong>
                                 <span style="margin-left: 8px; padding: 2px 6px; background: ${model.model_type === 'gradio' ? '#17a2b8' : '#28a745'}; color: white; border-radius: 3px; font-size: 10px;">${model.model_type.toUpperCase()}</span>
-                                <div style="margin-top: 4px; font-size: 11px; color: #666;">
+                                <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary);">
                                     Model: ${model.model_name} | Confidence: ${model.confidence_threshold}
                                 </div>
-                                <div style="margin-top: 2px; font-size: 10px; color: #888; word-break: break-all;">${model.inference_url}</div>
+                                <div style="margin-top: 2px; font-size: 10px; color: var(--text-secondary); word-break: break-all;">${model.inference_url}</div>
                             </div>
                             <div style="display: flex; gap: 4px; margin-left: 10px;">
                                 <button onclick="loadModelForEdit('${id}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>

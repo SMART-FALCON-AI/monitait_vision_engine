@@ -10,7 +10,7 @@ services:
     devices:
       - /dev:/dev
     ports:
-      - "5050:5050"  # Vision engine status page
+      - "80:5050"  # Vision engine status page
     privileged: true
     networks:
       - main_network
@@ -127,13 +127,35 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
       - grafana_data:/var/lib/grafana
     networks:
       - main_network
     depends_on:
       - timescaledb
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: "always"
+
+  # PiGallery2 Image Gallery
+  pigallery2:
+    container_name: "monitait_pigallery2"
+    image: bpatrik/pigallery2:latest
+    ports:
+      - "5000:80"
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - /mnt/SSD-RESERVE/raw_images:/app/data/images:ro
+      - pigallery2_config:/app/data/config
+      - pigallery2_db:/app/data/db
+    networks:
+      - main_network
     logging:
       options:
         max-size: "10m"
@@ -148,3 +170,5 @@ volumes:
   redis_data:
   timescale_data:
   grafana_data:
+  pigallery2_config:
+  pigallery2_db:
