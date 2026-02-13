@@ -5,8 +5,8 @@ Monitors disk usage and removes oldest files to maintain storage health.
 Optimized for high-volume image storage on SSD.
 """
 import os
+import shutil
 import time
-import subprocess
 import logging
 from pathlib import Path
 from typing import List, Tuple
@@ -36,27 +36,18 @@ total_space_freed_mb = 0
 
 def get_disk_usage() -> Tuple[int, int, int]:
     """
-    Returns disk usage information for MONITOR_DIR.
+    Returns disk usage information for the filesystem containing MONITOR_DIR.
+    Uses shutil.disk_usage() which directly queries the OS for the actual
+    mounted filesystem - more reliable than parsing df output in containers.
 
     Returns:
         Tuple[int, int, int]: (usage_percent, used_gb, total_gb)
     """
     try:
-        result = subprocess.check_output(
-            ["df", "--output=pcent,used,size", MONITOR_DIR]
-        ).decode("utf-8")
-        lines = result.strip().split('\n')
-        if len(lines) < 2:
-            return 100, 0, 0
-
-        data = lines[1].split()
-        usage_percent = int(data[0].strip('%'))
-        used_kb = int(data[1])
-        total_kb = int(data[2])
-
-        used_gb = used_kb // (1024 * 1024)
-        total_gb = total_kb // (1024 * 1024)
-
+        usage = shutil.disk_usage(MONITOR_DIR)
+        total_gb = usage.total // (1024 ** 3)
+        used_gb = usage.used // (1024 ** 3)
+        usage_percent = int((usage.used / usage.total) * 100) if usage.total > 0 else 100
         return usage_percent, used_gb, total_gb
     except Exception as e:
         logger.error(f"Error fetching disk usage: {e}")
@@ -130,6 +121,22 @@ def delete_files_batch(files: List[Tuple[float, Path, int]], batch_size: int) ->
             if deleted_count % 100 == 0:
                 logger.info(f"Deleted {deleted_count} files, freed {bytes_freed / (1024**2):.1f} MB")
 
+        except PermissionError:
+            # External SSD files may have restrictive permissions - try chmod first
+            try:
+                filepath.chmod(0o666)
+                filepath.unlink()
+                deleted_count += 1
+                bytes_freed += size
+            except Exception as e2:
+                logger.warning(f"Permission denied even after chmod for {filepath}: {e2}")
+        except OSError as e:
+            if e.errno == 16:  # Device or resource busy
+                logger.warning(f"File busy, skipping {filepath}")
+            elif e.errno == 30:  # Read-only filesystem
+                logger.error(f"Read-only filesystem for {filepath} - check mount options!")
+            else:
+                logger.warning(f"OS error deleting {filepath}: {e}")
         except Exception as e:
             logger.warning(f"Error deleting {filepath}: {e}")
 
@@ -225,6 +232,52 @@ def run_cleanup_cycle():
         logger.info(f"Total space freed: {total_space_freed_mb / 1024:.2f} GB")
 
 
+def verify_mount_health():
+    """Verify that MONITOR_DIR is accessible, writable, and on the expected filesystem."""
+    monitor_path = Path(MONITOR_DIR)
+
+    if not monitor_path.exists():
+        logger.error(f"MONITOR_DIR {MONITOR_DIR} does not exist!")
+        return False
+
+    if not monitor_path.is_dir():
+        logger.error(f"MONITOR_DIR {MONITOR_DIR} is not a directory!")
+        return False
+
+    # Check if writable by creating and removing a test file
+    test_file = monitor_path / ".cleanup_write_test"
+    try:
+        test_file.write_text("test")
+        test_file.unlink()
+        logger.info(f"Mount is writable: {MONITOR_DIR}")
+    except PermissionError:
+        logger.error(f"MONITOR_DIR {MONITOR_DIR} is NOT writable! Check mount permissions.")
+        return False
+    except OSError as e:
+        logger.error(f"MONITOR_DIR {MONITOR_DIR} write test failed: {e}")
+        return False
+
+    # Log filesystem info
+    usage = shutil.disk_usage(MONITOR_DIR)
+    logger.info(f"Filesystem total: {usage.total // (1024**3)}GB, "
+                f"used: {usage.used // (1024**3)}GB, "
+                f"free: {usage.free // (1024**3)}GB")
+
+    # Check that this is actually a separate mount (not root /)
+    try:
+        root_usage = shutil.disk_usage("/")
+        if usage.total == root_usage.total:
+            logger.warning(f"WARNING: {MONITOR_DIR} appears to be on the same filesystem as /. "
+                           f"Expected a separate mount (external SSD).")
+        else:
+            logger.info(f"Confirmed: {MONITOR_DIR} is on a separate filesystem from / "
+                        f"(root={root_usage.total // (1024**3)}GB, monitor={usage.total // (1024**3)}GB)")
+    except Exception:
+        pass
+
+    return True
+
+
 def main():
     """Main monitoring loop."""
     logger.info("=== MonitaQC Disk Cleanup Service Started ===")
@@ -233,6 +286,14 @@ def main():
     logger.info(f"Check interval: {CHECK_INTERVAL}s")
     logger.info(f"Batch size: {DELETION_BATCH_SIZE} files")
     logger.info(f"Min file age: {MIN_FILE_AGE_HOURS}h")
+
+    # Verify mount health before starting
+    if not verify_mount_health():
+        logger.error("Mount health check failed! Waiting 60s before retry...")
+        time.sleep(60)
+        if not verify_mount_health():
+            logger.critical("Mount health check failed twice. Exiting.")
+            return
 
     # Initial disk check
     usage_percent, used_gb, total_gb = get_disk_usage()

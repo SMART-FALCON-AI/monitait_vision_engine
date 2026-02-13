@@ -35,7 +35,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - /mnt/SSD-RESERVE/volumes/redis:/data
     networks:
       - main_network
     healthcheck:
@@ -103,7 +103,7 @@ services:
       - POSTGRES_PASSWORD=monitaqc2024
       - POSTGRES_DB=monitaqc
     volumes:
-      - timescale_data:/var/lib/postgresql/data
+      - /mnt/SSD-RESERVE/volumes/timescaledb:/var/lib/postgresql/data
       - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - main_network
@@ -131,7 +131,7 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
-      - grafana_data:/var/lib/grafana
+      - /mnt/SSD-RESERVE/volumes/grafana:/var/lib/grafana
     networks:
       - main_network
     depends_on:
@@ -152,8 +152,8 @@ services:
       - NODE_ENV=production
     volumes:
       - /mnt/SSD-RESERVE/raw_images:/app/data/images:ro
-      - pigallery2_config:/app/data/config
-      - pigallery2_db:/app/data/db
+      - /mnt/SSD-RESERVE/volumes/pigallery2_config:/app/data/config
+      - /mnt/SSD-RESERVE/volumes/pigallery2_db:/app/data/db
     networks:
       - main_network
     logging:
@@ -166,9 +166,5 @@ networks:
   main_network:
     driver: bridge
 
-volumes:
-  redis_data:
-  timescale_data:
-  grafana_data:
-  pigallery2_config:
-  pigallery2_db:
+# All persistent data stored on external SSD at /mnt/SSD-RESERVE/volumes/
+# This makes it easy to swap the main NVMe without losing data

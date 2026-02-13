@@ -9,6 +9,10 @@
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
         <title>Monitait Vision Engine v2.0.0</title>
         <style>
+            @font-face { font-family: 'Inter'; src: url('/static/fonts/Inter.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
+            @font-face { font-family: 'Vazir'; src: url('/static/fonts/Vazir.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
+            @font-face { font-family: 'Badr'; src: url('/static/fonts/Badr.ttf') format('truetype'); font-display: swap; }
+
             :root {
                 --primary-color: #3b82f6;
                 --primary-hover: #2563eb;
@@ -28,8 +32,11 @@
                 --shadow-lg: 0 10px 20px rgba(0, 0, 0, 0.2);
             }
 
+            body, button, input, select, textarea, option {
+                font-family: 'Inter', 'Vazir', 'Badr', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            }
+
             body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
                 margin: 0;
                 padding: 10px;
                 background: linear-gradient(to bottom, #0f172a 0%, #1e293b 100%);
@@ -739,6 +746,7 @@
                 border: 1px solid rgba(51, 65, 85, 0.4);
                 border-radius: 7px;
                 cursor: pointer;
+                font-family: inherit;
                 font-size: 12px;
                 font-weight: 500;
                 color: var(--text-secondary);
@@ -913,24 +921,474 @@
                     align-items: flex-start !important;
                 }
             }
+
+            /* RTL support for Arabic and Persian */
+            [dir="rtl"] .tab-navigation { direction: rtl; }
+            [dir="rtl"] .header-container { direction: rtl; }
+            [dir="rtl"] select, [dir="rtl"] input, [dir="rtl"] textarea { direction: rtl; }
         </style>
     </head>
     <body>
         <script>
-            // Diagnostic: identify blocking element (temporary - remove after debugging)
-            document.addEventListener('click', function(e) {
-                var el = document.elementFromPoint(e.clientX, e.clientY);
-                var info = 'Clicked element: <' + (el ? el.tagName : 'null') + '>';
-                if (el && el.id) info += ' id="' + el.id + '"';
-                if (el && el.className) info += ' class="' + el.className + '"';
-                info += ' at (' + e.clientX + ',' + e.clientY + ')';
-                var parents = [];
-                var p = el;
-                while (p && p !== document.body) { parents.push(p.tagName + (p.id ? '#'+p.id : '') + (p.className ? '.'+String(p.className).split(' ')[0] : '')); p = p.parentElement; }
-                console.log(info + ' | Chain: ' + parents.join(' > '));
-                // Show as title tooltip for easy viewing
-                document.title = info;
-            }, true);
+            // ===== Internationalization (i18n) System =====
+            var currentLang = localStorage.getItem('monitaqc_lang') || 'en';
+
+            var translations = {
+                en: {
+                    // Tabs
+                    tab_dashboard: "Dashboard", tab_ai: "AI Assistant", tab_gallery: "Gallery",
+                    tab_charts: "Charts", tab_hardware: "Hardware", tab_cameras: "Cameras",
+                    tab_inference: "Inference", tab_advanced: "Advanced",
+                    // Header
+                    save_all: "Save All Configuration", last_saved: "Last:", never: "Never",
+                    // Dashboard
+                    shipment: "Shipment", status: "Status", encoder: "Encoder", speed: "Speed",
+                    movement: "Movement", ej_queue: "Ej Queue", ej_active: "Ej Active",
+                    ej_enable: "Ej Enable", ej_offset: "Ej Offset",
+                    ok: "OK", ng: "NG", downtime: "Downtime", analog: "Analog",
+                    power: "Power", capture: "Capture", inference: "Inference",
+                    checking: "Checking...", online: "Online", offline: "Offline",
+                    moving: "Moving", stopped: "Stopped", enabled: "Enabled", disabled: "Disabled",
+                    // Timeline
+                    first: "First", previous: "Previous", next: "Next", last: "Last",
+                    zoom_in: "Zoom In", reset_zoom: "Reset Zoom", zoom_out: "Zoom Out",
+                    stop_update: "Stop Auto-Update", resume_update: "Resume Auto-Update",
+                    no_frames: "No frames yet",
+                    // Cameras
+                    camera_discovery: "IP Camera Discovery", network_subnet: "Network Subnet (first 3 octets)",
+                    scan_network: "Scan Network", camera_preview: "Camera Preview",
+                    camera_name: "Camera Name (optional)", camera_monitoring: "Camera Monitoring",
+                    refresh: "Refresh", apply: "Apply", save: "Save", delete: "Delete",
+                    // Image Processing
+                    image_processing: "Image Processing Configuration",
+                    parent_objects: "Parent Object List", remove_raw: "Remove Raw Image After DM Decode",
+                    // DataMatrix
+                    dm_config: "DataMatrix Configuration", valid_dm_sizes: "Valid DM Char Sizes",
+                    confidence_threshold: "Confidence Threshold", overlap_threshold: "Overlap Threshold",
+                    // Features
+                    histogram_feature: "Histogram Feature", save_histogram: "Save Histogram Images",
+                    class_count_check: "Class Count Check", classes_to_check: "Classes to Check",
+                    class_confidence: "Class Count Confidence Threshold",
+                    light_status: "Light Status Check",
+                    // State Management
+                    state_management: "State Management (Camera Capture Control)",
+                    trigger_capture: "Trigger Capture", available_states: "Available States",
+                    create_edit_state: "Create/Edit State (Multi-Phase Capture)",
+                    state_name: "State Name", delay: "Delay (s)", cameras: "Cameras",
+                    // Hardware
+                    hardware_config: "Hardware Configuration",
+                    ok_config: "OK Counter Adjustment", ng_config: "NG Counter Adjustment",
+                    offset_delay: "Offset Delay (milliseconds)", duration_pulses: "Duration Pulses",
+                    duration_percent: "Duration Percent", encoder_factor: "Encoder Factor",
+                    set: "Set", adjust: "Adjust",
+                    // Counter Service
+                    ejector_enabled: "Ejector Enabled", ejector_offset: "Ejector Offset (encoder counts)",
+                    ejector_duration: "Ejector Duration (seconds)", ejector_poll: "Ejector Poll Interval (seconds)",
+                    time_between: "Time Between Packages (seconds)",
+                    capture_mode: "Capture Mode",
+                    // Serial Port
+                    serial_config: "Serial Port Configuration", serial_port: "Serial Port Device",
+                    baud_rate: "Baud Rate", serial_mode: "Serial Mode",
+                    auto_apply_serial: "Auto-Apply: Serial port settings are applied immediately when changed",
+                    // Inference
+                    inference_status: "Inference Status", pipeline: "Pipeline",
+                    pipeline_management: "Inference Pipeline Management",
+                    active_pipeline: "Active Pipeline", pipeline_config: "Pipeline Configuration",
+                    available_pipelines: "Available Pipelines",
+                    create_edit_pipeline: "Create/Edit Pipeline",
+                    pipeline_name: "Pipeline Name", description: "Description",
+                    models_in_pipeline: "Models in Pipeline", create_update: "Create/Update",
+                    inference_models: "Inference Models", create_edit_model: "Create/Edit Model",
+                    model_name: "Model Name", type: "Type", inference_url: "Inference URL",
+                    fetch_models: "Fetch Models", min_confidence: "Min Confidence",
+                    // Advanced
+                    timeline_config: "Timeline Configuration",
+                    show_bboxes: "Show Bounding Boxes", camera_order: "Camera Order (Columns)",
+                    image_quality: "Image Quality", rows_per_page: "Rows per Page",
+                    total_frames: "Total Frames Stored",
+                    apply_timeline: "Apply Timeline Configuration",
+                    redis_config: "Redis Configuration", redis_host: "Redis Host", redis_port: "Redis Port",
+                    ai_config: "AI Configuration", active_model: "Active Model",
+                    configured_models: "Configured Models", add_edit_model: "Add / Edit Model",
+                    provider: "Provider", api_key: "API Key", save_model: "Save Model", clear: "Clear",
+                    get_api_key: "Get API Key",
+                    db_config: "Database Configuration", active_profile: "Active Profile",
+                    configured_profiles: "Configured Profiles", add_edit_profile: "Add / Edit Profile",
+                    profile_name: "Profile Name", host: "Host", port: "Port", database: "Database",
+                    user: "User", password: "Password", save_profile: "Save Profile",
+                    audio_config: "Audio Alerts Configuration",
+                    voice_narration: "Enable Voice Narration", beep_sounds: "Enable Beep Sounds",
+                    volume: "Volume", test_audio: "Test Audio",
+                    per_object: "Per-Object Configuration", enable_all: "Enable All",
+                    db_storage: "Database Storage Configuration",
+                    store_annotations: "Store Annotations to Database",
+                    // Charts
+                    grafana_dashboard: "Grafana Dashboard",
+                    default_creds: "Default Credentials",
+                    connection_info: "TimescaleDB Connection",
+                    // Language
+                    language: "Language"
+                },
+                fa: {
+                    tab_dashboard: "داشبورد", tab_ai: "دستیار هوشمند", tab_gallery: "گالری",
+                    tab_charts: "نمودارها", tab_hardware: "سخت‌افزار", tab_cameras: "دوربین‌ها",
+                    tab_inference: "استنتاج", tab_advanced: "پیشرفته",
+                    save_all: "ذخیره تمام تنظیمات", last_saved: "آخرین:", never: "هرگز",
+                    shipment: "محموله", status: "وضعیت", encoder: "انکودر", speed: "سرعت",
+                    movement: "حرکت", ej_queue: "صف خروج", ej_active: "خروجی فعال",
+                    ej_enable: "خروجی", ej_offset: "آفست خروجی",
+                    ok: "سالم", ng: "معیوب", downtime: "توقف", analog: "آنالوگ",
+                    power: "برق", capture: "ثبت", inference: "استنتاج",
+                    checking: "در حال بررسی...", online: "آنلاین", offline: "آفلاین",
+                    moving: "در حال حرکت", stopped: "متوقف", enabled: "فعال", disabled: "غیرفعال",
+                    first: "اول", previous: "قبلی", next: "بعدی", last: "آخر",
+                    zoom_in: "بزرگنمایی", reset_zoom: "بازنشانی", zoom_out: "کوچکنمایی",
+                    stop_update: "توقف بروزرسانی", resume_update: "ادامه بروزرسانی",
+                    no_frames: "هنوز فریمی نیست",
+                    camera_discovery: "جستجوی دوربین IP", network_subnet: "زیرشبکه (۳ اکتت اول)",
+                    scan_network: "اسکن شبکه", camera_preview: "پیش‌نمایش دوربین",
+                    camera_name: "نام دوربین (اختیاری)", camera_monitoring: "مانیتورینگ دوربین",
+                    refresh: "بروزرسانی", apply: "اعمال", save: "ذخیره", delete: "حذف",
+                    image_processing: "تنظیمات پردازش تصویر",
+                    parent_objects: "لیست اشیاء والد", remove_raw: "حذف تصویر خام بعد از دیکد",
+                    dm_config: "تنظیمات DataMatrix", valid_dm_sizes: "اندازه‌های معتبر DM",
+                    confidence_threshold: "آستانه اطمینان", overlap_threshold: "آستانه همپوشانی",
+                    histogram_feature: "ویژگی هیستوگرام", save_histogram: "ذخیره تصاویر هیستوگرام",
+                    class_count_check: "بررسی تعداد کلاس", classes_to_check: "کلاس‌های مورد بررسی",
+                    class_confidence: "آستانه اطمینان تعداد کلاس",
+                    light_status: "بررسی وضعیت نور",
+                    state_management: "مدیریت وضعیت (کنترل ثبت دوربین)",
+                    trigger_capture: "شروع ثبت", available_states: "وضعیت‌های موجود",
+                    create_edit_state: "ایجاد/ویرایش وضعیت (ثبت چندمرحله‌ای)",
+                    state_name: "نام وضعیت", delay: "تاخیر (ثانیه)", cameras: "دوربین‌ها",
+                    hardware_config: "تنظیمات سخت‌افزار",
+                    ok_config: "تنظیم شمارنده سالم", ng_config: "تنظیم شمارنده معیوب",
+                    offset_delay: "تاخیر آفست (میلی‌ثانیه)", duration_pulses: "مدت پالس",
+                    duration_percent: "درصد مدت", encoder_factor: "ضریب انکودر",
+                    set: "تنظیم", adjust: "تنظیم",
+                    ejector_enabled: "خروجی فعال", ejector_offset: "آفست خروجی (شمارش انکودر)",
+                    ejector_duration: "مدت خروجی (ثانیه)", ejector_poll: "فاصله نظرسنجی خروجی (ثانیه)",
+                    time_between: "زمان بین بسته‌ها (ثانیه)", capture_mode: "حالت ثبت",
+                    serial_config: "تنظیمات پورت سریال", serial_port: "دستگاه پورت سریال",
+                    baud_rate: "نرخ بود", serial_mode: "حالت سریال",
+                    auto_apply_serial: "اعمال خودکار: تنظیمات پورت سریال فوری اعمال می‌شوند",
+                    inference_status: "وضعیت استنتاج", pipeline: "خط لوله",
+                    pipeline_management: "مدیریت خط لوله استنتاج",
+                    active_pipeline: "خط لوله فعال", pipeline_config: "تنظیمات خط لوله",
+                    available_pipelines: "خطوط لوله موجود",
+                    create_edit_pipeline: "ایجاد/ویرایش خط لوله",
+                    pipeline_name: "نام خط لوله", description: "توضیحات",
+                    models_in_pipeline: "مدل‌ها در خط لوله", create_update: "ایجاد/بروزرسانی",
+                    inference_models: "مدل‌های استنتاج", create_edit_model: "ایجاد/ویرایش مدل",
+                    model_name: "نام مدل", type: "نوع", inference_url: "آدرس استنتاج",
+                    fetch_models: "دریافت مدل‌ها", min_confidence: "حداقل اطمینان",
+                    timeline_config: "تنظیمات تایم‌لاین",
+                    show_bboxes: "نمایش جعبه‌های مرزی", camera_order: "ترتیب دوربین (ستون‌ها)",
+                    image_quality: "کیفیت تصویر", rows_per_page: "ردیف در هر صفحه",
+                    total_frames: "کل فریم‌های ذخیره شده",
+                    apply_timeline: "اعمال تنظیمات تایم‌لاین",
+                    redis_config: "تنظیمات Redis", redis_host: "هاست Redis", redis_port: "پورت Redis",
+                    ai_config: "تنظیمات هوش مصنوعی", active_model: "مدل فعال",
+                    configured_models: "مدل‌های تنظیم شده", add_edit_model: "افزودن / ویرایش مدل",
+                    provider: "ارائه‌دهنده", api_key: "کلید API", save_model: "ذخیره مدل", clear: "پاک کردن",
+                    get_api_key: "دریافت کلید API",
+                    db_config: "تنظیمات پایگاه داده", active_profile: "پروفایل فعال",
+                    configured_profiles: "پروفایل‌های تنظیم شده", add_edit_profile: "افزودن / ویرایش پروفایل",
+                    profile_name: "نام پروفایل", host: "هاست", port: "پورت", database: "پایگاه داده",
+                    user: "کاربر", password: "رمز عبور", save_profile: "ذخیره پروفایل",
+                    audio_config: "تنظیمات هشدار صوتی",
+                    voice_narration: "فعال‌سازی روایت صوتی", beep_sounds: "فعال‌سازی صدای بیپ",
+                    volume: "حجم صدا", test_audio: "تست صدا",
+                    per_object: "تنظیمات هر شیء", enable_all: "فعال‌سازی همه",
+                    db_storage: "تنظیمات ذخیره‌سازی پایگاه داده",
+                    store_annotations: "ذخیره حاشیه‌نویسی در پایگاه داده",
+                    grafana_dashboard: "داشبورد Grafana",
+                    default_creds: "اطلاعات ورود پیش‌فرض",
+                    connection_info: "اتصال TimescaleDB",
+                    language: "زبان"
+                },
+                ar: {
+                    tab_dashboard: "لوحة التحكم", tab_ai: "مساعد ذكي", tab_gallery: "معرض",
+                    tab_charts: "رسوم بيانية", tab_hardware: "أجهزة", tab_cameras: "كاميرات",
+                    tab_inference: "استدلال", tab_advanced: "متقدم",
+                    save_all: "حفظ جميع الإعدادات", last_saved: "آخر:", never: "أبداً",
+                    shipment: "شحنة", status: "الحالة", encoder: "المشفر", speed: "السرعة",
+                    movement: "الحركة", ej_queue: "طابور الطرد", ej_active: "الطرد نشط",
+                    ej_enable: "تفعيل الطرد", ej_offset: "إزاحة الطرد",
+                    ok: "سليم", ng: "معيب", downtime: "توقف", analog: "تناظري",
+                    power: "الطاقة", capture: "التقاط", inference: "استدلال",
+                    checking: "جاري الفحص...", online: "متصل", offline: "غير متصل",
+                    moving: "متحرك", stopped: "متوقف", enabled: "مفعل", disabled: "معطل",
+                    first: "الأول", previous: "السابق", next: "التالي", last: "الأخير",
+                    zoom_in: "تكبير", reset_zoom: "إعادة تعيين", zoom_out: "تصغير",
+                    stop_update: "إيقاف التحديث", resume_update: "استئناف التحديث",
+                    no_frames: "لا توجد إطارات بعد",
+                    camera_discovery: "اكتشاف كاميرا IP", network_subnet: "الشبكة الفرعية",
+                    scan_network: "مسح الشبكة", camera_preview: "معاينة الكاميرا",
+                    camera_name: "اسم الكاميرا (اختياري)", camera_monitoring: "مراقبة الكاميرا",
+                    refresh: "تحديث", apply: "تطبيق", save: "حفظ", delete: "حذف",
+                    image_processing: "إعدادات معالجة الصور",
+                    parent_objects: "قائمة الكائنات الأصلية", remove_raw: "حذف الصورة الخام بعد الفك",
+                    dm_config: "إعدادات DataMatrix", valid_dm_sizes: "أحجام DM الصالحة",
+                    confidence_threshold: "عتبة الثقة", overlap_threshold: "عتبة التداخل",
+                    histogram_feature: "ميزة الرسم البياني", save_histogram: "حفظ صور الرسم البياني",
+                    class_count_check: "فحص عدد الفئات", classes_to_check: "الفئات المراد فحصها",
+                    class_confidence: "عتبة ثقة عدد الفئات", light_status: "فحص حالة الضوء",
+                    state_management: "إدارة الحالة (التحكم بالتقاط الكاميرا)",
+                    trigger_capture: "بدء الالتقاط", available_states: "الحالات المتاحة",
+                    create_edit_state: "إنشاء/تحرير حالة", state_name: "اسم الحالة",
+                    delay: "تأخير (ثانية)", cameras: "كاميرات",
+                    hardware_config: "إعدادات الأجهزة",
+                    ok_config: "ضبط عداد السليم", ng_config: "ضبط عداد المعيب",
+                    offset_delay: "تأخير الإزاحة (مللي ثانية)", duration_pulses: "نبضات المدة",
+                    duration_percent: "نسبة المدة", encoder_factor: "معامل المشفر",
+                    set: "تعيين", adjust: "ضبط",
+                    ejector_enabled: "الطارد مفعل", ejector_offset: "إزاحة الطارد",
+                    ejector_duration: "مدة الطارد (ثانية)", ejector_poll: "فاصل استقصاء الطارد",
+                    time_between: "الوقت بين الحزم (ثانية)", capture_mode: "وضع الالتقاط",
+                    serial_config: "إعدادات المنفذ التسلسلي", serial_port: "جهاز المنفذ",
+                    baud_rate: "معدل البود", serial_mode: "وضع المنفذ",
+                    auto_apply_serial: "تطبيق تلقائي: يتم تطبيق إعدادات المنفذ فوراً",
+                    inference_status: "حالة الاستدلال", pipeline: "خط الأنابيب",
+                    pipeline_management: "إدارة خطوط الاستدلال",
+                    active_pipeline: "خط الأنابيب النشط", pipeline_config: "إعدادات خط الأنابيب",
+                    available_pipelines: "الخطوط المتاحة",
+                    create_edit_pipeline: "إنشاء/تحرير خط", pipeline_name: "اسم الخط",
+                    description: "الوصف", models_in_pipeline: "نماذج في الخط",
+                    create_update: "إنشاء/تحديث",
+                    inference_models: "نماذج الاستدلال", create_edit_model: "إنشاء/تحرير نموذج",
+                    model_name: "اسم النموذج", type: "النوع", inference_url: "عنوان الاستدلال",
+                    fetch_models: "جلب النماذج", min_confidence: "الحد الأدنى للثقة",
+                    timeline_config: "إعدادات الجدول الزمني",
+                    show_bboxes: "إظهار المربعات المحيطة", camera_order: "ترتيب الكاميرا",
+                    image_quality: "جودة الصورة", rows_per_page: "صفوف في الصفحة",
+                    total_frames: "إجمالي الإطارات المخزنة",
+                    apply_timeline: "تطبيق إعدادات الجدول",
+                    redis_config: "إعدادات Redis", redis_host: "مضيف Redis", redis_port: "منفذ Redis",
+                    ai_config: "إعدادات الذكاء الاصطناعي", active_model: "النموذج النشط",
+                    configured_models: "النماذج المهيأة", add_edit_model: "إضافة / تحرير نموذج",
+                    provider: "المزود", api_key: "مفتاح API", save_model: "حفظ النموذج", clear: "مسح",
+                    get_api_key: "الحصول على مفتاح API",
+                    db_config: "إعدادات قاعدة البيانات", active_profile: "الملف النشط",
+                    configured_profiles: "الملفات المهيأة", add_edit_profile: "إضافة / تحرير ملف",
+                    profile_name: "اسم الملف", host: "المضيف", port: "المنفذ", database: "قاعدة البيانات",
+                    user: "المستخدم", password: "كلمة المرور", save_profile: "حفظ الملف",
+                    audio_config: "إعدادات التنبيهات الصوتية",
+                    voice_narration: "تفعيل السرد الصوتي", beep_sounds: "تفعيل أصوات التنبيه",
+                    volume: "مستوى الصوت", test_audio: "اختبار الصوت",
+                    per_object: "إعدادات كل كائن", enable_all: "تفعيل الكل",
+                    db_storage: "إعدادات تخزين قاعدة البيانات",
+                    store_annotations: "تخزين التعليقات في قاعدة البيانات",
+                    grafana_dashboard: "لوحة Grafana", default_creds: "بيانات الدخول الافتراضية",
+                    connection_info: "اتصال TimescaleDB", language: "اللغة"
+                },
+                de: {
+                    tab_dashboard: "Dashboard", tab_ai: "KI-Assistent", tab_gallery: "Galerie",
+                    tab_charts: "Diagramme", tab_hardware: "Hardware", tab_cameras: "Kameras",
+                    tab_inference: "Inferenz", tab_advanced: "Erweitert",
+                    save_all: "Alle Einstellungen speichern", last_saved: "Zuletzt:", never: "Nie",
+                    shipment: "Sendung", status: "Status", encoder: "Encoder", speed: "Geschwindigkeit",
+                    movement: "Bewegung", ej_queue: "Ausw. Warteschlange", ej_active: "Ausw. Aktiv",
+                    ej_enable: "Auswerfer", ej_offset: "Ausw. Offset",
+                    ok: "OK", ng: "Fehler", downtime: "Stillstand", analog: "Analog",
+                    power: "Strom", capture: "Erfassung", inference: "Inferenz",
+                    checking: "Prüfe...", online: "Online", offline: "Offline",
+                    moving: "Bewegend", stopped: "Gestoppt", enabled: "Aktiviert", disabled: "Deaktiviert",
+                    first: "Erste", previous: "Zurück", next: "Weiter", last: "Letzte",
+                    zoom_in: "Vergrößern", reset_zoom: "Zurücksetzen", zoom_out: "Verkleinern",
+                    stop_update: "Update stoppen", resume_update: "Update fortsetzen",
+                    no_frames: "Noch keine Frames",
+                    camera_discovery: "IP-Kamera Erkennung", network_subnet: "Netzwerk-Subnetz",
+                    scan_network: "Netzwerk scannen", camera_preview: "Kamera-Vorschau",
+                    camera_name: "Kameraname (optional)", camera_monitoring: "Kamera-Überwachung",
+                    refresh: "Aktualisieren", apply: "Anwenden", save: "Speichern", delete: "Löschen",
+                    image_processing: "Bildverarbeitungseinstellungen",
+                    parent_objects: "Elternobjektliste", remove_raw: "Rohbild nach DM-Dekodierung löschen",
+                    dm_config: "DataMatrix-Konfiguration", valid_dm_sizes: "Gültige DM-Größen",
+                    confidence_threshold: "Konfidenzschwelle", overlap_threshold: "Überlappungsschwelle",
+                    histogram_feature: "Histogramm-Funktion", save_histogram: "Histogrammbilder speichern",
+                    class_count_check: "Klassenanzahl-Prüfung", classes_to_check: "Zu prüfende Klassen",
+                    class_confidence: "Klassenanzahl-Konfidenzschwelle", light_status: "Lichtstatus-Prüfung",
+                    state_management: "Zustandsverwaltung (Kamera-Erfassungssteuerung)",
+                    trigger_capture: "Erfassung auslösen", available_states: "Verfügbare Zustände",
+                    create_edit_state: "Zustand erstellen/bearbeiten", state_name: "Zustandsname",
+                    delay: "Verzögerung (s)", cameras: "Kameras",
+                    hardware_config: "Hardware-Konfiguration",
+                    ok_config: "OK-Zähler Einstellung", ng_config: "Fehler-Zähler Einstellung",
+                    offset_delay: "Offset-Verzögerung (ms)", duration_pulses: "Dauerimpulse",
+                    duration_percent: "Dauer-Prozent", encoder_factor: "Encoder-Faktor",
+                    set: "Setzen", adjust: "Anpassen",
+                    ejector_enabled: "Auswerfer aktiv", ejector_offset: "Auswerfer-Offset",
+                    ejector_duration: "Auswerfer-Dauer (s)", ejector_poll: "Auswerfer-Abfrageintervall",
+                    time_between: "Zeit zwischen Paketen (s)", capture_mode: "Erfassungsmodus",
+                    serial_config: "Serielle Schnittstelle", serial_port: "Serieller Port",
+                    baud_rate: "Baudrate", serial_mode: "Serieller Modus",
+                    auto_apply_serial: "Automatisch: Serielle Einstellungen werden sofort angewendet",
+                    inference_status: "Inferenz-Status", pipeline: "Pipeline",
+                    pipeline_management: "Inferenz-Pipeline-Verwaltung",
+                    active_pipeline: "Aktive Pipeline", pipeline_config: "Pipeline-Konfiguration",
+                    available_pipelines: "Verfügbare Pipelines",
+                    create_edit_pipeline: "Pipeline erstellen/bearbeiten", pipeline_name: "Pipeline-Name",
+                    description: "Beschreibung", models_in_pipeline: "Modelle in Pipeline",
+                    create_update: "Erstellen/Aktualisieren",
+                    inference_models: "Inferenz-Modelle", create_edit_model: "Modell erstellen/bearbeiten",
+                    model_name: "Modellname", type: "Typ", inference_url: "Inferenz-URL",
+                    fetch_models: "Modelle abrufen", min_confidence: "Min. Konfidenz",
+                    timeline_config: "Timeline-Konfiguration",
+                    show_bboxes: "Begrenzungsrahmen anzeigen", camera_order: "Kamera-Reihenfolge",
+                    image_quality: "Bildqualität", rows_per_page: "Zeilen pro Seite",
+                    total_frames: "Gespeicherte Frames gesamt",
+                    apply_timeline: "Timeline-Konfiguration anwenden",
+                    redis_config: "Redis-Konfiguration", redis_host: "Redis-Host", redis_port: "Redis-Port",
+                    ai_config: "KI-Konfiguration", active_model: "Aktives Modell",
+                    configured_models: "Konfigurierte Modelle", add_edit_model: "Modell hinzufügen/bearbeiten",
+                    provider: "Anbieter", api_key: "API-Schlüssel", save_model: "Modell speichern", clear: "Löschen",
+                    get_api_key: "API-Schlüssel erhalten",
+                    db_config: "Datenbank-Konfiguration", active_profile: "Aktives Profil",
+                    configured_profiles: "Konfigurierte Profile", add_edit_profile: "Profil hinzufügen/bearbeiten",
+                    profile_name: "Profilname", host: "Host", port: "Port", database: "Datenbank",
+                    user: "Benutzer", password: "Passwort", save_profile: "Profil speichern",
+                    audio_config: "Audio-Alarm-Konfiguration",
+                    voice_narration: "Sprachausgabe aktivieren", beep_sounds: "Signaltöne aktivieren",
+                    volume: "Lautstärke", test_audio: "Audio testen",
+                    per_object: "Objekt-Konfiguration", enable_all: "Alle aktivieren",
+                    db_storage: "Datenbank-Speicher-Konfiguration",
+                    store_annotations: "Annotationen in Datenbank speichern",
+                    grafana_dashboard: "Grafana-Dashboard", default_creds: "Standard-Zugangsdaten",
+                    connection_info: "TimescaleDB-Verbindung", language: "Sprache"
+                },
+                tr: {
+                    tab_dashboard: "Panel", tab_ai: "Yapay Zeka", tab_gallery: "Galeri",
+                    tab_charts: "Grafikler", tab_hardware: "Donanım", tab_cameras: "Kameralar",
+                    tab_inference: "Çıkarım", tab_advanced: "Gelişmiş",
+                    save_all: "Tüm Ayarları Kaydet", last_saved: "Son:", never: "Hiç",
+                    shipment: "Sevkiyat", status: "Durum", encoder: "Enkoder", speed: "Hız",
+                    movement: "Hareket", ej_queue: "Atıcı Kuyruk", ej_active: "Atıcı Aktif",
+                    ej_enable: "Atıcı", ej_offset: "Atıcı Offset",
+                    ok: "İyi", ng: "Hatalı", downtime: "Duruş", analog: "Analog",
+                    power: "Güç", capture: "Yakalama", inference: "Çıkarım",
+                    checking: "Kontrol ediliyor...", online: "Çevrimiçi", offline: "Çevrimdışı",
+                    moving: "Hareket ediyor", stopped: "Durdu", enabled: "Etkin", disabled: "Devre dışı",
+                    first: "İlk", previous: "Önceki", next: "Sonraki", last: "Son",
+                    zoom_in: "Yakınlaştır", reset_zoom: "Sıfırla", zoom_out: "Uzaklaştır",
+                    stop_update: "Güncellemeyi durdur", resume_update: "Güncellemeye devam",
+                    no_frames: "Henüz kare yok",
+                    camera_discovery: "IP Kamera Keşfi", network_subnet: "Ağ Alt Ağı",
+                    scan_network: "Ağı Tara", camera_preview: "Kamera Önizleme",
+                    camera_name: "Kamera Adı (isteğe bağlı)", camera_monitoring: "Kamera İzleme",
+                    refresh: "Yenile", apply: "Uygula", save: "Kaydet", delete: "Sil",
+                    image_processing: "Görüntü İşleme Ayarları",
+                    parent_objects: "Ana Nesne Listesi", remove_raw: "DM Çözümlemesinden Sonra Ham Görüntüyü Sil",
+                    hardware_config: "Donanım Yapılandırması",
+                    ok_config: "İyi Sayaç Ayarı", ng_config: "Hatalı Sayaç Ayarı",
+                    offset_delay: "Offset Gecikmesi (ms)", set: "Ayarla", adjust: "Ayarla",
+                    serial_config: "Seri Port Yapılandırması", baud_rate: "Baud Hızı",
+                    inference_status: "Çıkarım Durumu", pipeline: "Boru Hattı",
+                    pipeline_management: "Çıkarım Boru Hattı Yönetimi",
+                    active_pipeline: "Aktif Boru Hattı",
+                    inference_models: "Çıkarım Modelleri", model_name: "Model Adı",
+                    timeline_config: "Zaman Çizelgesi Yapılandırması",
+                    redis_config: "Redis Yapılandırması",
+                    ai_config: "Yapay Zeka Yapılandırması",
+                    db_config: "Veritabanı Yapılandırması",
+                    audio_config: "Sesli Uyarı Yapılandırması",
+                    language: "Dil"
+                },
+                ja: {
+                    tab_dashboard: "ダッシュボード", tab_ai: "AIアシスタント", tab_gallery: "ギャラリー",
+                    tab_charts: "チャート", tab_hardware: "ハードウェア", tab_cameras: "カメラ",
+                    tab_inference: "推論", tab_advanced: "詳細設定",
+                    save_all: "全設定を保存", last_saved: "最終:", never: "なし",
+                    shipment: "出荷", status: "状態", encoder: "エンコーダ", speed: "速度",
+                    movement: "動作", ej_queue: "排出キュー", ej_active: "排出中",
+                    ej_enable: "排出器", ej_offset: "排出オフセット",
+                    ok: "良品", ng: "不良", downtime: "停止時間", analog: "アナログ",
+                    power: "電源", capture: "キャプチャ", inference: "推論",
+                    checking: "確認中...", online: "オンライン", offline: "オフライン",
+                    moving: "動作中", stopped: "停止", enabled: "有効", disabled: "無効",
+                    first: "最初", previous: "前へ", next: "次へ", last: "最後",
+                    zoom_in: "拡大", reset_zoom: "リセット", zoom_out: "縮小",
+                    stop_update: "更新停止", resume_update: "更新再開",
+                    no_frames: "フレームがありません",
+                    camera_discovery: "IPカメラ検出", scan_network: "ネットワークスキャン",
+                    camera_monitoring: "カメラ監視",
+                    refresh: "更新", apply: "適用", save: "保存", delete: "削除",
+                    hardware_config: "ハードウェア設定",
+                    ok_config: "良品カウンタ調整", ng_config: "不良カウンタ調整",
+                    set: "設定", adjust: "調整",
+                    serial_config: "シリアルポート設定",
+                    inference_status: "推論状態", pipeline: "パイプライン",
+                    pipeline_management: "推論パイプライン管理",
+                    inference_models: "推論モデル", model_name: "モデル名",
+                    timeline_config: "タイムライン設定",
+                    redis_config: "Redis設定",
+                    ai_config: "AI設定", db_config: "データベース設定",
+                    audio_config: "音声アラート設定",
+                    language: "言語"
+                },
+                es: {
+                    tab_dashboard: "Panel", tab_ai: "Asistente IA", tab_gallery: "Galería",
+                    tab_charts: "Gráficos", tab_hardware: "Hardware", tab_cameras: "Cámaras",
+                    tab_inference: "Inferencia", tab_advanced: "Avanzado",
+                    save_all: "Guardar toda la configuración", last_saved: "Último:", never: "Nunca",
+                    shipment: "Envío", status: "Estado", encoder: "Codificador", speed: "Velocidad",
+                    movement: "Movimiento", ej_queue: "Cola eyector", ej_active: "Eyector activo",
+                    ej_enable: "Eyector", ej_offset: "Offset eyector",
+                    ok: "OK", ng: "Defecto", downtime: "Inactividad", analog: "Analógico",
+                    power: "Energía", capture: "Captura", inference: "Inferencia",
+                    checking: "Verificando...", online: "En línea", offline: "Fuera de línea",
+                    moving: "En movimiento", stopped: "Detenido", enabled: "Habilitado", disabled: "Deshabilitado",
+                    first: "Primero", previous: "Anterior", next: "Siguiente", last: "Último",
+                    zoom_in: "Acercar", reset_zoom: "Restablecer", zoom_out: "Alejar",
+                    stop_update: "Detener actualización", resume_update: "Reanudar actualización",
+                    no_frames: "Sin cuadros aún",
+                    camera_discovery: "Descubrimiento de cámaras IP", scan_network: "Escanear red",
+                    camera_monitoring: "Monitoreo de cámaras",
+                    refresh: "Actualizar", apply: "Aplicar", save: "Guardar", delete: "Eliminar",
+                    hardware_config: "Configuración de hardware",
+                    ok_config: "Ajuste contador OK", ng_config: "Ajuste contador defectos",
+                    set: "Establecer", adjust: "Ajustar",
+                    serial_config: "Configuración de puerto serie",
+                    inference_status: "Estado de inferencia", pipeline: "Tubería",
+                    pipeline_management: "Gestión de tuberías de inferencia",
+                    inference_models: "Modelos de inferencia", model_name: "Nombre del modelo",
+                    timeline_config: "Configuración de línea de tiempo",
+                    redis_config: "Configuración de Redis",
+                    ai_config: "Configuración de IA", db_config: "Configuración de base de datos",
+                    audio_config: "Configuración de alertas de audio",
+                    language: "Idioma"
+                }
+            };
+
+            // Get translation with English fallback
+            function t(key) {
+                return (translations[currentLang] && translations[currentLang][key]) || translations.en[key] || key;
+            }
+
+            // Apply translations to all elements with data-i18n attribute
+            function applyLanguage(lang) {
+                if (lang) {
+                    currentLang = lang;
+                    localStorage.setItem('monitaqc_lang', lang);
+                }
+                // Set RTL for Arabic and Persian
+                var isRTL = (currentLang === 'ar' || currentLang === 'fa');
+                document.documentElement.dir = isRTL ? 'rtl' : 'ltr';
+
+                // Update all data-i18n elements
+                document.querySelectorAll('[data-i18n]').forEach(function(el) {
+                    var key = el.getAttribute('data-i18n');
+                    var prefix = el.getAttribute('data-i18n-prefix') || '';
+                    el.textContent = prefix + t(key);
+                });
+                // Update all data-i18n-placeholder elements
+                document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
+                    el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
+                });
+                // Update language selector display
+                var langSelect = document.getElementById('lang-select');
+                if (langSelect) langSelect.value = currentLang;
+            }
         </script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
@@ -946,23 +1404,32 @@
 
                 <!-- CENTER: Tab Navigation -->
                 <div class="tab-navigation" style="margin: 0; flex: 1;">
-                    <button class="tab-button active" onclick="switchTab('dashboard')">📊 Dashboard</button>
-                    <button class="tab-button" onclick="switchTab('ai')">🤖 AI Assistant</button>
-                    <button class="tab-button" onclick="switchTab('gallery')">🖼️ Gallery</button>
-                    <button class="tab-button" onclick="switchTab('grafana')">📈 Charts</button>
-                    <button class="tab-button" onclick="switchTab('hardware')">🔧 Hardware</button>
-                    <button class="tab-button" onclick="switchTab('cameras')">📷 Cameras</button>
-                    <button class="tab-button" onclick="switchTab('infrastructure')">🔮 Inference</button>
-                    <button class="tab-button" onclick="switchTab('advanced')">⚡ Advanced</button>
+                    <button class="tab-button active" onclick="switchTab('dashboard')">📊 <span data-i18n="tab_dashboard">Dashboard</span></button>
+                    <button class="tab-button" onclick="switchTab('ai')">🤖 <span data-i18n="tab_ai">AI Assistant</span></button>
+                    <button class="tab-button" onclick="switchTab('gallery')">🖼️ <span data-i18n="tab_gallery">Gallery</span></button>
+                    <button class="tab-button" onclick="switchTab('grafana')">📈 <span data-i18n="tab_charts">Charts</span></button>
+                    <button class="tab-button" onclick="switchTab('hardware')">🔧 <span data-i18n="tab_hardware">Hardware</span></button>
+                    <button class="tab-button" onclick="switchTab('cameras')">📷 <span data-i18n="tab_cameras">Cameras</span></button>
+                    <button class="tab-button" onclick="switchTab('infrastructure')">🔮 <span data-i18n="tab_inference">Inference</span></button>
+                    <button class="tab-button" onclick="switchTab('advanced')">⚡ <span data-i18n="tab_advanced">Advanced</span></button>
                 </div>
 
-                <!-- RIGHT: Save Button -->
+                <!-- RIGHT: Language + Save -->
                 <div style="display: flex; flex-direction: column; gap: 4px; align-items: flex-end;">
+                    <select id="lang-select" onchange="applyLanguage(this.value)" style="padding: 4px 8px; background: var(--card-bg); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 4px; font-size: 11px; cursor: pointer; margin-bottom: 2px;">
+                        <option value="en">English</option>
+                        <option value="de">Deutsch</option>
+                        <option value="ja">日本語</option>
+                        <option value="tr">Türkçe</option>
+                        <option value="es">Español</option>
+                        <option value="ar">العربية</option>
+                        <option value="fa">فارسی</option>
+                    </select>
                     <button onclick="saveAllServiceConfig()" style="padding: 8px 12px; background: var(--success-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
-                        💾 Save All Configuration
+                        💾 <span data-i18n="save_all">Save All Configuration</span>
                     </button>
                     <div style="font-size: 9px; color: var(--text-secondary);">
-                        Last: <strong id="last-saved-time" style="color: var(--text-primary);">Never</strong>
+                        <span data-i18n="last_saved">Last:</span> <strong id="last-saved-time" style="color: var(--text-primary);"><span data-i18n="never">Never</span></strong>
                     </div>
                 </div>
             </div>
@@ -976,7 +1443,7 @@
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
                             <!-- Shipment -->
                             <div class="status-box" style="padding: 5px;">
-                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;">Shipment</div>
+                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;" data-i18n="shipment">Shipment</div>
                                 <div id="shipment-value" style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600;" onclick="editShipmentId()">
                                     <span id="shipment-text">-</span>
                                     <span style="font-size: 9px; opacity: 0.6;">✏️</span>
@@ -991,7 +1458,7 @@
 
                             <!-- Connection Status -->
                             <div class="status-box" style="padding: 5px;">
-                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;">Status</div>
+                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;" data-i18n="status">Status</div>
                                 <div class="data-source" id="dataSource" style="font-size: 9px; padding: 2px; background: var(--light-bg); border-radius: 3px; margin-bottom: 3px;">Loading...</div>
                                 <div style="font-size: 8px; color: var(--text-secondary);">
                                     Last: <strong id="last-saved-time">Never</strong>
@@ -1013,11 +1480,11 @@
                         <div class="status-box" style="padding: 5px;">
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;">
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Encoder</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="encoder">Encoder</div>
                                     <div style="font-size: 10px; font-weight: 700; color: var(--text-primary);" id="encoder-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Speed</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="speed">Speed</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="speed-value">-</div>
                                 </div>
                                 <div>
@@ -1025,46 +1492,46 @@
                                     <div style="font-size: 9px; font-weight: 600;" id="pps-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Movement</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="movement">Movement</div>
                                     <div style="display: flex; align-items: center; gap: 2px;">
                                         <span class="movement-indicator" id="movement-indicator" style="width: 7px; height: 7px;"></span>
                                         <span style="font-size: 9px; font-weight: 600;" id="movement-value">-</span>
                                     </div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Queue</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_queue">Ej Queue</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-queue">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Active</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_active">Ej Active</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-running">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Enable</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_enable">Ej Enable</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Ej Offset</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_offset">Ej Offset</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-offset">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">OK</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ok">OK</div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--success-color);" id="ok-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">NG</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ng">NG</div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--danger-color);" id="ng-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Downtime</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="downtime">Downtime</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="downtime-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Analog</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="analog">Analog</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="analog-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Power</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="power">Power</div>
                                     <div style="font-size: 9px; font-weight: 600;" id="power-value">-</div>
                                 </div>
                             </div>
@@ -1136,7 +1603,7 @@
                 <!-- Camera Discovery Section -->
                 <div class="discovery-section">
                 <div class="section-header">
-                    <h2>🔍 IP Camera Discovery</h2>
+                    <h2>🔍 <span data-i18n="camera_discovery">IP Camera Discovery</span></h2>
                 </div>
 
                 <div class="discovery-controls">
@@ -1179,7 +1646,7 @@
             <!-- Camera Monitoring Section -->
             <div class="camera-monitor-section">
                 <div class="section-header">
-                    <h2>📷 Camera Monitoring</h2>
+                    <h2>📷 <span data-i18n="camera_monitoring">Camera Monitoring</span></h2>
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <span class="camera-refresh-status" id="camera-refresh-status">Active</span>
                         <button class="control-button" style="width: auto; padding: 6px 12px;" onclick="refreshCameras()">🔄 Refresh</button>
@@ -1207,7 +1674,7 @@
                 </table>
 
                 <div class="control-section">
-                    <h3>Image Processing Configuration</h3>
+                    <h3 data-i18n="image_processing">Image Processing Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label">Parent Object List (comma-separated, use _root for no parent requirement)</div>
@@ -1228,7 +1695,7 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>DataMatrix Configuration</h3>
+                    <h3 data-i18n="dm_config">DataMatrix Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
                             <div class="control-label">Valid DM Char Sizes (comma-separated)</div>
@@ -1306,7 +1773,7 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>State Management (Camera Capture Control)</h3>
+                    <h3 data-i18n="state_management">State Management (Camera Capture Control)</h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
                             <span style="font-weight: bold; color: #333;">Current State:</span>
@@ -1396,7 +1863,7 @@
 
             <!-- Hardware Tab -->
             <div id="tab-hardware" class="tab-content">
-                <h2 style="margin: 0 0 20px 0; color: var(--text-primary); font-weight: 600;">Hardware Configuration</h2>
+                <h2 style="margin: 0 0 20px 0; color: var(--text-primary); font-weight: 600;" data-i18n="hardware_config">Hardware Configuration</h2>
 
                 <!-- Status Indicators -->
                 <div class="control-section">
@@ -1593,7 +2060,7 @@
 
                 <!-- Serial Port Configuration -->
                 <div class="control-section">
-                    <h3>Serial Port Configuration</h3>
+                    <h3 data-i18n="serial_config">Serial Port Configuration</h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
                         <div style="display: flex; align-items: center; gap: 10px;">
                             <span style="font-weight: bold; color: var(--text-primary);">Device Status:</span>
@@ -1722,7 +2189,7 @@
             <!-- Inference Tab -->
             <div id="tab-infrastructure" class="tab-content">
                 <div class="control-section">
-                    <h3>Inference Status</h3>
+                    <h3 data-i18n="inference_status">Inference Status</h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
                         <div style="display: flex; align-items: center; gap: 8px;">
                             <span style="font-weight: bold; color: var(--text-primary);">Pipeline:</span>
@@ -1735,7 +2202,7 @@
                 </div>
 
                 <div class="control-section">
-                    <h3>Inference Pipeline Management</h3>
+                    <h3 data-i18n="pipeline_management">Inference Pipeline Management</h3>
                     <div style="background: rgba(30, 41, 59, 0.5); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
                             <span style="font-weight: bold; color: var(--text-primary);">Active Pipeline:</span>
@@ -1959,7 +2426,7 @@
             <div id="tab-advanced" class="tab-content">
                 <!-- Timeline Configuration Section -->
                 <div class="control-section">
-                    <h3>⚙️ Timeline Configuration</h3>
+                    <h3>⚙️ <span data-i18n="timeline_config">Timeline Configuration</span></h3>
                     <div class="control-grid">
                         <div class="control-item">
                             <label class="control-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
@@ -2010,7 +2477,7 @@
 
                 <!-- Redis Configuration Section -->
                 <div class="control-section">
-                    <h3>🔴 Redis Configuration</h3>
+                    <h3>🔴 <span data-i18n="redis_config">Redis Configuration</span></h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
                         <div style="display: flex; align-items: center; gap: 8px;">
                             <span style="font-weight: bold; color: var(--text-primary);">Redis:</span>
@@ -2041,7 +2508,7 @@
 
                 <!-- AI Configuration Section -->
                 <div class="control-section">
-                    <h3>🔑 AI Configuration</h3>
+                    <h3>🔑 <span data-i18n="ai_config">AI Configuration</span></h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
                             <span style="font-weight: bold; color: #333;">Active Model:</span>
@@ -2090,7 +2557,7 @@
 
                 <!-- Database Configuration Section -->
                 <div class="control-section">
-                    <h3>⚙️ Database Configuration</h3>
+                    <h3>⚙️ <span data-i18n="db_config">Database Configuration</span></h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
                             <span style="font-weight: bold; color: #333;">Active Profile:</span>
@@ -2144,7 +2611,7 @@
 
                 <!-- Audio Alerts Configuration Section -->
                 <div class="control-section">
-                    <h3>🔊 Audio Alerts Configuration</h3>
+                    <h3>🔊 <span data-i18n="audio_config">Audio Alerts Configuration</span></h3>
 
                     <!-- Global Audio Controls -->
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;">
@@ -2187,7 +2654,7 @@
 
                 <!-- Database Storage Configuration Section -->
                 <div class="control-section">
-                    <h3>💾 Database Storage Configuration</h3>
+                    <h3>💾 <span data-i18n="db_storage">Database Storage Configuration</span></h3>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label">PostgreSQL Connection URI</div>
@@ -5796,6 +6263,9 @@
 
             // Set default API type fields (Gradio with HuggingFace URL)
             updateAPITypeFields();
+
+            // Apply saved language preference
+            applyLanguage(currentLang);
         </script>
     </body>
 </html>
