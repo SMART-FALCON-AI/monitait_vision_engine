@@ -57,7 +57,7 @@ pipeline_manager: Optional[PipelineManager] = None
 app = FastAPI(
     title="Counter Service",
     description="Service for counting and tracking packages with camera processing",
-    version="2.2.0"
+    version="3.0.0"
 )
 
 # Mount static files
