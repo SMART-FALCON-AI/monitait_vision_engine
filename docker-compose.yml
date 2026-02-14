@@ -47,9 +47,8 @@ services:
         max-file: "2"
     restart: "always"
 
-  # YOLO AI Inference Service
+  # YOLO AI Inference Service (replicas load-balanced via Docker DNS round-robin)
   yolo_inference:
-    container_name: "monitait_yolo"
     image: yolo_inference
     build: "./yolo_inference"
     shm_size: '1gb'
@@ -69,6 +68,8 @@ services:
         max-size: "10m"
         max-file: "2"
     restart: "always"
+    deploy:
+      replicas: 2
 
   # Automated Disk Cleanup Service
   cleanup:
