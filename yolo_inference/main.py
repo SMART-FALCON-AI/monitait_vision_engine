@@ -38,3 +38,16 @@ async def set_model(request: Request, model_path: str = Form(...)):
 async def health_check():
     """Health check endpoint for monitoring."""
     return {'status': 'healthy', 'service': 'YOLO Inference'}
+
+
+@app.get(os.path.join(DETECTION_URL, 'classes'))
+async def get_classes():
+    """Return the list of class names from the loaded model."""
+    names = getattr(detector.model, 'names', {})
+    if isinstance(names, dict):
+        class_list = list(names.values())
+    elif isinstance(names, list):
+        class_list = names
+    else:
+        class_list = []
+    return {'classes': class_list}

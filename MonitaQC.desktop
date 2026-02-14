@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=MonitaQC
+Comment=MonitaQC Vision Quality Control
+Exec=xdg-open http://localhost
+Icon=applications-science
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupNotify=true

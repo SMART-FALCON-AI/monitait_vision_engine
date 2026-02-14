@@ -6,12 +6,10 @@ services:
     command: "python3 main.py"
     volumes:
       - ./vision_engine:/code
-      - /mnt/SSD-RESERVE/raw_images:/code/raw_images
-    devices:
-      - /dev:/dev
+      - ${DATA_ROOT:-.}/raw_images:/code/raw_images
     ports:
       - "80:5050"  # Vision engine status page
-    privileged: true
+    privileged: ${PRIVILEGED:-false}
     networks:
       - main_network
     environment:
@@ -35,7 +33,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - /mnt/SSD-RESERVE/volumes/redis:/data
+      - ${DATA_ROOT:-.}/volumes/redis:/data
     networks:
       - main_network
     healthcheck:
@@ -77,7 +75,7 @@ services:
     container_name: "monitait_cleanup"
     build: "./cleanup"
     volumes:
-      - /mnt/SSD-RESERVE/raw_images:/data
+      - ${DATA_ROOT:-.}/raw_images:/data
     environment:
       - MONITOR_DIR=/data
       - MAX_USAGE_PERCENT=90          # Start cleanup at 90% disk usage
@@ -103,7 +101,7 @@ services:
       - POSTGRES_PASSWORD=monitaqc2024
       - POSTGRES_DB=monitaqc
     volumes:
-      - /mnt/SSD-RESERVE/volumes/timescaledb:/var/lib/postgresql/data
+      - ${DATA_ROOT:-.}/volumes/timescaledb:/var/lib/postgresql/data
       - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - main_network
@@ -131,7 +129,7 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
-      - /mnt/SSD-RESERVE/volumes/grafana:/var/lib/grafana
+      - ${DATA_ROOT:-.}/volumes/grafana:/var/lib/grafana
     networks:
       - main_network
     depends_on:
@@ -151,9 +149,9 @@ services:
     environment:
       - NODE_ENV=production
     volumes:
-      - /mnt/SSD-RESERVE/raw_images:/app/data/images:ro
-      - /mnt/SSD-RESERVE/volumes/pigallery2_config:/app/data/config
-      - /mnt/SSD-RESERVE/volumes/pigallery2_db:/app/data/db
+      - ${DATA_ROOT:-.}/raw_images:/app/data/images:ro
+      - ${DATA_ROOT:-.}/volumes/pigallery2_config:/app/data/config
+      - ${DATA_ROOT:-.}/volumes/pigallery2_db:/app/data/db
     networks:
       - main_network
     logging:
@@ -166,5 +164,5 @@ networks:
   main_network:
     driver: bridge
 
-# All persistent data stored on external SSD at /mnt/SSD-RESERVE/volumes/
-# This makes it easy to swap the main NVMe without losing data
+# DATA_ROOT defaults to "." (project dir) on Windows/dev, set to "/mnt/SSD-RESERVE" on production Linux
+# PRIVILEGED defaults to false on Windows/dev, set to true on production Linux (for /dev access)

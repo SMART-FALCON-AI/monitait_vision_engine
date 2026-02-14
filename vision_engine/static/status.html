@@ -7,7 +7,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>Monitait Vision Engine v2.1.1</title>
+        <title>Monitait Vision Engine v2.2.0</title>
         <style>
             @font-face { font-family: 'Inter'; src: url('/static/fonts/Inter.ttf') format('truetype'); font-weight: 100 900; font-display: swap; }
             @font-face { font-family: 'Vazir'; src: url('/static/fonts/Vazir.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
@@ -320,6 +320,23 @@
                 background: #475569;
                 cursor: not-allowed;
                 opacity: 0.6;
+            }
+            /* Loading spinner */
+            @keyframes spin { to { transform: rotate(360deg); } }
+            .btn-spinner {
+                display: inline-block;
+                width: 14px; height: 14px;
+                border: 2px solid rgba(255,255,255,0.3);
+                border-top-color: #fff;
+                border-radius: 50%;
+                animation: spin 0.6s linear infinite;
+                vertical-align: middle;
+                margin-right: 6px;
+            }
+            .btn-loading {
+                pointer-events: none;
+                opacity: 0.7;
+                position: relative;
             }
             .control-response {
                 font-size: 12px;
@@ -999,6 +1016,7 @@
                     watcher_config: "Watcher Configuration",
                     downtime_threshold: "Downtime Threshold (seconds)",
                     external_reset: "External Reset", verbose_mode: "Verbose Mode",
+                    ascending: "Ascending (1→2→3...)", descending: "Descending (...3→2→1)", image_rotation: "Image Rotation",
                     // Inference
                     inference_status: "Inference Status", pipeline: "Pipeline",
                     pipeline_management: "Inference Pipeline Management",
@@ -1092,6 +1110,7 @@
                     watcher_config: "تنظیمات ناظر",
                     downtime_threshold: "آستانه توقف (ثانیه)",
                     external_reset: "ریست خارجی", verbose_mode: "حالت تفصیلی",
+                    ascending: "صعودی (۱→۲→۳...)", descending: "نزولی (...۳→۲→۱)", image_rotation: "چرخش تصویر",
                     inference_status: "وضعیت استنتاج", pipeline: "خط لوله",
                     pipeline_management: "مدیریت خط لوله استنتاج",
                     active_pipeline: "خط لوله فعال", pipeline_config: "تنظیمات خط لوله",
@@ -1178,6 +1197,7 @@
                     watcher_config: "إعدادات المراقب",
                     downtime_threshold: "عتبة التوقف (ثانية)",
                     external_reset: "إعادة تعيين خارجي", verbose_mode: "الوضع التفصيلي",
+                    ascending: "تصاعدي (١→٢→٣...)", descending: "تنازلي (...٣→٢→١)", image_rotation: "تدوير الصورة",
                     inference_status: "حالة الاستدلال", pipeline: "خط الأنابيب",
                     pipeline_management: "إدارة خطوط الاستدلال",
                     active_pipeline: "خط الأنابيب النشط", pipeline_config: "إعدادات خط الأنابيب",
@@ -1261,6 +1281,7 @@
                     watcher_config: "Überwachungskonfiguration",
                     downtime_threshold: "Stillstandsschwelle (Sekunden)",
                     external_reset: "Externer Reset", verbose_mode: "Detaillierter Modus",
+                    ascending: "Aufsteigend (1→2→3...)", descending: "Absteigend (...3→2→1)", image_rotation: "Bilddrehung",
                     inference_status: "Inferenz-Status", pipeline: "Pipeline",
                     pipeline_management: "Inferenz-Pipeline-Verwaltung",
                     active_pipeline: "Aktive Pipeline", pipeline_config: "Pipeline-Konfiguration",
@@ -1334,6 +1355,7 @@
                     watcher_config: "İzleyici Yapılandırması",
                     downtime_threshold: "Duruş Eşiği (saniye)",
                     external_reset: "Harici Sıfırlama", verbose_mode: "Ayrıntılı Mod",
+                    ascending: "Artan (1→2→3...)", descending: "Azalan (...3→2→1)", image_rotation: "Görüntü Döndürme",
                     inference_status: "Çıkarım Durumu", pipeline: "Boru Hattı",
                     pipeline_management: "Çıkarım Boru Hattı Yönetimi",
                     active_pipeline: "Aktif Boru Hattı",
@@ -1382,6 +1404,7 @@
                     watcher_config: "ウォッチャー設定",
                     downtime_threshold: "停止閾値 (秒)",
                     external_reset: "外部リセット", verbose_mode: "詳細モード",
+                    ascending: "昇順 (1→2→3...)", descending: "降順 (...3→2→1)", image_rotation: "画像回転",
                     inference_status: "推論状態", pipeline: "パイプライン",
                     pipeline_management: "推論パイプライン管理",
                     inference_models: "推論モデル", model_name: "モデル名",
@@ -1428,6 +1451,7 @@
                     watcher_config: "Configuración del vigilante",
                     downtime_threshold: "Umbral de inactividad (segundos)",
                     external_reset: "Reinicio externo", verbose_mode: "Modo detallado",
+                    ascending: "Ascendente (1→2→3...)", descending: "Descendente (...3→2→1)", image_rotation: "Rotación de imagen",
                     inference_status: "Estado de inferencia", pipeline: "Tubería",
                     pipeline_management: "Gestión de tuberías de inferencia",
                     inference_models: "Modelos de inferencia", model_name: "Nombre del modelo",
@@ -1442,6 +1466,23 @@
             // Get translation with English fallback
             function t(key) {
                 return (translations[currentLang] && translations[currentLang][key]) || translations.en[key] || key;
+            }
+
+            // Loading state helpers for buttons
+            function _btnLoading(btn) {
+                if (!btn) try { btn = event && event.target && event.target.closest('button, .control-button, .camera-btn, .discovery-button'); } catch(e) {}
+                if (!btn || btn.classList.contains('btn-loading')) return null;
+                var orig = btn.innerHTML;
+                btn.classList.add('btn-loading');
+                btn.disabled = true;
+                btn.innerHTML = '<span class="btn-spinner"></span>' + orig;
+                return { btn: btn, orig: orig };
+            }
+            function _btnDone(state) {
+                if (!state) return;
+                state.btn.classList.remove('btn-loading');
+                state.btn.disabled = false;
+                state.btn.innerHTML = state.orig;
             }
 
             // Apply translations to all elements with data-i18n attribute
@@ -1478,7 +1519,7 @@
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
                     </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.1.1</div>
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v2.2.0</div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
@@ -2508,24 +2549,27 @@
                     <h3>⚙️ <span data-i18n="timeline_config">Timeline Configuration</span></h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <label class="control-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="timeline-show-bbox" checked style="width: 18px; height: 18px; cursor: pointer;">
-                                <span style="font-weight: 600;">Show Bounding Boxes</span>
-                            </label>
-                        </div>
-
-                        <div class="control-item">
                             <div class="control-label" data-i18n="camera_order">Camera Order (Columns)</div>
                             <div style="display: flex; gap: 12px; margin-top: 8px;">
                                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
                                     <input type="radio" name="camera-order" value="normal" checked>
-                                    <span>1→2→3→4→5→6</span>
+                                    <span data-i18n="ascending">Ascending (1→2→3...)</span>
                                 </label>
                                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
                                     <input type="radio" name="camera-order" value="reverse">
-                                    <span>6→5→4→3→2→1</span>
+                                    <span data-i18n="descending">Descending (...3→2→1)</span>
                                 </label>
                             </div>
+                        </div>
+
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="image_rotation">Image Rotation</div>
+                            <select id="timeline-rotation" class="control-input" style="margin-top: 8px;">
+                                <option value="0">0°</option>
+                                <option value="90">90°</option>
+                                <option value="180">180°</option>
+                                <option value="270">270°</option>
+                            </select>
                         </div>
 
                         <div class="control-item">
@@ -2550,6 +2594,38 @@
                                 ✓ Apply Timeline Configuration
                             </button>
                             <div class="control-response" id="timeline-config-response"></div>
+                        </div>
+                    </div>
+
+                    <!-- Per-Object Detection & Audio Configuration (merged) -->
+                    <div style="margin-top: 20px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(51, 65, 85, 0.6);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                            <h4 style="margin: 0; color: var(--text-primary);">Per-Object Detection & Alerts</h4>
+                            <button onclick="fetchModelClasses()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: var(--secondary-color);">Fetch Classes</button>
+                        </div>
+
+                        <!-- Per-Object Cards (dynamically populated) -->
+                        <div id="audio-objects-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;">
+                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
+                                No objects detected yet. Start detection to see objects here.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Ejection Procedures Section -->
+                    <div style="margin-top: 20px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                            <h4 style="margin: 0; color: #ef4444;">Ejection Procedures</h4>
+                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;">+ Add Procedure</button>
+                        </div>
+                        <div id="procedures-list">
+                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
+                                No ejection procedures configured.
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; text-align: right;">
+                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);">Save Procedures</button>
+                            <span id="procedures-save-status" style="margin-left: 8px; font-size: 12px; color: var(--text-secondary);"></span>
                         </div>
                     </div>
                 </div>
@@ -2688,48 +2764,7 @@
                     </div>
                 </div>
 
-                <!-- Audio Alerts Configuration Section -->
-                <div class="control-section">
-                    <h3>🔊 <span data-i18n="audio_config">Audio Alerts Configuration</span></h3>
-
-                    <!-- Global Audio Controls -->
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px;">
-                        <div class="control-item">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="audio-narrate" onchange="toggleNarration()" style="width: 16px; height: 16px; cursor: pointer;">
-                                <span style="font-weight: 600;">Enable Voice Narration</span>
-                            </label>
-                            <p style="margin: 5px 0 0 24px; font-size: 12px; color: var(--text-secondary);">Speak detected object names</p>
-                        </div>
-                        <div class="control-item">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="audio-beep" onchange="toggleBeep()" style="width: 16px; height: 16px; cursor: pointer;">
-                                <span style="font-weight: 600;">Enable Beep Sounds</span>
-                            </label>
-                            <p style="margin: 5px 0 0 24px; font-size: 12px; color: var(--text-secondary);">Play alert sound on detection</p>
-                        </div>
-                        <div class="control-item">
-                            <div style="font-weight: 600; margin-bottom: 5px;">Volume: <span id="audio-volume-display">50%</span></div>
-                            <input type="range" id="audio-volume" min="0" max="100" value="50" onchange="updateVolume()" style="width: 100%; cursor: pointer;">
-                        </div>
-                        <div class="control-item">
-                            <button onclick="testAudio()" class="control-button" style="background: var(--secondary-color); width: 100%;">🔊 Test Audio</button>
-                        </div>
-                    </div>
-
-                    <!-- Per-Object Configuration -->
-                    <div style="background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(51, 65, 85, 0.6);">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                            <h4 style="margin: 0; color: var(--text-primary);">Per-Object Configuration</h4>
-                            <button onclick="enableAllObjects()" class="control-button" style="padding: 6px 12px; font-size: 13px;">✅ Enable All</button>
-                        </div>
-                        <div id="audio-objects-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px;">
-                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
-                                No objects detected yet. Start detection to see objects here.
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <!-- Audio Alerts section merged into Timeline Configuration above -->
 
                 <!-- Data File Editor Section -->
                 <div class="control-section">
@@ -2765,11 +2800,15 @@
             // ===== Audio Alert System =====
             // Production line alarm system for real-time object detection
             let audioSettings = {
-                narrate: false,        // Voice narration of detected objects
-                beep: false,           // Beep sound for selected objects
+                narrate: true,         // Narration controlled per-object
+                beep: true,            // Beep controlled per-object
                 volume: 0.5,
-                enabledObjects: {},    // { "socket": true, "defect": false, ... }
-                objectBeepSounds: {}   // { "socket": "sine", "defect": "square", ... }
+                showBoundingBoxes: true, // Bounding boxes controlled per-object
+                enabledObjects: {},    // { "socket": true, ... } - per-object beep
+                narrateObjects: {},    // { "socket": true, ... } - per-object narrate
+                objectBeepSounds: {},  // { "socket": "sine", ... }
+                showObjects: {},       // { "socket": true, ... } - per-object show bbox
+                objectConfidence: {}   // { "socket": 1, ... } - min confidence %
             };
             let audioContext = null;
             let detectedObjectClasses = new Set();  // Track all detected objects
@@ -2798,20 +2837,32 @@
 
             // Update UI to reflect current settings
             function updateAudioUI() {
-                const narrateEl = document.getElementById('audio-narrate');
-                const beepEl = document.getElementById('audio-beep');
-                const volumeEl = document.getElementById('audio-volume');
-                const volumeDisplay = document.getElementById('audio-volume-display');
-                const beepConfig = document.getElementById('audio-beep-config');
+                // Global toggles always enabled (controlled per-object)
+                audioSettings.narrate = true;
+                audioSettings.beep = true;
+                audioSettings.showBoundingBoxes = true;
+            }
 
-                if (narrateEl) narrateEl.checked = audioSettings.narrate;
-                if (beepEl) beepEl.checked = audioSettings.beep;
-                if (volumeEl) volumeEl.value = audioSettings.volume * 100;
-                if (volumeDisplay) volumeDisplay.textContent = Math.round(audioSettings.volume * 100) + '%';
-
-                // Show/hide beep configuration
-                if (beepConfig) {
-                    beepConfig.style.display = audioSettings.beep ? 'block' : 'none';
+            // Fetch model classes from YOLO service
+            async function fetchModelClasses() {
+                try {
+                    const resp = await fetch('/api/model_classes');
+                    const data = await resp.json();
+                    if (data.classes && data.classes.length > 0) {
+                        data.classes.forEach(name => {
+                            if (!detectedObjectClasses.has(name)) {
+                                detectedObjectClasses.add(name);
+                                if (audioSettings.showObjects[name] === undefined) audioSettings.showObjects[name] = true;
+                                if (audioSettings.enabledObjects[name] === undefined) audioSettings.enabledObjects[name] = true;
+                                if (audioSettings.narrateObjects[name] === undefined) audioSettings.narrateObjects[name] = true;
+                                if (audioSettings.objectConfidence[name] === undefined) audioSettings.objectConfidence[name] = 1;
+                            }
+                        });
+                        saveAudioSettings();
+                        updateObjectsList();
+                    }
+                } catch (e) {
+                    console.error('Could not fetch model classes:', e);
                 }
             }
 
@@ -2823,6 +2874,14 @@
                 if (audioContext.state === 'suspended') {
                     audioContext.resume();
                 }
+            }
+
+            // Toggle global bounding boxes
+            function toggleGlobalBbox() {
+                const bboxEl = document.getElementById('global-show-bbox');
+                audioSettings.showBoundingBoxes = bboxEl.checked;
+                saveAudioSettings();
+                console.log('[Detection] Bounding boxes', audioSettings.showBoundingBoxes ? 'enabled' : 'disabled');
             }
 
             // Toggle narration
@@ -2924,44 +2983,61 @@
                 }, 0);
             }
 
-            // Update the objects list in the UI
+            // Update the objects list in the UI (merged show/confidence + audio)
             function updateObjectsList() {
                 const listEl = document.getElementById('audio-objects-list');
                 if (!listEl) return;
 
-                // Clear existing list
                 listEl.innerHTML = '';
 
-                // If no objects detected yet
                 if (detectedObjectClasses.size === 0) {
                     listEl.innerHTML = '<div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">No objects detected yet. Start detection to see objects here.</div>';
                     return;
                 }
 
-                // Create card for each detected object class
                 const sortedObjects = Array.from(detectedObjectClasses).sort();
                 sortedObjects.forEach(objectName => {
-                    const isEnabled = audioSettings.enabledObjects[objectName] || false;
+                    const isShown = audioSettings.showObjects[objectName] !== false;
+                    const confidence = audioSettings.objectConfidence[objectName] !== undefined ? audioSettings.objectConfidence[objectName] : 1;
+                    const isNarrate = audioSettings.narrateObjects[objectName] || false;
+                    const isBeep = audioSettings.enabledObjects[objectName] || false;
                     const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
+                    const safeName = objectName.replace(/'/g, "\\'");
 
                     const card = document.createElement('div');
-                    card.style.cssText = 'padding: 12px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; border: 1px solid rgba(51, 65, 85, 0.6);';
+                    card.style.cssText = `padding: 10px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; border: 1px solid ${isShown ? 'rgba(34,197,94,0.4)' : 'rgba(51, 65, 85, 0.6)'};`;
 
                     card.innerHTML = `
-                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
-                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 1;">
-                                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleObjectBeep('${objectName}')" style="width: 16px; height: 16px; cursor: pointer;">
-                                <span style="font-weight: 600; color: var(--text-primary);">${objectName}</span>
+                        <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 8px; font-size: 14px;">${objectName}</div>
+                        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                            <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">Min conf:</span>
+                            <input type="number" value="${confidence}" min="0" max="100" step="1"
+                                onchange="updateObjectConfidence('${safeName}', this.value)"
+                                style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;">
+                            <span style="font-size: 12px; color: var(--text-secondary);">%</span>
+                        </div>
+                        <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 6px;">
+                            <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Show bounding box">
+                                <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                                Show
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Voice narration">
+                                <input type="checkbox" ${isNarrate ? 'checked' : ''} onchange="toggleObjectNarrate('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                                Narrate
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Beep alert">
+                                <input type="checkbox" ${isBeep ? 'checked' : ''} onchange="toggleObjectBeep('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                                Beep
                             </label>
                         </div>
-                        <div style="display: flex; gap: 8px; align-items: center;">
-                            <select onchange="updateObjectBeepSound('${objectName}', this.value)" style="flex: 1; padding: 4px 8px; background: rgba(30, 41, 59, 0.6); color: var(--text-primary); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; font-size: 12px;">
-                                <option value="sine" ${beepSound === 'sine' ? 'selected' : ''}>🔔 Sine (Bell)</option>
-                                <option value="square" ${beepSound === 'square' ? 'selected' : ''}>📢 Square (Buzzer)</option>
-                                <option value="sawtooth" ${beepSound === 'sawtooth' ? 'selected' : ''}>🎺 Sawtooth (Horn)</option>
-                                <option value="triangle" ${beepSound === 'triangle' ? 'selected' : ''}>🎵 Triangle (Soft)</option>
+                        <div style="display: flex; gap: 6px; align-items: center;">
+                            <select onchange="updateObjectBeepSound('${safeName}', this.value)" style="flex: 1; padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
+                                <option value="sine" ${beepSound === 'sine' ? 'selected' : ''}>🔔 Sine</option>
+                                <option value="square" ${beepSound === 'square' ? 'selected' : ''}>📢 Square</option>
+                                <option value="sawtooth" ${beepSound === 'sawtooth' ? 'selected' : ''}>🎺 Sawtooth</option>
+                                <option value="triangle" ${beepSound === 'triangle' ? 'selected' : ''}>🎵 Triangle</option>
                             </select>
-                            <button onclick="testObjectBeep('${objectName}')" style="padding: 4px 10px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap;">▶ Test</button>
+                            <button onclick="testObjectBeep('${safeName}')" style="padding: 3px 8px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">▶</button>
                         </div>
                     `;
 
@@ -2969,10 +3045,199 @@
                 });
             }
 
-            // Enable all detected objects
-            function enableAllObjects() {
+            // Toggle show/hide bounding box for object
+            function toggleObjectShow(objectName) {
+                const current = audioSettings.showObjects[objectName] !== false;
+                audioSettings.showObjects[objectName] = !current;
+                saveAudioSettings();
+                updateObjectsList();
+            }
+
+            // Toggle narrate for object
+            function toggleObjectNarrate(objectName) {
+                audioSettings.narrateObjects[objectName] = !audioSettings.narrateObjects[objectName];
+                saveAudioSettings();
+                updateObjectsList();
+            }
+
+            // Update confidence threshold for object
+            function updateObjectConfidence(objectName, value) {
+                audioSettings.objectConfidence[objectName] = Math.max(0, Math.min(100, parseFloat(value) || 1));
+                saveAudioSettings();
+            }
+
+            // ============== EJECTION PROCEDURES ==============
+            let procedures = [];
+
+            function addProcedure() {
+                procedures.push({
+                    id: 'proc_' + Date.now(),
+                    name: 'New Procedure',
+                    enabled: true,
+                    logic: 'any',
+                    rules: []
+                });
+                renderProcedures();
+            }
+
+            function removeProcedure(procId) {
+                procedures = procedures.filter(p => p.id !== procId);
+                renderProcedures();
+            }
+
+            function addRule(procId) {
+                const proc = procedures.find(p => p.id === procId);
+                if (!proc) return;
+                const firstClass = detectedObjectClasses.size > 0 ? Array.from(detectedObjectClasses).sort()[0] : '';
+                proc.rules.push({ object: firstClass, condition: 'present', min_confidence: 30 });
+                renderProcedures();
+            }
+
+            function removeRule(procId, ruleIndex) {
+                const proc = procedures.find(p => p.id === procId);
+                if (!proc) return;
+                proc.rules.splice(ruleIndex, 1);
+                renderProcedures();
+            }
+
+            function updateProcedureField(procId, field, value) {
+                const proc = procedures.find(p => p.id === procId);
+                if (!proc) return;
+                proc[field] = value;
+            }
+
+            function updateRuleField(procId, ruleIndex, field, value) {
+                const proc = procedures.find(p => p.id === procId);
+                if (!proc || !proc.rules[ruleIndex]) return;
+                if (field === 'min_confidence') {
+                    proc.rules[ruleIndex][field] = Math.max(0, Math.min(100, parseInt(value) || 0));
+                } else {
+                    proc.rules[ruleIndex][field] = value;
+                }
+            }
+
+            function renderProcedures() {
+                const container = document.getElementById('procedures-list');
+                if (!container) return;
+
+                if (procedures.length === 0) {
+                    container.innerHTML = '<div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">No ejection procedures configured.</div>';
+                    return;
+                }
+
+                container.innerHTML = procedures.map(proc => {
+                    const rulesHtml = proc.rules.map((rule, ri) => `
+                        <div style="display: flex; gap: 6px; align-items: center; padding: 6px; background: rgba(15, 23, 42, 0.4); border-radius: 4px; flex-wrap: wrap;">
+                            <select onchange="updateRuleField('${proc.id}', ${ri}, 'object', this.value)"
+                                style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; min-width: 100px;">
+                                ${Array.from(detectedObjectClasses).sort().map(name =>
+                                    '<option value="' + name + '" ' + (rule.object === name ? 'selected' : '') + '>' + name + '</option>'
+                                ).join('')}
+                            </select>
+                            <select onchange="updateRuleField('${proc.id}', ${ri}, 'condition', this.value)"
+                                style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
+                                <option value="present" ${rule.condition === 'present' ? 'selected' : ''}>Present</option>
+                                <option value="not_present" ${rule.condition === 'not_present' ? 'selected' : ''}>Not Present</option>
+                            </select>
+                            <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
+                            <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
+                                onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"
+                                style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                            <span style="font-size: 11px; color: var(--text-secondary);">%</span>
+                            <button onclick="removeRule('${proc.id}', ${ri})"
+                                style="padding: 2px 6px; background: rgba(239,68,68,0.3); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); border-radius: 4px; cursor: pointer; font-size: 11px;"
+                                title="Remove rule">X</button>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div style="padding: 12px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; margin-bottom: 8px; border: 1px solid ${proc.enabled ? 'rgba(239,68,68,0.4)' : 'rgba(51,65,85,0.6)'};">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap;">
+                                <input type="text" value="${proc.name}"
+                                    onchange="updateProcedureField('${proc.id}', 'name', this.value)"
+                                    style="flex: 1; min-width: 120px; padding: 4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 13px; font-weight: 600;">
+                                <div style="display: flex; gap: 8px; align-items: center;">
+                                    <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; color: ${proc.enabled ? '#ef4444' : 'var(--text-secondary)'};">
+                                        <input type="checkbox" ${proc.enabled ? 'checked' : ''}
+                                            onchange="updateProcedureField('${proc.id}', 'enabled', this.checked)"
+                                            style="width: 14px; height: 14px; cursor: pointer;">
+                                        Enabled
+                                    </label>
+                                    <select onchange="updateProcedureField('${proc.id}', 'logic', this.value)"
+                                        style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
+                                        <option value="any" ${proc.logic === 'any' ? 'selected' : ''}>ANY rule (OR)</option>
+                                        <option value="all" ${proc.logic === 'all' ? 'selected' : ''}>ALL rules (AND)</option>
+                                    </select>
+                                    <button onclick="removeProcedure('${proc.id}')"
+                                        style="padding: 3px 8px; background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>
+                                </div>
+                            </div>
+                            <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px;">
+                                ${rulesHtml || '<div style="padding: 8px; text-align: center; color: var(--text-secondary); font-size: 12px; font-style: italic;">No rules. Add a rule to define when this procedure triggers.</div>'}
+                            </div>
+                            <button onclick="addRule('${proc.id}')"
+                                style="padding: 3px 10px; background: rgba(59,130,246,0.2); color: var(--primary-color); border: 1px solid rgba(59,130,246,0.4); border-radius: 4px; cursor: pointer; font-size: 11px;">+ Add Rule</button>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            async function saveProcedures() {
+                const statusEl = document.getElementById('procedures-save-status');
+                try {
+                    statusEl.textContent = 'Saving...';
+                    statusEl.style.color = 'var(--text-secondary)';
+                    const response = await fetch('/api/procedures', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ procedures: procedures })
+                    });
+                    const result = await response.json();
+                    if (response.ok && result.success) {
+                        statusEl.textContent = 'Saved!';
+                        statusEl.style.color = 'var(--success-color)';
+                    } else {
+                        statusEl.textContent = 'Error: ' + (result.error || 'Unknown');
+                        statusEl.style.color = '#ef4444';
+                    }
+                } catch (e) {
+                    statusEl.textContent = 'Save failed';
+                    statusEl.style.color = '#ef4444';
+                    console.error('Error saving procedures:', e);
+                }
+                setTimeout(() => { statusEl.textContent = ''; }, 3000);
+            }
+
+            async function loadProcedures() {
+                try {
+                    const response = await fetch('/api/procedures');
+                    const data = await response.json();
+                    if (data.procedures) {
+                        procedures = data.procedures;
+                        renderProcedures();
+                    }
+                } catch (e) {
+                    console.error('Error loading procedures:', e);
+                }
+            }
+
+            // Show all objects (enable all: show + narrate + beep)
+            function showAllObjects() {
                 detectedObjectClasses.forEach(objectName => {
+                    audioSettings.showObjects[objectName] = true;
                     audioSettings.enabledObjects[objectName] = true;
+                    audioSettings.narrateObjects[objectName] = true;
+                });
+                saveAudioSettings();
+                updateObjectsList();
+            }
+
+            // Hide all objects (disable all: show + narrate + beep)
+            function hideAllObjects() {
+                detectedObjectClasses.forEach(objectName => {
+                    audioSettings.showObjects[objectName] = false;
+                    audioSettings.enabledObjects[objectName] = false;
+                    audioSettings.narrateObjects[objectName] = false;
                 });
                 saveAudioSettings();
                 updateObjectsList();
@@ -2992,6 +3257,15 @@
                 initAudioContext();
                 const soundType = audioSettings.objectBeepSounds?.[objectName] || 'sine';
                 playBeepWithType(soundType);
+                // Also narrate the object name
+                if ('speechSynthesis' in window) {
+                    window.speechSynthesis.cancel();
+                    const utterance = new SpeechSynthesisUtterance(objectName);
+                    utterance.rate = 1.0;
+                    utterance.pitch = 1.0;
+                    utterance.volume = audioSettings.volume;
+                    window.speechSynthesis.speak(utterance);
+                }
             }
 
             // Play beep with specific wave type
@@ -3039,23 +3313,30 @@
 
                             // Update UI if new object detected
                             if (wasNew) {
-                                // Initialize as disabled by default
+                                // Initialize defaults for new objects
                                 if (audioSettings.enabledObjects[className] === undefined) {
-                                    audioSettings.enabledObjects[className] = false;
+                                    audioSettings.enabledObjects[className] = true; // beep enabled by default
                                 }
+                                if (audioSettings.narrateObjects[className] === undefined) {
+                                    audioSettings.narrateObjects[className] = true; // narrate enabled by default
+                                }
+                                if (audioSettings.showObjects[className] === undefined) {
+                                    audioSettings.showObjects[className] = true; // show bbox by default
+                                }
+                                if (audioSettings.objectConfidence[className] === undefined) {
+                                    audioSettings.objectConfidence[className] = 1; // 1% default
+                                }
+                                saveAudioSettings();
                                 updateObjectsList();
                             }
 
-                            // Only play audio if this specific object is enabled
-                            const isEnabled = audioSettings.enabledObjects[className] === true;
-
-                            // Narrate if narration is enabled AND this object is enabled
-                            if (audioSettings.narrate && isEnabled) {
+                            // Narrate if global narration ON AND per-object narrate ON
+                            if (audioSettings.narrate && audioSettings.narrateObjects[className]) {
                                 narrateObject(className);
                             }
 
-                            // Beep if beep is enabled AND this object is enabled
-                            if (audioSettings.beep && isEnabled) {
+                            // Beep if global beep ON AND per-object beep ON
+                            if (audioSettings.beep && audioSettings.enabledObjects[className]) {
                                 const now = Date.now();
                                 if (now - lastBeepTime >= BEEP_COOLDOWN) {
                                     lastBeepTime = now;
@@ -3324,6 +3605,16 @@
                                 bufferSlider.value = configData.timeline_config.buffer_size;
                                 bufferValue.textContent = configData.timeline_config.buffer_size;
                             }
+                            // Load per-object filters into audioSettings
+                            if (configData.timeline_config.object_filters) {
+                                const filters = configData.timeline_config.object_filters;
+                                Object.keys(filters).forEach(name => {
+                                    detectedObjectClasses.add(name);
+                                    audioSettings.showObjects[name] = filters[name].show !== false;
+                                    audioSettings.objectConfidence[name] = Math.round((filters[name].min_confidence || 0.01) * 100);
+                                });
+                                updateObjectsList();
+                            }
                         }
                     } catch (error) {
                         console.error('Error loading timeline config:', error);
@@ -3348,7 +3639,6 @@
 
                 // Apply configuration
                 applyBtn.addEventListener('click', async () => {
-                    const showBbox = document.getElementById('timeline-show-bbox').checked;
                     const cameraOrder = document.querySelector('input[name="camera-order"]:checked').value;
                     const quality = qualitySlider.value;
                     const rows = rowsSlider.value;
@@ -3361,15 +3651,28 @@
                     responseDiv.style.color = '#666';
 
                     try {
+                        const rotation = parseInt(document.getElementById('timeline-rotation').value) || 0;
+
+                        // Build per-object filters from audioSettings
+                        const objectFilters = {};
+                        detectedObjectClasses.forEach(name => {
+                            objectFilters[name] = {
+                                show: audioSettings.showObjects[name] !== false,
+                                min_confidence: (audioSettings.objectConfidence[name] !== undefined ? audioSettings.objectConfidence[name] : 1) / 100
+                            };
+                        });
+
                         const response = await fetch('/api/timeline_config', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                show_bounding_boxes: showBbox,
+                                show_bounding_boxes: audioSettings.showBoundingBoxes !== false,
                                 camera_order: cameraOrder,
                                 image_quality: parseInt(quality),
                                 num_rows: parseInt(rows),
-                                buffer_size: parseInt(buffer)
+                                buffer_size: parseInt(buffer),
+                                image_rotation: rotation,
+                                object_filters: objectFilters
                             })
                         });
 
@@ -3491,6 +3794,7 @@
 
             // Service Configuration functions
             async function saveAllServiceConfig() {
+                var _b = _btnLoading();
                 try {
                     // Save all configuration (cameras + settings) using the correct endpoint
                     const response = await fetch('/api/cameras/config/save', { method: 'POST' });
@@ -3507,7 +3811,7 @@
                 } catch (error) {
                     console.error('Error saving config:', error);
                     alert('❌ Error saving settings');
-                }
+                } finally { _btnDone(_b); }
             }
 
             async function loadServiceConfig() {
@@ -3670,7 +3974,7 @@
 
                 if (!name) { alert('Please enter a model name'); return; }
                 if (!apiKey) { alert('Please enter an API key or endpoint'); return; }
-
+                var _b = _btnLoading();
                 try {
                     const response = await fetch('/api/ai_config', {
                         method: 'POST',
@@ -3686,7 +3990,7 @@
                     }
                 } catch (error) {
                     alert('Error: ' + error.message);
-                }
+                } finally { _btnDone(_b); }
             }
 
             async function activateAIModel(name) {
@@ -3791,7 +4095,7 @@
 
                 if (!name) { alert('Please enter a profile name'); return; }
                 if (!host) { alert('Please enter a host'); return; }
-
+                var _b = _btnLoading();
                 try {
                     const response = await fetch('/api/db_config', {
                         method: 'POST',
@@ -3806,6 +4110,7 @@
                         alert('Failed to save: ' + (data.error || 'Unknown error'));
                     }
                 } catch (error) { alert('Error: ' + error.message); }
+                finally { _btnDone(_b); }
             }
 
             async function activateDBProfile(name) {
@@ -4124,6 +4429,14 @@
                             };
                             updateInfraStatus('redis', data.health.redis === 'connected');
 
+                            // Update DB status from SSE health
+                            const dbStatusSSE = document.getElementById('db-status');
+                            if (dbStatusSSE && data.health.db) {
+                                const dbOk = data.health.db === 'connected';
+                                dbStatusSSE.textContent = dbOk ? 'Connected' : 'Disconnected';
+                                dbStatusSSE.style.background = dbOk ? '#28a745' : '#dc3545';
+                            }
+
                             const restartWarning = document.getElementById('gradio-restart-warning');
                             if (restartWarning) {
                                 restartWarning.style.display = data.health.gradio_needs_restart ? 'inline' : 'none';
@@ -4203,6 +4516,14 @@
                             redisDot.style.background = redisOk ? '#28a745' : '#6c757d';
                             redisText.textContent = redisOk ? 'Connected' : 'Not Available';
                             redisText.style.color = redisOk ? '#28a745' : '#6c757d';
+                        }
+
+                        // Update DB status
+                        const dbStatusEl = document.getElementById('db-status');
+                        if (dbStatusEl) {
+                            const dbOk = data.db === 'connected';
+                            dbStatusEl.textContent = dbOk ? 'Connected' : 'Disconnected';
+                            dbStatusEl.style.background = dbOk ? '#28a745' : '#dc3545';
                         }
 
                         // Update Pipeline status (YOLO/Gradio)
@@ -4487,6 +4808,7 @@
             async function updateConfig(key, value) {
                 const responseId = `config-${key}-response`;
                 const responseEl = document.getElementById(responseId);
+                var _b = _btnLoading();
 
                 try {
                     const response = await fetch('/api/config', {
@@ -4531,13 +4853,13 @@
                             responseEl.className = 'control-response';
                         }, 3000);
                     }
-                }
+                } finally { _btnDone(_b); }
             }
 
             async function sendCommand(command, value = null) {
                 const responseId = `cmd-${command}-response`;
                 const responseEl = document.getElementById(responseId);
-
+                var _b = _btnLoading();
                 try {
                     let url = `/${command}`;
                     if (value !== null) {
@@ -4576,7 +4898,7 @@
                             responseEl.className = 'control-response';
                         }, 3000);
                     }
-                }
+                } finally { _btnDone(_b); }
             }
 
             // ===== CAMERA MONITORING FUNCTIONS =====
@@ -4933,6 +5255,7 @@
             }
 
             async function saveCameraConfig(cameraId) {
+                var _b = _btnLoading();
                 try {
                     showCameraMessage(cameraId, 'Saving camera configuration...', 'info');
 
@@ -4950,7 +5273,7 @@
                     }
                 } catch (error) {
                     showCameraMessage(cameraId, `Error: ${error.message}`, 'error');
-                }
+                } finally { _btnDone(_b); }
             }
 
             function refreshCameras() {
@@ -5320,6 +5643,7 @@
             }
 
             async function createOrUpdateState() {
+                var _b = _btnLoading();
                 const responseEl = document.getElementById('state-config-response');
                 const name = document.getElementById('state-name-input').value.trim();
 
@@ -5370,7 +5694,7 @@
                 } catch (error) {
                     responseEl.textContent = 'Error: ' + error.message;
                     responseEl.className = 'control-response error';
-                }
+                } finally { _btnDone(_b); }
                 setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
             }
 
@@ -6286,6 +6610,12 @@
 
             // Load audio settings from localStorage
             loadAudioSettings();
+
+            // Pre-populate object classes from model
+            fetchModelClasses();
+
+            // Load ejection procedures
+            loadProcedures();
 
             // Start timeline image refresh
             startTimelineRefresh();

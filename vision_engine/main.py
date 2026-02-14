@@ -211,9 +211,11 @@ def get_timeline_composite():
         try:
             config = app.state.timeline_config
             quality = config.get('image_quality', 85)
+            image_rotation = config.get('image_rotation', 0)
         except Exception as e:
             logger.debug(f"Could not load timeline config for stitching, using defaults: {e}")
             quality = 85
+            image_rotation = 0
 
         # Create Redis connection
         redis_client = Redis("redis", 6379, db=0)
@@ -244,8 +246,12 @@ def get_timeline_composite():
                 ts, jpeg_bytes = pickle.loads(frame_data)
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
-                    # Rotate 90° clockwise: landscape (1280x700) -> portrait (700x1280)
-                    thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                    if image_rotation == 90:
+                        thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                    elif image_rotation == 180:
+                        thumb = cv2.rotate(thumb, cv2.ROTATE_180)
+                    elif image_rotation == 270:
+                        thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
                     row_frames.append(thumb)
             if row_frames:
                 camera_rows.append(np.hstack(row_frames))
@@ -1551,7 +1557,7 @@ pipeline_manager: Optional[PipelineManager] = None
 app = FastAPI(
     title="Counter Service",
     description="Service for counting and tracking packages with camera processing",
-    version="1.0.0"
+    version="2.2.0"
 )
 
 # Mount static files
@@ -1737,6 +1743,34 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
         app.state.timeline_config = full_data["timeline_config"]
         settings_applied["timeline_config"] = True
         logger.info(f"Timeline config loaded: {full_data['timeline_config']}")
+
+        # Migration: convert legacy per-object eject to procedures
+        if 'procedures' not in app.state.timeline_config:
+            obj_filters = app.state.timeline_config.get('object_filters', {})
+            legacy_rules = []
+            for obj_name, obj_cfg in obj_filters.items():
+                if obj_cfg.get('eject', False):
+                    legacy_rules.append({
+                        'object': obj_name,
+                        'condition': obj_cfg.get('eject_condition', 'present'),
+                        'min_confidence': int(obj_cfg.get('min_confidence', 0.01) * 100)
+                    })
+                obj_cfg.pop('eject', None)
+                obj_cfg.pop('eject_condition', None)
+            if legacy_rules:
+                app.state.timeline_config['procedures'] = [{
+                    'id': 'proc_legacy',
+                    'name': 'Migrated Eject Rules',
+                    'enabled': True,
+                    'logic': 'any',
+                    'rules': legacy_rules
+                }]
+                logger.info(f"Migrated {len(legacy_rules)} legacy eject rules to procedure")
+            else:
+                app.state.timeline_config['procedures'] = []
+            full_data['timeline_config'] = app.state.timeline_config
+            save_data_file(full_data)
+            logger.info("Legacy eject config migrated to procedures format")
     else:
         # Initialize with defaults if not in config
         app.state.timeline_config = {
@@ -1744,7 +1778,9 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
             'camera_order': 'normal',
             'image_quality': 85,
             'num_rows': 20,
-            'buffer_size': 20
+            'buffer_size': 20,
+            'object_filters': {},
+            'procedures': []
         }
         if full_data is None:
             logger.debug("Timeline config: full_data not provided, using defaults")
@@ -2130,11 +2166,21 @@ async def health_check(request: Request):
             except:
                 pass
 
+        # Check TimescaleDB/PostgreSQL connection
+        db_ok = False
+        try:
+            conn = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT, database=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASSWORD, connect_timeout=2)
+            conn.close()
+            db_ok = True
+        except Exception:
+            db_ok = False
+
         response_content = {
             "status": "healthy" if status_code == 200 else "unhealthy",
             "device": "connected" if device_ok else ("camera-only" if not serial_available else "disconnected"),
             "serial": "connected" if serial_available else "not available",
             "redis": "connected" if redis_ok else "disconnected",
+            "db": "connected" if db_ok else "disconnected",
             "yolo": "connected" if yolo_ok else "not available",
             "cameras": cameras_status,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2389,8 +2435,20 @@ async def status_stream():
     """Server-Sent Events stream for real-time status updates."""
     def generate():
         last_data = None
+        _db_ok = False
+        _db_check_time = 0
         while True:
             try:
+                # Periodic DB health check (every 30s)
+                if time.time() - _db_check_time > 30:
+                    try:
+                        _c = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT, database=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASSWORD, connect_timeout=2)
+                        _c.close()
+                        _db_ok = True
+                    except Exception:
+                        _db_ok = False
+                    _db_check_time = time.time()
+
                 # Build current status data
                 current_data = {
                     "encoder_value": watcher_instance.encoder_value if watcher_instance else 0,
@@ -2449,6 +2507,7 @@ async def status_stream():
                     # Health status
                     "health": {
                         "redis": "connected" if (watcher_instance and watcher_instance.redis_connection and watcher_instance.redis_connection.redis_connection) else "disconnected",
+                        "db": "connected" if _db_ok else "disconnected",
                         "gradio_needs_restart": False,  # Will be updated if needed
                     },
                     # Latest detection event for audio notification
@@ -2532,13 +2591,24 @@ async def video_feed():
         while True:
             try:
                 if watcher_instance and watcher_instance.cameras:
+                    # Get rotation from config
+                    try:
+                        _rot = app.state.timeline_config.get('image_rotation', 0)
+                    except:
+                        _rot = 0
                     # Collect frames from all cameras (sorted by camera ID)
                     camera_frames = []
                     for cam_id in sorted(watcher_instance.cameras.keys()):
                         cam = watcher_instance.cameras[cam_id]
                         if hasattr(cam, 'frame') and cam.frame is not None:
-                            # Rotate 90° clockwise: landscape -> portrait
-                            camera_frames.append(cv2.rotate(cam.frame.copy(), cv2.ROTATE_90_CLOCKWISE))
+                            f = cam.frame.copy()
+                            if _rot == 90:
+                                f = cv2.rotate(f, cv2.ROTATE_90_CLOCKWISE)
+                            elif _rot == 180:
+                                f = cv2.rotate(f, cv2.ROTATE_180)
+                            elif _rot == 270:
+                                f = cv2.rotate(f, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                            camera_frames.append(f)
 
                     if camera_frames:
                         frame_count += 1
@@ -2554,15 +2624,23 @@ async def video_feed():
                             last_log_time = time.time()
                         if detections and timestamp:
                             detection_age = time.time() - timestamp
-                            if detection_age < 10.0:
+                            if detection_age < 10.0 and getattr(app.state, 'timeline_config', {}).get('show_bounding_boxes', True):
+                                _obj_filters = getattr(app.state, 'timeline_config', {}).get('object_filters', {})
                                 for det in detections:
                                     try:
+                                        confidence = det.get('confidence', 0)
+                                        name = det.get('name', f"Class {det.get('class', 0)}")
+                                        # Apply per-object filter: check show flag and min confidence
+                                        obj_f = _obj_filters.get(name, {})
+                                        if obj_f.get('show') is False:
+                                            continue
+                                        min_conf = obj_f.get('min_confidence', 0.01)
+                                        if confidence < min_conf:
+                                            continue
                                         x1 = int(det.get('xmin', 0))
                                         y1 = int(det.get('ymin', 0))
                                         x2 = int(det.get('xmax', 0))
                                         y2 = int(det.get('ymax', 0))
-                                        confidence = det.get('confidence', 0)
-                                        name = det.get('name', f"Class {det.get('class', 0)}")
                                         cv2.rectangle(camera_frames[0], (x1, y1), (x2, y2), (0, 255, 0), 3)
                                         label = f"{name} {confidence:.2f}"
                                         (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -2619,21 +2697,24 @@ async def video_feed_detections():
                     frame_path = os.path.join("raw_images", f"{latest_frame_id}.jpg")
                     if os.path.exists(frame_path):
                         frame = cv2.imread(frame_path)
-                        if frame is not None:
-                            # Draw all detections with bounding boxes
+                        if frame is not None and getattr(app.state, 'timeline_config', {}).get('show_bounding_boxes', True):
+                            # Draw detections with bounding boxes (filtered by object_filters)
+                            _obj_filters = getattr(app.state, 'timeline_config', {}).get('object_filters', {})
                             for det in detections:
                                 try:
+                                    confidence = det.get('confidence', 0)
+                                    name = det.get('name', f"Class {det.get('class', 0)}")
+                                    obj_f = _obj_filters.get(name, {})
+                                    if obj_f.get('show') is False:
+                                        continue
+                                    min_conf = obj_f.get('min_confidence', 0.01)
+                                    if confidence < min_conf:
+                                        continue
                                     x1 = int(det.get('xmin', 0))
                                     y1 = int(det.get('ymin', 0))
                                     x2 = int(det.get('xmax', 0))
                                     y2 = int(det.get('ymax', 0))
-                                    confidence = det.get('confidence', 0)
-                                    name = det.get('name', f"Class {det.get('class', 0)}")
-
-                                    # Draw thick green rectangle
                                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-                                    # Draw label with background
                                     label = f"{name} {confidence:.2f}"
                                     (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                                     cv2.rectangle(frame, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
@@ -2688,9 +2769,11 @@ async def timeline_image(page: int = 0):
             config = app.state.timeline_config
             quality = config.get('image_quality', 85)
             frames_per_page = config.get('num_rows', 10)
+            image_rotation = config.get('image_rotation', 0)
         except:
             quality = 85
             frames_per_page = 10
+            image_rotation = 0
 
         # Create Redis connection
         redis_client = Redis("redis", 6379, db=0)
@@ -2740,8 +2823,13 @@ async def timeline_image(page: int = 0):
                 ts, jpeg_bytes = pickle.loads(frame_data)
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
-                    # Rotate 90° clockwise: landscape (1280x700) -> portrait (700x1280)
-                    thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                    # Apply configurable rotation (0, 90, 180, 270)
+                    if image_rotation == 90:
+                        thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                    elif image_rotation == 180:
+                        thumb = cv2.rotate(thumb, cv2.ROTATE_180)
+                    elif image_rotation == 270:
+                        thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
                     row_frames.append(thumb)
 
             if row_frames:
@@ -2776,6 +2864,30 @@ async def timeline_image(page: int = 0):
         placeholder[:] = (60, 60, 60)
         _, jpeg = cv2.imencode('.jpg', placeholder)
         return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+@app.get("/api/model_classes")
+async def get_model_classes():
+    """Get the list of object class names from the active inference model."""
+    classes = []
+    try:
+        # Try YOLO service classes endpoint
+        active_url = YOLO_INFERENCE_URL
+        if pipeline_manager and pipeline_manager.get_current_model():
+            active_url = pipeline_manager.get_current_model().inference_url
+        # Build classes URL from the inference URL
+        classes_url = active_url.rstrip('/').rsplit('/detect', 1)[0] + '/classes'
+        resp = requests.get(classes_url, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            classes = data.get('classes', [])
+    except Exception as e:
+        logger.debug(f"Could not fetch model classes: {e}")
+    # Also include PARENT_OBJECT_LIST as known objects
+    for obj in PARENT_OBJECT_LIST:
+        if obj not in classes and obj != '_root':
+            classes.append(obj)
+    return {"classes": classes}
+
 
 @app.get("/api/timeline_count")
 async def timeline_count():
@@ -2836,11 +2948,19 @@ async def update_timeline_config(request: Request):
         data = await request.json()
 
         # Extract configuration values
-        show_bounding_boxes = data.get('show_bounding_boxes', True)
+        show_bounding_boxes = data.get('show_bounding_boxes', True)  # Global bbox toggle
         camera_order = data.get('camera_order', 'normal')
         image_quality = data.get('image_quality', 85)
         num_rows = data.get('num_rows', 10)
         buffer_size = data.get('buffer_size', 20)  # Total frames to store
+        image_rotation = data.get('image_rotation', 0)  # 0, 90, 180, 270
+        object_filters = data.get('object_filters', {})  # {name: {show: bool, min_confidence: float}}
+        procedures = data.get('procedures', getattr(app.state, 'timeline_config', {}).get('procedures', []))
+
+        # Strip legacy eject fields from object_filters (handled by procedures now)
+        for obj_cfg in object_filters.values():
+            obj_cfg.pop('eject', None)
+            obj_cfg.pop('eject_condition', None)
 
         # Store configuration in app state
         app.state.timeline_config = {
@@ -2848,7 +2968,10 @@ async def update_timeline_config(request: Request):
             'camera_order': camera_order,
             'image_quality': image_quality,
             'num_rows': num_rows,
-            'buffer_size': buffer_size
+            'buffer_size': buffer_size,
+            'image_rotation': image_rotation,
+            'object_filters': object_filters,
+            'procedures': procedures
         }
 
         # Save to DATA_FILE
@@ -2863,7 +2986,7 @@ async def update_timeline_config(request: Request):
             redis_client.delete(*timeline_keys)
             logger.info(f"Cleared {len(timeline_keys)} timeline buffers to apply new settings")
 
-        logger.info(f"Timeline config saved: bbox={show_bounding_boxes}, order={camera_order}, quality={image_quality}, rows={num_rows}, buffer={buffer_size}")
+        logger.info(f"Timeline config saved: order={camera_order}, quality={image_quality}, rows={num_rows}, buffer={buffer_size}, object_filters={len(object_filters)} objects")
 
         return {
             'success': True,
@@ -2876,6 +2999,37 @@ async def update_timeline_config(request: Request):
             status_code=500,
             content={'success': False, 'error': str(e)}
         )
+
+@app.get("/api/procedures")
+async def get_procedures():
+    """Get current ejection procedures."""
+    config = getattr(app.state, 'timeline_config', {})
+    return {'procedures': config.get('procedures', [])}
+
+
+@app.post("/api/procedures")
+async def update_procedures(request: Request):
+    """Update ejection procedures configuration."""
+    try:
+        data = await request.json()
+        procedures = data.get('procedures', [])
+
+        # Update in app.state
+        config = getattr(app.state, 'timeline_config', {})
+        config['procedures'] = procedures
+        app.state.timeline_config = config
+
+        # Persist to DATA_FILE
+        file_data = load_data_file()
+        file_data['timeline_config'] = app.state.timeline_config
+        save_data_file(file_data)
+
+        logger.info(f"Procedures updated: {len(procedures)} procedure(s)")
+        return {'success': True, 'procedures': procedures}
+    except Exception as e:
+        logger.error(f"Error updating procedures: {e}")
+        return JSONResponse(status_code=500, content={'success': False, 'error': str(e)})
+
 
 @app.get("/timeline_slideshow")
 async def timeline_slideshow():
@@ -4298,6 +4452,30 @@ async def save_camera(request: Request):
 
         # Save configuration
         if save_service_config(config):
+            # Hot-add camera to running watcher instance (no restart needed)
+            cam_id_int = int(camera_id)
+            if watcher_instance is not None and cam_id_int not in watcher_instance.cameras:
+                try:
+                    cam = CameraBuffer(camera_url, exposure=0, gain=0)
+                    watcher_instance.cameras[cam_id_int] = cam
+                    watcher_instance.camera_metadata[cam_id_int] = {
+                        "name": camera_name,
+                        "type": "ip",
+                        "ip": camera_ip,
+                        "path": camera_path,
+                        "source": camera_url
+                    }
+                    # Update camera_paths list
+                    while len(watcher_instance.camera_paths) < cam_id_int:
+                        watcher_instance.camera_paths.append("")
+                    if cam_id_int <= len(watcher_instance.camera_paths):
+                        watcher_instance.camera_paths[cam_id_int - 1] = camera_url
+                    else:
+                        watcher_instance.camera_paths.append(camera_url)
+                    logger.info(f"Hot-added camera {cam_id_int} to running watcher: {camera_url}")
+                except Exception as e:
+                    logger.warning(f"Camera saved but failed to hot-add to watcher: {e}. Restart to apply.")
+
             return JSONResponse(content={
                 "success": True,
                 "message": f"Camera '{camera_name}' saved successfully as Camera {camera_id}",
@@ -6570,8 +6748,8 @@ class ArduinoSocket:
                     try:
                         self.shipment = self.redis_connection.get_redis("shipment")
                         self.shipment = self.shipment.decode('utf-8') if self.shipment else "no_shipment"
+                        os.makedirs("raw_images/" + self.shipment, exist_ok=True)
                         if self.shipment != self.old_shipment:
-                            os.makedirs("raw_images/" + self.shipment, exist_ok=True)
                             self.old_shipment = self.shipment
                     except Exception as e:
                         self.shipment = "no_shipment"
@@ -6693,8 +6871,18 @@ class ArduinoSocket:
                         frame_histogram_data = []
                         stream_path = os.path.join("raw_images", f"{stream_frame[0]}.jpg")
                         stream_frame[1] = cv2.imread(stream_path)
-                        # Annotate frame_data[1] with bounding boxes and labels
+                        # Annotate frame_data[1] with bounding boxes and labels (filtered by object_filters)
+                        _tl_cfg = getattr(app.state, 'timeline_config', {})
+                        _obj_filters = _tl_cfg.get('object_filters', {})
+                        _skip_bbox = not _tl_cfg.get('show_bounding_boxes', True)
                         for idx, res in enumerate(stream_frame[2]):
+                            if _skip_bbox:
+                                break
+                            _of = _obj_filters.get(res.get('name', ''), {})
+                            if _of.get('show') is False:
+                                continue
+                            if res.get('confidence', 0) < _of.get('min_confidence', 0.01):
+                                continue
                             cv2.rectangle(stream_frame[1], (int(res['xmin']), int(res['ymin'])),(int(res['xmax']), int(res['ymax'])), (100, 150, 250), 4)
                             text = f"{res['name']} {res['confidence']:.2f}"
                             font = cv2.FONT_HERSHEY_COMPLEX
@@ -7372,6 +7560,60 @@ def inference_worker_thread():
                             # Log processed frame result
                             classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
                             logger.info(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
+
+                        # Evaluate procedure-based eject rules after processing all messages
+                        try:
+                            _tl_cfg = getattr(app.state, 'timeline_config', {})
+                            _procedures = _tl_cfg.get('procedures', [])
+                            if _procedures and EJECTOR_ENABLED:
+                                # Collect detected objects with max confidence
+                                all_detected = {}  # {name: max_confidence}
+                                for msg in queue_messages:
+                                    det_list = msg.get('detection', [])
+                                    if isinstance(det_list, list):
+                                        for d in det_list:
+                                            if isinstance(d, dict) and d.get('name'):
+                                                name = d['name']
+                                                conf = d.get('confidence', 0)
+                                                if name not in all_detected or conf > all_detected[name]:
+                                                    all_detected[name] = conf
+
+                                should_eject = False
+                                eject_reasons = []
+
+                                for proc in _procedures:
+                                    if not proc.get('enabled', False):
+                                        continue
+                                    rules = proc.get('rules', [])
+                                    if not rules:
+                                        continue
+
+                                    logic = proc.get('logic', 'any')
+
+                                    def _eval_rule(rule):
+                                        obj = rule.get('object', '')
+                                        cond = rule.get('condition', 'present')
+                                        min_conf = rule.get('min_confidence', 0) / 100.0
+                                        if cond == 'present':
+                                            return obj in all_detected and all_detected[obj] >= min_conf
+                                        elif cond == 'not_present':
+                                            return obj not in all_detected or all_detected[obj] < min_conf
+                                        return False
+
+                                    results = [_eval_rule(r) for r in rules]
+                                    triggered = all(results) if logic == 'all' else any(results)
+
+                                    if triggered:
+                                        should_eject = True
+                                        matched = [r.get('object', '?') for r, res in zip(rules, results) if res]
+                                        eject_reasons.append(f"[{proc.get('name','?')}:{logic}:{','.join(matched)}]")
+
+                                if should_eject:
+                                    eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
+                                    watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
+                                    logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
+                        except Exception as e:
+                            logger.warning(f"Procedure eject evaluation error: {e}")
 
                     except Exception as e:
                         logger.warning(f"Non-critical error in frame processing: {e}")
