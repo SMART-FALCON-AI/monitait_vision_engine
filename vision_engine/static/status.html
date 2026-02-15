@@ -63,7 +63,7 @@
                     <div style="display: flex; flex-direction: column; gap: 5px;">
                         <!-- Shipment -->
                         <div class="status-box" style="padding: 5px;">
-                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;" data-i18n="shipment">Shipment <span class="info-tooltip-sm">i<span class="info-tooltip-text">Current shipment/batch ID. Click to edit.</span></span></div>
+                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;"><span data-i18n="shipment">Shipment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_shipment">Current shipment/batch ID. Click to edit.</span></span></div>
                             <div id="shipment-value" style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600;" onclick="editShipmentId()">
                                 <span id="shipment-text">-</span>
                                 <span style="font-size: 9px; opacity: 0.6;">✏️</span>
@@ -80,58 +80,58 @@
                         <div class="status-box" style="padding: 5px;">
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;">
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="encoder">Encoder <span class="info-tooltip-sm">i<span class="info-tooltip-text">Rotary encoder position count. Tracks conveyor movement.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="encoder">Encoder</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder">Rotary encoder position count. Tracks conveyor movement.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 700; color: var(--text-primary);" id="encoder-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="speed">Speed <span class="info-tooltip-sm">i<span class="info-tooltip-text">Production speed in pulses per minute (PPM).</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="speed">Speed</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_speed">Production speed in pulses per minute (PPM).</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="speed-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Pulses/s <span class="info-tooltip-sm">i<span class="info-tooltip-text">Raw encoder pulses per second.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="pulses_s">Pulses/s</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_pulses_s">Raw encoder pulses per second.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="pps-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="movement">Movement <span class="info-tooltip-sm">i<span class="info-tooltip-text">Whether the conveyor belt is currently moving.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="movement">Movement</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_movement">Whether the conveyor belt is currently moving.</span></span></div>
                                     <div style="display: flex; align-items: center; gap: 2px;">
                                         <span class="movement-indicator" id="movement-indicator" style="width: 7px; height: 7px;"></span>
                                         <span style="font-size: 9px; font-weight: 600;" id="movement-value">-</span>
                                     </div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_queue">Ej Queue <span class="info-tooltip-sm">i<span class="info-tooltip-text">Number of items waiting to be ejected.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_queue">Ej Queue</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_queue">Number of items waiting to be ejected.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-queue">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_active">Ej Active <span class="info-tooltip-sm">i<span class="info-tooltip-text">Whether the ejector is currently firing.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_active">Ej Active</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_active">Whether the ejector is currently firing.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-running">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_enable">Ej Enable <span class="info-tooltip-sm">i<span class="info-tooltip-text">Whether ejection is enabled. Disable to inspect without ejecting.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_enable">Ej Enable</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_enable">Whether ejection is enabled. Disable to inspect without ejecting.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_offset">Ej Offset <span class="info-tooltip-sm">i<span class="info-tooltip-text">Encoder count delay between camera and ejector position.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_offset">Ej Offset</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_offset">Encoder count delay between camera and ejector position.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-offset">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ok">OK <span class="info-tooltip-sm">i<span class="info-tooltip-text">Total count of items that passed inspection.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ok">OK</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ok">Total count of items that passed inspection.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--success-color);" id="ok-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ng">NG <span class="info-tooltip-sm">i<span class="info-tooltip-text">Total count of rejected (No Good) items.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ng">NG</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ng">Total count of rejected (No Good) items.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--danger-color);" id="ng-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="downtime">Downtime <span class="info-tooltip-sm">i<span class="info-tooltip-text">Seconds since the conveyor last stopped moving.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="downtime">Downtime</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_downtime">Seconds since the conveyor last stopped moving.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="downtime-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="analog">Analog <span class="info-tooltip-sm">i<span class="info-tooltip-text">Current analog sensor reading from the hardware.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="analog">Analog</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_analog">Current analog sensor reading from the hardware.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="analog-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="power">Power <span class="info-tooltip-sm">i<span class="info-tooltip-text">Power supply voltage reading from the hardware.</span></span></div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="power">Power</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_power">Power supply voltage reading from the hardware.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="power-value">-</div>
                                 </div>
                             </div>
@@ -140,20 +140,20 @@
                         <!-- Live Inference Stats -->
                         <div class="status-box" style="padding: 5px;">
                             <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
-                                <strong>Capture <span class="info-tooltip-sm">i<span class="info-tooltip-text">Current capture mode and trigger configuration.</span></span>:</strong> <span id="inference-state-name" style="color: var(--primary-color); font-weight: 700;">...</span>
+                                <strong><span data-i18n="capture">Capture</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_capture">Current capture mode and trigger configuration.</span></span>:</strong> <span id="inference-state-name" style="color: var(--primary-color); font-weight: 700;">...</span>
                                 <span id="capture-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                             </div>
                             <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
-                                <strong>Inference <span class="info-tooltip-sm">i<span class="info-tooltip-text">AI model used for object detection (local YOLO or remote Gradio).</span></span>:</strong>
+                                <strong><span data-i18n="inference">Inference</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inference">AI model used for object detection (local YOLO or remote Gradio).</span></span>:</strong>
                                 <strong id="inference-service-name" style="color: var(--primary-color);">...</strong>
                                 <span id="inference-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                                 <span id="gradio-restart-warning" style="display: none; color: var(--danger-color); font-weight: bold;"> ⚠️</span>
                             </div>
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px;">
-                                <div>Latency <span class="info-tooltip-sm">i<span class="info-tooltip-text">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value">...</strong></div>
-                                <div>Interval <span class="info-tooltip-sm">i<span class="info-tooltip-text">Time between consecutive inference frames (ms).</span></span>: <strong id="frame-interval-value">...</strong></div>
-                                <div>Inf <span class="info-tooltip-sm">i<span class="info-tooltip-text">Inference frames per second — how fast the model processes.</span></span>: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
-                                <div>Cap <span class="info-tooltip-sm">i<span class="info-tooltip-text">Capture frames per second — how fast the camera captures.</span></span>: <strong id="capture-fps-value">...</strong>
+                                <div><span data-i18n="latency">Latency</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_latency">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value">...</strong></div>
+                                <div><span data-i18n="interval">Interval</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_interval">Time between consecutive inference frames (ms).</span></span>: <strong id="frame-interval-value">...</strong></div>
+                                <div><span data-i18n="inf_fps">Inf</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inf_fps">Inference frames per second — how fast the model processes.</span></span>: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
+                                <div><span data-i18n="cap_fps">Cap</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_cap_fps">Capture frames per second — how fast the camera captures.</span></span>: <strong id="capture-fps-value">...</strong>
                                     <span id="capture-heartbeat" style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--success-color); margin-left: 2px; opacity: 0;"></span>
                                 </div>
                             </div>
@@ -164,8 +164,8 @@
                             </div>
                             <!-- Queue Usage Charts -->
                             <div style="margin-top: 6px; display: flex; gap: 8px; font-size: 8px; color: var(--text-secondary);">
-                                <span style="flex: 1;">Disk Queue <span class="info-tooltip-sm">i<span class="info-tooltip-text">Frames waiting to be saved to disk. High values mean disk I/O is slow.</span></span></span>
-                                <span style="flex: 1;">Inference Queue <span class="info-tooltip-sm">i<span class="info-tooltip-text">Frames waiting for AI analysis. Hot (red) = urgent for ejector, Cold (blue) = historical.</span></span></span>
+                                <span style="flex: 1;"><span data-i18n="disk_queue">Disk Queue</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_disk_queue">Frames waiting to be saved to disk. High values mean disk I/O is slow.</span></span></span>
+                                <span style="flex: 1;"><span data-i18n="inf_queue">Inference Queue</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inf_queue">Frames waiting for AI analysis. Hot (red) = urgent for ejector, Cold (blue) = historical.</span></span></span>
                             </div>
                             <div style="display: flex; gap: 8px;">
                                 <div style="flex: 1;">
@@ -179,11 +179,11 @@
 
                         <!-- System Resources -->
                         <div class="status-box" style="padding: 5px;">
-                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 3px;">💻 System <span class="info-tooltip-sm">i<span class="info-tooltip-text">Live server resource usage.</span></span></div>
+                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 3px;">💻 <span data-i18n="system">System</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_system">Live server resource usage.</span></span></div>
                             <div style="font-size: 9px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
-                                <div>CPU <span class="info-tooltip-sm">i<span class="info-tooltip-text">CPU usage percentage and core count.</span></span>: <strong id="system-cpu-value" style="color: var(--primary-color);">...</strong><br><span id="system-cpu-cores" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
-                                <div>RAM <span class="info-tooltip-sm">i<span class="info-tooltip-text">Memory usage percentage and total available.</span></span>: <strong id="system-ram-value" style="color: var(--primary-color);">...</strong><br><span id="system-ram-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
-                                <div>Disk <span class="info-tooltip-sm">i<span class="info-tooltip-text">Disk usage percentage and total capacity.</span></span>: <strong id="system-disk-value" style="color: var(--primary-color);">...</strong><br><span id="system-disk-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div><span data-i18n="cpu">CPU</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_cpu">CPU usage percentage and core count.</span></span>: <strong id="system-cpu-value" style="color: var(--primary-color);">...</strong><br><span id="system-cpu-cores" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div><span data-i18n="ram">RAM</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ram">Memory usage percentage and total available.</span></span>: <strong id="system-ram-value" style="color: var(--primary-color);">...</strong><br><span id="system-ram-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div><span data-i18n="disk">Disk</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_disk">Disk usage percentage and total capacity.</span></span>: <strong id="system-disk-value" style="color: var(--primary-color);">...</strong><br><span id="system-disk-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
                             </div>
                         </div>
 
