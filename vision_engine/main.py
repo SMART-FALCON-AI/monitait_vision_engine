@@ -415,6 +415,7 @@ from routers.states import router as states_router
 from routers.config_routes import router as config_router
 from routers.ai import router as ai_router
 from routers.commands import router as commands_router
+from routers.websocket import router as ws_router
 
 app.include_router(health_router)
 app.include_router(cameras_router)
@@ -424,6 +425,7 @@ app.include_router(inference_router)
 app.include_router(states_router)
 app.include_router(config_router)
 app.include_router(ai_router)
+app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 
 
@@ -551,6 +553,13 @@ apply_pipeline_config_at_startup(pipeline_manager)
 # Docker DNS round-robin distributes requests across YOLO replicas.
 _num_cameras = len(watcher.cameras) if watcher.cameras else 1
 INFERENCE_WORKERS = max(4, _num_cameras * 4)
+# Limit concurrent YOLO HTTP requests to avoid overwhelming the service.
+# With 2 YOLO replicas × 2 workers each = 4 slots; allow a small buffer.
+_YOLO_REPLICAS = int(os.environ.get("YOLO_REPLICAS", 2))
+_YOLO_WORKERS = int(os.environ.get("YOLO_WORKERS", 2))
+_yolo_semaphore = threading.Semaphore(_YOLO_REPLICAS * _YOLO_WORKERS + 2)
+# Max age (seconds) for a queued frame — older frames are skipped
+_MAX_FRAME_AGE = 15.0
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
 # Update autoscaler initial state with actual values
@@ -584,6 +593,13 @@ def inference_worker_thread():
             if not frames_data:
                 continue
 
+            # Drop stale frames — no point processing frames that are too old
+            enqueue_t = frames_data.get('_enqueue_t', 0)
+            age = time.time() - enqueue_t if enqueue_t else 0
+            if age > _MAX_FRAME_AGE:
+                logger.debug(f"Dropping stale frame batch (age={age:.1f}s > {_MAX_FRAME_AGE}s)")
+                continue
+
             # frames_data is already a Python dict — no JSON parsing needed
             frames = frames_data.get("frames", [])
             capture_encoder = frames_data.get("encoder", 0)
@@ -600,17 +616,23 @@ def inference_worker_thread():
                 continue
 
             try:
-                # Call process_frame_helper() directly in this thread.
-                # YOLO inference is I/O-bound (HTTP request) — GIL is released during
-                # socket I/O, so multiple threads achieve true concurrency.
-                # Docker DNS round-robin distributes requests across YOLO replicas.
-                results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
+                # Acquire semaphore to limit concurrent YOLO HTTP requests.
+                # Prevents flooding YOLO when queue is deep — excess workers wait here.
+                _yolo_semaphore.acquire()
+                try:
+                    results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
+                finally:
+                    _yolo_semaphore.release()
 
                 # Filter out None results
                 valid_results = [r for r in results if r is not None]
                 if not valid_results:
                     # Retry once
-                    results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
+                    _yolo_semaphore.acquire()
+                    try:
+                        results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
+                    finally:
+                        _yolo_semaphore.release()
                     valid_results = [r for r in results if r is not None]
                     if not valid_results:
                         continue

@@ -182,20 +182,37 @@ function startStatusStream() {
     };
 }
 
-// Refresh timeline image periodically (every 2 seconds)
-let timelineRefreshInterval = null;
-function startTimelineRefresh() {
-    if (timelineRefreshInterval) clearInterval(timelineRefreshInterval);
-    timelineRefreshInterval = setInterval(() => {
-        const timelineImg = document.getElementById('timeline-slide');
-        if (timelineImg) {
-            // Preserve current page in URL
-            const curSrc = timelineImg.src || '';
-            const pageMatch = curSrc.match(/page=(\d+)/);
-            const page = pageMatch ? pageMatch[1] : '0';
-            timelineImg.src = `/timeline_image?page=${page}&t=${Date.now()}`;
+// Timeline WebSocket — event-driven push (replaces polling)
+let timelineWs = null;
+let timelineWsPage = 0;
+function connectTimelineWs() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline`);
+    timelineWs.binaryType = 'arraybuffer';
+    timelineWs.onmessage = (e) => {
+        if (typeof e.data === 'string') return; // skip text messages
+        const blob = new Blob([e.data], {type: 'image/jpeg'});
+        const url = URL.createObjectURL(blob);
+        const img = document.getElementById('timeline-slide');
+        if (img) {
+            if (img._blobUrl) URL.revokeObjectURL(img._blobUrl);
+            img._blobUrl = url;
+            img.src = url;
         }
-    }, 1000);
+    };
+    timelineWs.onclose = () => {
+        timelineWs = null;
+        setTimeout(connectTimelineWs, 2000);
+    };
+    timelineWs.onerror = () => {}; // onclose will handle reconnect
+}
+function startTimelineRefresh() { connectTimelineWs(); }
+// Send page number to server when user navigates timeline
+function timelineWsSendPage(page) {
+    timelineWsPage = page;
+    if (timelineWs && timelineWs.readyState === WebSocket.OPEN) {
+        timelineWs.send(String(page));
+    }
 }
 
 // Fetch health data (infrastructure status) - called periodically
@@ -1003,31 +1020,51 @@ function updateCameraImages() {
     });
 }
 
-// Start continuous live feed updates for all camera feeds
-// Only runs when cameras tab is visible to avoid server overload
-let liveFeedInterval = null;
+// Camera WebSocket live feeds — only active when Cameras tab is visible
+let cameraWsConnections = {}; // { cameraId: WebSocket }
 function startLiveFeedUpdates() {
-    if (liveFeedInterval) return; // Already running
+    openCameraWebSockets();
+}
 
-    liveFeedInterval = setInterval(() => {
-        // Only update when cameras tab is active
-        const camerasTab = document.getElementById('tab-cameras');
-        if (!camerasTab || !camerasTab.classList.contains('active')) return;
+function openCameraWebSockets() {
+    const camerasTab = document.getElementById('tab-cameras');
+    if (!camerasTab || !camerasTab.classList.contains('active')) return;
 
-        document.querySelectorAll('.camera-live-feed').forEach(img => {
-            const cameraId = img.getAttribute('data-camera-id');
-            if (cameraId && cameraData[cameraId] && cameraData[cameraId].connected) {
-                img.src = `/api/camera/${cameraId}/snapshot?t=${Date.now()}`;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    document.querySelectorAll('.camera-live-feed').forEach(img => {
+        const cameraId = img.getAttribute('data-camera-id');
+        if (!cameraId || cameraWsConnections[cameraId]) return;
+        if (cameraData[cameraId] && !cameraData[cameraId].connected) return;
+
+        const ws = new WebSocket(`${proto}//${location.host}/ws/camera/${cameraId}`);
+        ws.binaryType = 'arraybuffer';
+        ws.onmessage = (e) => {
+            if (typeof e.data === 'string') return;
+            const blob = new Blob([e.data], {type: 'image/jpeg'});
+            const url = URL.createObjectURL(blob);
+            if (img._blobUrl) URL.revokeObjectURL(img._blobUrl);
+            img._blobUrl = url;
+            img.src = url;
+        };
+        ws.onclose = () => {
+            delete cameraWsConnections[cameraId];
+            // Auto-reconnect if tab is still active
+            const tab = document.getElementById('tab-cameras');
+            if (tab && tab.classList.contains('active')) {
+                setTimeout(() => openCameraWebSockets(), 2000);
             }
-        });
-    }, 1000); // Update every 1s when cameras tab is active
+        };
+        ws.onerror = () => {};
+        cameraWsConnections[cameraId] = ws;
+    });
 }
 
 function stopLiveFeedUpdates() {
-    if (liveFeedInterval) {
-        clearInterval(liveFeedInterval);
-        liveFeedInterval = null;
-    }
+    Object.keys(cameraWsConnections).forEach(id => {
+        const ws = cameraWsConnections[id];
+        if (ws && ws.readyState <= WebSocket.OPEN) ws.close();
+    });
+    cameraWsConnections = {};
 }
 
 // Start live feed updates when cameras are loaded

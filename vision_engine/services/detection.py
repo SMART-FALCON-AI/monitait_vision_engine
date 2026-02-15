@@ -144,6 +144,10 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None):
         pipe.execute()
 
         cfg.timeline_frame_counter += 1
+        try:
+            redis_client.publish("ws:timeline_update", str(camera_id))
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Timeline add frame error: {e}", exc_info=True)
 

@@ -83,6 +83,40 @@ function initAudioContext() {
     }
 }
 
+// Auto-unlock audio on page load — retry until browser allows it.
+// For guaranteed zero-interaction audio, add the site to Chrome's
+// autoplay allowlist: chrome://settings/content/sound → "Allowed to play sound"
+// Or launch Chrome with: --autoplay-policy=no-user-gesture-required
+(function() {
+    let _unlocked = false;
+    function tryUnlock() {
+        initAudioContext();
+        if ('speechSynthesis' in window) {
+            const silent = new SpeechSynthesisUtterance('');
+            silent.volume = 0;
+            window.speechSynthesis.speak(silent);
+        }
+        if (audioContext && audioContext.state === 'running') {
+            _unlocked = true;
+            clearInterval(_audioRetry);
+            console.log('[Audio] Unlocked automatically');
+        }
+    }
+    // Try on load, then retry every 2s until browser allows it
+    const _audioRetry = setInterval(tryUnlock, 2000);
+    window.addEventListener('load', tryUnlock);
+    // Also unlock on any interaction as fallback
+    function onGesture() {
+        tryUnlock();
+        if (_unlocked) {
+            document.removeEventListener('click', onGesture, true);
+            document.removeEventListener('touchstart', onGesture, true);
+        }
+    }
+    document.addEventListener('click', onGesture, true);
+    document.addEventListener('touchstart', onGesture, true);
+})();
+
 // Toggle global bounding boxes
 function toggleGlobalBbox() {
     const bboxEl = document.getElementById('global-show-bbox');
@@ -675,8 +709,13 @@ document.addEventListener('DOMContentLoaded', function() {
     function loadPage(page) {
         if (page < 0 || page >= totalPages) return;
         currentPage = page;
-        const timestamp = new Date().getTime();
-        slide.src = `/timeline_image?page=${page}&t=${timestamp}`;
+        // Use WebSocket if available, else fall back to HTTP
+        if (typeof timelineWsSendPage === 'function') {
+            timelineWsSendPage(page);
+        } else {
+            const timestamp = new Date().getTime();
+            slide.src = `/timeline_image?page=${page}&t=${timestamp}`;
+        }
         updateCounter();
         panzoom.reset();
     }
@@ -686,8 +725,13 @@ document.addEventListener('DOMContentLoaded', function() {
         if (autoUpdate) {
             await updatePageCount();
             currentPage = 0; // Always show latest page
-            const timestamp = new Date().getTime();
-            slide.src = `/timeline_image?page=0&t=${timestamp}`;
+            // WebSocket handles auto-push for page 0; send page just in case
+            if (typeof timelineWsSendPage === 'function') {
+                timelineWsSendPage(0);
+            } else {
+                const timestamp = new Date().getTime();
+                slide.src = `/timeline_image?page=0&t=${timestamp}`;
+            }
             updateCounter();
         }
     }
