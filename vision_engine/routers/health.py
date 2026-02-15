@@ -228,8 +228,10 @@ async def get_system_metrics(request: Request):
         mem_available_gb = mem.available / (1024**3)
         mem_percent = mem.percent
 
-        # Disk usage (root partition)
-        disk = psutil.disk_usage('/')
+        # Disk usage — use the data volume mount (reflects real host disk)
+        import os
+        _disk_path = '/code/raw_images' if os.path.exists('/code/raw_images') else '/'
+        disk = psutil.disk_usage(_disk_path)
         disk_total_gb = disk.total / (1024**3)
         disk_used_gb = disk.used / (1024**3)
         disk_free_gb = disk.free / (1024**3)
