@@ -2441,6 +2441,14 @@ async function pollLatestDetections() {
     }
 }
 
+// Color based on usage percentage: green → yellow → red
+function usageColor(pct) {
+    if (pct < 50) return '#4ade80';   // green
+    if (pct < 75) return '#facc15';   // yellow
+    if (pct < 90) return '#fb923c';   // orange
+    return '#f87171';                  // red
+}
+
 // Fetch and update system metrics
 async function fetchSystemMetrics() {
     try {
@@ -2452,6 +2460,7 @@ async function fetchSystemMetrics() {
         const cpuCoresEl = document.getElementById('system-cpu-cores');
         if (cpuValueEl && data.cpu) {
             cpuValueEl.textContent = `${data.cpu.percent}%`;
+            cpuValueEl.style.color = usageColor(data.cpu.percent);
             if (cpuCoresEl) {
                 cpuCoresEl.textContent = `${data.cpu.cores_logical} cores`;
             }
@@ -2462,6 +2471,7 @@ async function fetchSystemMetrics() {
         const ramDetailsEl = document.getElementById('system-ram-details');
         if (ramValueEl && data.memory) {
             ramValueEl.textContent = `${data.memory.percent}%`;
+            ramValueEl.style.color = usageColor(data.memory.percent);
             if (ramDetailsEl) {
                 ramDetailsEl.textContent = `${data.memory.used_gb}GB / ${data.memory.total_gb}GB`;
             }
@@ -2472,6 +2482,7 @@ async function fetchSystemMetrics() {
         const diskDetailsEl = document.getElementById('system-disk-details');
         if (diskValueEl && data.disk) {
             diskValueEl.textContent = `${data.disk.percent}%`;
+            diskValueEl.style.color = usageColor(data.disk.percent);
             if (diskDetailsEl) {
                 diskDetailsEl.textContent = `${data.disk.free_gb}GB free`;
             }
