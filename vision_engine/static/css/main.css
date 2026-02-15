@@ -683,12 +683,12 @@ body {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 14px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
-    background: rgba(100, 160, 255, 0.35);
+    background: rgba(100, 160, 255, 0.3);
     color: #7ab8ff;
-    font-size: 9px;
+    font-size: 7px;
     font-weight: bold;
     cursor: help;
     flex-shrink: 0;
