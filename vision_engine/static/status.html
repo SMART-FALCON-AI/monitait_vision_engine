@@ -7,7 +7,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>Monitait Vision Engine v3.0.0</title>
+        <title>Monitait Vision Engine v3.2.0</title>
         <link rel="stylesheet" href="/static/css/main.css">
     </head>
     <body>
@@ -61,99 +61,77 @@
                 <div style="display: grid; grid-template-columns: 10% 90%; gap: 8px;">
                     <!-- Left Column: Compact Stats Grid (10% width) -->
                     <div style="display: flex; flex-direction: column; gap: 5px;">
-                        <!-- Shipment & Status Row -->
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px;">
-                            <!-- Shipment -->
-                            <div class="status-box" style="padding: 5px;">
-                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;" data-i18n="shipment">Shipment</div>
-                                <div id="shipment-value" style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600;" onclick="editShipmentId()">
-                                    <span id="shipment-text">-</span>
-                                    <span style="font-size: 9px; opacity: 0.6;">✏️</span>
-                                </div>
-                                <input type="text" id="shipment-input" style="display: none; padding: 3px; border: 2px solid var(--primary-color); border-radius: 3px; font-weight: bold; font-size: 10px; width: 100%;" placeholder="Shipment ID">
-                                <div style="display: none; gap: 3px; margin-top: 3px;" id="shipment-buttons">
-                                    <button onclick="saveShipmentId()" style="padding: 2px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✓</button>
-                                    <button onclick="cancelEditShipment()" style="padding: 2px 8px; background: var(--text-secondary); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✗</button>
-                                </div>
-                                <div style="font-size: 8px; color: var(--text-secondary); margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border-color);" id="device-status">Checking...</div>
-                            </div>
-
-                            <!-- Connection Status -->
-                            <div class="status-box" style="padding: 5px;">
-                                <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;" data-i18n="status">Status</div>
-                                <div class="data-source" id="dataSource" style="font-size: 9px; padding: 2px; background: var(--light-bg); border-radius: 3px; margin-bottom: 3px;">Loading...</div>
-                                <div style="font-size: 8px; color: var(--text-secondary);">
-                                    Last: <strong id="last-saved-time">Never</strong>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- System Resources -->
+                        <!-- Shipment -->
                         <div class="status-box" style="padding: 5px;">
-                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 3px;">💻 System</div>
-                            <div style="font-size: 9px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
-                                <div>CPU: <strong id="system-cpu-value" style="color: var(--primary-color);">...</strong><br><span id="system-cpu-cores" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
-                                <div>RAM: <strong id="system-ram-value" style="color: var(--primary-color);">...</strong><br><span id="system-ram-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
-                                <div>Disk: <strong id="system-disk-value" style="color: var(--primary-color);">...</strong><br><span id="system-disk-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;" data-i18n="shipment">Shipment <span class="info-tooltip-sm">i<span class="info-tooltip-text">Current shipment/batch ID. Click to edit.</span></span></div>
+                            <div id="shipment-value" style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600;" onclick="editShipmentId()">
+                                <span id="shipment-text">-</span>
+                                <span style="font-size: 9px; opacity: 0.6;">✏️</span>
                             </div>
+                            <input type="text" id="shipment-input" style="display: none; padding: 3px; border: 2px solid var(--primary-color); border-radius: 3px; font-weight: bold; font-size: 10px; width: 100%;" placeholder="Shipment ID">
+                            <div style="display: none; gap: 3px; margin-top: 3px;" id="shipment-buttons">
+                                <button onclick="saveShipmentId()" style="padding: 2px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✓</button>
+                                <button onclick="cancelEditShipment()" style="padding: 2px 8px; background: var(--text-secondary); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✗</button>
+                            </div>
+                            <div style="font-size: 8px; color: var(--text-secondary); margin-top: 3px; padding-top: 3px; border-top: 1px solid var(--border-color);" id="device-status">Checking...</div>
                         </div>
 
                         <!-- Serial Data Grid (3 columns) -->
                         <div class="status-box" style="padding: 5px;">
                             <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px;">
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="encoder">Encoder</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="encoder">Encoder <span class="info-tooltip-sm">i<span class="info-tooltip-text">Rotary encoder position count. Tracks conveyor movement.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 700; color: var(--text-primary);" id="encoder-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="speed">Speed</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="speed">Speed <span class="info-tooltip-sm">i<span class="info-tooltip-text">Production speed in pulses per minute (PPM).</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="speed-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);">Pulses/s</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);">Pulses/s <span class="info-tooltip-sm">i<span class="info-tooltip-text">Raw encoder pulses per second.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="pps-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="movement">Movement</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="movement">Movement <span class="info-tooltip-sm">i<span class="info-tooltip-text">Whether the conveyor belt is currently moving.</span></span></div>
                                     <div style="display: flex; align-items: center; gap: 2px;">
                                         <span class="movement-indicator" id="movement-indicator" style="width: 7px; height: 7px;"></span>
                                         <span style="font-size: 9px; font-weight: 600;" id="movement-value">-</span>
                                     </div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_queue">Ej Queue</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_queue">Ej Queue <span class="info-tooltip-sm">i<span class="info-tooltip-text">Number of items waiting to be ejected.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-queue">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_active">Ej Active</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_active">Ej Active <span class="info-tooltip-sm">i<span class="info-tooltip-text">Whether the ejector is currently firing.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-running">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_enable">Ej Enable</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_enable">Ej Enable <span class="info-tooltip-sm">i<span class="info-tooltip-text">Whether ejection is enabled. Disable to inspect without ejecting.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_offset">Ej Offset</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ej_offset">Ej Offset <span class="info-tooltip-sm">i<span class="info-tooltip-text">Encoder count delay between camera and ejector position.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="ejector-offset">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ok">OK</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ok">OK <span class="info-tooltip-sm">i<span class="info-tooltip-text">Total count of items that passed inspection.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--success-color);" id="ok-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ng">NG</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="ng">NG <span class="info-tooltip-sm">i<span class="info-tooltip-text">Total count of rejected (No Good) items.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--danger-color);" id="ng-counter">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="downtime">Downtime</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="downtime">Downtime <span class="info-tooltip-sm">i<span class="info-tooltip-text">Seconds since the conveyor last stopped moving.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="downtime-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="analog">Analog</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="analog">Analog <span class="info-tooltip-sm">i<span class="info-tooltip-text">Current analog sensor reading from the hardware.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="analog-value">-</div>
                                 </div>
                                 <div>
-                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="power">Power</div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);" data-i18n="power">Power <span class="info-tooltip-sm">i<span class="info-tooltip-text">Power supply voltage reading from the hardware.</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600;" id="power-value">-</div>
                                 </div>
                             </div>
@@ -162,28 +140,50 @@
                         <!-- Live Inference Stats -->
                         <div class="status-box" style="padding: 5px;">
                             <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
-                                <strong>Capture:</strong> <span id="inference-state-name" style="color: var(--primary-color); font-weight: 700;">...</span>
+                                <strong>Capture <span class="info-tooltip-sm">i<span class="info-tooltip-text">Current capture mode and trigger configuration.</span></span>:</strong> <span id="inference-state-name" style="color: var(--primary-color); font-weight: 700;">...</span>
                                 <span id="capture-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                             </div>
                             <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
-                                <strong>Inference:</strong>
+                                <strong>Inference <span class="info-tooltip-sm">i<span class="info-tooltip-text">AI model used for object detection (local YOLO or remote Gradio).</span></span>:</strong>
                                 <strong id="inference-service-name" style="color: var(--primary-color);">...</strong>
                                 <span id="inference-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                                 <span id="gradio-restart-warning" style="display: none; color: var(--danger-color); font-weight: bold;"> ⚠️</span>
                             </div>
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px;">
-                                <div>Latency: <strong id="inference-time-value">...</strong></div>
-                                <div>Interval: <strong id="frame-interval-value">...</strong></div>
-                                <div>Inf: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
-                                <div>Cap: <strong id="capture-fps-value">...</strong>
+                                <div>Latency <span class="info-tooltip-sm">i<span class="info-tooltip-text">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value">...</strong></div>
+                                <div>Interval <span class="info-tooltip-sm">i<span class="info-tooltip-text">Time between consecutive inference frames (ms).</span></span>: <strong id="frame-interval-value">...</strong></div>
+                                <div>Inf <span class="info-tooltip-sm">i<span class="info-tooltip-text">Inference frames per second — how fast the model processes.</span></span>: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
+                                <div>Cap <span class="info-tooltip-sm">i<span class="info-tooltip-text">Capture frames per second — how fast the camera captures.</span></span>: <strong id="capture-fps-value">...</strong>
                                     <span id="capture-heartbeat" style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--success-color); margin-left: 2px; opacity: 0;"></span>
                                 </div>
                             </div>
                             <!-- Queue Status Indicator -->
-                            <div id="queue-status-bar" style="margin-top: 6px; padding: 4px 8px; border-radius: 4px; font-size: 9px; font-weight: 600; display: none; align-items: center; gap: 6px;">
+                            <div id="queue-status-bar" style="margin-top: 6px; padding: 4px 8px; border-radius: 4px; font-size: 9px; font-weight: 600; display: none; flex-wrap: wrap; align-items: center; gap: 4px;">
                                 <span id="queue-icon">⚠️</span>
-                                <span id="queue-message">Queue building up</span>
-                                <span id="queue-ratio" style="margin-left: auto; font-size: 8px;"></span>
+                                <span id="queue-message" style="flex: 1; min-width: 0;">Queue building up</span>
+                            </div>
+                            <!-- Queue Usage Charts -->
+                            <div style="margin-top: 6px; display: flex; gap: 8px; font-size: 8px; color: var(--text-secondary);">
+                                <span style="flex: 1;">Disk Queue <span class="info-tooltip-sm">i<span class="info-tooltip-text">Frames waiting to be saved to disk. High values mean disk I/O is slow.</span></span></span>
+                                <span style="flex: 1;">Inference Queue <span class="info-tooltip-sm">i<span class="info-tooltip-text">Frames waiting for AI analysis. Hot (red) = urgent for ejector, Cold (blue) = historical.</span></span></span>
+                            </div>
+                            <div style="display: flex; gap: 8px;">
+                                <div style="flex: 1;">
+                                    <canvas id="disk-queue-chart" height="50" style="width: 100%; border-radius: 4px; background: rgba(0,0,0,0.2);"></canvas>
+                                </div>
+                                <div style="flex: 1;">
+                                    <canvas id="inf-queue-chart" height="50" style="width: 100%; border-radius: 4px; background: rgba(0,0,0,0.2);"></canvas>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- System Resources -->
+                        <div class="status-box" style="padding: 5px;">
+                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 3px;">💻 System <span class="info-tooltip-sm">i<span class="info-tooltip-text">Live server resource usage.</span></span></div>
+                            <div style="font-size: 9px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
+                                <div>CPU <span class="info-tooltip-sm">i<span class="info-tooltip-text">CPU usage percentage and core count.</span></span>: <strong id="system-cpu-value" style="color: var(--primary-color);">...</strong><br><span id="system-cpu-cores" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div>RAM <span class="info-tooltip-sm">i<span class="info-tooltip-text">Memory usage percentage and total available.</span></span>: <strong id="system-ram-value" style="color: var(--primary-color);">...</strong><br><span id="system-ram-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
+                                <div>Disk <span class="info-tooltip-sm">i<span class="info-tooltip-text">Disk usage percentage and total capacity.</span></span>: <strong id="system-disk-value" style="color: var(--primary-color);">...</strong><br><span id="system-disk-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
                             </div>
                         </div>
 
@@ -444,7 +444,7 @@
                                 <!-- Phase 1 (default) - all cameras -->
                                 <div class="phase-row" id="phase-row-0" style="display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(51, 65, 85, 0.4); border-radius: 4px;">
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Light Mode</label>
+                                        <label style="font-size: 10px; color: #666;">Light Mode <span class="info-tooltip">i<span class="info-tooltip-text">Which lights to turn on/off during this capture phase.</span></span></label>
                                         <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
                                             <option value="U_ON_B_OFF" selected>U On, B Off</option>
                                             <option value="U_OFF_B_ON">U Off, B On</option>
@@ -453,19 +453,19 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Delay (s)</label>
+                                        <label style="font-size: 10px; color: #666;">Delay (s) <span class="info-tooltip">i<span class="info-tooltip-text">Wait time in seconds after setting lights, before capturing.</span></span></label>
                                         <input type="number" class="control-input phase-delay" value="0.1" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Cameras</label>
+                                        <label style="font-size: 10px; color: #666;">Cameras <span class="info-tooltip">i<span class="info-tooltip-text">Comma-separated camera IDs to capture in this phase.</span></span></label>
                                         <input type="text" class="control-input phase-cameras" value="1,2,3,4" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Steps (-1=loop)</label>
+                                        <label style="font-size: 10px; color: #666;">Steps (-1=loop) <span class="info-tooltip">i<span class="info-tooltip-text">Capture every N encoder steps. -1 = continuous capture loop.</span></span></label>
                                         <input type="number" class="control-input phase-steps" value="1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Analog (-1=off)</label>
+                                        <label style="font-size: 10px; color: #666;">Analog (-1=off) <span class="info-tooltip">i<span class="info-tooltip-text">Analog sensor threshold. -1 = disabled. N = trigger when value >= N.</span></span></label>
                                         <input type="number" class="control-input phase-analog" value="-1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <button class="camera-btn camera-btn-danger" onclick="removePhase(0)" style="padding: 4px 8px; font-size: 11px;">✕</button>
@@ -1269,6 +1269,9 @@
             </div>
             <!-- End Advanced Tab -->
         </div>
+
+        <!-- Global tooltip (lives outside all stacking contexts so it's never clipped) -->
+        <div id="global-tooltip" style="display:none; position:fixed; z-index:999999; background:#1a2332; color:#e2e8f0; border:1px solid rgba(100,160,255,0.4); border-radius:6px; padding:8px 12px; font-size:11px; line-height:1.4; max-width:260px; pointer-events:none; box-shadow:0 4px 16px rgba(0,0,0,0.4);"></div>
 
         <script src="/static/js/audio.js"></script>
         <script src="/static/js/app-core.js"></script>

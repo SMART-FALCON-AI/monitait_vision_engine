@@ -41,6 +41,26 @@ prepared_query_data = []
 # HTTP session for inference requests
 session = requests.Session()
 
+# Reusable process pool for DataMatrix decoding (avoids fork overhead per call)
+_dm_process_pool = None
+
+def _get_dm_pool():
+    """Lazy-init a reusable ProcessPoolExecutor for DataMatrix decoding."""
+    global _dm_process_pool
+    if _dm_process_pool is None:
+        _dm_process_pool = ProcessPoolExecutor(max_workers=4)
+    return _dm_process_pool
+
+# Reusable Redis connection for timeline + timing (avoids new connection per call)
+_timeline_redis = None
+
+def _get_timeline_redis():
+    """Lazy-init a reusable Redis connection for timeline and timing writes."""
+    global _timeline_redis
+    if _timeline_redis is None:
+        _timeline_redis = Redis("redis", 6379, db=0)
+    return _timeline_redis
+
 
 def init(watcher, pipeline_manager, app, query_data):
     """Initialize detection module with runtime dependencies.
@@ -73,8 +93,13 @@ def add_detection_event(event_type: str, details: dict = None):
     except Exception as e:
         logger.error(f"Error adding detection event to Redis: {e}")
 
-def add_frame_to_timeline(camera_id, frame):
-    """Add a frame thumbnail to the timeline buffer (stored in Redis for cross-process access)."""
+def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None):
+    """Add a frame thumbnail to the timeline buffer (stored in Redis for cross-process access).
+
+    Args:
+        capture_t: Capture timestamp. If provided, used for timeline ordering instead of current time.
+        detections: List of detection dicts (optional). Stored alongside frame for bbox rendering.
+    """
     if frame is None:
         logger.warning("add_frame_to_timeline: frame is None")
         return
@@ -89,53 +114,28 @@ def add_frame_to_timeline(camera_id, frame):
             base_buffer_size = 100
             quality = 85
 
-        # Dynamically adjust max buffer size based on quality to manage memory
-        # Higher quality = lower max buffer, lower quality = higher max buffer
-        if quality >= 95:
-            # Very high quality (95-100%): cap at 100 frames to save memory
-            max_buffer_size = 100
-        elif quality >= 85:
-            # High quality (85-94%): cap at 300 frames
-            max_buffer_size = 300
-        elif quality >= 70:
-            # Medium quality (70-84%): cap at 500 frames (baseline)
-            max_buffer_size = 500
+        buffer_size = base_buffer_size
+
+        # Resize to fixed thumbnail height (preserving aspect ratio)
+        # Height is chosen to be readable on a QC monitor: 240px
+        h, w = frame.shape[:2]
+        thumb_h = 240
+        if h > thumb_h:
+            scale = thumb_h / h
+            image_to_encode = cv2.resize(frame, (int(w * scale), thumb_h))
         else:
-            # Low quality (<70%): allow larger buffer (1000 frames)
-            max_buffer_size = 1000
-
-        # Use the smaller of user's configured size or quality-based limit
-        buffer_size = min(base_buffer_size, max_buffer_size)
-
-        # Scale image based on quality percentage
-        # 100% = original size, lower % = smaller thumbnail
-        if quality == 100:
-            # Keep original full-resolution image
             image_to_encode = frame
-        else:
-            # Calculate scale factor based on quality percentage
-            # At 85%, use standard thumbnail size (120x90)
-            # Scale proportionally for other quality levels
-            scale_factor = quality / 85.0  # 85% is baseline for standard thumbnail
-            target_width = int(cfg.TIMELINE_THUMBNAIL_WIDTH * scale_factor)
-            target_height = int(cfg.TIMELINE_THUMBNAIL_HEIGHT * scale_factor)
 
-            # Ensure minimum size of at least the standard thumbnail
-            target_width = max(target_width, cfg.TIMELINE_THUMBNAIL_WIDTH)
-            target_height = max(target_height, cfg.TIMELINE_THUMBNAIL_HEIGHT)
+        # Quality slider controls JPEG compression only (lower = smaller/faster)
+        jpeg_q = max(30, min(95, quality))
+        _, jpeg = cv2.imencode('.jpg', image_to_encode, [cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
 
-            # Resize to calculated dimensions
-            image_to_encode = cv2.resize(frame, (target_width, target_height))
-
-        # Encode as JPEG bytes with configured quality
-        _, jpeg = cv2.imencode('.jpg', image_to_encode, [cv2.IMWRITE_JPEG_QUALITY, quality])
-
-        # Create Redis connection (each process needs its own connection)
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = _get_timeline_redis()
 
         # Store in Redis list (FIFO with max length)
         redis_key = f"{cfg.TIMELINE_REDIS_PREFIX}{camera_id}"
-        frame_data = pickle.dumps((time.time(), jpeg.tobytes()))
+        ts = capture_t if capture_t else time.time()
+        frame_data = pickle.dumps((ts, jpeg.tobytes(), detections))
 
         # Use Redis pipeline for atomic operations
         pipe = redis_client.pipeline()
@@ -144,10 +144,6 @@ def add_frame_to_timeline(camera_id, frame):
         pipe.execute()
 
         cfg.timeline_frame_counter += 1
-        if buffer_size < base_buffer_size:
-            logger.info(f"Timeline: Added frame for camera {camera_id} to Redis (keeping last {buffer_size} frames, capped from {base_buffer_size} due to quality={quality}%)")
-        else:
-            logger.info(f"Timeline: Added frame for camera {camera_id} to Redis (keeping last {buffer_size} frames)")
     except Exception as e:
         logger.error(f"Timeline add frame error: {e}", exc_info=True)
 
@@ -157,13 +153,6 @@ def req_predict(image):
     Returns detections in standardized format with keys: x1, y1, x2, y2, confidence, class_id, name
     """
     start_time = time.time()
-
-    # Track frame-to-frame interval
-    if cfg.last_inference_timestamp > 0:
-        interval = (start_time - cfg.last_inference_timestamp) * 1000  # Convert to ms
-        cfg.frame_intervals.append(interval)
-        if len(cfg.frame_intervals) > cfg.max_inference_samples:
-            cfg.frame_intervals.pop(0)
 
     # Check if we're using Gradio API (HuggingFace Space)
     if "hf.space" in cfg.YOLO_INFERENCE_URL or "huggingface" in cfg.YOLO_INFERENCE_URL:
@@ -249,35 +238,8 @@ def req_predict(image):
 
             logger.info(f"Cached {len(normalized_detections)} detections at timestamp {cfg.latest_detections_timestamp}")
 
-            # Add detection event for audio notification
-            if normalized_detections:
-                # Extract detection types for audio
-                detection_names = [d.get('name', 'unknown') for d in normalized_detections]
-                has_datamatrix = any('matrix' in n.lower() or 'dm' in n.lower() for n in detection_names)
-                add_detection_event(
-                    "datamatrix" if has_datamatrix else "object",
-                    {"count": len(normalized_detections), "classes": list(set(detection_names))}
-                )
-
-            # Track inference time and update timestamp
-            elapsed = (time.time() - start_time) * 1000  # Convert to ms
-            cfg.inference_times.append(elapsed)
-            if len(cfg.inference_times) > cfg.max_inference_samples:
-                cfg.inference_times.pop(0)
-            cfg.last_inference_timestamp = time.time()
-
-            # Store timing in Redis for cross-process access
-            try:
-                if _watcher and _watcher.redis_connection:
-                    _watcher.redis_connection.redis_connection.lpush("inference_times", str(elapsed))
-                    _watcher.redis_connection.redis_connection.ltrim("inference_times", 0, cfg.max_inference_samples - 1)
-                    if cfg.last_inference_timestamp > 0:
-                        interval_ms = (time.time() - cfg.last_inference_timestamp) * 1000
-                        _watcher.redis_connection.redis_connection.lpush("frame_intervals", str(interval_ms))
-                        _watcher.redis_connection.redis_connection.ltrim("frame_intervals", 0, cfg.max_inference_samples - 1)
-                    _watcher.redis_connection.redis_connection.set("last_inference_timestamp", str(time.time()))
-            except Exception as e:
-                logger.warning(f"Failed to store timing in Redis: {e}")
+            # Note: detection events and Redis timing are handled by process_frame()
+            # to avoid duplicate writes when called from the inference pipeline.
 
             return json.dumps(normalized_detections)
 
@@ -294,31 +256,7 @@ def req_predict(image):
             response = requests.post(cfg.YOLO_INFERENCE_URL, files={"image": image}, headers=headers, timeout=10)
             response.raise_for_status()
 
-            # Track inference time and update timestamp
-            elapsed = (time.time() - start_time) * 1000  # Convert to ms
-            cfg.inference_times.append(elapsed)
-            if len(cfg.inference_times) > cfg.max_inference_samples:
-                cfg.inference_times.pop(0)
-
-            # Store timing in Redis for cross-process access
-            try:
-                if _watcher and _watcher.redis_connection:
-                    _watcher.redis_connection.redis_connection.lpush("inference_times", str(elapsed))
-                    _watcher.redis_connection.redis_connection.ltrim("inference_times", 0, cfg.max_inference_samples - 1)
-
-                    # Calculate and store frame interval
-                    last_ts_str = _watcher.redis_connection.redis_connection.get("last_inference_timestamp")
-                    if last_ts_str:
-                        last_ts = float(last_ts_str.decode('utf-8'))
-                        interval_ms = (time.time() - last_ts) * 1000
-                        _watcher.redis_connection.redis_connection.lpush("frame_intervals", str(interval_ms))
-                        _watcher.redis_connection.redis_connection.ltrim("frame_intervals", 0, cfg.max_inference_samples - 1)
-
-                    _watcher.redis_connection.redis_connection.set("last_inference_timestamp", str(time.time()))
-            except Exception as e:
-                logger.warning(f"Failed to store timing in Redis: {e}")
-
-            cfg.last_inference_timestamp = time.time()
+            # Note: Redis timing is tracked by process_frame() to avoid duplicate writes
             return response.text  # Return JSON string, not parsed dict
         except requests.exceptions.RequestException as e:
             logger.error(f"YOLO prediction failed: {e}")
@@ -418,20 +356,19 @@ def decode_dm(frame_name, frame, yolo_object, iterator, dm_chars_sizes=[13,19,26
         # Convert to grayscale
         cropped_dm_gray = cv2.cvtColor(cropped_dm, cv2.COLOR_BGR2GRAY)
 
-        # Start decoding
-        with ProcessPoolExecutor(max_workers=4) as process_executor3:
-            futures = [
-                process_executor3.submit(preprocess_and_decode, stage_name, preprocess, cropped_dm_gray, dm_chars_sizes)
-                for stage_name, preprocess in stages
-            ]
-            for future in futures:
-                decoded_dm, processed_image, stage_name = future.result()
-                if decoded_dm:
-
-                    # Optionally save the image for debugging
-                    name_dm = os.path.join("raw_images", f"{frame_name}_{decoded_dm}_{iterator}_{stage_name}_dm.jpg")
-                    cv2.imwrite(name_dm, processed_image)
-                    return decoded_dm
+        # Start decoding (uses shared process pool — no fork overhead per call)
+        pool = _get_dm_pool()
+        futures = [
+            pool.submit(preprocess_and_decode, stage_name, preprocess, cropped_dm_gray, dm_chars_sizes)
+            for stage_name, preprocess in stages
+        ]
+        for future in futures:
+            decoded_dm, processed_image, stage_name = future.result()
+            if decoded_dm:
+                # Optionally save the image for debugging
+                name_dm = os.path.join("raw_images", f"{frame_name}_{decoded_dm}_{iterator}_{stage_name}_dm.jpg")
+                cv2.imwrite(name_dm, processed_image)
+                return decoded_dm
 
         return None
 
@@ -689,22 +626,30 @@ def check_class_counts(yolo_results, confidence_threshold=None):
 
     return all_equal
 
-def process_frame(frame, capture_mode):
+def process_frame(frame, capture_mode, capture_t=None):
     try:
 
-        frame_id , _ = frame
+        frame_id, jpeg_bytes = frame
         frame_path = os.path.join("raw_images", f"{frame_id}.jpg")
 
-        # Wait for file to exist (async disk writes may not have completed yet)
-        for _wait in range(100):  # Up to 1 second
-            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
-                break
-            time.sleep(0.01)
+        if jpeg_bytes is not None:
+            # In-memory path: decode JPEG bytes directly (no disk I/O)
+            img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+            image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            img_bytes = jpeg_bytes  # Already encoded — skip cv2.imencode entirely
+        else:
+            # Fallback: legacy disk path (backward compatibility / retry)
+            for _wait in range(100):  # Up to 1 second
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                    break
+                time.sleep(0.01)
+            image = cv2.imread(frame_path)
+            img_encoded = cv2.imencode('.jpg', image)[1]
+            img_bytes = img_encoded.tobytes()
 
-        image = cv2.imread(frame_path)
-
-        img_encoded = cv2.imencode('.jpg', image)[1]
-        img_bytes = img_encoded.tobytes()
+        if image is None:
+            logger.error(f"Failed to decode image for {frame_id}")
+            return None
 
         # Use pipeline manager if available, otherwise fallback to legacy req_predict
         start_time = time.time()
@@ -722,7 +667,7 @@ def process_frame(frame, capture_mode):
 
         # Track inference timing in Redis (cross-process safe)
         try:
-            redis_client = Redis("redis", 6379, db=0)
+            redis_client = _get_timeline_redis()
             redis_client.lpush("inference_times", str(elapsed_ms))
             redis_client.ltrim("inference_times", 0, 9)  # Keep last 10
 
@@ -810,8 +755,7 @@ def process_frame(frame, capture_mode):
                 inference_time_ms = int(processing_time * 1000)
                 # Get shipment from Redis (works across processes, unlike watcher object)
                 try:
-                    r = Redis("redis", 6379, db=0)
-                    shipment_val = r.get("shipment")
+                    shipment_val = _get_timeline_redis().get("shipment")
                     shipment_str = shipment_val.decode('utf-8') if isinstance(shipment_val, bytes) and shipment_val else "no_shipment"
                 except Exception:
                     shipment_str = "no_shipment"
@@ -825,13 +769,12 @@ def process_frame(frame, capture_mode):
             except Exception as e:
                 logger.error(f"Failed to write inference to DB: {e}")
 
-        # Add frame to timeline regardless of detections (use annotated if available, otherwise original)
+        # Push inferenced frame to timeline with detection data for bbox overlay
         try:
-            camera_id = int(frame_id.split('_')[-1])
-            timeline_img = annotated_image if (yolo_res and len(yolo_res) > 0) else image
-            add_frame_to_timeline(camera_id, timeline_img)
+            cam_id = int(frame_id.rsplit('_', 1)[-1])
+            add_frame_to_timeline(cam_id, image, capture_t=capture_t, detections=yolo_res if yolo_res else None)
         except Exception as e:
-            logger.error(f"Could not add frame to timeline (frame_id={frame_id}): {e}", exc_info=True)
+            logger.debug(f"Timeline push after inference failed: {e}")
 
         frame_data = [frame_id, image, yolo_res, 5]
 
@@ -910,7 +853,7 @@ def most_frequent_string(dms_list):
     counter = Counter(dms_list)
     return counter.most_common(1)[0][0] if counter else None
 
-def process_frame_helper(frame):
+def process_frame_helper(frame, capture_t=None):
     capture_mode = "single"  # or "multiple"
-    return process_frame(frame, capture_mode)
+    return process_frame(frame, capture_mode, capture_t=capture_t)
 

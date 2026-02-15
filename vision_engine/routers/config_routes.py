@@ -431,9 +431,9 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
         # Shipment ID
         if "shipment" in config_data:
             shipment_id = str(config_data["shipment"]).strip() or "no_shipment"
-            # Store in Redis (direct connection - works across processes)
+            # Store in Redis db=3 (must match RedisConnection used by watcher)
             try:
-                r = Redis("redis", 6379, db=0)
+                r = Redis("redis", 6379, db=3)
                 r.set("shipment", shipment_id)
             except Exception as e:
                 logger.warning(f"Failed to set shipment in Redis: {e}")

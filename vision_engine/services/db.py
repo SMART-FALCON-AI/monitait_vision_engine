@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 db_connection_pool = None
 
 # Background write queue — all DB writes go through this to avoid blocking callers
-_db_queue = queue.Queue(maxsize=1000)
+# DB tasks are lightweight metadata (~1KB each); scale with RAM
+import psutil as _psutil
+_ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
+_db_queue = queue.Queue(maxsize=max(500, int(_ram_gb * 100)))
 
 
 def get_db_connection():

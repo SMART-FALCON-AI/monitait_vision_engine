@@ -46,6 +46,8 @@ function updateAudioUI() {
 
 // Fetch model classes from YOLO service
 async function fetchModelClasses() {
+    const btn = document.querySelector('button[onclick="fetchModelClasses()"]');
+    if (btn) { btn.textContent = '⏳ Loading...'; btn.disabled = true; }
     try {
         const resp = await fetch('/api/model_classes');
         const data = await resp.json();
@@ -61,9 +63,13 @@ async function fetchModelClasses() {
             });
             saveAudioSettings();
             updateObjectsList();
+            if (btn) { btn.textContent = `✓ ${data.classes.length} classes`; setTimeout(() => { btn.textContent = 'Fetch Classes'; btn.disabled = false; }, 2000); }
+        } else {
+            if (btn) { btn.textContent = 'No classes found'; setTimeout(() => { btn.textContent = 'Fetch Classes'; btn.disabled = false; }, 2000); }
         }
     } catch (e) {
         console.error('Could not fetch model classes:', e);
+        if (btn) { btn.textContent = '✗ Error'; setTimeout(() => { btn.textContent = 'Fetch Classes'; btn.disabled = false; }, 2000); }
     }
 }
 
@@ -791,7 +797,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             // Note: Quality is stored in timeline_config but not returned by timeline_count API
             // We'll load it from the data file via getData API
-            const configResponse = await fetch('/api/getData');
+            const configResponse = await fetch('/api/data-file');
             const configData = await configResponse.json();
             if (configData.timeline_config) {
                 if (configData.timeline_config.image_quality) {
@@ -964,7 +970,7 @@ async function saveShipmentId() {
             cancelEditShipment();
 
             // Show success message
-            const statusBox = shipmentInput.closest('.status-box-item');
+            const statusBox = shipmentInput.closest('.status-box');
             const successMsg = document.createElement('div');
             successMsg.style.cssText = 'color: var(--success-color); font-size: 12px; margin-top: 4px;';
             successMsg.textContent = '✓ Shipment ID updated';

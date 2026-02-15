@@ -9,6 +9,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+# Force RTSP over TCP to prevent half-grey frames from UDP packet loss
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
 # Camera configuration (from environment)
 IP_CAMERA_USER = os.environ.get("IP_CAMERA_USER", "admin")
 IP_CAMERA_PASS = os.environ.get("IP_CAMERA_PASS", "")
@@ -491,9 +494,17 @@ class CameraBuffer:
                 self.camera.grab()
                 success, frame = self.camera.retrieve(0)
                 if success:
-                    self.frame = frame
-                    self.success = success
-                    failure_count = 0  # Reset counter on successful read
+                    # Reject half-grey frames (incomplete decode)
+                    # Check bottom 25% of frame for uniform grey (128) pixels
+                    h = frame.shape[0]
+                    bottom = frame[h * 3 // 4:, :]
+                    if np.mean(bottom == 128) > 0.9:
+                        success = False
+                        logger.debug("Rejected grey frame (incomplete decode)")
+                    else:
+                        self.frame = frame
+                        self.success = success
+                        failure_count = 0  # Reset counter on successful read
                 else:
                     self.success = success
                     failure_count += 1

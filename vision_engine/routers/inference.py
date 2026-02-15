@@ -108,8 +108,9 @@ async def get_inference_stats(request: Request):
             avg_capture_interval = sum(capture_intervals) / len(capture_intervals)
             capture_fps = 1000.0 / avg_capture_interval if avg_capture_interval > 0 else 0
 
-    # Autoscaler status from app.state
+    # Autoscaler status and system capacity from app.state
     autoscaler = getattr(request.app.state, 'autoscaler', {})
+    system_capacity = getattr(request.app.state, 'system_capacity', {})
 
     return JSONResponse(content={
         "service_type": service_type,
@@ -128,8 +129,9 @@ async def get_inference_stats(request: Request):
         "inference_fps": round(inference_fps, 2),
         # Capture FPS based on camera capture rate
         "capture_fps": round(capture_fps, 2),
-        # Autoscaler status
+        # Autoscaler status + system capacity
         "autoscaler": autoscaler,
+        "system_capacity": system_capacity,
         # Sample counts
         "inference_sample_count": len(use_inference_times),
         "interval_sample_count": len(use_frame_intervals),

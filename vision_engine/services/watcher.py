@@ -14,6 +14,7 @@ import cv2
 import time
 import json
 import os
+import shutil
 import queue
 import numpy as np
 import serial
@@ -41,15 +42,179 @@ _state_manager = None
 _app = None
 
 # Background disk write queue — cv2.imwrite runs here to unblock capture loop
-_disk_queue = queue.Queue(maxsize=2000)
+# Each item ~3MB numpy array; budget 10% of RAM
+import psutil as _psutil
+_total_ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
+_disk_queue = queue.Queue(maxsize=max(200, int(_total_ram_gb * 1024 * 0.10 / 3)))
+
+# Priority inference queue — newest frames first (for ejector), then oldest (for historical)
+#
+# Design: deque acts as a time-ordered buffer. Workers pop from the RIGHT (newest)
+# when hot frames exist (within ejector window), otherwise pop from the LEFT (oldest)
+# for historical data. No frames are dropped — all get processed eventually.
+_EJECTOR_WINDOW_SEC = 5.0   # Frames newer than this are "hot" — processed LIFO (newest first)
+
+class _PriorityInferenceQueue:
+    """Two-tier inference queue: hot frames (LIFO) for ejector, cold frames (FIFO) for history."""
+
+    def __init__(self, maxsize=1000):
+        self.maxsize = maxsize
+        self._deque = collections.deque()    # oldest on left, newest on right
+        self._lock = threading.Lock()
+        self._not_empty = threading.Event()
+        self._not_full = threading.Event()
+        self._not_full.set()
+        self.hot_count = 0   # frames within ejector window (for dashboard)
+        self.cold_count = 0  # frames outside ejector window (for dashboard)
+
+    def put(self, item, timeout=None):
+        """Add frame with timestamp. Blocks if full."""
+        deadline = time.time() + timeout if timeout else None
+        while True:
+            with self._lock:
+                if len(self._deque) < self.maxsize:
+                    item['_enqueue_t'] = time.time()
+                    self._deque.append(item)
+                    self._not_empty.set()
+                    if len(self._deque) >= self.maxsize:
+                        self._not_full.clear()
+                    return
+            if deadline and time.time() >= deadline:
+                raise queue.Full()
+            self._not_full.wait(timeout=0.1)
+
+    def put_nowait(self, item):
+        with self._lock:
+            if len(self._deque) >= self.maxsize:
+                raise queue.Full()
+            item['_enqueue_t'] = time.time()
+            self._deque.append(item)
+            self._not_empty.set()
+            if len(self._deque) >= self.maxsize:
+                self._not_full.clear()
+
+    def get(self, timeout=None):
+        """Get next frame: newest-first if hot frames exist, oldest-first otherwise."""
+        deadline = time.time() + timeout if timeout else None
+        while True:
+            with self._lock:
+                if self._deque:
+                    now = time.time()
+                    # Check if newest frame is hot (within ejector window)
+                    if now - self._deque[-1]['_enqueue_t'] <= _EJECTOR_WINDOW_SEC:
+                        item = self._deque.pop()       # LIFO — newest first for ejector
+                    else:
+                        item = self._deque.popleft()   # FIFO — oldest first for historical
+                    self._not_full.set()
+                    if not self._deque:
+                        self._not_empty.clear()
+                    return item
+            if deadline and time.time() >= deadline:
+                raise queue.Empty()
+            self._not_empty.wait(timeout=0.05)
+
+    def qsize(self):
+        return len(self._deque)
+
+    def stats(self):
+        """Return (hot_count, cold_count) for dashboard."""
+        now = time.time()
+        h = c = 0
+        with self._lock:
+            for item in self._deque:
+                if now - item.get('_enqueue_t', 0) <= _EJECTOR_WINDOW_SEC:
+                    h += 1
+                else:
+                    c += 1
+        self.hot_count = h
+        self.cold_count = c
+        return h, c
+
+import collections
+# Each item ~500KB JPEG; budget 5% of RAM
+_inf_maxsize = max(100, int(_total_ram_gb * 1024 * 0.05 / 0.5))
+_inference_queue = _PriorityInferenceQueue(maxsize=_inf_maxsize)
 _disk_writers_count = 0
 _disk_lock = threading.Lock()
 
+_DISK_MAX_PCT = 75              # Total disk usage cap — keeps 25% free for DB + safety
+_last_disk_ok = True
+_last_disk_check_t = 0
+_raw_root = None                # Resolved once on first write
+
+def _resolve_raw_root(some_path):
+    """Walk up from a write path to find the raw_images root."""
+    global _raw_root
+    if _raw_root:
+        return _raw_root
+    p = some_path
+    while p and os.path.basename(p) != "raw_images":
+        p = os.path.dirname(p)
+    _raw_root = p or "raw_images"
+    return _raw_root
+
+def _sorted_chunks():
+    """Return all hourly chunk dirs across all shipments, oldest first."""
+    root = _raw_root or "raw_images"
+    chunks = []
+    try:
+        for shipment in os.listdir(root):
+            sp = os.path.join(root, shipment)
+            if not os.path.isdir(sp):
+                continue
+            for chunk in os.listdir(sp):
+                cp = os.path.join(sp, chunk)
+                if os.path.isdir(cp) and len(chunk) >= 13 and chunk[4] == '-' and '_' in chunk:
+                    chunks.append((chunk, cp))
+    except OSError:
+        pass
+    chunks.sort(key=lambda x: x[0])
+    return chunks
+
+def _ensure_disk_space(write_dir):
+    """DVR-style ring buffer: if disk > 75%, delete oldest hour chunk. Never stop writing."""
+    global _last_disk_ok, _last_disk_check_t
+    _resolve_raw_root(write_dir)
+
+    now = time.time()
+    if now - _last_disk_check_t < 2 and _last_disk_ok:
+        return
+
+    try:
+        usage = shutil.disk_usage(write_dir)
+        pct = usage.used * 100 // usage.total
+        _last_disk_check_t = now
+    except OSError:
+        return
+
+    if pct <= _DISK_MAX_PCT:
+        _last_disk_ok = True
+        return
+
+    # Over limit — delete oldest chunks until under 75%
+    _last_disk_ok = False
+    current_hour = datetime.now().strftime("%Y-%m-%d_%H")
+    for chunk_name, chunk_path in _sorted_chunks():
+        if chunk_name >= current_hour:
+            break  # Never delete current hour
+        shutil.rmtree(chunk_path, ignore_errors=True)
+        logger.info(f"DVR cleanup: deleted {chunk_path}")
+        try:
+            pct = shutil.disk_usage(write_dir).used * 100 // shutil.disk_usage(write_dir).total
+            if pct <= _DISK_MAX_PCT:
+                _last_disk_ok = True
+                logger.info(f"DVR cleanup done — disk at {pct}%")
+                break
+        except OSError:
+            break
+
 def _disk_writer_loop():
-    """Background thread that saves images to disk without blocking capture."""
+    """Background thread: checks disk space (NVR-style), then writes image."""
     while True:
         try:
             path, frame = _disk_queue.get()
+            # Ensure disk has space before writing (deletes oldest chunks if full)
+            _ensure_disk_space(os.path.dirname(path))
             cv2.imwrite(path, frame)
         except Exception as e:
             logger.error(f"Disk write error: {e}")
@@ -848,11 +1013,15 @@ class ArduinoSocket:
                     try:
                         self.shipment = self.redis_connection.get_redis("shipment")
                         self.shipment = self.shipment.decode('utf-8') if self.shipment else "no_shipment"
-                        os.makedirs("raw_images/" + self.shipment, exist_ok=True)
+                        # Time-chunked subdirectory (NVR approach): raw_images/SHIPMENT/YYYY-MM-DD_HH/
+                        hour_chunk = datetime.now().strftime("%Y-%m-%d_%H")
+                        chunk_dir = os.path.join("raw_images", self.shipment, hour_chunk)
+                        os.makedirs(chunk_dir, exist_ok=True)
                         if self.shipment != self.old_shipment:
                             self.old_shipment = self.shipment
                     except Exception as e:
                         self.shipment = "no_shipment"
+                        hour_chunk = datetime.now().strftime("%Y-%m-%d_%H")
 
                     # Execute capture based on StateManager configuration
                     grabbed_frames = []
@@ -900,26 +1069,37 @@ class ArduinoSocket:
                         # No fallback - StateManager must be properly configured
                         logger.error("StateManager not available or state disabled - no capture performed")
 
-                    # Second loop - queue frames for async disk write (non-blocking)
+                    # Second loop - encode frames in-memory and queue for inference + disk archival
                     for camera_index, grabbed in grabbed_frames:
-                        d_path = f"{self.shipment}/{d}_{camera_index}"
+                        d_path = f"{self.shipment}/{hour_chunk}/{d}_{camera_index}"
                         name = os.path.join("raw_images", f"{d_path}.jpg")
+
+                        # Encode to JPEG in memory (fast ~2-5ms, avoids disk round-trip for inference)
+                        ok, encoded = cv2.imencode('.jpg', grabbed)
+                        jpeg_bytes = encoded.tobytes() if ok else None
+
+                        # Queue raw numpy for async disk archival (non-blocking, drop if full)
                         try:
                             _disk_queue.put_nowait((name, grabbed))
                         except queue.Full:
-                            logger.warning("Disk write queue full — writing synchronously")
-                            cv2.imwrite(name, grabbed)
-                        frames.append([d_path, None])
+                            logger.warning("Disk write queue full — dropping disk write (inference continues)")
+
+                        # Carry JPEG bytes alongside path for in-memory inference
+                        frames.append([d_path, jpeg_bytes])
 
                     if (capture_timestamp - self.last_capture_ts > cfg.time_between_two_package):
                         self.last_capture_ts = capture_timestamp  # Use the same timestamp
-                        # Push the entire list of frames to Redis with encoder value
+                        # Push to priority inference queue (hot=ejector LIFO, cold=historical FIFO)
                         frames_data = {
                             "frames": frames,
                             "encoder": self.encoder_value,
-                            "shipment": self.shipment
+                            "shipment": self.shipment,
+                            "capture_t": capture_timestamp,
                         }
-                        self.redis_connection.update_queue_messages_redis(json.dumps(frames_data), stream_name="frames_queue")
+                        try:
+                            _inference_queue.put(frames_data, timeout=5.0)
+                        except queue.Full:
+                            logger.error("Inference queue full after 5s — dropping frame batch")
             except Exception as e:
                 logger.error(f"Capture error: {e}")
                 # Restart all cameras dynamically
@@ -957,6 +1137,8 @@ class ArduinoSocket:
     def stream_results(self):
         # Target height for stream concatenation (all frames will be resized to this height)
         TARGET_STREAM_HEIGHT = 720
+        # Pre-create green/red separator images once (same height every time)
+        _, _green_img, _red_img = create_dynamic_images(TARGET_STREAM_HEIGHT)
 
         while not self.stop_thread:
             try:
@@ -1060,8 +1242,7 @@ class ArduinoSocket:
                                 new_w = int(orig_w * scale)
                                 stream_frame[1] = cv2.resize(stream_frame[1], (new_w, TARGET_STREAM_HEIGHT), interpolation=cv2.INTER_LINEAR)
 
-                        # Create dynamic green and red images based on target stream height
-                        _, frame_green_image, frame_red_image = create_dynamic_images(TARGET_STREAM_HEIGHT)
+                        frame_green_image, frame_red_image = _green_img, _red_img
 
                         for k in range(len(stream_frame) - 4):
                             if stream_frame[4 + k] is not None:
@@ -1130,14 +1311,18 @@ class ArduinoSocket:
                                 if not os.path.exists(dest_folder):
                                     os.makedirs(dest_folder, exist_ok=True)
 
-                                for file in os.listdir(src_folder):
-                                    if file.startswith(ts) and file.endswith(".jpg"):
-                                        src_path = os.path.join(src_folder, file)
-                                        dest_path = os.path.join(dest_folder, file)
-                                        try:
-                                            os.rename(src_path, dest_path)
-                                        except OSError:
-                                            pass
+                                # Search recursively (files may be in hourly time-chunk subdirs)
+                                for root, dirs, files in os.walk(src_folder):
+                                    if "mismatch" in root:
+                                        continue
+                                    for file in files:
+                                        if file.startswith(ts) and file.endswith(".jpg"):
+                                            src_path = os.path.join(root, file)
+                                            dest_path = os.path.join(dest_folder, file)
+                                            try:
+                                                os.rename(src_path, dest_path)
+                                            except OSError:
+                                                pass
 
                 except Exception as e:
                     logger.error(f"Error on dms_mismatch: {e}")

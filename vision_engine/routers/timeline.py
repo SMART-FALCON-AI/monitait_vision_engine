@@ -137,9 +137,17 @@ def get_timeline_composite(request: Request):
             frames_raw = redis_client.lrange(key, 0, -1)
             if not frames_raw:
                 continue
-            row_frames = []
+            # Unpack all frames (handle both 2-tuple and 3-tuple formats)
+            all_frames = []
             for frame_data in frames_raw:
-                ts, jpeg_bytes = pickle.loads(frame_data)
+                unpacked = pickle.loads(frame_data)
+                ts = unpacked[0]
+                jpeg_bytes = unpacked[1]
+                all_frames.append((ts, jpeg_bytes))
+            # Sort chronologically
+            all_frames.sort(key=lambda x: x[0])
+            row_frames = []
+            for ts, jpeg_bytes in all_frames:
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     if image_rotation == 90:
@@ -232,20 +240,64 @@ async def timeline_image(request: Request, page: int = 0):
         if page < 0 or page >= total_pages:
             page = 0
 
+        # Get bbox rendering config
+        try:
+            show_bbox = tl_config.get('show_bounding_boxes', True)
+            obj_filters = tl_config.get('object_filters', {})
+        except:
+            show_bbox = True
+            obj_filters = {}
+
         # Build one horizontal row per camera for this page
         camera_rows = []
         for cam_id in sorted(camera_frames_raw.keys()):
             frames_raw = camera_frames_raw[cam_id]
-            total = len(frames_raw)
+
+            # Unpack all frames and sort by capture timestamp (chronological order)
+            all_frames = []
+            for frame_data in frames_raw:
+                unpacked = pickle.loads(frame_data)
+                if len(unpacked) == 3:
+                    ts, jpeg_bytes, detections = unpacked
+                else:
+                    ts, jpeg_bytes = unpacked
+                    detections = None
+                all_frames.append((ts, jpeg_bytes, detections))
+            all_frames.sort(key=lambda x: x[0])
+
+            # Paginate after sorting
+            total = len(all_frames)
             end_index = total - (page * frames_per_page)
             start_index = max(0, end_index - frames_per_page)
-            page_slice = frames_raw[start_index:end_index] if end_index > 0 else []
+            page_slice = all_frames[start_index:end_index] if end_index > 0 else []
 
             row_frames = []
-            for frame_data in page_slice:
-                ts, jpeg_bytes = pickle.loads(frame_data)
+            for ts, jpeg_bytes, detections in page_slice:
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
+                    # Draw bounding boxes if enabled and detections exist
+                    if show_bbox and detections:
+                        for det in detections:
+                            try:
+                                name = det.get('name', '')
+                                confidence = det.get('confidence', 0)
+                                of = obj_filters.get(name, {})
+                                if of.get('show') is False:
+                                    continue
+                                if confidence < of.get('min_confidence', 0.01):
+                                    continue
+                                x1 = int(det.get('xmin', det.get('x1', 0)))
+                                y1 = int(det.get('ymin', det.get('y1', 0)))
+                                x2 = int(det.get('xmax', det.get('x2', 0)))
+                                y2 = int(det.get('ymax', det.get('y2', 0)))
+                                cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                                label = f"{name} {confidence:.0%}"
+                                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
+                                cv2.rectangle(thumb, (x1, y1 - lh - 4), (x1 + lw + 4, y1), (0, 255, 0), -1)
+                                cv2.putText(thumb, label, (x1 + 2, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+                            except Exception:
+                                pass
+
                     # Apply configurable rotation (0, 90, 180, 270)
                     if image_rotation == 90:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)

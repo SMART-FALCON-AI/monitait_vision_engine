@@ -173,14 +173,12 @@ function startStatusStream() {
 
     statusEventSource.onerror = function(error) {
         console.log('SSE reconnecting...');
-        dataSource.textContent = 'RECONNECTING';
-        dataSource.className = 'data-source';
+        if (dataSource) { dataSource.textContent = 'RECONNECTING'; dataSource.className = 'data-source'; }
     };
 
     statusEventSource.onopen = function() {
         console.log('SSE connected');
-        dataSource.textContent = 'LIVE';
-        dataSource.className = 'data-source serial';
+        if (dataSource) { dataSource.textContent = 'LIVE'; dataSource.className = 'data-source serial'; }
     };
 }
 
@@ -189,24 +187,15 @@ let timelineRefreshInterval = null;
 function startTimelineRefresh() {
     if (timelineRefreshInterval) clearInterval(timelineRefreshInterval);
     timelineRefreshInterval = setInterval(() => {
-        const timelineImg = document.getElementById('timeline-image');
-        const placeholder = document.getElementById('timeline-placeholder');
+        const timelineImg = document.getElementById('timeline-slide');
         if (timelineImg) {
-            // Add timestamp to force browser to reload
-            const newSrc = '/timeline_image?t=' + Date.now();
-            const testImg = new Image();
-            testImg.onload = () => {
-                timelineImg.src = newSrc;
-                timelineImg.style.display = 'block';
-                if (placeholder) placeholder.style.display = 'none';
-            };
-            testImg.onerror = () => {
-                timelineImg.style.display = 'none';
-                if (placeholder) placeholder.style.display = 'block';
-            };
-            testImg.src = newSrc;
+            // Preserve current page in URL
+            const curSrc = timelineImg.src || '';
+            const pageMatch = curSrc.match(/page=(\d+)/);
+            const page = pageMatch ? pageMatch[1] : '0';
+            timelineImg.src = `/timeline_image?page=${page}&t=${Date.now()}`;
         }
-    }, 2000);
+    }, 1000);
 }
 
 // Fetch health data (infrastructure status) - called periodically
@@ -331,8 +320,10 @@ function fetchConfig() {
             }
             // Store annotation configuration
             if (data.store_annotation) {
-                document.getElementById('store-annotation-enabled-input').value = data.store_annotation.enabled ? 'true' : 'false';
-                document.getElementById('postgres-info').textContent =
+                const saEl = document.getElementById('store-annotation-enabled-input');
+                if (saEl) saEl.value = data.store_annotation.enabled ? 'true' : 'false';
+                const pgEl = document.getElementById('postgres-info');
+                if (pgEl) pgEl.textContent =
                     `PostgreSQL: ${data.store_annotation.postgres_host}:${data.store_annotation.postgres_port}/${data.store_annotation.postgres_db}`;
             }
             // Serial configuration
@@ -680,6 +671,10 @@ function renderCameraCards() {
     });
 }
 
+function tip(text) {
+    return `<span class="info-tooltip">i<span class="info-tooltip-text">${text}</span></span>`;
+}
+
 function createCameraCard(cameraId, camera) {
     const div = document.createElement('div');
     div.className = 'camera-card';
@@ -751,13 +746,12 @@ function createCameraCard(cameraId, camera) {
 
         ${isIPCamera ? `
         <div class="camera-config-section">
-            <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 10px; margin-bottom: 10px; font-size: 13px;">
-                ℹ️ <strong>IP Camera Note:</strong> Exposure, gain, and brightness cannot be controlled via software for RTSP/IP cameras.
-                These settings must be configured through the camera's web interface or manufacturer app.
-            </div>
             <div class="camera-roi-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #333;">
                 <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                    <label style="margin-right: 10px; font-weight: bold;">ROI (Region of Interest)</label>
+                    <label style="margin-right: 10px; font-weight: bold;">IP Camera Settings ${tip('Exposure, gain, and brightness must be configured through the camera\'s web interface.')}</label>
+                </div>
+                <div style="display: flex; align-items: center; margin-bottom: 8px;">
+                    <label style="margin-right: 10px; font-weight: bold;">ROI ${tip('Region of Interest — crop the frame to only process a specific area.')}</label>
                     <input type="checkbox" id="cam-cfg-roi-enabled-${cameraId}" ${config.roi_enabled ? 'checked' : ''} ${!isConnected ? 'disabled' : ''}>
                     <span style="margin-left: 5px; font-size: 11px;">Enable</span>
                 </div>
@@ -794,39 +788,39 @@ function createCameraCard(cameraId, camera) {
         <div class="camera-config-section">
             <div class="camera-config-grid">
                 <div class="camera-config-item">
-                    <label>Exposure</label>
+                    <label>Exposure ${tip('Sensor exposure time. Higher = brighter but more motion blur.')}</label>
                     <input type="number" id="cam-cfg-exposure-${cameraId}" value="${config.exposure || 100}" min="1" max="100000"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
                 <div class="camera-config-item">
-                    <label>Gain</label>
+                    <label>Gain ${tip('Sensor amplification. Higher = brighter but more noise.')}</label>
                     <input type="number" id="cam-cfg-gain-${cameraId}" value="${config.gain || 100}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
                 <div class="camera-config-item">
-                    <label>Brightness</label>
+                    <label>Brightness ${tip('Overall image brightness offset (0-255).')}</label>
                     <input type="number" id="cam-cfg-brightness-${cameraId}" value="${config.brightness || 100}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
                 <div class="camera-config-item">
-                    <label>Contrast</label>
+                    <label>Contrast ${tip('Difference between light and dark areas (0-255).')}</label>
                     <input type="number" id="cam-cfg-contrast-${cameraId}" value="${config.contrast || 0}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
                 <div class="camera-config-item">
-                    <label>Saturation</label>
+                    <label>Saturation ${tip('Color intensity. 0 = grayscale, 255 = vivid colors.')}</label>
                     <input type="number" id="cam-cfg-saturation-${cameraId}" value="${config.saturation || 50}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
                 <div class="camera-config-item">
-                    <label>FPS</label>
+                    <label>FPS ${tip('Frames per second. Higher = smoother but more CPU/bandwidth.')}</label>
                     <input type="number" id="cam-cfg-fps-${cameraId}" value="${config.fps || 30}" min="1" max="120"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
             </div>
             <div class="camera-roi-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #333;">
                 <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                    <label style="margin-right: 10px; font-weight: bold;">ROI</label>
+                    <label style="margin-right: 10px; font-weight: bold;">ROI ${tip('Region of Interest — crop the frame to only process a specific area.')}</label>
                     <input type="checkbox" id="cam-cfg-roi-enabled-${cameraId}" ${config.roi_enabled ? 'checked' : ''} ${!isConnected ? 'disabled' : ''}>
                     <span style="margin-left: 5px; font-size: 11px;">Enable</span>
                 </div>
@@ -1039,6 +1033,31 @@ function stopLiveFeedUpdates() {
 // Start live feed updates when cameras are loaded
 window.addEventListener('load', () => {
     setTimeout(startLiveFeedUpdates, 1000);
+    // Global tooltip — rendered at <body> level, outside all stacking contexts
+    const _gTip = document.getElementById('global-tooltip');
+    document.addEventListener('mouseenter', (e) => {
+        if (!e.target || typeof e.target.closest !== 'function') return;
+        const trigger = e.target.closest('.info-tooltip, .info-tooltip-sm');
+        if (!trigger || !_gTip) return;
+        const src = trigger.querySelector('.info-tooltip-text');
+        if (!src) return;
+        _gTip.textContent = src.textContent;
+        _gTip.style.display = 'block';
+        const rect = trigger.getBoundingClientRect();
+        const tw = _gTip.offsetWidth;
+        const th = _gTip.offsetHeight;
+        let top = rect.top - th - 8;
+        if (top < 4) top = rect.bottom + 8;
+        let left = rect.left + rect.width / 2 - tw / 2;
+        left = Math.max(4, Math.min(left, window.innerWidth - tw - 4));
+        _gTip.style.top = top + 'px';
+        _gTip.style.left = left + 'px';
+    }, true);
+    document.addEventListener('mouseleave', (e) => {
+        if (!e.target || typeof e.target.closest !== 'function') return;
+        const trigger = e.target.closest('.info-tooltip, .info-tooltip-sm');
+        if (trigger && _gTip) _gTip.style.display = 'none';
+    }, true);
 });
 
 // ===== CAMERA CONFIG PERSISTENCE FUNCTIONS =====
@@ -1292,7 +1311,7 @@ function addPhaseRow(idx, lightMode, delay, cameras, steps = 1, analog = -1) {
 
     div.innerHTML = `
         <div>
-            <label style="font-size: 10px; color: #666;">Light Mode</label>
+            <label style="font-size: 10px; color: #666;">Light Mode ${tip('Which lights to turn on/off during this capture phase.')}</label>
             <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
                 <option value="U_ON_B_OFF" ${lightMode === 'U_ON_B_OFF' ? 'selected' : ''}>U On, B Off</option>
                 <option value="U_OFF_B_ON" ${lightMode === 'U_OFF_B_ON' ? 'selected' : ''}>U Off, B On</option>
@@ -1301,19 +1320,19 @@ function addPhaseRow(idx, lightMode, delay, cameras, steps = 1, analog = -1) {
             </select>
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Delay (s)</label>
+            <label style="font-size: 10px; color: #666;">Delay (s) ${tip('Wait time in seconds after setting lights, before capturing.')}</label>
             <input type="number" class="control-input phase-delay" value="${delay}" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Cameras</label>
+            <label style="font-size: 10px; color: #666;">Cameras ${tip('Comma-separated camera IDs to capture in this phase.')}</label>
             <input type="text" class="control-input phase-cameras" value="${camerasStr}" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Steps (-1=loop)</label>
+            <label style="font-size: 10px; color: #666;">Steps (-1=loop) ${tip('Capture every N encoder steps. -1 = continuous capture loop.')}</label>
             <input type="number" class="control-input phase-steps" value="${steps}" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Analog (-1=off)</label>
+            <label style="font-size: 10px; color: #666;">Analog (-1=off) ${tip('Analog sensor threshold. -1 = disabled. N = trigger when value >= N.')}</label>
             <input type="number" class="control-input phase-analog" value="${analog}" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <button class="camera-btn camera-btn-danger" onclick="removePhase('${idx}')" style="padding: 4px 8px; font-size: 11px;">✕</button>
@@ -2176,7 +2195,7 @@ async function fetchInferenceStats() {
     }
 }
 
-// Queue Status Monitor - Shows autoscaler level + worker counts
+// Queue Status Monitor - Shows autoscaler level + worker counts + system capacity
 function updateQueueStatus(data) {
     const queueBar = document.getElementById('queue-status-bar');
     const queueIcon = document.getElementById('queue-icon');
@@ -2186,19 +2205,42 @@ function updateQueueStatus(data) {
     if (!queueBar) return;
 
     const as = data.autoscaler || {};
+    const sc = data.system_capacity || {};
     const diskLvl = as.disk_level || '—';
     const infLvl = as.inf_level || '—';
     const diskW = as.disk_writers || 0;
     const infW = as.inference_workers || 0;
     const diskPct = as.disk_queue_pct || 0;
+    const diskQLen = as.disk_queue_len || 0;
+    const diskQMax = as.disk_queue_max || 2000;
     const infQ = as.inf_queue_len || 0;
+    const infQMax = as.inf_queue_max || 1000;
+    const infHot = as.inf_hot || 0;
+    const infCold = as.inf_cold || 0;
+    const maxDiskW = sc.max_disk_writers || 32;
+    const maxInfW = sc.max_inference_workers || 24;
+    const cpuCores = sc.cpu_physical || '?';
+    const cpuLogical = sc.cpu_logical || '?';
+    const ramGB = sc.ram_total_gb || '?';
 
     // Determine worst level between disk and inference
     const levels = { 'OK': 0, 'WARNING': 1, 'CRITICAL': 2 };
-    const worstScore = Math.max(levels[diskLvl] || 0, levels[infLvl] || 0);
+    let worstScore = Math.max(levels[diskLvl] || 0, levels[infLvl] || 0);
 
-    // Worker info string
-    const workerInfo = `Disk: ${diskW}t (${diskPct}%) | Inf: ${infW}w (q:${infQ})`;
+    // Also check FPS ratio: if inference is significantly slower than capture, flag it
+    const infFps = data.inference ? data.inference.fps : 0;
+    const capFps = data.capture_fps || 0;
+    let fpsWarning = '';
+    if (infFps > 0 && capFps > 0) {
+        const ratio = capFps / infFps;
+        if (ratio > 10) {
+            worstScore = Math.max(worstScore, 2);
+            fpsWarning = ` — Cap/Inf ratio: ${ratio.toFixed(0)}x`;
+        } else if (ratio > 3) {
+            worstScore = Math.max(worstScore, 1);
+            fpsWarning = ` — Cap/Inf ratio: ${ratio.toFixed(1)}x`;
+        }
+    }
 
     queueBar.style.display = 'flex';
 
@@ -2208,14 +2250,16 @@ function updateQueueStatus(data) {
         queueBar.style.border = '1px solid var(--danger-color)';
         queueBar.style.color = 'var(--danger-color)';
         queueIcon.textContent = '🚨';
-        queueMessage.textContent = 'CRITICAL — autoscaling x4';
+        const critReason = fpsWarning ? 'inference too slow' + fpsWarning : (diskPct > 25 ? `disk queue ${diskPct}%` : `${infHot} urgent frames waiting`);
+        queueMessage.textContent = 'CRITICAL — ' + critReason;
     } else if (worstScore >= 1) {
         // WARNING
         queueBar.style.background = 'rgba(251, 191, 36, 0.2)';
         queueBar.style.border = '1px solid var(--warning-color)';
         queueBar.style.color = 'var(--warning-color)';
         queueIcon.textContent = '⚠️';
-        queueMessage.textContent = 'WARNING — autoscaling x2';
+        const warnReason = fpsWarning ? 'inference falling behind' + fpsWarning : (diskPct > 5 ? `disk queue ${diskPct}%` : `${infHot} urgent frames waiting`);
+        queueMessage.textContent = 'WARNING — ' + warnReason;
     } else {
         // OK
         queueBar.style.background = 'rgba(34, 197, 94, 0.2)';
@@ -2225,7 +2269,133 @@ function updateQueueStatus(data) {
         queueMessage.textContent = 'OK — inference keeping up';
     }
 
-    if (queueRatio) queueRatio.textContent = workerInfo;
+    // (Chart counts are drawn directly on the canvas by updateQueueChart / updateInfQueueChart)
+
+    // Update queue usage charts
+    updateQueueChart('disk-queue-chart', _diskQueueHistory, diskQLen, diskQMax, '#3b82f6');
+    updateInfQueueChart('inf-queue-chart', _infHotHistory, _infColdHistory, infHot, infCold, infQMax);
+}
+
+// Queue history buffers for charts (60 data points = ~60 seconds of history)
+const _diskQueueHistory = [];
+const _infHotHistory = [];
+const _infColdHistory = [];
+const _QUEUE_HISTORY_MAX = 60;
+
+function updateQueueChart(canvasId, history, currentValue, maxValue, color) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    // Push new value as percentage
+    const pct = maxValue > 0 ? (currentValue / maxValue) * 100 : 0;
+    history.push(pct);
+    if (history.length > _QUEUE_HISTORY_MAX) history.shift();
+
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width = canvas.offsetWidth * (window.devicePixelRatio || 1);
+    const h = canvas.height = 50 * (window.devicePixelRatio || 1);
+    ctx.clearRect(0, 0, w, h);
+
+    if (history.length < 2) return;
+
+    const stepX = w / (_QUEUE_HISTORY_MAX - 1);
+
+    // Fill area
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    for (let i = 0; i < history.length; i++) {
+        const x = (i + _QUEUE_HISTORY_MAX - history.length) * stepX;
+        const y = h - (history[i] / 100) * h;
+        ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    ctx.fillStyle = color + '33';
+    ctx.fill();
+
+    // Line
+    ctx.beginPath();
+    for (let i = 0; i < history.length; i++) {
+        const x = (i + _QUEUE_HISTORY_MAX - history.length) * stepX;
+        const y = h - (history[i] / 100) * h;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 * (window.devicePixelRatio || 1);
+    ctx.stroke();
+
+    // Current value text (bottom-right)
+    ctx.fillStyle = color;
+    ctx.font = `${9 * (window.devicePixelRatio || 1)}px Inter, sans-serif`;
+    ctx.textAlign = 'right';
+    ctx.fillText(`${currentValue}/${maxValue}`, w - 4, h - 4);
+}
+
+function updateInfQueueChart(canvasId, hotHistory, coldHistory, hotVal, coldVal, maxVal) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    const hotPct = maxVal > 0 ? (hotVal / maxVal) * 100 : 0;
+    const coldPct = maxVal > 0 ? (coldVal / maxVal) * 100 : 0;
+    hotHistory.push(hotPct);
+    coldHistory.push(coldPct);
+    if (hotHistory.length > _QUEUE_HISTORY_MAX) hotHistory.shift();
+    if (coldHistory.length > _QUEUE_HISTORY_MAX) coldHistory.shift();
+
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.width = canvas.offsetWidth * dpr;
+    const h = canvas.height = 50 * dpr;
+    ctx.clearRect(0, 0, w, h);
+
+    if (hotHistory.length < 2) return;
+    const stepX = w / (_QUEUE_HISTORY_MAX - 1);
+    const len = hotHistory.length;
+
+    // Cold area (blue, bottom layer — stacked under hot)
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    for (let i = 0; i < len; i++) {
+        const x = (i + _QUEUE_HISTORY_MAX - len) * stepX;
+        const y = h - ((coldHistory[i] + hotHistory[i]) / 100) * h;
+        ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    ctx.fillStyle = '#3b82f633';
+    ctx.fill();
+
+    // Hot area (red/orange, top layer)
+    ctx.beginPath();
+    ctx.moveTo(0, h);
+    for (let i = 0; i < len; i++) {
+        const x = (i + _QUEUE_HISTORY_MAX - len) * stepX;
+        const y = h - (hotHistory[i] / 100) * h;
+        ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w, h);
+    ctx.closePath();
+    ctx.fillStyle = '#ef444466';
+    ctx.fill();
+
+    // Hot line
+    ctx.beginPath();
+    for (let i = 0; i < len; i++) {
+        const x = (i + _QUEUE_HISTORY_MAX - len) * stepX;
+        const y = h - (hotHistory[i] / 100) * h;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.stroke();
+
+    // Labels (bottom-right)
+    ctx.font = `${9 * dpr}px Inter, sans-serif`;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ef4444';
+    ctx.fillText(`🔥${hotVal}`, w - 4, h - 14 * dpr);
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillText(`❄${coldVal}`, w - 4, h - 4);
 }
 
 // Heartbeat pulse animation
@@ -2353,3 +2523,132 @@ updateAPITypeFields();
 
 // Apply saved language preference
 applyLanguage(currentLang);
+
+// ── Info Tooltips for all configuration fields ──
+(function() {
+    const tooltips = {
+        // Image Processing
+        'parent_objects': 'Objects that must be detected as parents before child objects are processed. Use _root when no parent is needed.',
+        'remove_raw': 'Delete the original raw image file after DataMatrix has been successfully decoded to save disk space.',
+
+        // DataMatrix
+        'valid_dm_sizes': 'Accepted character lengths for DataMatrix codes. Codes with other lengths will be rejected.',
+        'confidence_threshold': 'Minimum confidence score (0-1) for DataMatrix detection. Lower = more detections but more false positives.',
+        'overlap_threshold': 'Maximum allowed overlap (0-1) between detected DataMatrix regions. Used to filter duplicate detections.',
+
+        // Feature Toggles
+        'histogram_feature': 'Analyze color/brightness distribution of captured images for quality metrics.',
+        'save_histogram': 'Save histogram analysis images to disk alongside raw captures.',
+        'class_count_check': 'Verify that all specified classes have equal detection counts per package. Flags NG if counts differ.',
+        'classes_to_check': 'Object classes to include in the equal-count check.',
+        'class_confidence': 'Minimum confidence for detections to be counted in the class count check.',
+        'light_status': 'Verify light state via serial response before capturing. Slower but ensures correct lighting.',
+
+        // Hardware - PWM
+        'upper_pwm': 'PWM duty cycle for the upper light bar. 0 = off, 255 = maximum brightness.',
+        'bottom_pwm': 'PWM duty cycle for the bottom light bar. 0 = off, 255 = maximum brightness.',
+        'warning_led': 'Control the warning LED indicator on the hardware unit.',
+
+        // OK Configuration
+        'ok_counter_adj': 'Manually adjust the OK counter by adding or subtracting a value.',
+        'ok_config': 'Settings for the ejector/marker action when a package passes inspection (OK).',
+
+        // NG Configuration
+        'ng_counter_adj': 'Manually adjust the NG (reject) counter by adding or subtracting a value.',
+        'ng_config': 'Settings for the ejector/marker action when a package fails inspection (NG).',
+
+        // Shared OK/NG fields (matched by label text below)
+        'offset_delay': 'Delay in milliseconds after encoder trigger before activating the ejector.',
+        'duration_pulses': 'How long the ejector stays active, measured in pulses (each pulse = 16 microseconds).',
+        'duration_percent': 'Ejector activation duration as a percentage of the interval between two packages.',
+        'encoder_factor': 'Scaling factor applied to encoder counts for timing calculations.',
+
+        // Counter Service
+        'ejector_enabled': 'Enable or disable the physical ejector mechanism.',
+        'ejector_offset': 'Encoder count delay between detection and ejection. Adjusts for physical distance.',
+        'ejector_duration': 'How long the ejector solenoid stays activated in seconds.',
+        'ejector_poll': 'How frequently the system checks for packages to eject. Lower = more responsive.',
+        'time_between': 'Minimum time gap between two consecutive package captures. Prevents double-captures.',
+        'capture_mode': 'Single = one capture per trigger. Multiple = capture from all cameras per trigger.',
+
+        // Serial Port
+        'serial_port': 'System device path for the serial connection to the hardware controller.',
+        'baud_rate': 'Communication speed for the serial port. Must match the hardware controller setting.',
+        'serial_mode': 'Normal mode uses the new protocol. Legacy mode for older hardware controllers.',
+
+        // Watcher
+        'downtime_threshold': 'Seconds of no encoder movement before the system reports a downtime event.',
+        'external_reset': 'Allow the hardware controller to reset counters via serial command.',
+        'verbose_mode': 'Request detailed configuration readback from the hardware controller.',
+
+        // Timeline
+        'camera_order': 'Display order of camera columns in the timeline view.',
+        'image_rotation': 'Rotate all timeline images by the specified angle.',
+
+        // Redis
+        'redis_host': 'Hostname or IP of the Redis server used for inter-service communication.',
+        'redis_port': 'Port number for the Redis connection (default: 6379).',
+
+        // AI
+        'model_name': 'A friendly name for this AI model configuration.',
+        'provider': 'The AI service provider (Claude, ChatGPT, Gemini, or local Ollama).',
+        'api_key': 'Authentication key for the AI provider API.',
+
+        // Database
+        'profile_name': 'A name to identify this database connection profile.',
+        'host': 'Hostname or IP address of the TimescaleDB/PostgreSQL server.',
+        'port': 'Port number for the database connection (default: 5432).',
+        'database': 'Name of the database to connect to.',
+        'user': 'Username for database authentication.',
+        'password': 'Password for database authentication.',
+
+        // State Management
+        'state_name': 'Unique name for this capture state configuration.',
+        'enabled': 'Whether this state is active and can be selected.'
+    };
+
+    function createTooltipIcon(text) {
+        const span = document.createElement('span');
+        span.className = 'info-tooltip';
+        span.innerHTML = 'i<span class="info-tooltip-text">' + text + '</span>';
+        return span;
+    }
+
+    // Apply tooltips to all .control-label elements with data-i18n
+    document.querySelectorAll('.control-label[data-i18n]').forEach(label => {
+        const key = label.getAttribute('data-i18n');
+        if (tooltips[key]) {
+            label.appendChild(createTooltipIcon(tooltips[key]));
+        }
+    });
+
+    // Apply tooltips to labels by text content (for fields without data-i18n)
+    const textTooltips = {
+        'Image Quality': 'JPEG compression quality for timeline images. Higher = better quality but larger files.',
+        'Rows per Page': 'Number of capture rows shown per page in the timeline view.',
+        'Total Frames Stored': 'Maximum number of frames kept in the timeline history buffer.',
+        'Pipeline Name': 'Unique identifier for this inference pipeline.',
+        'Description': 'Optional description of what this pipeline does.',
+        'Models in Pipeline': 'Select which inference models run in this pipeline, in order.',
+        'Model Name': 'A friendly name to identify this model configuration.',
+        'Inference URL': 'The HTTP endpoint for the inference server (Gradio or YOLO).',
+        'Model Name (for Gradio)': 'The specific model name exposed by the Gradio API.',
+        'Min Confidence': 'Minimum detection confidence (0-1). Lower = more detections, more false positives.',
+        'Type': 'Inference backend type: Gradio (HuggingFace) or YOLO (local).',
+        'Light Mode': 'Which lights to turn on/off during this capture phase.',
+        'Delay (s)': 'Wait time in seconds after setting lights, before capturing.',
+        'Cameras': 'Comma-separated camera IDs to capture in this phase.',
+        'Steps (-1=loop)': 'Capture every N encoder steps. -1 = continuous capture loop.',
+        'Analog (-1=off)': 'Analog sensor threshold. -1 = disabled. N = trigger when value >= N.'
+    };
+    document.querySelectorAll('.control-label, label').forEach(label => {
+        if (label.querySelector('.info-tooltip')) return;
+        const text = label.childNodes[0]?.textContent?.trim() || label.textContent.trim();
+        for (const [match, tipText] of Object.entries(textTooltips)) {
+            if (text.startsWith(match)) {
+                label.appendChild(createTooltipIcon(tipText));
+                break;
+            }
+        }
+    });
+})();

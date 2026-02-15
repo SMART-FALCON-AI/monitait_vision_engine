@@ -3,7 +3,8 @@ import json
 import threading
 import os
 import logging
-from concurrent.futures import ProcessPoolExecutor
+import queue
+import psutil
 from fastapi import FastAPI
 from typing import Optional
 import uvicorn
@@ -36,7 +37,7 @@ from services.camera import (
     IP_CAMERA_USER, IP_CAMERA_PASS, IP_CAMERA_SUBNET,
     IP_CAMERA_BRIGHTNESS, IP_CAMERA_CONTRAST, IP_CAMERA_SATURATION
 )
-from services.watcher import ArduinoSocket, set_state_manager, set_app
+from services.watcher import ArduinoSocket, set_state_manager, set_app, _inference_queue
 from services import detection
 from services.detection import (
     add_detection_event, add_frame_to_timeline,
@@ -57,7 +58,7 @@ pipeline_manager: Optional[PipelineManager] = None
 app = FastAPI(
     title="Counter Service",
     description="Service for counting and tracking packages with camera processing",
-    version="3.0.0"
+    version="3.2.0"
 )
 
 # Mount static files
@@ -503,6 +504,25 @@ app.state.state_manager = state_manager
 app.state.pipeline_manager = pipeline_manager
 app.state.apply_config_settings = apply_config_settings
 app.state.apply_saved_config_at_startup = apply_saved_config_at_startup
+# System capacity — detected once at startup
+_cpu_logical = psutil.cpu_count(logical=True) or 1
+_cpu_physical = psutil.cpu_count(logical=False) or 1
+_mem = psutil.virtual_memory()
+_mem_total_gb = round(_mem.total / (1024**3), 1)
+_max_disk_writers = max(4, _cpu_logical)
+_max_inference_workers = max(8, _cpu_logical * 4)
+app.state.system_capacity = {
+    "cpu_logical": _cpu_logical,
+    "cpu_physical": _cpu_physical,
+    "ram_total_gb": _mem_total_gb,
+    "max_disk_writers": _max_disk_writers,
+    "max_inference_workers": _max_inference_workers,
+}
+logger.info(
+    f"System capacity: {_cpu_physical} physical cores ({_cpu_logical} logical), "
+    f"{_mem_total_gb}GB RAM | Max workers: {_max_disk_writers} disk, {_max_inference_workers} inference"
+)
+
 # Autoscaler status — published here, read by /api/inference/stats
 app.state.autoscaler = {
     "disk_level": "OK",
@@ -526,13 +546,12 @@ apply_states_from_config(state_manager)
 # Load saved pipeline configuration
 apply_pipeline_config_at_startup(pipeline_manager)
 
-# Create persistent ProcessPoolExecutor AFTER detection.init() so forked processes
-# inherit module-level vars (_watcher, _pipeline_manager, _app, etc.)
-# Start conservative: 1 worker per camera. Autoscaler ramps up based on actual load.
+# Concurrent inference threads — each thread independently pops a frame from
+# Redis, calls process_frame_helper() (HTTP to YOLO), and handles results.
+# Docker DNS round-robin distributes requests across YOLO replicas.
 _num_cameras = len(watcher.cameras) if watcher.cameras else 1
-INFERENCE_WORKERS = max(1, _num_cameras)
-process_executor = ProcessPoolExecutor(max_workers=INFERENCE_WORKERS)
-logger.info(f"ProcessPoolExecutor: {INFERENCE_WORKERS} initial workers for {_num_cameras} camera(s)")
+INFERENCE_WORKERS = max(4, _num_cameras * 4)
+logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
 # Update autoscaler initial state with actual values
 from services.watcher import _disk_writers_count as _initial_disk
@@ -554,54 +573,44 @@ def inference_worker_thread():
 
     while True:
         try:
-            # Fetch all frames from Redis queue
             st_ts = time.time()
-            raw_frames_queue = watcher.get_queue_messages(stream_name="frames_queue")
-            if not raw_frames_queue:
-                time.sleep(0.01)
-                continue
 
+            # Pop from in-memory Python queue (blocks until item available)
             try:
-                frames_data = json.loads(raw_frames_queue)
-            except json.JSONDecodeError:
+                frames_data = _inference_queue.get(timeout=0.1)
+            except queue.Empty:
                 continue
 
             if not frames_data:
                 continue
 
-            # Handle new format with encoder value or legacy format
-            if isinstance(frames_data, dict):
-                frames = frames_data.get("frames", [])
-                capture_encoder = frames_data.get("encoder", 0)
-                capture_shipment = frames_data.get("shipment", "no_shipment")
-            else:
-                # Legacy format: frames_data is the frames list directly
-                frames = frames_data
-                capture_encoder = 0
-                capture_shipment = "no_shipment"
+            # frames_data is already a Python dict — no JSON parsing needed
+            frames = frames_data.get("frames", [])
+            capture_encoder = frames_data.get("encoder", 0)
+            capture_shipment = frames_data.get("shipment", "no_shipment")
+            capture_t = frames_data.get("capture_t", None)
 
             # Validate frame structure before processing
             valid_frames = []
             for frame in frames:
-                if isinstance(frame, list) and len(frame) > 0:
+                if isinstance(frame, (list, tuple)) and len(frame) > 0:
                     valid_frames.append(frame)
 
             if not valid_frames:
                 continue
 
             try:
-                # Submit frames to persistent ProcessPoolExecutor (no per-iteration overhead).
-                # Each worker process bypasses the GIL for CPU-bound work and makes its own
-                # HTTP request to YOLO, naturally distributing across replicas.
-                futures = [process_executor.submit(process_frame_helper, f) for f in valid_frames]
-                results = [fut.result() for fut in futures]
+                # Call process_frame_helper() directly in this thread.
+                # YOLO inference is I/O-bound (HTTP request) — GIL is released during
+                # socket I/O, so multiple threads achieve true concurrency.
+                # Docker DNS round-robin distributes requests across YOLO replicas.
+                results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
 
                 # Filter out None results
                 valid_results = [r for r in results if r is not None]
                 if not valid_results:
                     # Retry once
-                    futures = [process_executor.submit(process_frame_helper, f) for f in valid_frames]
-                    results = [fut.result() for fut in futures]
+                    results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
                     valid_results = [r for r in results if r is not None]
                     if not valid_results:
                         continue
@@ -720,7 +729,7 @@ def inference_worker_thread():
             logger.error(f"Main loop error: {e}")
             time.sleep(0.1)
 
-# Start inference worker threads (uses same INFERENCE_WORKERS count as ProcessPoolExecutor)
+# Start inference worker threads — each thread pops frames and calls YOLO independently
 for i in range(INFERENCE_WORKERS):
     t = threading.Thread(target=inference_worker_thread, daemon=True, name=f"inference-worker-{i+1}")
     t.start()
@@ -730,9 +739,9 @@ logger.info(f"{INFERENCE_WORKERS} inference worker thread(s) started")
 # =============================================================================
 # Autoscaler — monitors queue pressure every 5 min, scales workers dynamically
 # =============================================================================
-AUTOSCALE_INTERVAL = 300   # seconds between checks
-MAX_DISK_WRITERS = 32
-MAX_INFERENCE_WORKERS = 24
+AUTOSCALE_INTERVAL = 30    # seconds between checks
+MAX_DISK_WRITERS = _max_disk_writers
+MAX_INFERENCE_WORKERS = _max_inference_workers
 
 def _autoscaler():
     """Background thread: checks queue depth every 5 min and scales resources.
@@ -742,10 +751,9 @@ def _autoscaler():
         WARNING  — queues building up         → double current resources
         CRITICAL — queues overflowing         → quadruple current resources
     """
-    global process_executor, INFERENCE_WORKERS
+    global INFERENCE_WORKERS
     import services.watcher as _watcher_mod
-    from services.watcher import _disk_queue, add_disk_writers
-    from redis import Redis as _Redis
+    from services.watcher import _disk_queue, add_disk_writers, _inference_queue as _inf_q
 
     # First check after 30s (let system warm up), then every AUTOSCALE_INTERVAL
     time.sleep(30)
@@ -756,16 +764,13 @@ def _autoscaler():
             disk_pct = (disk_qsize / _disk_queue.maxsize * 100) if _disk_queue.maxsize else 0
             disk_count = _watcher_mod._disk_writers_count  # read live value from module
 
-            # ── Measure inference queue pressure ──
-            try:
-                _r = _Redis("redis", 6379, db=0)
-                inf_qlen = _r.llen("frames_queue")
-            except Exception:
-                inf_qlen = 0
+            # ── Measure inference queue pressure (priority queue: hot + cold) ──
+            inf_qlen = _inf_q.qsize()
+            inf_hot, inf_cold = _inf_q.stats()
 
             # ── Classify ──
             #   Disk:      >25% full → CRITICAL,  >5% → WARNING
-            #   Inference: >20 items → CRITICAL,  >5  → WARNING
+            #   Inference: hot frames queuing means ejector can't keep up
             if disk_pct > 25:
                 disk_level = "CRITICAL"
             elif disk_pct > 5:
@@ -773,12 +778,12 @@ def _autoscaler():
             else:
                 disk_level = "OK"
 
-            if inf_qlen > 20:
-                inf_level = "CRITICAL"
-            elif inf_qlen > 5:
+            if inf_hot > 10:
+                inf_level = "CRITICAL"    # Hot frames backing up — ejector at risk
+            elif inf_hot > 3:
                 inf_level = "WARNING"
             else:
-                inf_level = "OK"
+                inf_level = "OK"          # Hot frames draining fast, cold is fine
 
             # ── Publish state so API/dashboard can read it ──
             app.state.autoscaler = {
@@ -787,7 +792,12 @@ def _autoscaler():
                 "disk_writers": disk_count,
                 "inference_workers": INFERENCE_WORKERS,
                 "disk_queue_pct": round(disk_pct, 1),
+                "disk_queue_len": disk_qsize,
+                "disk_queue_max": _disk_queue.maxsize,
                 "inf_queue_len": inf_qlen,
+                "inf_queue_max": _inf_q.maxsize,
+                "inf_hot": inf_hot,
+                "inf_cold": inf_cold,
             }
 
             logger.info(
@@ -821,11 +831,7 @@ def _autoscaler():
             if new_workers > INFERENCE_WORKERS:
                 old_count = INFERENCE_WORKERS
 
-                # Replace ProcessPoolExecutor with a larger one
-                old_executor = process_executor
-                process_executor = ProcessPoolExecutor(max_workers=new_workers)
-
-                # Start additional inference worker threads
+                # Spawn additional inference worker threads
                 for i in range(old_count, new_workers):
                     t = threading.Thread(
                         target=inference_worker_thread, daemon=True,

@@ -29,7 +29,7 @@ services:
   redis:
     container_name: "monitait_redis"
     image: redis:7-alpine
-    command: ["redis-server", "--notify-keyspace-events", "KEA", "--stop-writes-on-bgsave-error", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["redis-server", "--notify-keyspace-events", "KEA", "--stop-writes-on-bgsave-error", "no", "--maxmemory", "${REDIS_MAXMEMORY:-256}mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "6379:6379"
     volumes:
@@ -51,8 +51,8 @@ services:
   yolo_inference:
     image: yolo_inference
     build: "./yolo_inference"
-    shm_size: '1gb'
-    command: "uvicorn main:app --host 0.0.0.0 --port 4442"
+    shm_size: '${SHM_SIZE:-2g}'
+    command: "uvicorn main:app --host 0.0.0.0 --port 4442 --workers ${YOLO_WORKERS:-2}"
     expose:
       - 4442
     volumes:
@@ -69,27 +69,7 @@ services:
         max-file: "2"
     restart: "always"
     deploy:
-      replicas: 2
-
-  # Automated Disk Cleanup Service
-  cleanup:
-    container_name: "monitait_cleanup"
-    build: "./cleanup"
-    volumes:
-      - ${DATA_ROOT:-.}/raw_images:/data
-    environment:
-      - MONITOR_DIR=/data
-      - MAX_USAGE_PERCENT=90          # Start cleanup at 90% disk usage
-      - MIN_USAGE_PERCENT=80           # Stop cleanup at 80% disk usage
-      - CHECK_INTERVAL=60              # Check every 60 seconds (reduced CPU usage)
-      - DELETION_BATCH_SIZE=1000       # Delete 1000 files per batch (faster cleanup)
-      - MIN_FILE_AGE_HOURS=1           # Protect files newer than 1 hour
-      - ENABLE_METRICS=true            # Enable lifetime metrics logging
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "3"
-    restart: "always"
+      replicas: ${YOLO_REPLICAS:-2}
 
   # TimescaleDB PostgreSQL Database
   timescaledb:
