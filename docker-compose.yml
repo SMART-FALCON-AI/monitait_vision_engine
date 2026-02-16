@@ -31,8 +31,8 @@ services:
     container_name: "monitait_redis"
     image: redis:7-alpine
     command: ["redis-server", "--notify-keyspace-events", "KEA", "--stop-writes-on-bgsave-error", "no", "--maxmemory", "${REDIS_MAXMEMORY:-256}mb", "--maxmemory-policy", "allkeys-lru"]
-    ports:
-      - "6379:6379"
+    expose:
+      - 6379
     volumes:
       - ${DATA_ROOT:-.}/volumes/redis:/data
     networks:
@@ -71,13 +71,19 @@ services:
     restart: "always"
     deploy:
       replicas: ${YOLO_REPLICAS:-2}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # TimescaleDB PostgreSQL Database
   timescaledb:
     container_name: "monitait_timescaledb"
     image: timescale/timescaledb:latest-pg15
-    ports:
-      - "5432:5432"
+    expose:
+      - 5432
     environment:
       - POSTGRES_USER=monitaqc
       - POSTGRES_PASSWORD=monitaqc2024
@@ -102,8 +108,8 @@ services:
   grafana:
     container_name: "monitait_grafana"
     image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
+    expose:
+      - 3000
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin

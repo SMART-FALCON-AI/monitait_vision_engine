@@ -58,7 +58,7 @@ pipeline_manager: Optional[PipelineManager] = None
 app = FastAPI(
     title="Counter Service",
     description="Service for counting and tracking packages with camera processing",
-    version="3.2.0"
+    version="3.3.0"
 )
 
 # Mount static files
@@ -83,13 +83,13 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     Returns tuple of (settings_applied: dict, cameras_loaded: int).
     """
     global EJECTOR_ENABLED, EJECTOR_OFFSET, EJECTOR_DURATION, EJECTOR_POLL_INTERVAL
-    global CAPTURE_MODE, TIME_BETWEEN_TWO_PACKAGE, REMOVE_RAW_IMAGE_WHEN_DM_DECODED
+    global CAPTURE_MODE, REMOVE_RAW_IMAGE_WHEN_DM_DECODED
     global PARENT_OBJECT_LIST, HISTOGRAM_ENABLED, HISTOGRAM_SAVE_IMAGE
     global CHECK_CLASS_COUNTS_ENABLED, CHECK_CLASS_COUNTS_CLASSES, CHECK_CLASS_COUNTS_CONFIDENCE
     global DM_CHARS_SIZES, DM_CONFIDENCE_THRESHOLD, DM_OVERLAP_THRESHOLD
     global STORE_ANNOTATION_ENABLED, ENFORCE_PARENT_OBJECT
     global YOLO_INFERENCE_URL, GRADIO_MODEL, GRADIO_CONFIDENCE_THRESHOLD
-    global capture_mode, time_between_two_package, remove_raw_image_when_dm_decoded, parent_object_list
+    global capture_mode, remove_raw_image_when_dm_decoded, parent_object_list
     global SERIAL_MODE
 
     settings_applied = {}
@@ -150,9 +150,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     # Apply capture settings
     if "capture" in config:
         CAPTURE_MODE = config["capture"].get("mode", CAPTURE_MODE)
-        TIME_BETWEEN_TWO_PACKAGE = config["capture"].get("time_between_packages", TIME_BETWEEN_TWO_PACKAGE)
         capture_mode = CAPTURE_MODE
-        time_between_two_package = TIME_BETWEEN_TWO_PACKAGE
         settings_applied["capture"] = True
 
     # Apply image processing settings
@@ -306,13 +304,13 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     # Sync all config changes back to the config module so other modules see them
     for _name in [
         'EJECTOR_ENABLED', 'EJECTOR_OFFSET', 'EJECTOR_DURATION', 'EJECTOR_POLL_INTERVAL',
-        'CAPTURE_MODE', 'TIME_BETWEEN_TWO_PACKAGE', 'REMOVE_RAW_IMAGE_WHEN_DM_DECODED',
+        'CAPTURE_MODE', 'REMOVE_RAW_IMAGE_WHEN_DM_DECODED',
         'PARENT_OBJECT_LIST', 'HISTOGRAM_ENABLED', 'HISTOGRAM_SAVE_IMAGE',
         'CHECK_CLASS_COUNTS_ENABLED', 'CHECK_CLASS_COUNTS_CLASSES', 'CHECK_CLASS_COUNTS_CONFIDENCE',
         'DM_CHARS_SIZES', 'DM_CONFIDENCE_THRESHOLD', 'DM_OVERLAP_THRESHOLD',
         'STORE_ANNOTATION_ENABLED', 'ENFORCE_PARENT_OBJECT',
         'YOLO_INFERENCE_URL', 'GRADIO_MODEL', 'GRADIO_CONFIDENCE_THRESHOLD',
-        'capture_mode', 'time_between_two_package', 'remove_raw_image_when_dm_decoded', 'parent_object_list',
+        'capture_mode', 'remove_raw_image_when_dm_decoded', 'parent_object_list',
         'SERIAL_MODE',
     ]:
         setattr(cfg_module, _name, globals()[_name])
@@ -453,7 +451,6 @@ def start_web_server():
 
 # Legacy variable names for backward compatibility
 capture_mode = CAPTURE_MODE
-time_between_two_package = TIME_BETWEEN_TWO_PACKAGE
 remove_raw_image_when_dm_decoded = REMOVE_RAW_IMAGE_WHEN_DM_DECODED
 parent_object_list = PARENT_OBJECT_LIST
 

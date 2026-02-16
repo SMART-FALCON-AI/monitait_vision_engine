@@ -118,11 +118,9 @@ function startStatusStream() {
             if (data.inference) {
                 const inf = data.inference;
                 const avgTimeEl = document.getElementById('avg-inference-time');
-                const avgIntervalEl = document.getElementById('avg-frame-interval');
                 const fpsEl = document.getElementById('inference-fps');
                 if (avgTimeEl) avgTimeEl.textContent = inf.avg_time_ms.toFixed(1) + ' ms';
-                if (avgIntervalEl) avgIntervalEl.textContent = inf.avg_interval_ms.toFixed(1) + ' ms';
-                if (fpsEl) fpsEl.textContent = inf.fps.toFixed(1) + ' FPS';
+                if (fpsEl) fpsEl.textContent = (inf.inference_fps || 0).toFixed(1) + ' FPS';
 
                 // Process detections for audio alerts
                 if (inf.last_detection) {
@@ -316,7 +314,6 @@ function fetchConfig() {
                 document.getElementById('ejector-poll-input').value = data.ejector.poll_interval || 0.03;
             }
             if (data.capture) {
-                document.getElementById('time-between-packages-input').value = data.capture.time_between_packages || 0.305;
                 document.getElementById('capture-mode-input').value = data.capture.mode || 'single';
             }
             // Image processing configuration
@@ -2311,17 +2308,6 @@ async function fetchInferenceStats() {
             }
         }
 
-        // Update frame interval (time between completed frames) with FPS
-        const intervalValueEl = document.getElementById('frame-interval-value');
-        if (intervalValueEl) {
-            if (data.avg_frame_interval_ms > 0) {
-                const intFps = (1000 / data.avg_frame_interval_ms).toFixed(1);
-                intervalValueEl.textContent = data.avg_frame_interval_ms + ' ms (' + intFps + '/s)';
-            } else {
-                intervalValueEl.textContent = 'N/A';
-            }
-        }
-
         // Update inference FPS (data.inference_fps is already in FPS from backend)
         const inferenceFpsValueEl = document.getElementById('inference-fps-value');
         if (inferenceFpsValueEl) {
@@ -2399,7 +2385,7 @@ function updateQueueStatus(data) {
     let worstScore = Math.max(levels[diskLvl] || 0, levels[infLvl] || 0);
 
     // Also check FPS ratio: if inference is significantly slower than capture, flag it
-    const infFps = data.inference ? data.inference.fps : 0;
+    const infFps = data.inference_fps || 0;
     const capFps = data.capture_fps || 0;
     let fpsWarning = '';
     if (infFps > 0 && capFps > 0) {

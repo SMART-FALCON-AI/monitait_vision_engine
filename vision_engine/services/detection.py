@@ -97,14 +97,19 @@ def add_detection_event(event_type: str, details: dict = None):
 def evaluate_eject_from_detections(detections_list, procedures):
     """Evaluate eject rules from stored detections and current procedures config.
 
+    Also checks class count equality if CHECK_CLASS_COUNTS_ENABLED.
+
     Args:
         detections_list: list of detection dicts (from one or more cameras at the same timestamp)
         procedures: list of procedure configs from timeline_config
 
     Returns:
-        (should_eject: bool, reasons: list[str])
+        (should_eject: bool, reasons: list[str])  — reasons are human-readable
     """
-    if not procedures:
+    should_eject = False
+    eject_reasons = []
+
+    if not detections_list:
         return False, []
 
     all_detected = {}
@@ -115,10 +120,28 @@ def evaluate_eject_from_detections(detections_list, procedures):
             if name not in all_detected or conf > all_detected[name]:
                 all_detected[name] = conf
 
-    should_eject = False
-    eject_reasons = []
+    # --- Class count check ---
+    if cfg.CHECK_CLASS_COUNTS_ENABLED:
+        target_classes = cfg.CHECK_CLASS_COUNTS_CLASSES
+        conf_threshold = cfg.CHECK_CLASS_COUNTS_CONFIDENCE
+        from collections import Counter
+        class_counts = Counter(
+            det['name'] for det in detections_list
+            if isinstance(det, dict) and det.get('name') in target_classes
+            and det.get('confidence', 1.0) >= conf_threshold
+        )
+        for cls in target_classes:
+            if cls not in class_counts:
+                class_counts[cls] = 0
+        if class_counts:
+            counts = list(class_counts.values())
+            if len(set(counts)) > 1:
+                should_eject = True
+                count_detail = ", ".join(f"{cls}={class_counts[cls]}" for cls in target_classes)
+                eject_reasons.append(f"Count mismatch ({count_detail})")
 
-    for proc in procedures:
+    # --- Procedure rules ---
+    for proc in (procedures or []):
         if not proc.get('enabled', False):
             continue
         rules = proc.get('rules', [])
@@ -140,8 +163,18 @@ def evaluate_eject_from_detections(detections_list, procedures):
         triggered = all(results) if logic == 'all' else any(results)
         if triggered:
             should_eject = True
-            matched = [r.get('object', '?') for r, res in zip(rules, results) if res]
-            eject_reasons.append(f"[{proc.get('name', '?')}:{','.join(matched)}]")
+            proc_name = proc.get('name', 'Unnamed')
+            details = []
+            for r, res in zip(rules, results):
+                if res:
+                    obj = r.get('object', '?')
+                    cond = r.get('condition', 'present')
+                    if cond == 'present':
+                        details.append(f"'{obj}' detected")
+                    elif cond == 'not_present':
+                        details.append(f"'{obj}' missing")
+            reason = f"{proc_name}: {', '.join(details)}" if details else proc_name
+            eject_reasons.append(reason)
 
     return should_eject, eject_reasons
 
@@ -731,14 +764,20 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             redis_client.lpush("inference_times", str(elapsed_ms))
             redis_client.ltrim("inference_times", 0, 9)  # Keep last 10
 
-            # Frame interval = time since last inference completion (measures throughput)
+            # Atomic counter: total inference frames processed (all workers)
+            now = time.time()
+            redis_client.incr("inf_frame_count")
+            redis_client.lpush("inf_frame_timestamps", str(now))
+            redis_client.ltrim("inf_frame_timestamps", 0, 199)  # Keep last 200
+
+            # Legacy: single-worker frame interval (kept for backward compat)
             last_ts_raw = redis_client.get("last_inference_timestamp")
             if last_ts_raw:
                 last_ts = float(last_ts_raw.decode('utf-8'))
-                interval_ms = (time.time() - last_ts) * 1000
+                interval_ms = (now - last_ts) * 1000
                 redis_client.lpush("frame_intervals", str(interval_ms))
                 redis_client.ltrim("frame_intervals", 0, 9)
-            redis_client.set("last_inference_timestamp", str(time.time()))
+            redis_client.set("last_inference_timestamp", str(now))
         except Exception as e:
             logger.debug(f"Failed to track inference timing in Redis: {e}")
 

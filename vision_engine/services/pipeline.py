@@ -397,7 +397,12 @@ class PipelineManager:
                 timeout=10
             )
             response.raise_for_status()
-            return response.json()
+            result = response.json()
+            # Some YOLO endpoints double-encode: return a JSON string instead of a list.
+            # Unwrap if needed.
+            if isinstance(result, str):
+                result = json.loads(result)
+            return result
         except Exception as e:
             logger.error(f"YOLO inference error: {e}")
             return []

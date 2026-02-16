@@ -47,65 +47,48 @@ import psutil as _psutil
 _total_ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
 _disk_queue = queue.Queue(maxsize=max(200, int(_total_ram_gb * 1024 * 0.10 / 3)))
 
-# Priority inference queue — newest frames first (for ejector), then oldest (for historical)
+# ── Two-tier inference queue: Hot (RAM) + Cold (Disk) ──
 #
-# Design: deque acts as a time-ordered buffer. Workers pop from the RIGHT (newest)
-# when hot frames exist (within ejector window), otherwise pop from the LEFT (oldest)
-# for historical data. No frames are dropped — all get processed eventually.
-_EJECTOR_WINDOW_SEC = 5.0   # Frames newer than this are "hot" — processed LIFO (newest first)
+# Hot queue (RAM, LIFO): sized by RAM budget. When full, frames spill to cold.
+#   Workers pop newest first so ejector gets the freshest decision.
+# Cold queue (Disk, FIFO): practically unlimited. Frames spill here when hot is full
+#   or when YOLO fails (after fail-safe eject). Processed oldest-first for historical data.
+# No frame is ever dropped.
 
-class _PriorityInferenceQueue:
-    """Two-tier inference queue: hot frames (LIFO) for ejector, cold frames (FIFO) for history."""
+import collections
+import pickle
+import glob as _glob_mod
+
+# RAM budget for hot queue (5% of RAM, ~500KB per frame)
+_ram_budget = max(100, int(_total_ram_gb * 1024 * 0.05 / 0.5))
+
+
+class HotQueue:
+    """RAM-based LIFO queue for ejector-critical frames."""
 
     def __init__(self, maxsize=1000):
         self.maxsize = maxsize
-        self._deque = collections.deque()    # oldest on left, newest on right
+        self._deque = collections.deque()
         self._lock = threading.Lock()
         self._not_empty = threading.Event()
-        self._not_full = threading.Event()
-        self._not_full.set()
-        self.hot_count = 0   # frames within ejector window (for dashboard)
-        self.cold_count = 0  # frames outside ejector window (for dashboard)
 
-    def put(self, item, timeout=None):
-        """Add frame with timestamp. Blocks if full."""
-        deadline = time.time() + timeout if timeout else None
-        while True:
-            with self._lock:
-                if len(self._deque) < self.maxsize:
-                    item['_enqueue_t'] = time.time()
-                    self._deque.append(item)
-                    self._not_empty.set()
-                    if len(self._deque) >= self.maxsize:
-                        self._not_full.clear()
-                    return
-            if deadline and time.time() >= deadline:
-                raise queue.Full()
-            self._not_full.wait(timeout=0.1)
-
-    def put_nowait(self, item):
+    def put(self, item):
+        """Add frame to hot queue. Returns False if full (caller should spill to cold)."""
         with self._lock:
             if len(self._deque) >= self.maxsize:
-                raise queue.Full()
+                return False
             item['_enqueue_t'] = time.time()
             self._deque.append(item)
             self._not_empty.set()
-            if len(self._deque) >= self.maxsize:
-                self._not_full.clear()
+            return True
 
     def get(self, timeout=None):
-        """Get next frame: newest-first if hot frames exist, oldest-first otherwise."""
+        """LIFO pop (newest first). Raises queue.Empty on timeout."""
         deadline = time.time() + timeout if timeout else None
         while True:
             with self._lock:
                 if self._deque:
-                    now = time.time()
-                    # Check if newest frame is hot (within ejector window)
-                    if now - self._deque[-1]['_enqueue_t'] <= _EJECTOR_WINDOW_SEC:
-                        item = self._deque.pop()       # LIFO — newest first for ejector
-                    else:
-                        item = self._deque.popleft()   # FIFO — oldest first for historical
-                    self._not_full.set()
+                    item = self._deque.pop()  # LIFO — newest first for ejector
                     if not self._deque:
                         self._not_empty.clear()
                     return item
@@ -116,24 +99,109 @@ class _PriorityInferenceQueue:
     def qsize(self):
         return len(self._deque)
 
+
+class ColdDiskQueue:
+    """Disk-based FIFO queue for historical frame processing. No frame is ever dropped."""
+
+    def __init__(self, directory="cold_queue"):
+        self._dir = directory
+        os.makedirs(self._dir, exist_ok=True)
+        self._lock = threading.Lock()
+        # Count files on startup (may have leftovers from previous run)
+        self._count = len(_glob_mod.glob(os.path.join(self._dir, '*.pkl')))
+        if self._count > 0:
+            logger.info(f"Cold queue: {self._count} leftover frames from previous run")
+
+    def put(self, item):
+        """Serialize frame batch to disk. Never fails (unless disk is full)."""
+        item['_enqueue_t'] = item.get('_enqueue_t', time.time())
+        fname = f"{item['_enqueue_t']:.6f}_{item.get('encoder', 0)}.pkl"
+        path = os.path.join(self._dir, fname)
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(item, f, protocol=pickle.HIGHEST_PROTOCOL)
+            with self._lock:
+                self._count += 1
+        except Exception as e:
+            logger.error(f"Cold queue write failed: {e}")
+
+    def get(self):
+        """FIFO: pick oldest file, deserialize, delete. Returns None if empty."""
+        try:
+            files = sorted(_glob_mod.glob(os.path.join(self._dir, '*.pkl')))
+            if not files:
+                return None
+            path = files[0]
+            with open(path, 'rb') as f:
+                item = pickle.load(f)
+            os.remove(path)
+            with self._lock:
+                self._count = max(0, self._count - 1)
+            return item
+        except Exception as e:
+            logger.error(f"Cold queue read failed: {e}")
+            # Try to remove corrupt file
+            try:
+                if files:
+                    os.remove(files[0])
+                    with self._lock:
+                        self._count = max(0, self._count - 1)
+            except Exception:
+                pass
+            return None
+
+    def qsize(self):
+        with self._lock:
+            return self._count
+
+
+class InferenceQueueFacade:
+    """Unified producer interface: tries hot first, spills to cold. Never drops."""
+
+    def __init__(self, hot, cold):
+        self.hot = hot
+        self.cold = cold
+
+    def put(self, item, timeout=None):
+        """Add frame — hot queue first, spill to cold disk if hot is full."""
+        if not self.hot.put(item):
+            logger.debug("Hot queue full — spilling to cold disk queue")
+            self.cold.put(item)
+
     def stats(self):
         """Return (hot_count, cold_count) for dashboard."""
-        now = time.time()
-        h = c = 0
-        with self._lock:
-            for item in self._deque:
-                if now - item.get('_enqueue_t', 0) <= _EJECTOR_WINDOW_SEC:
-                    h += 1
-                else:
-                    c += 1
-        self.hot_count = h
-        self.cold_count = c
-        return h, c
+        return self.hot.qsize(), self.cold.qsize()
 
-import collections
-# Each item ~500KB JPEG; budget 5% of RAM
-_inf_maxsize = max(100, int(_total_ram_gb * 1024 * 0.05 / 0.5))
-_inference_queue = _PriorityInferenceQueue(maxsize=_inf_maxsize)
+    @property
+    def maxsize(self):
+        return self.hot.maxsize
+
+    def qsize(self):
+        return self.hot.qsize() + self.cold.qsize()
+
+
+# Initialize with defaults immediately so capture threads don't hit None.
+# init_queues() re-initializes with correct sizing after cameras + ejector config are known.
+_hot_queue = HotQueue(maxsize=max(10, _ram_budget))
+_cold_queue_disk = ColdDiskQueue(directory="/tmp/cold_queue")
+_inference_queue = InferenceQueueFacade(_hot_queue, _cold_queue_disk)
+
+
+def init_queues(num_cameras, ejector_offset, ejector_enabled):
+    """Initialize hot (RAM) + cold (disk) inference queues.
+
+    Hot queue uses the full RAM budget. When hot fills up, frames spill to cold (disk).
+    """
+    global _hot_queue, _cold_queue_disk, _inference_queue
+    hot_max = max(10, _ram_budget)
+    _hot_queue = HotQueue(maxsize=hot_max)
+    _cold_queue_disk = ColdDiskQueue(directory="/tmp/cold_queue")
+    _inference_queue = InferenceQueueFacade(_hot_queue, _cold_queue_disk)
+    logger.info(
+        f"Inference queues initialized: hot={hot_max} frames (RAM), "
+        f"cold=disk (/tmp/cold_queue/), ejector={'ON' if ejector_enabled else 'OFF'}, "
+        f"cameras={num_cameras}, offset={ejector_offset}"
+    )
 _disk_writers_count = 0
 _disk_lock = threading.Lock()
 
@@ -292,7 +360,6 @@ class ArduinoSocket:
         self.stop_thread = False
         self.redis_connection = RedisConnection(cfg.REDIS_HOST, cfg.REDIS_PORT)
         self.last_encoder_value = 0
-        self.last_capture_ts = time.time()
         self.encoder_value = 0
         self.health_check = False
         self.is_moving = False
@@ -1063,6 +1130,9 @@ class ArduinoSocket:
                                         cr = _get_cap_redis()
                                         cr.lpush("capture_timestamps", str(capture_ts))
                                         cr.ltrim("capture_timestamps", 0, 9)
+                                        # Atomic counter: total captured frames (all cameras)
+                                        cr.lpush("cap_frame_timestamps", str(capture_ts))
+                                        cr.ltrim("cap_frame_timestamps", 0, 199)  # Keep last 200
                                     except Exception:
                                         globals()['_cap_redis'] = None  # Reset, will reconnect
                     else:
@@ -1087,19 +1157,14 @@ class ArduinoSocket:
                         # Carry JPEG bytes alongside path for in-memory inference
                         frames.append([d_path, jpeg_bytes])
 
-                    if (capture_timestamp - self.last_capture_ts > cfg.time_between_two_package):
-                        self.last_capture_ts = capture_timestamp  # Use the same timestamp
-                        # Push to priority inference queue (hot=ejector LIFO, cold=historical FIFO)
-                        frames_data = {
-                            "frames": frames,
-                            "encoder": self.encoder_value,
-                            "shipment": self.shipment,
-                            "capture_t": capture_timestamp,
-                        }
-                        try:
-                            _inference_queue.put(frames_data, timeout=5.0)
-                        except queue.Full:
-                            logger.error("Inference queue full after 5s — dropping frame batch")
+                    # Push every captured batch to inference (no throttle gate)
+                    frames_data = {
+                        "frames": frames,
+                        "encoder": self.encoder_value,
+                        "shipment": self.shipment,
+                        "capture_t": capture_timestamp,
+                    }
+                    _inference_queue.put(frames_data)  # Hot → cold spill. Never drops.
             except Exception as e:
                 logger.error(f"Capture error: {e}")
                 # Restart all cameras dynamically

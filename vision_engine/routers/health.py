@@ -374,15 +374,25 @@ async def status_stream(request: Request):
 
                 # Fetch inference timing data from Redis
                 inference_times = []
-                frame_intervals = []
+                inf_frame_timestamps = []
+                cap_frame_timestamps = []
                 try:
                     redis_conn = Redis("redis", 6379, db=0)
                     times_raw = redis_conn.lrange("inference_times", 0, -1)
                     inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
-                    intervals_raw = redis_conn.lrange("frame_intervals", 0, -1)
-                    frame_intervals = [float(i.decode('utf-8')) for i in intervals_raw if i]
+                    inf_raw = redis_conn.lrange("inf_frame_timestamps", 0, -1)
+                    inf_frame_timestamps = [float(t.decode('utf-8')) for t in inf_raw if t]
+                    cap_raw = redis_conn.lrange("cap_frame_timestamps", 0, -1)
+                    cap_frame_timestamps = [float(t.decode('utf-8')) for t in cap_raw if t]
                 except Exception:
                     pass
+
+                # True FPS: count frames in last 5 seconds
+                _now = time.time()
+                _inf_recent = [t for t in inf_frame_timestamps if _now - t <= 5.0]
+                _inf_fps = (len(_inf_recent) - 1) / (max(_inf_recent) - min(_inf_recent)) if len(_inf_recent) >= 2 and max(_inf_recent) > min(_inf_recent) else 0
+                _cap_recent = [t for t in cap_frame_timestamps if _now - t <= 5.0]
+                _cap_fps = (len(_cap_recent) - 1) / (max(_cap_recent) - min(_cap_recent)) if len(_cap_recent) >= 2 and max(_cap_recent) > min(_cap_recent) else 0
 
                 # Build current status data
                 current_data = {
@@ -435,8 +445,8 @@ async def status_stream(request: Request):
                     # Inference stats
                     "inference": {
                         "avg_time_ms": sum(inference_times) / len(inference_times) if inference_times else 0,
-                        "avg_interval_ms": sum(frame_intervals) / len(frame_intervals) if frame_intervals else 0,
-                        "fps": 1000.0 / (sum(frame_intervals) / len(frame_intervals)) if frame_intervals and sum(frame_intervals) > 0 else 0,
+                        "inference_fps": round(_inf_fps, 2),
+                        "capture_fps": round(_cap_fps, 2),
                         "samples": len(inference_times),
                     },
                     # Health status

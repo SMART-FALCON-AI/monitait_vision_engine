@@ -7,7 +7,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>Monitait Vision Engine v3.2.0</title>
+        <title>Monitait Vision Engine v3.3.0</title>
         <link rel="stylesheet" href="/static/css/main.css">
     </head>
     <body>
@@ -21,7 +21,7 @@
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
                     </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v3.2.0</div>
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v3.3.0</div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
@@ -150,7 +150,6 @@
                             </div>
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px;">
                                 <div><span data-i18n="latency">Latency</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_latency">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value">...</strong></div>
-                                <div><span data-i18n="interval">Interval</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_interval">Time between consecutive inference frames (ms).</span></span>: <strong id="frame-interval-value">...</strong></div>
                                 <div><span data-i18n="inf_fps">Inf</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inf_fps">Inference frames per second — how fast the model processes.</span></span>: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
                                 <div><span data-i18n="cap_fps">Cap</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_cap_fps">Capture frames per second — how fast the camera captures.</span></span>: <strong id="capture-fps-value">...</strong>
                                     <span id="capture-heartbeat" style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--success-color); margin-left: 2px; opacity: 0;"></span>
@@ -361,27 +360,6 @@
                             </select>
                             <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
                             <div class="control-response" id="config-histogram_save_image-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="class_count_check">Class Count Check (equal counts)</div>
-                            <select class="control-input" id="check-class-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="classes_to_check">Classes to Check (comma-separated)</div>
-                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
-                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
-                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="class_confidence">Class Count Confidence Threshold</div>
-                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
-                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
-                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
@@ -634,7 +612,7 @@
                 </div>
 
                 <div class="control-section">
-                    <h3 data-i18n="counter_service_config">Counter Service Configuration</h3>
+                    <h3 data-i18n="ejector_config">Ejector Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_enabled">Ejector Enabled</div>
@@ -664,10 +642,25 @@
                             <div class="control-response" id="config-ejector_poll_interval-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="time_between">Time Between Packages (seconds)</div>
-                            <input type="number" class="control-input" id="time-between-packages-input" min="0" step="0.001" value="0.305">
-                            <button class="control-button" onclick="updateConfig('time_between_packages', document.getElementById('time-between-packages-input').value)">Set Time</button>
-                            <div class="control-response" id="config-time_between_packages-response"></div>
+                            <div class="control-label" data-i18n="class_count_check">Class Count Check (equal counts)</div>
+                            <select class="control-input" id="check-class-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="classes_to_check">Classes to Check (comma-separated)</div>
+                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
+                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="class_confidence">Class Count Confidence Threshold</div>
+                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="capture_mode">Capture Mode</div>
@@ -677,6 +670,23 @@
                             </select>
                             <button class="control-button" onclick="updateConfig('capture_mode', document.getElementById('capture-mode-input').value)">Set Mode</button>
                             <div class="control-response" id="config-capture_mode-response"></div>
+                        </div>
+                    </div>
+
+                    <!-- Ejection Procedures -->
+                    <div style="margin-top: 15px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                            <h4 style="margin: 0; color: #ef4444;">Ejection Procedures</h4>
+                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;">+ Add Procedure</button>
+                        </div>
+                        <div id="procedures-list">
+                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
+                                No ejection procedures configured.
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; text-align: right;">
+                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);">Save Procedures</button>
+                            <span id="procedures-save-status" style="margin-left: 8px; font-size: 12px; color: var(--text-secondary);"></span>
                         </div>
                     </div>
                 </div>
@@ -1101,22 +1111,6 @@
                         </div>
                     </div>
 
-                    <!-- Ejection Procedures Section -->
-                    <div style="margin-top: 20px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3);">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-                            <h4 style="margin: 0; color: #ef4444;">Ejection Procedures</h4>
-                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;">+ Add Procedure</button>
-                        </div>
-                        <div id="procedures-list">
-                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
-                                No ejection procedures configured.
-                            </div>
-                        </div>
-                        <div style="margin-top: 10px; text-align: right;">
-                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);">Save Procedures</button>
-                            <span id="procedures-save-status" style="margin-left: 8px; font-size: 12px; color: var(--text-secondary);"></span>
-                        </div>
-                    </div>
                 </div>
 
                 <!-- Redis Configuration Section -->

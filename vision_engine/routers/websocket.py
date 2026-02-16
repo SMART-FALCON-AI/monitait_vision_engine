@@ -262,13 +262,15 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
         meta_columns = []
         for i, cm in enumerate(columns_meta):
             should_eject = False
+            eject_reasons = []
             if procedures and cm['all_detections']:
-                should_eject, _ = evaluate_eject_from_detections(cm['all_detections'], procedures)
+                should_eject, eject_reasons = evaluate_eject_from_detections(cm['all_detections'], procedures)
             meta_columns.append({
                 "index": i,
                 "ts": cm['ts'],
                 "encoder": cm['encoder'],
                 "should_eject": should_eject,
+                "eject_reasons": eject_reasons,
                 "d_paths": cm['d_paths'],
             })
 

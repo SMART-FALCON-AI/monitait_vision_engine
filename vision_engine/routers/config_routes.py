@@ -119,7 +119,6 @@ def build_current_service_config(app_state):
         },
         "capture": {
             "mode": config.CAPTURE_MODE,
-            "time_between_packages": config.TIME_BETWEEN_TWO_PACKAGE
         },
         "image_processing": {
             "remove_raw_image_when_dm_decoded": config.REMOVE_RAW_IMAGE_WHEN_DM_DECODED,
@@ -179,7 +178,6 @@ async def get_config(request: Request):
         },
         "capture": {
             "mode": config.CAPTURE_MODE,
-            "time_between_packages": config.TIME_BETWEEN_TWO_PACKAGE
         },
         "image_processing": {
             "parent_object_list": config.PARENT_OBJECT_LIST,
@@ -237,7 +235,7 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
         - ejector_offset: int - Encoder counts from camera to ejector
         - ejector_duration: float - Seconds to run ejector motor
         - ejector_poll_interval: float - Seconds between ejector checks
-        - time_between_packages: float - Minimum seconds between captures
+
         - capture_mode: str - "single" or "multiple"
         - parent_object_list: str - Comma-separated list of parent object names
         - remove_raw_image_when_dm_decoded: bool - Remove raw images after DM decode
@@ -278,12 +276,6 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
             logger.info(f"Updated EJECTOR_POLL_INTERVAL to {config.EJECTOR_POLL_INTERVAL}")
 
         # Capture configuration
-        if "time_between_packages" in config_data:
-            config.TIME_BETWEEN_TWO_PACKAGE = float(config_data["time_between_packages"])
-            config.time_between_two_package = config.TIME_BETWEEN_TWO_PACKAGE
-            updated["time_between_packages"] = config.TIME_BETWEEN_TWO_PACKAGE
-            logger.info(f"Updated TIME_BETWEEN_TWO_PACKAGE to {config.TIME_BETWEEN_TWO_PACKAGE}")
-
         if "capture_mode" in config_data:
             mode = config_data["capture_mode"]
             if mode in ["single", "multiple"]:

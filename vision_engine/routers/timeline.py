@@ -65,9 +65,14 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
         # Evaluate eject from detections
         all_dets = col.get('all_detections', [])
         if procedures and all_dets:
-            should_eject, _ = evaluate_eject_from_detections(all_dets, procedures)
+            should_eject, reasons = evaluate_eject_from_detections(all_dets, procedures)
         else:
             should_eject = None  # unknown
+            reasons = []
+
+        # Store reasons back in col for metadata
+        col['should_eject'] = should_eject
+        col['eject_reasons'] = reasons
 
         # Background color
         if should_eject is True:
@@ -82,12 +87,22 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
         # Thin separator line between columns
         cv2.line(header, (x_end - 1, 0), (x_end - 1, _HEADER_HEIGHT - 1), (30, 30, 30), 1)
 
-        # Encoder text (small)
+        # Encoder text (top-left, small)
         enc_val = col.get('encoder')
         if enc_val is not None:
             enc_text = str(int(enc_val))
             cv2.putText(header, enc_text, (x_start + 2, 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (220, 220, 220), 1)
+
+        # Eject reason text (bottom-left, small, only for red columns)
+        if should_eject is True and reasons:
+            reason_text = "; ".join(reasons)
+            # Truncate to fit column width (~6px per char at scale 0.25)
+            max_chars = max(5, (thumb_width - 6) // 5)
+            if len(reason_text) > max_chars:
+                reason_text = reason_text[:max_chars - 2] + ".."
+            cv2.putText(header, reason_text, (x_start + 2, _HEADER_HEIGHT - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, (255, 255, 255), 1)
 
         # Ejector position marker (downward triangle)
         if ejector_target is not None and enc_val is not None:
@@ -723,14 +738,16 @@ async def timeline_meta(request: Request, page: int = 0):
                         col_ts = ts
 
             should_eject = False
+            eject_reasons = []
             if procedures and col_all_dets:
-                should_eject, _ = evaluate_eject_from_detections(col_all_dets, procedures)
+                should_eject, eject_reasons = evaluate_eject_from_detections(col_all_dets, procedures)
 
             columns.append({
                 "index": col_idx,
                 "ts": col_ts,
                 "encoder": col_encoder,
                 "should_eject": should_eject,
+                "eject_reasons": eject_reasons,
                 "d_paths": col_d_paths,
             })
 

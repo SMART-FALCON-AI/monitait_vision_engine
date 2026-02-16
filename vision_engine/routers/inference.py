@@ -49,32 +49,29 @@ async def get_inference_stats(request: Request):
 
     # Try to get timing data from Redis (cross-process)
     redis_inference_times = []
-    redis_frame_intervals = []
-    redis_capture_timestamps = []
+    inf_frame_timestamps = []
+    cap_frame_timestamps = []
 
     try:
-        # Always use direct Redis connection for reliability
         redis_conn = Redis("redis", 6379, db=0)
 
-        # Get inference times from Redis
+        # Per-request inference latency (last 10)
         times_raw = redis_conn.lrange("inference_times", 0, -1)
         redis_inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
 
-        # Get frame intervals from Redis
-        intervals_raw = redis_conn.lrange("frame_intervals", 0, -1)
-        redis_frame_intervals = [float(i.decode('utf-8')) for i in intervals_raw if i]
+        # Total inference throughput timestamps (all workers, last 200)
+        inf_raw = redis_conn.lrange("inf_frame_timestamps", 0, -1)
+        inf_frame_timestamps = [float(t.decode('utf-8')) for t in inf_raw if t]
 
-        # Get capture timestamps from Redis
-        capture_raw = redis_conn.lrange("capture_timestamps", 0, -1)
-        redis_capture_timestamps = [float(t.decode('utf-8')) for t in capture_raw if t]
+        # Total capture throughput timestamps (all cameras, last 200)
+        cap_raw = redis_conn.lrange("cap_frame_timestamps", 0, -1)
+        cap_frame_timestamps = [float(t.decode('utf-8')) for t in cap_raw if t]
     except Exception as e:
         logger.warning(f"Failed to read timing from Redis: {e}")
 
-    # Use Redis data if available, otherwise fall back to in-memory
     use_inference_times = redis_inference_times if redis_inference_times else config.inference_times
-    use_frame_intervals = redis_frame_intervals if redis_frame_intervals else config.frame_intervals
 
-    # Calculate average inference time (processing time only)
+    # Average inference latency per request
     if use_inference_times:
         avg_inference = sum(use_inference_times) / len(use_inference_times)
         min_inference = min(use_inference_times)
@@ -84,31 +81,24 @@ async def get_inference_stats(request: Request):
         min_inference = 0
         max_inference = 0
 
-    # Calculate average frame interval (time between frames)
-    if use_frame_intervals:
-        avg_interval = sum(use_frame_intervals) / len(use_frame_intervals)
-        min_interval = min(use_frame_intervals)
-        max_interval = max(use_frame_intervals)
-        # Calculate inference FPS from average interval (1000ms / interval_ms = fps)
-        inference_fps = 1000.0 / avg_interval if avg_interval > 0 else 0
-    else:
-        avg_interval = 0
-        min_interval = 0
-        max_interval = 0
-        inference_fps = 0
+    # True inference FPS = frames processed per second (all workers combined)
+    now = time.time()
+    inference_fps = 0
+    if len(inf_frame_timestamps) >= 2:
+        recent = [t for t in inf_frame_timestamps if now - t <= 5.0]  # Last 5 seconds
+        if len(recent) >= 2:
+            span = max(recent) - min(recent)
+            if span > 0:
+                inference_fps = (len(recent) - 1) / span
 
-    # Calculate capture FPS from capture timestamps
+    # True capture FPS = frames captured per second (all cameras combined)
     capture_fps = 0
-    if redis_capture_timestamps and len(redis_capture_timestamps) >= 2:
-        # Sort timestamps and calculate intervals
-        sorted_timestamps = sorted(redis_capture_timestamps)
-        capture_intervals = [
-            (sorted_timestamps[i] - sorted_timestamps[i-1]) * 1000  # Convert to ms
-            for i in range(1, len(sorted_timestamps))
-        ]
-        if capture_intervals:
-            avg_capture_interval = sum(capture_intervals) / len(capture_intervals)
-            capture_fps = 1000.0 / avg_capture_interval if avg_capture_interval > 0 else 0
+    if len(cap_frame_timestamps) >= 2:
+        recent = [t for t in cap_frame_timestamps if now - t <= 5.0]
+        if len(recent) >= 2:
+            span = max(recent) - min(recent)
+            if span > 0:
+                capture_fps = (len(recent) - 1) / span
 
     # Autoscaler status and system capacity from app.state
     autoscaler = getattr(request.app.state, 'autoscaler', {})
@@ -119,25 +109,20 @@ async def get_inference_stats(request: Request):
         "service_url": service_url,
         "state_name": state_name,
         "shipment_id": shipment_id,
-        # Processing time (from capture to result)
+        # Per-request inference latency
         "avg_inference_time_ms": round(avg_inference, 1),
         "min_inference_time_ms": round(min_inference, 1),
         "max_inference_time_ms": round(max_inference, 1),
-        # Frame-to-frame interval (time between processes)
-        "avg_frame_interval_ms": round(avg_interval, 1),
-        "min_frame_interval_ms": round(min_interval, 1),
-        "max_frame_interval_ms": round(max_interval, 1),
-        # Inference FPS based on frame intervals
+        # True throughput FPS (all workers/cameras combined)
         "inference_fps": round(inference_fps, 2),
-        # Capture FPS based on camera capture rate
         "capture_fps": round(capture_fps, 2),
         # Autoscaler status + system capacity
         "autoscaler": autoscaler,
         "system_capacity": system_capacity,
         # Sample counts
         "inference_sample_count": len(use_inference_times),
-        "interval_sample_count": len(use_frame_intervals),
-        "capture_sample_count": len(redis_capture_timestamps),
+        "inf_throughput_samples": len(inf_frame_timestamps),
+        "cap_throughput_samples": len(cap_frame_timestamps),
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
 

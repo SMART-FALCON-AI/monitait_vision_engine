@@ -23,7 +23,6 @@ EJECTOR_POLL_INTERVAL = float(os.environ.get("EJECTOR_POLL_INTERVAL", 0.03))
 
 # Capture configuration
 CAPTURE_MODE = os.environ.get("CAPTURE_MODE", "single")
-TIME_BETWEEN_TWO_PACKAGE = float(os.environ.get("TIME_BETWEEN_TWO_PACKAGE", 0.305))
 
 # Image processing configuration
 REMOVE_RAW_IMAGE_WHEN_DM_DECODED = os.environ.get("REMOVE_RAW_IMAGE_WHEN_DM_DECODED", "false").lower() == "true"
@@ -93,7 +92,6 @@ max_capture_samples = 10
 
 # Lowercase aliases (used by ArduinoSocket)
 capture_mode = CAPTURE_MODE
-time_between_two_package = TIME_BETWEEN_TWO_PACKAGE
 remove_raw_image_when_dm_decoded = REMOVE_RAW_IMAGE_WHEN_DM_DECODED
 parent_object_list = PARENT_OBJECT_LIST
 
