@@ -93,12 +93,67 @@ def add_detection_event(event_type: str, details: dict = None):
     except Exception as e:
         logger.error(f"Error adding detection event to Redis: {e}")
 
-def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None):
+
+def evaluate_eject_from_detections(detections_list, procedures):
+    """Evaluate eject rules from stored detections and current procedures config.
+
+    Args:
+        detections_list: list of detection dicts (from one or more cameras at the same timestamp)
+        procedures: list of procedure configs from timeline_config
+
+    Returns:
+        (should_eject: bool, reasons: list[str])
+    """
+    if not procedures:
+        return False, []
+
+    all_detected = {}
+    for det in detections_list:
+        if isinstance(det, dict) and det.get('name'):
+            name = det['name']
+            conf = det.get('confidence', 0)
+            if name not in all_detected or conf > all_detected[name]:
+                all_detected[name] = conf
+
+    should_eject = False
+    eject_reasons = []
+
+    for proc in procedures:
+        if not proc.get('enabled', False):
+            continue
+        rules = proc.get('rules', [])
+        if not rules:
+            continue
+        logic = proc.get('logic', 'any')
+
+        def _eval_rule(rule):
+            obj = rule.get('object', '')
+            cond = rule.get('condition', 'present')
+            min_conf = rule.get('min_confidence', 0) / 100.0
+            if cond == 'present':
+                return obj in all_detected and all_detected[obj] >= min_conf
+            elif cond == 'not_present':
+                return obj not in all_detected or all_detected[obj] < min_conf
+            return False
+
+        results = [_eval_rule(r) for r in rules]
+        triggered = all(results) if logic == 'all' else any(results)
+        if triggered:
+            should_eject = True
+            matched = [r.get('object', '?') for r, res in zip(rules, results) if res]
+            eject_reasons.append(f"[{proc.get('name', '?')}:{','.join(matched)}]")
+
+    return should_eject, eject_reasons
+
+
+def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None, d_path=None, encoder=None):
     """Add a frame thumbnail to the timeline buffer (stored in Redis for cross-process access).
 
     Args:
         capture_t: Capture timestamp. If provided, used for timeline ordering instead of current time.
         detections: List of detection dicts (optional). Stored alongside frame for bbox rendering.
+        d_path: Relative path to raw image (e.g. 'shipment/hour/timestamp_camid').
+        encoder: Encoder position at time of capture.
     """
     if frame is None:
         logger.warning("add_frame_to_timeline: frame is None")
@@ -135,7 +190,8 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None):
         # Store in Redis list (FIFO with max length)
         redis_key = f"{cfg.TIMELINE_REDIS_PREFIX}{camera_id}"
         ts = capture_t if capture_t else time.time()
-        frame_data = pickle.dumps((ts, jpeg.tobytes(), detections))
+        meta = {"d_path": d_path, "encoder": encoder}
+        frame_data = pickle.dumps((ts, jpeg.tobytes(), detections, meta))
 
         # Use Redis pipeline for atomic operations
         pipe = redis_client.pipeline()
@@ -630,7 +686,7 @@ def check_class_counts(yolo_results, confidence_threshold=None):
 
     return all_equal
 
-def process_frame(frame, capture_mode, capture_t=None):
+def process_frame(frame, capture_mode, capture_t=None, encoder=None):
     try:
 
         frame_id, jpeg_bytes = frame
@@ -776,7 +832,7 @@ def process_frame(frame, capture_mode, capture_t=None):
         # Push inferenced frame to timeline with detection data for bbox overlay
         try:
             cam_id = int(frame_id.rsplit('_', 1)[-1])
-            add_frame_to_timeline(cam_id, image, capture_t=capture_t, detections=yolo_res if yolo_res else None)
+            add_frame_to_timeline(cam_id, image, capture_t=capture_t, detections=yolo_res if yolo_res else None, d_path=frame_id, encoder=encoder)
         except Exception as e:
             logger.debug(f"Timeline push after inference failed: {e}")
 
@@ -857,7 +913,7 @@ def most_frequent_string(dms_list):
     counter = Counter(dms_list)
     return counter.most_common(1)[0][0] if counter else None
 
-def process_frame_helper(frame, capture_t=None):
+def process_frame_helper(frame, capture_t=None, encoder=None):
     capture_mode = "single"  # or "multiple"
-    return process_frame(frame, capture_mode, capture_t=capture_t)
+    return process_frame(frame, capture_mode, capture_t=capture_t, encoder=encoder)
 

@@ -7,6 +7,7 @@ services:
     volumes:
       - ./vision_engine:/code
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
+      - ./volumes/weights:/weights
     ports:
       - "80:5050"  # Vision engine status page
     privileged: ${PRIVILEGED:-false}

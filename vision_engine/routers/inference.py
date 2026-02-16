@@ -1,7 +1,9 @@
 """Inference, pipeline, and model management routes."""
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
+import os
+import pathlib
 from config import (
     YOLO_INFERENCE_URL, GRADIO_MODEL, GRADIO_CONFIDENCE_THRESHOLD,
     inference_times, frame_intervals, last_inference_timestamp,
@@ -429,3 +431,144 @@ async def get_gradio_models(url: str):
             "models": ["Data Matrix", "predict", "N/A"],
             "error": str(e)
         }, status_code=200)  # Return 200 with defaults instead of 500
+
+
+WEIGHTS_DIR = pathlib.Path("/weights")
+MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+
+
+def _yolo_base_url():
+    """Derive YOLO service base URL (without /detect/) from the configured detection URL."""
+    url = config.YOLO_INFERENCE_URL.rstrip("/")
+    if url.endswith("/detect"):
+        url = url[:-len("/detect")]
+    return url
+
+
+def _call_set_model_all_replicas(model_path: str):
+    """Call set-model on yolo_inference, repeating to cover all replicas via DNS round-robin."""
+    base = _yolo_base_url()
+    replicas = int(os.environ.get("YOLO_REPLICAS", 2))
+    attempts = max(replicas * 3, 6)
+    successes = 0
+    last_error = None
+    for _ in range(attempts):
+        try:
+            resp = requests.post(f"{base}/set-model", data={"model_path": model_path}, timeout=30)
+            if resp.status_code == 200:
+                successes += 1
+        except Exception as e:
+            last_error = e
+    return successes, last_error
+
+
+def _fetch_classes():
+    """Fetch class names from the currently loaded YOLO model."""
+    base = _yolo_base_url()
+    try:
+        resp = requests.get(f"{base}/classes", timeout=10)
+        if resp.status_code == 200:
+            return resp.json().get("classes", [])
+        else:
+            logger.warning(f"YOLO /classes returned {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Failed to fetch YOLO classes: {e}")
+    return []
+
+
+@router.get("/api/models/weights")
+def list_weights():
+    """List available .pt weight files in /weights/ directory, plus current active classes."""
+    weights = []
+    if WEIGHTS_DIR.exists():
+        for f in sorted(WEIGHTS_DIR.glob("*.pt")):
+            stat = f.stat()
+            weights.append({
+                "name": f.name,
+                "size_mb": round(stat.st_size / (1024 * 1024), 1),
+                "modified": stat.st_mtime,
+            })
+
+    current_classes = _fetch_classes()
+    return JSONResponse(content={"weights": weights, "current_classes": current_classes})
+
+
+@router.post("/api/models/upload-weights")
+async def upload_weights(file: UploadFile = File(...)):
+    """Upload a .pt weight file and activate it on all YOLO replicas."""
+    if not file.filename or not file.filename.endswith(".pt"):
+        return JSONResponse(content={"error": "Only .pt files are allowed"}, status_code=400)
+
+    # Sanitize filename
+    safe_name = pathlib.Path(file.filename).name
+    if not safe_name or safe_name.startswith("."):
+        return JSONResponse(content={"error": "Invalid filename"}, status_code=400)
+
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = WEIGHTS_DIR / safe_name
+
+    # Stream to disk with size check
+    total = 0
+    with open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            total += len(chunk)
+            if total > MAX_UPLOAD_SIZE:
+                f.close()
+                dest.unlink(missing_ok=True)
+                return JSONResponse(content={"error": "File exceeds 500MB limit"}, status_code=413)
+            f.write(chunk)
+
+    size_mb = round(total / (1024 * 1024), 1)
+    logger.info(f"Uploaded weight file: {safe_name} ({size_mb}MB)")
+
+    # Activate on all YOLO replicas
+    model_path = f"/weights/{safe_name}"
+    successes, last_error = _call_set_model_all_replicas(model_path)
+    if successes == 0:
+        err_msg = str(last_error) if last_error else "unknown error"
+        return JSONResponse(content={
+            "error": f"File uploaded but failed to activate model: {err_msg}",
+            "filename": safe_name,
+            "size_mb": size_mb,
+        }, status_code=502)
+
+    classes = _fetch_classes()
+    logger.info(f"Activated {safe_name} on {successes} replica(s), classes: {classes}")
+
+    return JSONResponse(content={
+        "filename": safe_name,
+        "path": model_path,
+        "size_mb": size_mb,
+        "classes": classes,
+        "replicas_updated": successes,
+    })
+
+
+@router.post("/api/models/activate-weights")
+async def activate_weights(request: Request):
+    """Activate an existing .pt weight file on all YOLO replicas."""
+    body = await request.json()
+    filename = body.get("filename", "").strip()
+    if not filename or not filename.endswith(".pt"):
+        return JSONResponse(content={"error": "Invalid filename"}, status_code=400)
+
+    safe_name = pathlib.Path(filename).name
+    dest = WEIGHTS_DIR / safe_name
+    if not dest.exists():
+        return JSONResponse(content={"error": f"Weight file not found: {safe_name}"}, status_code=404)
+
+    model_path = f"/weights/{safe_name}"
+    successes, last_error = _call_set_model_all_replicas(model_path)
+    if successes == 0:
+        err_msg = str(last_error) if last_error else "unknown error"
+        return JSONResponse(content={"error": f"Failed to activate model: {err_msg}"}, status_code=502)
+
+    classes = _fetch_classes()
+    logger.info(f"Activated {safe_name} on {successes} replica(s), classes: {classes}")
+
+    return JSONResponse(content={
+        "filename": safe_name,
+        "path": model_path,
+        "classes": classes,
+        "replicas_updated": successes,
+    })

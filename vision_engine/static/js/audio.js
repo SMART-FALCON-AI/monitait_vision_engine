@@ -83,34 +83,63 @@ function initAudioContext() {
     }
 }
 
-// Auto-unlock audio on page load — retry until browser allows it.
-// For guaranteed zero-interaction audio, add the site to Chrome's
-// autoplay allowlist: chrome://settings/content/sound → "Allowed to play sound"
-// Or launch Chrome with: --autoplay-policy=no-user-gesture-required
+// Audio unlock — browsers require a user gesture before playing sound.
+// Show a one-click overlay on first load to capture the gesture.
+// Once unlocked, it stays unlocked for the session.
 (function() {
-    let _unlocked = false;
-    function tryUnlock() {
+    function unlockAudio() {
         initAudioContext();
         if ('speechSynthesis' in window) {
             const silent = new SpeechSynthesisUtterance('');
             silent.volume = 0;
             window.speechSynthesis.speak(silent);
         }
-        if (audioContext && audioContext.state === 'running') {
-            _unlocked = true;
-            clearInterval(_audioRetry);
-            console.log('[Audio] Unlocked automatically');
-        }
+        console.log('[Audio] Unlocked via user gesture');
     }
-    // Try on load, then retry every 2s until browser allows it
-    const _audioRetry = setInterval(tryUnlock, 2000);
-    window.addEventListener('load', tryUnlock);
-    // Also unlock on any interaction as fallback
+
+    function isAudioUnlocked() {
+        return audioContext && audioContext.state === 'running';
+    }
+
+    // Try silent unlock first (works if site is in Chrome's autoplay allowlist)
+    window.addEventListener('load', function() {
+        initAudioContext();
+        // Give browser a moment to resolve autoplay policy
+        setTimeout(function() {
+            if (isAudioUnlocked()) {
+                console.log('[Audio] Unlocked automatically (allowlisted)');
+                return;
+            }
+            // Not allowlisted — show click-to-start overlay
+            const overlay = document.createElement('div');
+            overlay.id = 'audio-unlock-overlay';
+            overlay.style.cssText =
+                'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.7);' +
+                'display:flex;align-items:center;justify-content:center;cursor:pointer;';
+            overlay.innerHTML =
+                '<div style="background:#1e293b;border:2px solid #3b82f6;border-radius:16px;' +
+                'padding:40px 60px;text-align:center;color:#e2e8f0;font-family:Inter,sans-serif;">' +
+                '<div style="font-size:48px;margin-bottom:16px;">🔊</div>' +
+                '<div style="font-size:20px;font-weight:600;margin-bottom:8px;">MonitaQC</div>' +
+                '<div style="font-size:14px;color:#94a3b8;">Click anywhere to enable audio alerts</div>' +
+                '</div>';
+            overlay.addEventListener('click', function() {
+                unlockAudio();
+                overlay.remove();
+            }, { once: true });
+            document.body.appendChild(overlay);
+        }, 500);
+    });
+
+    // Also unlock on any interaction as fallback (e.g. tab click)
     function onGesture() {
-        tryUnlock();
-        if (_unlocked) {
+        unlockAudio();
+        if (isAudioUnlocked()) {
             document.removeEventListener('click', onGesture, true);
             document.removeEventListener('touchstart', onGesture, true);
+            // Remove overlay if still visible
+            const overlay = document.getElementById('audio-unlock-overlay');
+            if (overlay) overlay.remove();
         }
     }
     document.addEventListener('click', onGesture, true);
@@ -670,6 +699,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const toggleBtn = document.getElementById("timeline-toggle-auto");
 
     let autoUpdate = true;
+    window.timelineAutoUpdate = true;
     let refreshInterval;
 
     // Initialize Panzoom on the timeline image
@@ -715,6 +745,11 @@ document.addEventListener('DOMContentLoaded', function() {
         } else {
             const timestamp = new Date().getTime();
             slide.src = `/timeline_image?page=${page}&t=${timestamp}`;
+            // Fetch metadata via HTTP when not using WebSocket
+            fetch('/api/timeline_meta?page=' + page)
+                .then(r => r.json())
+                .then(meta => { if (meta.type === 'timeline_meta') window._timelineMeta = meta; })
+                .catch(() => {});
         }
         updateCounter();
         panzoom.reset();
@@ -752,6 +787,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Toggle auto-update
     toggleBtn.onclick = () => {
         autoUpdate = !autoUpdate;
+        window.timelineAutoUpdate = autoUpdate;
         if (autoUpdate) {
             toggleBtn.textContent = "Stop";
             toggleBtn.classList.remove("stopped");
@@ -770,28 +806,36 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById("timeline-first").addEventListener('click', () => {
         stopAutoRefresh();
         autoUpdate = false;
+        window.timelineAutoUpdate = false;
         toggleBtn.textContent = "Resume";
+        toggleBtn.classList.add("stopped");
         loadPage(totalPages - 1); // Oldest page
     });
 
     document.getElementById("timeline-prev").addEventListener('click', () => {
         stopAutoRefresh();
         autoUpdate = false;
+        window.timelineAutoUpdate = false;
         toggleBtn.textContent = "Resume";
+        toggleBtn.classList.add("stopped");
         loadPage(Math.min(totalPages - 1, currentPage + 1)); // Older page
     });
 
     document.getElementById("timeline-next").addEventListener('click', () => {
         stopAutoRefresh();
         autoUpdate = false;
+        window.timelineAutoUpdate = false;
         toggleBtn.textContent = "Resume";
+        toggleBtn.classList.add("stopped");
         loadPage(Math.max(0, currentPage - 1)); // Newer page
     });
 
     document.getElementById("timeline-last").addEventListener('click', () => {
         stopAutoRefresh();
         autoUpdate = false;
+        window.timelineAutoUpdate = false;
         toggleBtn.textContent = "Resume";
+        toggleBtn.classList.add("stopped");
         loadPage(0); // Latest page
     });
 
@@ -811,6 +855,116 @@ document.addEventListener('DOMContentLoaded', function() {
     slide.addEventListener("dblclick", () => {
         panzoom.zoom(panzoom.getScale() === 1 ? 2 : 1);
     });
+
+    // Click-to-view: click on a frame to view in gallery or download raw image
+    (function() {
+        let mouseDownPos = null;
+        let popup = null;
+
+        function removePopup() {
+            if (popup && popup.parentNode) popup.parentNode.removeChild(popup);
+            popup = null;
+        }
+
+        slide.addEventListener("pointerdown", (e) => {
+            mouseDownPos = { x: e.clientX, y: e.clientY };
+        });
+
+        slide.addEventListener("pointerup", (e) => {
+            if (!mouseDownPos) return;
+            const dx = e.clientX - mouseDownPos.x;
+            const dy = e.clientY - mouseDownPos.y;
+            mouseDownPos = null;
+
+            // Only treat as click if mouse moved less than 5px (not a pan)
+            if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+
+            const meta = window._timelineMeta;
+            if (!meta || !meta.columns || !meta.columns.length || !meta.thumb_width) return;
+
+            // Map click to natural image coordinates
+            const rect = slide.getBoundingClientRect();
+            const natW = slide.naturalWidth;
+            const natH = slide.naturalHeight;
+            if (!natW || !natH) return;
+
+            const scaleX = natW / rect.width;
+            const scaleY = natH / rect.height;
+            const natX = (e.clientX - rect.left) * scaleX;
+            const natY = (e.clientY - rect.top) * scaleY;
+
+            // Determine column and camera row
+            const colIndex = Math.floor(natX / meta.thumb_width);
+            const rowY = natY - meta.header_height;
+            if (rowY < 0 || colIndex < 0 || colIndex >= meta.columns.length) return;
+            const camIndex = Math.floor(rowY / meta.thumb_height);
+            if (camIndex < 0 || camIndex >= meta.num_cameras) return;
+
+            const col = meta.columns[colIndex];
+            const camIds = meta.cam_ids || Object.keys(col.d_paths);
+            if (camIndex >= camIds.length) return;
+            const camId = String(camIds[camIndex]);
+            const dPath = col.d_paths[camId];
+
+            if (!dPath) return;
+
+            // Remove existing popup
+            removePopup();
+
+            // Build popup
+            popup = document.createElement("div");
+            popup.style.cssText = "position:fixed;z-index:100000;background:#1a2332;border:1px solid rgba(100,160,255,0.5);border-radius:8px;padding:10px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.5);font-size:12px;color:#e2e8f0;line-height:1.6;min-width:180px;";
+
+            // Position near click
+            const popX = Math.min(e.clientX + 10, window.innerWidth - 220);
+            const popY = Math.min(e.clientY + 10, window.innerHeight - 140);
+            popup.style.left = popX + "px";
+            popup.style.top = popY + "px";
+
+            // Folder path for gallery
+            const parts = dPath.split("/");
+            const folder = parts.slice(0, -1).join("/");
+            const filename = parts[parts.length - 1];
+
+            // Eject indicator
+            const ejectText = col.should_eject ? '<span style="color:#ff6b6b;">EJECT</span>' : '<span style="color:#69db7c;">OK</span>';
+            const encText = col.encoder != null ? `Enc: ${col.encoder}` : '';
+            const tsText = col.ts ? new Date(col.ts * 1000).toLocaleTimeString() : '';
+
+            popup.innerHTML = `
+                <div style="margin-bottom:6px;font-weight:bold;color:#fff;">${ejectText} ${encText ? '| ' + encText : ''}</div>
+                <div style="margin-bottom:8px;color:#aaa;font-size:11px;">${tsText} | Cam ${camId}</div>
+                <div style="display:flex;gap:8px;">
+                    <a href="http://${location.hostname}:5000/#/gallery/${encodeURI(folder)}" target="_blank"
+                       style="flex:1;text-align:center;padding:6px 10px;background:#2b5797;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Gallery</a>
+                    <a href="/api/raw_image/${encodeURI(dPath)}.jpg" download="${filename}.jpg"
+                       style="flex:1;text-align:center;padding:6px 10px;background:#2d7d46;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Download</a>
+                </div>
+                <div style="margin-top:6px;text-align:center;">
+                    <a href="/api/raw_image/${encodeURI(dPath)}_DETECTED.jpg" download="${filename}_DETECTED.jpg"
+                       style="color:#aaa;font-size:10px;text-decoration:underline;">Download Annotated</a>
+                </div>
+            `;
+
+            document.body.appendChild(popup);
+
+            // Dismiss on click outside
+            setTimeout(() => {
+                function dismiss(ev) {
+                    if (popup && !popup.contains(ev.target)) {
+                        removePopup();
+                        document.removeEventListener("pointerdown", dismiss, true);
+                    }
+                }
+                document.addEventListener("pointerdown", dismiss, true);
+            }, 50);
+        });
+
+        // Also dismiss on Escape
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") removePopup();
+        });
+    })();
 
     // Start auto-refresh on load
     updatePageCount();

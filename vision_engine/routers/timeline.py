@@ -1,15 +1,107 @@
+import pathlib
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response, FileResponse
 from config import (load_data_file, save_data_file, TIMELINE_REDIS_PREFIX,
                     TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT,
                     latest_detections, latest_detections_timestamp,
                     DETECTION_EVENTS_REDIS_KEY)
-import config
+import config as cfg_module
 import cv2, numpy as np, time, json, pickle, logging, os
 from redis import Redis
+from services.detection import evaluate_eject_from_detections
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Absolute path to raw_images for path traversal protection
+_RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
+
+# Header strip height in pixels
+_HEADER_HEIGHT = 28
+
+
+def _unpack_timeline_entry(frame_data):
+    """Unpack a timeline Redis entry, handling 2/3/4-tuple formats.
+    Returns (ts, jpeg_bytes, detections, meta) where meta is a dict with d_path, encoder.
+    """
+    unpacked = pickle.loads(frame_data)
+    n = len(unpacked)
+    if n >= 4:
+        ts, jpeg_bytes, detections, meta = unpacked[0], unpacked[1], unpacked[2], unpacked[3]
+    elif n == 3:
+        ts, jpeg_bytes, detections = unpacked
+        meta = {}
+    else:
+        ts, jpeg_bytes = unpacked[0], unpacked[1]
+        detections = None
+        meta = {}
+    return ts, jpeg_bytes, detections, meta if isinstance(meta, dict) else {}
+
+
+def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, current_encoder, ejector_offset):
+    """Render a metadata header strip above the timeline composite.
+
+    Args:
+        columns_meta: list of dicts per column with 'detections', 'encoder', 'should_eject'
+        thumb_width: pixel width of each column
+        num_columns: number of columns
+        procedures: eject procedure rules
+        current_encoder: live encoder value from watcher
+        ejector_offset: EJECTOR_OFFSET config value
+
+    Returns:
+        numpy array of shape (_HEADER_HEIGHT, total_width, 3)
+    """
+    total_width = thumb_width * num_columns
+    header = np.zeros((_HEADER_HEIGHT, total_width, 3), dtype=np.uint8)
+    header[:] = (50, 50, 50)  # dark gray default
+
+    ejector_target = (current_encoder - ejector_offset) if current_encoder is not None else None
+
+    for i, col in enumerate(columns_meta):
+        x_start = i * thumb_width
+        x_end = x_start + thumb_width
+
+        # Evaluate eject from detections
+        all_dets = col.get('all_detections', [])
+        if procedures and all_dets:
+            should_eject, _ = evaluate_eject_from_detections(all_dets, procedures)
+        else:
+            should_eject = None  # unknown
+
+        # Background color
+        if should_eject is True:
+            color = (0, 0, 180)  # red BGR
+        elif should_eject is False:
+            color = (0, 140, 0)  # green BGR
+        else:
+            color = (60, 60, 60)  # gray
+
+        cv2.rectangle(header, (x_start, 0), (x_end - 1, _HEADER_HEIGHT - 1), color, -1)
+
+        # Thin separator line between columns
+        cv2.line(header, (x_end - 1, 0), (x_end - 1, _HEADER_HEIGHT - 1), (30, 30, 30), 1)
+
+        # Encoder text (small)
+        enc_val = col.get('encoder')
+        if enc_val is not None:
+            enc_text = str(int(enc_val))
+            cv2.putText(header, enc_text, (x_start + 2, 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (220, 220, 220), 1)
+
+        # Ejector position marker (downward triangle)
+        if ejector_target is not None and enc_val is not None:
+            if abs(enc_val - ejector_target) <= max(1, abs(ejector_offset) * 0.1):
+                cx = x_start + thumb_width // 2
+                pts = np.array([[cx - 5, _HEADER_HEIGHT - 8], [cx + 5, _HEADER_HEIGHT - 8], [cx, _HEADER_HEIGHT - 1]], np.int32)
+                cv2.fillPoly(header, [pts], (0, 100, 255))  # orange triangle
+
+        # Capture marker (rightmost column on page 0 — caller marks it)
+        if col.get('is_capture'):
+            cx = x_start + thumb_width // 2
+            cv2.circle(header, (cx, _HEADER_HEIGHT - 5), 3, (255, 200, 0), -1)  # cyan dot
+
+    return header
 
 
 def generate_detection_stream():
@@ -248,21 +340,34 @@ async def timeline_image(request: Request, page: int = 0):
             show_bbox = True
             obj_filters = {}
 
+        # Get procedures config for eject evaluation
+        try:
+            procedures = tl_config.get('procedures', [])
+        except Exception:
+            procedures = []
+
+        # Get current encoder from watcher for ejector marker
+        try:
+            watcher_inst = request.app.state.watcher_instance
+            current_encoder = getattr(watcher_inst, 'encoder_value', None)
+        except Exception:
+            current_encoder = None
+        ejector_offset = int(os.environ.get("EJECTOR_OFFSET", 0))
+
         # Build one horizontal row per camera for this page
-        camera_rows = []
-        for cam_id in sorted(camera_frames_raw.keys()):
+        # Also collect per-column metadata across all cameras
+        sorted_cam_ids = sorted(camera_frames_raw.keys())
+        cam_page_slices = {}  # cam_id -> list of (ts, jpeg_bytes, detections, meta)
+        num_columns = 0
+
+        for cam_id in sorted_cam_ids:
             frames_raw = camera_frames_raw[cam_id]
 
             # Unpack all frames and sort by capture timestamp (chronological order)
             all_frames = []
             for frame_data in frames_raw:
-                unpacked = pickle.loads(frame_data)
-                if len(unpacked) == 3:
-                    ts, jpeg_bytes, detections = unpacked
-                else:
-                    ts, jpeg_bytes = unpacked
-                    detections = None
-                all_frames.append((ts, jpeg_bytes, detections))
+                ts, jpeg_bytes, detections, meta = _unpack_timeline_entry(frame_data)
+                all_frames.append((ts, jpeg_bytes, detections, meta))
             all_frames.sort(key=lambda x: x[0])
 
             # Paginate after sorting
@@ -271,8 +376,45 @@ async def timeline_image(request: Request, page: int = 0):
             start_index = max(0, end_index - frames_per_page)
             page_slice = all_frames[start_index:end_index] if end_index > 0 else []
 
+            cam_page_slices[cam_id] = page_slice
+            num_columns = max(num_columns, len(page_slice))
+
+        # Build per-column metadata (across all cameras)
+        columns_meta = []
+        for col_idx in range(num_columns):
+            col_all_dets = []
+            col_d_paths = {}
+            col_encoder = None
+            col_ts = None
+            for cam_id in sorted_cam_ids:
+                ps = cam_page_slices.get(cam_id, [])
+                if col_idx < len(ps):
+                    ts, jpeg_bytes, detections, meta = ps[col_idx]
+                    if detections:
+                        col_all_dets.extend(detections)
+                    d_path = meta.get('d_path') if meta else None
+                    col_d_paths[str(cam_id)] = d_path
+                    if meta and meta.get('encoder') is not None:
+                        col_encoder = meta['encoder']
+                    if col_ts is None:
+                        col_ts = ts
+            columns_meta.append({
+                'all_detections': col_all_dets,
+                'd_paths': col_d_paths,
+                'encoder': col_encoder,
+                'ts': col_ts,
+                'is_capture': (page == 0 and col_idx == num_columns - 1),
+            })
+
+        # Render camera rows with bboxes and rotation
+        camera_rows = []
+        thumb_width = 0
+        thumb_height = 240
+
+        for cam_id in sorted_cam_ids:
+            page_slice = cam_page_slices.get(cam_id, [])
             row_frames = []
-            for ts, jpeg_bytes, detections in page_slice:
+            for ts, jpeg_bytes, detections, meta in page_slice:
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     # Draw bounding boxes if enabled and detections exist
@@ -306,6 +448,9 @@ async def timeline_image(request: Request, page: int = 0):
                     elif image_rotation == 270:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
                     row_frames.append(thumb)
+                    # Record thumb dimensions (after rotation)
+                    if thumb_width == 0:
+                        thumb_height, thumb_width = thumb.shape[:2]
 
             if row_frames:
                 camera_rows.append(np.hstack(row_frames))
@@ -317,9 +462,19 @@ async def timeline_image(request: Request, page: int = 0):
             _, jpeg = cv2.imencode('.jpg', placeholder)
             return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
+        # Build metadata header strip
+        header = _build_header_strip(columns_meta, thumb_width, num_columns, procedures, current_encoder, ejector_offset)
+
         # Pad all rows to same width and vstack (cameras stacked vertically)
         max_width = max(row.shape[1] for row in camera_rows)
-        padded_rows = []
+        # Ensure header matches width
+        if header.shape[1] < max_width:
+            pad = np.zeros((_HEADER_HEIGHT, max_width - header.shape[1], 3), dtype=np.uint8)
+            header = np.hstack([header, pad])
+        elif header.shape[1] > max_width:
+            header = header[:, :max_width]
+
+        padded_rows = [header]
         for row in camera_rows:
             if row.shape[1] < max_width:
                 pad = np.zeros((row.shape[0], max_width - row.shape[1], 3), dtype=np.uint8)
@@ -453,6 +608,147 @@ async def update_timeline_config(request: Request):
             status_code=500,
             content={'success': False, 'error': str(e)}
         )
+
+
+@router.get("/api/raw_image/{path:path}")
+async def serve_raw_image(path: str):
+    """Serve a raw image file from the raw_images directory."""
+    safe_path = pathlib.Path("raw_images") / path
+    try:
+        resolved = safe_path.resolve()
+        if not str(resolved).startswith(str(_RAW_IMAGES_ROOT)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid path")
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(str(resolved), media_type="image/jpeg")
+
+
+@router.get("/api/timeline_meta")
+async def timeline_meta(request: Request, page: int = 0):
+    """Get metadata for each column in the timeline composite (used by frontend click handler)."""
+    try:
+        try:
+            tl_config = request.app.state.timeline_config
+            frames_per_page = tl_config.get('num_rows', 10)
+            image_rotation = tl_config.get('image_rotation', 0)
+            procedures = tl_config.get('procedures', [])
+        except Exception:
+            frames_per_page = 10
+            image_rotation = 0
+            procedures = []
+
+        redis_client = Redis("redis", 6379, db=0)
+        all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        if not all_keys:
+            return {"type": "timeline_meta", "columns": [], "thumb_width": 0, "thumb_height": 240,
+                    "header_height": _HEADER_HEIGHT, "num_cameras": 0, "page": page, "total_pages": 0}
+
+        def extract_cam_id(key):
+            k = key.decode() if isinstance(key, bytes) else key
+            try:
+                return int(k.split(":")[-1])
+            except ValueError:
+                return 0
+        all_keys.sort(key=extract_cam_id)
+
+        camera_frames_raw = {}
+        max_total_frames = 0
+        for key in all_keys:
+            frames_raw = redis_client.lrange(key, 0, -1)
+            cam_id = extract_cam_id(key)
+            camera_frames_raw[cam_id] = frames_raw if frames_raw else []
+            max_total_frames = max(max_total_frames, len(camera_frames_raw[cam_id]))
+
+        total_pages = max(1, (max_total_frames + frames_per_page - 1) // frames_per_page)
+        if page < 0 or page >= total_pages:
+            page = 0
+
+        sorted_cam_ids = sorted(camera_frames_raw.keys())
+        cam_page_slices = {}
+        num_columns = 0
+
+        for cam_id in sorted_cam_ids:
+            frames_raw = camera_frames_raw[cam_id]
+            all_frames = []
+            for frame_data in frames_raw:
+                ts, jpeg_bytes, detections, meta = _unpack_timeline_entry(frame_data)
+                all_frames.append((ts, detections, meta))
+            all_frames.sort(key=lambda x: x[0])
+
+            total = len(all_frames)
+            end_index = total - (page * frames_per_page)
+            start_index = max(0, end_index - frames_per_page)
+            ps = all_frames[start_index:end_index] if end_index > 0 else []
+            cam_page_slices[cam_id] = ps
+            num_columns = max(num_columns, len(ps))
+
+        # Determine thumb dimensions from first available frame
+        thumb_width = 0
+        thumb_height = 240
+        for cam_id in sorted_cam_ids:
+            frames_raw = camera_frames_raw[cam_id]
+            if frames_raw:
+                _, jpeg_bytes, _, _ = _unpack_timeline_entry(frames_raw[0])
+                thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if thumb is not None:
+                    if image_rotation in (90, 270):
+                        thumb_width, thumb_height = thumb.shape[:2]
+                    else:
+                        thumb_height, thumb_width = thumb.shape[:2]
+                    break
+
+        # Build per-column metadata
+        columns = []
+        for col_idx in range(num_columns):
+            col_all_dets = []
+            col_d_paths = {}
+            col_encoder = None
+            col_ts = None
+            for cam_id in sorted_cam_ids:
+                ps = cam_page_slices.get(cam_id, [])
+                if col_idx < len(ps):
+                    ts, detections, meta = ps[col_idx]
+                    if detections:
+                        col_all_dets.extend(detections)
+                    col_d_paths[str(cam_id)] = meta.get('d_path') if meta else None
+                    if meta and meta.get('encoder') is not None:
+                        col_encoder = meta['encoder']
+                    if col_ts is None:
+                        col_ts = ts
+
+            should_eject = False
+            if procedures and col_all_dets:
+                should_eject, _ = evaluate_eject_from_detections(col_all_dets, procedures)
+
+            columns.append({
+                "index": col_idx,
+                "ts": col_ts,
+                "encoder": col_encoder,
+                "should_eject": should_eject,
+                "d_paths": col_d_paths,
+            })
+
+        return {
+            "type": "timeline_meta",
+            "columns": columns,
+            "thumb_width": thumb_width,
+            "thumb_height": thumb_height,
+            "header_height": _HEADER_HEIGHT,
+            "num_cameras": len(sorted_cam_ids),
+            "cam_ids": sorted_cam_ids,
+            "page": page,
+            "total_pages": total_pages,
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting timeline metadata: {e}")
+        return {"type": "timeline_meta", "columns": [], "error": str(e)}
 
 
 @router.get("/timeline_slideshow")

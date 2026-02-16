@@ -40,7 +40,7 @@ from services.camera import (
 from services.watcher import ArduinoSocket, set_state_manager, set_app, _inference_queue
 from services import detection
 from services.detection import (
-    add_detection_event, add_frame_to_timeline,
+    add_detection_event, add_frame_to_timeline, evaluate_eject_from_detections,
     process_frame_helper, most_frequent_string, create_dynamic_images,
 )
 
@@ -549,17 +549,18 @@ apply_states_from_config(state_manager)
 apply_pipeline_config_at_startup(pipeline_manager)
 
 # Concurrent inference threads — each thread independently pops a frame from
-# Redis, calls process_frame_helper() (HTTP to YOLO), and handles results.
+# the hot queue (RAM) or cold queue (disk), calls YOLO, and handles results.
 # Docker DNS round-robin distributes requests across YOLO replicas.
 _num_cameras = len(watcher.cameras) if watcher.cameras else 1
 INFERENCE_WORKERS = max(4, _num_cameras * 4)
-# Limit concurrent YOLO HTTP requests to avoid overwhelming the service.
-# With 2 YOLO replicas × 2 workers each = 4 slots; allow a small buffer.
-_YOLO_REPLICAS = int(os.environ.get("YOLO_REPLICAS", 2))
-_YOLO_WORKERS = int(os.environ.get("YOLO_WORKERS", 2))
-_yolo_semaphore = threading.Semaphore(_YOLO_REPLICAS * _YOLO_WORKERS + 2)
-# Max age (seconds) for a queued frame — older frames are skipped
-_MAX_FRAME_AGE = 15.0
+# No semaphore — worker count IS the concurrency limit.
+# Autoscaler adds workers when queue backs up, which naturally increases
+# concurrency to match the API's capacity (local or remote).
+
+# Initialize hot (RAM) + cold (disk) inference queues
+from services.watcher import init_queues
+init_queues(_num_cameras, cfg_module.EJECTOR_OFFSET, cfg_module.EJECTOR_ENABLED)
+
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
 # Update autoscaler initial state with actual values
@@ -572,186 +573,186 @@ web_server_thread = threading.Thread(target=start_web_server, daemon=True)
 web_server_thread.start()
 logger.info(f"Web server started on http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
 
-# Inference worker thread function - must be defined before being used
+
+# ── Shared frame processing logic ──
+def _process_frame_batch(frames_data, allow_eject=True):
+    """Process a frame batch through YOLO and handle results.
+
+    Args:
+        frames_data: dict with 'frames', 'encoder', 'shipment', 'capture_t'
+        allow_eject: if True, evaluate ejector rules (hot path). If False, skip (cold path).
+
+    Returns:
+        True if YOLO produced results, False if inference failed.
+    """
+    st_ts = time.time()
+    frames = frames_data.get("frames", [])
+    capture_encoder = frames_data.get("encoder", 0)
+    capture_shipment = frames_data.get("shipment", "no_shipment")
+    capture_t = frames_data.get("capture_t", None)
+
+    # Validate frame structure before processing
+    valid_frames = []
+    for frame in frames:
+        if isinstance(frame, (list, tuple)) and len(frame) > 0:
+            valid_frames.append(frame)
+
+    if not valid_frames:
+        return True  # Nothing to process, not a failure
+
+    results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
+
+    # Filter out None results
+    valid_results = [r for r in results if r is not None]
+    if not valid_results:
+        # Retry once
+        results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
+        valid_results = [r for r in results if r is not None]
+        if not valid_results:
+            return False  # Inference failed
+
+    queue_messages, processed_frames = zip(*valid_results)
+
+    # Filter and collect all valid messages in one go
+    valid_queue_messages = [
+        msg for msg in queue_messages
+        if isinstance(msg.get('dms'), list) and len(msg['dms']) > 0 and msg['dms'][0] not in [None, '']
+    ]
+
+    if valid_queue_messages:
+        all_dms = [msg['dms'][0] for msg in valid_queue_messages]
+        most_frequent = most_frequent_string(all_dms)
+
+        # Sort queue messages with safe handling of None values
+        queue_messages = sorted(
+            queue_messages,
+            key=lambda x: (
+                x.get('priority', 0),
+                not isinstance(x.get('dms'), list) or len(x.get('dms', [])) == 0 or x['dms'][0] is None,
+                -len(x['dms'][0]) if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else float('-inf'),
+                x['dms'][0] != most_frequent if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else True
+            )
+        )
+
+    # Add histogram data to the first queue message if available
+    if hasattr(watcher, 'stream_histogram_data') and watcher.stream_histogram_data:
+        if len(queue_messages) > 0:
+            queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
+            watcher.stream_histogram_data = []
+
+    if queue_messages:
+        # Add encoder value to each queue message for ejector tracking
+        for msg in queue_messages:
+            msg['encoder'] = capture_encoder
+        watcher.send_queue_messages(json.dumps(queue_messages))
+
+    if processed_frames:
+        watcher.redis_connection.update_queue_messages_redis(
+            json.dumps(processed_frames),
+            stream_name="stream_queue"
+        )
+
+    # Log results
+    for msg in queue_messages:
+        ts = msg.get('ts', 'N/A')
+        dms_list = msg.get('dms', [])
+        first_dms = dms_list[0] if isinstance(dms_list, list) and len(dms_list) > 0 else None
+        timestamp = time.time() - st_ts
+        detection_info = msg.get('detection', [])
+        if not isinstance(detection_info, list):
+            detection_info = []
+        classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
+        logger.info(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
+
+    # Evaluate procedure-based eject rules (only for hot path)
+    if allow_eject:
+        try:
+            _tl_cfg = getattr(app.state, 'timeline_config', {})
+            _procedures = _tl_cfg.get('procedures', [])
+            if _procedures and cfg_module.EJECTOR_ENABLED:
+                # Collect all detections across all messages
+                all_detections = []
+                for msg in queue_messages:
+                    det_list = msg.get('detection', [])
+                    if isinstance(det_list, list):
+                        all_detections.extend(d for d in det_list if isinstance(d, dict))
+
+                should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _procedures)
+
+                if should_eject:
+                    eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
+                    watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
+                    logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
+        except Exception as e:
+            logger.warning(f"Procedure eject evaluation error: {e}")
+
+    return True
+
+
+# ── Inference worker thread: hot (RAM, LIFO) first, then cold (disk, FIFO) ──
 def inference_worker_thread():
     """
-    Dedicated thread for processing frames through inference pipeline.
-    Runs independently from capture and web server threads.
+    Two-phase inference worker:
+    1. Try hot queue (RAM, LIFO) — for ejector decisions. On YOLO failure → fail-safe eject + spill to cold.
+    2. If hot empty → try cold queue (disk, FIFO) — for historical processing, no ejector.
+    No frame is ever dropped.
     """
+    # Re-read module globals (set by init_queues before threads start)
+    import services.watcher as _watcher_mod
+    hot_q = _watcher_mod._hot_queue
+    cold_q = _watcher_mod._cold_queue_disk
+
     logger.info("Inference worker thread started")
 
     while True:
         try:
-            st_ts = time.time()
-
-            # Pop from in-memory Python queue (blocks until item available)
+            # Phase 1: Try hot queue (LIFO — newest first for ejector)
             try:
-                frames_data = _inference_queue.get(timeout=0.1)
+                frames_data = hot_q.get(timeout=0.05)
             except queue.Empty:
-                continue
+                frames_data = None
 
-            if not frames_data:
-                continue
-
-            # Drop stale frames — no point processing frames that are too old
-            enqueue_t = frames_data.get('_enqueue_t', 0)
-            age = time.time() - enqueue_t if enqueue_t else 0
-            if age > _MAX_FRAME_AGE:
-                logger.debug(f"Dropping stale frame batch (age={age:.1f}s > {_MAX_FRAME_AGE}s)")
-                continue
-
-            # frames_data is already a Python dict — no JSON parsing needed
-            frames = frames_data.get("frames", [])
-            capture_encoder = frames_data.get("encoder", 0)
-            capture_shipment = frames_data.get("shipment", "no_shipment")
-            capture_t = frames_data.get("capture_t", None)
-
-            # Validate frame structure before processing
-            valid_frames = []
-            for frame in frames:
-                if isinstance(frame, (list, tuple)) and len(frame) > 0:
-                    valid_frames.append(frame)
-
-            if not valid_frames:
-                continue
-
-            try:
-                # Acquire semaphore to limit concurrent YOLO HTTP requests.
-                # Prevents flooding YOLO when queue is deep — excess workers wait here.
-                _yolo_semaphore.acquire()
+            if frames_data:
                 try:
-                    results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
-                finally:
-                    _yolo_semaphore.release()
-
-                # Filter out None results
-                valid_results = [r for r in results if r is not None]
-                if not valid_results:
-                    # Retry once
-                    _yolo_semaphore.acquire()
-                    try:
-                        results = [process_frame_helper(f, capture_t=capture_t) for f in valid_frames]
-                    finally:
-                        _yolo_semaphore.release()
-                    valid_results = [r for r in results if r is not None]
-                    if not valid_results:
-                        continue
-
-                queue_messages, processed_frames = zip(*valid_results)
-
-                # Filter and collect all valid messages in one go
-                valid_queue_messages = [
-                    msg for msg in queue_messages
-                    if isinstance(msg.get('dms'), list) and len(msg['dms']) > 0 and msg['dms'][0] not in [None, '']
-                ]
-
-                if valid_queue_messages:
-                    all_dms = [msg['dms'][0] for msg in valid_queue_messages]
-                    most_frequent = most_frequent_string(all_dms)
-
-                    # Sort queue messages with safe handling of None values
-                    queue_messages = sorted(
-                        queue_messages,
-                        key=lambda x: (
-                            x.get('priority', 0),
-                            not isinstance(x.get('dms'), list) or len(x.get('dms', [])) == 0 or x['dms'][0] is None,
-                            -len(x['dms'][0]) if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else float('-inf'),
-                            x['dms'][0] != most_frequent if isinstance(x.get('dms'), list) and len(x.get('dms', [])) > 0 and x['dms'][0] is not None else True
-                        )
-                    )
-
-                # Add histogram data to the first queue message if available
-                if hasattr(watcher, 'stream_histogram_data') and watcher.stream_histogram_data:
-                    if len(queue_messages) > 0:
-                        queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
-                        watcher.stream_histogram_data = []
-
-                if queue_messages:
-                    # Add encoder value to each queue message for ejector tracking
-                    for msg in queue_messages:
-                        msg['encoder'] = capture_encoder
-                    watcher.send_queue_messages(json.dumps(queue_messages))
-
-                if processed_frames:
-                    watcher.redis_connection.update_queue_messages_redis(
-                        json.dumps(processed_frames),
-                        stream_name="stream_queue"
-                    )
-
-                try:
-                    for msg in queue_messages:
-                        ts = msg.get('ts', 'N/A')
-                        dms_list = msg.get('dms', [])
-                        first_dms = dms_list[0] if isinstance(dms_list, list) and len(dms_list) > 0 else None
-                        timestamp = time.time() - st_ts
-                        detection_info = msg.get('detection', [])
-                        if not isinstance(detection_info, list):
-                            detection_info = []
-                        classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
-                        logger.info(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
-
-                    # Evaluate procedure-based eject rules
-                    try:
-                        _tl_cfg = getattr(app.state, 'timeline_config', {})
-                        _procedures = _tl_cfg.get('procedures', [])
-                        if _procedures and cfg_module.EJECTOR_ENABLED:
-                            all_detected = {}
-                            for msg in queue_messages:
-                                det_list = msg.get('detection', [])
-                                if isinstance(det_list, list):
-                                    for d in det_list:
-                                        if isinstance(d, dict) and d.get('name'):
-                                            name = d['name']
-                                            conf = d.get('confidence', 0)
-                                            if name not in all_detected or conf > all_detected[name]:
-                                                all_detected[name] = conf
-
-                            should_eject = False
-                            eject_reasons = []
-
-                            for proc in _procedures:
-                                if not proc.get('enabled', False):
-                                    continue
-                                rules = proc.get('rules', [])
-                                if not rules:
-                                    continue
-                                logic = proc.get('logic', 'any')
-
-                                def _eval_rule(rule):
-                                    obj = rule.get('object', '')
-                                    cond = rule.get('condition', 'present')
-                                    min_conf = rule.get('min_confidence', 0) / 100.0
-                                    if cond == 'present':
-                                        return obj in all_detected and all_detected[obj] >= min_conf
-                                    elif cond == 'not_present':
-                                        return obj not in all_detected or all_detected[obj] < min_conf
-                                    return False
-
-                                results = [_eval_rule(r) for r in rules]
-                                triggered = all(results) if logic == 'all' else any(results)
-                                if triggered:
-                                    should_eject = True
-                                    matched = [r.get('object', '?') for r, res in zip(rules, results) if res]
-                                    eject_reasons.append(f"[{proc.get('name','?')}:{logic}:{','.join(matched)}]")
-
-                            if should_eject:
-                                eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
-                                watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
-                                logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
-                    except Exception as e:
-                        logger.warning(f"Procedure eject evaluation error: {e}")
-
+                    success = _process_frame_batch(frames_data, allow_eject=True)
+                    if not success:
+                        # YOLO failed after retry — fail-safe eject + spill to cold
+                        if cfg_module.EJECTOR_ENABLED:
+                            capture_encoder = frames_data.get("encoder", 0)
+                            dms_list = frames_data.get("frames", [])
+                            eject_data = json.dumps({"encoder": capture_encoder, "dm": None})
+                            watcher.redis_connection.update_queue_messages_redis(
+                                eject_data, stream_name="ejector_queue"
+                            )
+                            logger.warning(f"FAIL-SAFE EJECT: YOLO failed, ejecting encoder={capture_encoder}")
+                        cold_q.put(frames_data)
+                        logger.debug("Hot frame spilled to cold queue after YOLO failure")
                 except Exception as e:
-                    logger.warning(f"Non-critical error in frame processing: {e}")
-            except Exception as e:
-                logger.error(f"Processing error: {e}")
+                    logger.error(f"Hot processing error: {e}")
+                    # Don't lose the frame — spill to cold
+                    try:
+                        cold_q.put(frames_data)
+                    except Exception:
+                        pass
                 continue
+
+            # Phase 2: Hot queue empty — try cold queue (FIFO — oldest first)
+            frames_data = cold_q.get()
+            if frames_data:
+                try:
+                    _process_frame_batch(frames_data, allow_eject=False)
+                except Exception as e:
+                    logger.error(f"Cold processing error: {e}")
+                continue
+
+            # Both queues empty — brief sleep to avoid busy-wait
+            time.sleep(0.05)
 
         except Exception as e:
-            logger.error(f"Main loop error: {e}")
+            logger.error(f"Inference worker error: {e}")
             time.sleep(0.1)
 
-# Start inference worker threads — each thread pops frames and calls YOLO independently
+# Start inference worker threads
 for i in range(INFERENCE_WORKERS):
     t = threading.Thread(target=inference_worker_thread, daemon=True, name=f"inference-worker-{i+1}")
     t.start()
@@ -775,7 +776,7 @@ def _autoscaler():
     """
     global INFERENCE_WORKERS
     import services.watcher as _watcher_mod
-    from services.watcher import _disk_queue, add_disk_writers, _inference_queue as _inf_q
+    from services.watcher import _disk_queue, add_disk_writers
 
     # First check after 30s (let system warm up), then every AUTOSCALE_INTERVAL
     time.sleep(30)
@@ -786,9 +787,11 @@ def _autoscaler():
             disk_pct = (disk_qsize / _disk_queue.maxsize * 100) if _disk_queue.maxsize else 0
             disk_count = _watcher_mod._disk_writers_count  # read live value from module
 
-            # ── Measure inference queue pressure (priority queue: hot + cold) ──
-            inf_qlen = _inf_q.qsize()
-            inf_hot, inf_cold = _inf_q.stats()
+            # ── Measure inference queue pressure (hot=RAM, cold=disk) ──
+            inf_hot = _watcher_mod._hot_queue.qsize() if _watcher_mod._hot_queue else 0
+            inf_cold = _watcher_mod._cold_queue_disk.qsize() if _watcher_mod._cold_queue_disk else 0
+            inf_qlen = inf_hot + inf_cold
+            inf_qmax = _watcher_mod._hot_queue.maxsize if _watcher_mod._hot_queue else 0
 
             # ── Classify ──
             #   Disk:      >25% full → CRITICAL,  >5% → WARNING
@@ -817,14 +820,14 @@ def _autoscaler():
                 "disk_queue_len": disk_qsize,
                 "disk_queue_max": _disk_queue.maxsize,
                 "inf_queue_len": inf_qlen,
-                "inf_queue_max": _inf_q.maxsize,
+                "inf_queue_max": inf_qmax,
                 "inf_hot": inf_hot,
                 "inf_cold": inf_cold,
             }
 
             logger.info(
                 f"[Autoscaler] Disk: {disk_qsize}/{_disk_queue.maxsize} ({disk_pct:.0f}%) [{disk_level}] | "
-                f"Inf queue: {inf_qlen} [{inf_level}] | "
+                f"Inf: hot={inf_hot} cold={inf_cold} [{inf_level}] | "
                 f"Workers: {disk_count} disk, {INFERENCE_WORKERS} inference"
             )
 

@@ -7,15 +7,19 @@ Provides two WebSocket endpoints:
 
 import asyncio
 import cv2
+import json
 import logging
 import numpy as np
+import os
 import pickle
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis import Redis
 
 import config as cfg
 from config import TIMELINE_REDIS_PREFIX
+from services.detection import evaluate_eject_from_detections
+from routers.timeline import _unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -57,6 +61,22 @@ class ConnectionManager:
         except Exception:
             pass
 
+    async def send_text(self, ws: WebSocket, data: str):
+        try:
+            await ws.send_text(data)
+        except Exception:
+            pass
+
+    async def broadcast_text(self, channel: str, data: str):
+        dead: List[WebSocket] = []
+        for ws in self._channels.get(channel, []):
+            try:
+                await ws.send_text(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(channel, ws)
+
 
 manager = ConnectionManager()
 
@@ -69,9 +89,9 @@ _timeline_cache_bytes: bytes = b""
 _timeline_cache_page: int = 0
 
 
-def _build_timeline_composite(page: int, app_state) -> bytes | None:
-    """Build the timeline composite JPEG (runs in executor thread).
-    Reuses the same logic as timeline.py /timeline_image endpoint."""
+def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dict]]:
+    """Build the timeline composite JPEG + metadata (runs in executor thread).
+    Returns (jpeg_bytes, metadata_dict) or None."""
     try:
         # Get config
         try:
@@ -81,12 +101,22 @@ def _build_timeline_composite(page: int, app_state) -> bytes | None:
             image_rotation = tl_config.get('image_rotation', 0)
             show_bbox = tl_config.get('show_bounding_boxes', True)
             obj_filters = tl_config.get('object_filters', {})
+            procedures = tl_config.get('procedures', [])
         except Exception:
             quality = 85
             frames_per_page = 10
             image_rotation = 0
             show_bbox = True
             obj_filters = {}
+            procedures = []
+
+        # Get current encoder for ejector marker
+        try:
+            watcher_inst = app_state.watcher_instance
+            current_encoder = getattr(watcher_inst, 'encoder_value', None)
+        except Exception:
+            current_encoder = None
+        ejector_offset = int(os.environ.get("EJECTOR_OFFSET", 0))
 
         redis_client = Redis("redis", 6379, db=0)
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
@@ -114,18 +144,16 @@ def _build_timeline_composite(page: int, app_state) -> bytes | None:
         total_pages = max(1, (max_total_frames + frames_per_page - 1) // frames_per_page)
         safe_page = page if 0 <= page < total_pages else 0
 
-        camera_rows = []
-        for cam_id in sorted(camera_frames_raw.keys()):
+        sorted_cam_ids = sorted(camera_frames_raw.keys())
+        cam_page_slices = {}
+        num_columns = 0
+
+        for cam_id in sorted_cam_ids:
             frames_raw = camera_frames_raw[cam_id]
             all_frames = []
             for frame_data in frames_raw:
-                unpacked = pickle.loads(frame_data)
-                if len(unpacked) == 3:
-                    ts, jpeg_bytes, detections = unpacked
-                else:
-                    ts, jpeg_bytes = unpacked
-                    detections = None
-                all_frames.append((ts, jpeg_bytes, detections))
+                ts, jpeg_bytes, detections, meta = _unpack_timeline_entry(frame_data)
+                all_frames.append((ts, jpeg_bytes, detections, meta))
             all_frames.sort(key=lambda x: x[0])
 
             total = len(all_frames)
@@ -133,8 +161,44 @@ def _build_timeline_composite(page: int, app_state) -> bytes | None:
             start_index = max(0, end_index - frames_per_page)
             page_slice = all_frames[start_index:end_index] if end_index > 0 else []
 
+            cam_page_slices[cam_id] = page_slice
+            num_columns = max(num_columns, len(page_slice))
+
+        # Build per-column metadata
+        columns_meta = []
+        for col_idx in range(num_columns):
+            col_all_dets = []
+            col_d_paths = {}
+            col_encoder = None
+            col_ts = None
+            for cam_id in sorted_cam_ids:
+                ps = cam_page_slices.get(cam_id, [])
+                if col_idx < len(ps):
+                    ts, jpeg_bytes, detections, meta = ps[col_idx]
+                    if detections:
+                        col_all_dets.extend(detections)
+                    col_d_paths[str(cam_id)] = meta.get('d_path') if meta else None
+                    if meta and meta.get('encoder') is not None:
+                        col_encoder = meta['encoder']
+                    if col_ts is None:
+                        col_ts = ts
+            columns_meta.append({
+                'all_detections': col_all_dets,
+                'd_paths': col_d_paths,
+                'encoder': col_encoder,
+                'ts': col_ts,
+                'is_capture': (safe_page == 0 and col_idx == num_columns - 1),
+            })
+
+        # Render camera rows
+        camera_rows = []
+        thumb_width = 0
+        thumb_height = 240
+
+        for cam_id in sorted_cam_ids:
+            page_slice = cam_page_slices.get(cam_id, [])
             row_frames = []
-            for ts, jpeg_bytes, detections in page_slice:
+            for ts, jpeg_bytes, detections, meta in page_slice:
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     if show_bbox and detections:
@@ -165,6 +229,8 @@ def _build_timeline_composite(page: int, app_state) -> bytes | None:
                     elif image_rotation == 270:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
                     row_frames.append(thumb)
+                    if thumb_width == 0:
+                        thumb_height, thumb_width = thumb.shape[:2]
 
             if row_frames:
                 camera_rows.append(np.hstack(row_frames))
@@ -172,8 +238,17 @@ def _build_timeline_composite(page: int, app_state) -> bytes | None:
         if not camera_rows:
             return None
 
+        # Build header strip
+        header = _build_header_strip(columns_meta, thumb_width, num_columns, procedures, current_encoder, ejector_offset)
+
         max_width = max(row.shape[1] for row in camera_rows)
-        padded_rows = []
+        if header.shape[1] < max_width:
+            pad = np.zeros((_HEADER_HEIGHT, max_width - header.shape[1], 3), dtype=np.uint8)
+            header = np.hstack([header, pad])
+        elif header.shape[1] > max_width:
+            header = header[:, :max_width]
+
+        padded_rows = [header]
         for row in camera_rows:
             if row.shape[1] < max_width:
                 pad = np.zeros((row.shape[0], max_width - row.shape[1], 3), dtype=np.uint8)
@@ -182,7 +257,34 @@ def _build_timeline_composite(page: int, app_state) -> bytes | None:
 
         composite = np.vstack(padded_rows)
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        return jpeg.tobytes()
+
+        # Build metadata for frontend
+        meta_columns = []
+        for i, cm in enumerate(columns_meta):
+            should_eject = False
+            if procedures and cm['all_detections']:
+                should_eject, _ = evaluate_eject_from_detections(cm['all_detections'], procedures)
+            meta_columns.append({
+                "index": i,
+                "ts": cm['ts'],
+                "encoder": cm['encoder'],
+                "should_eject": should_eject,
+                "d_paths": cm['d_paths'],
+            })
+
+        metadata = {
+            "type": "timeline_meta",
+            "columns": meta_columns,
+            "thumb_width": thumb_width,
+            "thumb_height": thumb_height,
+            "header_height": _HEADER_HEIGHT,
+            "num_cameras": len(sorted_cam_ids),
+            "cam_ids": sorted_cam_ids,
+            "page": safe_page,
+            "total_pages": total_pages,
+        }
+
+        return jpeg.tobytes(), metadata
 
     except Exception as e:
         logger.error(f"WS timeline composite error: {e}", exc_info=True)
@@ -203,11 +305,13 @@ async def ws_timeline(websocket: WebSocket):
     try:
         # Send current composite immediately on connect
         loop = asyncio.get_event_loop()
-        jpeg = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state)
-        if jpeg:
+        result = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state)
+        if result:
+            jpeg, meta = result
             _timeline_cache_bytes = jpeg
             _timeline_cache_version = cfg.timeline_frame_counter
             _timeline_cache_page = client_page
+            await manager.send_text(websocket, json.dumps(meta))
             await manager.send_binary(websocket, jpeg)
 
         # Start two concurrent tasks: listen for client messages + subscribe to Redis updates
@@ -219,10 +323,12 @@ async def ws_timeline(websocket: WebSocket):
                     msg = await websocket.receive_text()
                     client_page = int(msg)
                     # Immediately rebuild for this client's new page
-                    jpeg = await loop.run_in_executor(
+                    result = await loop.run_in_executor(
                         None, _build_timeline_composite, client_page, app_state
                     )
-                    if jpeg:
+                    if result:
+                        jpeg, meta = result
+                        await manager.send_text(websocket, json.dumps(meta))
                         await manager.send_binary(websocket, jpeg)
                 except (WebSocketDisconnect, RuntimeError):
                     break
@@ -250,13 +356,15 @@ async def ws_timeline(websocket: WebSocket):
                         current_version = cfg.timeline_frame_counter
                         # Only rebuild if version changed or page differs
                         if current_version != _timeline_cache_version or client_page != _timeline_cache_page:
-                            jpeg = await loop.run_in_executor(
+                            result = await loop.run_in_executor(
                                 None, _build_timeline_composite, client_page, app_state
                             )
-                            if jpeg:
+                            if result:
+                                jpeg, meta = result
                                 _timeline_cache_version = current_version
                                 _timeline_cache_bytes = jpeg
                                 _timeline_cache_page = client_page
+                                await manager.broadcast_text("timeline", json.dumps(meta))
                                 await manager.broadcast_binary("timeline", jpeg)
             except (WebSocketDisconnect, RuntimeError):
                 pass

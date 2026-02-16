@@ -906,7 +906,8 @@
                                     <input type="text" class="control-input" id="model-url-input" placeholder="https://..." onchange="fetchModelsFromGradio()">
                                     <button class="control-button" style="font-size: 11px; padding: 4px 8px; margin-top: 4px;" onclick="fetchModelsFromGradio()">Fetch Models</button>
                                 </div>
-                                <div class="control-item">
+                                <!-- Gradio model name (shown when type=gradio) -->
+                                <div class="control-item" id="gradio-name-section">
                                     <div class="control-label">Model Name (for Gradio)</div>
                                     <select class="control-input" id="model-gradio-name-input">
                                         <option value="Data Matrix">Data Matrix</option>
@@ -920,6 +921,21 @@
                                         <option value="predict">predict</option>
                                         <option value="N/A">N/A</option>
                                     </select>
+                                </div>
+                                <!-- YOLO weights (shown when type=yolo) -->
+                                <div class="control-item" id="yolo-weights-section" style="display: none; grid-column: 1 / -1;">
+                                    <div class="control-label">YOLO Weights (.pt)</div>
+                                    <div style="display: flex; gap: 6px; align-items: center; margin-bottom: 8px;">
+                                        <select class="control-input" id="yolo-weights-select" style="flex: 3; min-width: 0;">
+                                            <option value="">-- Select existing weight --</option>
+                                        </select>
+                                        <button class="control-button" style="font-size: 11px; padding: 6px 14px; white-space: nowrap; flex-shrink: 0;" onclick="activateExistingWeights()">Activate</button>
+                                    </div>
+                                    <div style="display: flex; gap: 6px; align-items: center;">
+                                        <input type="file" id="yolo-weights-file" accept=".pt" style="font-size: 11px; color: var(--text-secondary); flex: 3; min-width: 0;">
+                                        <button class="control-button" style="font-size: 11px; padding: 6px 14px; white-space: nowrap; background-color: #0d6efd; flex-shrink: 0;" onclick="uploadWeightsFile()">Upload .pt</button>
+                                    </div>
+                                    <div id="yolo-classes-display" style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;"></div>
                                 </div>
                                 <div class="control-item">
                                     <div class="control-label">Min Confidence (0-1)</div>

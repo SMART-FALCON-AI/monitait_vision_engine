@@ -190,7 +190,17 @@ function connectTimelineWs() {
     timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline`);
     timelineWs.binaryType = 'arraybuffer';
     timelineWs.onmessage = (e) => {
-        if (typeof e.data === 'string') return; // skip text messages
+        if (typeof e.data === 'string') {
+            // Parse timeline metadata JSON
+            try {
+                const meta = JSON.parse(e.data);
+                if (meta.type === 'timeline_meta') {
+                    window._timelineMeta = meta;
+                }
+            } catch(err) {}
+            return;
+        }
+        if (!window.timelineAutoUpdate) return; // respect Stop button
         const blob = new Blob([e.data], {type: 'image/jpeg'});
         const url = URL.createObjectURL(blob);
         const img = document.getElementById('timeline-slide');
@@ -1584,9 +1594,14 @@ async function fetchModelsFromGradio() {
 function handleModelTypeChange() {
     const type = document.getElementById('model-type-input').value;
     const select = document.getElementById('model-gradio-name-input');
+    const gradioSection = document.getElementById('gradio-name-section');
+    const yoloSection = document.getElementById('yolo-weights-section');
 
     if (type === 'yolo') {
         select.innerHTML = '<option value="N/A">N/A</option>';
+        gradioSection.style.display = 'none';
+        yoloSection.style.display = '';
+        loadExistingWeights();
     } else if (type === 'gradio') {
         select.innerHTML = `
             <option value="Data Matrix">Data Matrix</option>
@@ -1600,7 +1615,123 @@ function handleModelTypeChange() {
             <option value="predict">predict</option>
             <option value="N/A">N/A</option>
         `;
+        gradioSection.style.display = '';
+        yoloSection.style.display = 'none';
     }
+}
+
+async function loadExistingWeights() {
+    const sel = document.getElementById('yolo-weights-select');
+    try {
+        const resp = await fetch('/api/models/weights');
+        const data = await resp.json();
+        const weights = data.weights || [];
+        if (weights.length === 0) {
+            sel.innerHTML = '<option value="">No weights uploaded yet — use Upload below</option>';
+        } else {
+            sel.innerHTML = '<option value="">-- Select weight to activate --</option>';
+            weights.forEach(w => {
+                const opt = document.createElement('option');
+                opt.value = w.name;
+                opt.textContent = `${w.name} (${w.size_mb} MB)`;
+                sel.appendChild(opt);
+            });
+        }
+        // Show current active model classes
+        if (data.current_classes && data.current_classes.length > 0) {
+            _showYoloClasses(data.current_classes);
+        }
+    } catch (e) {
+        sel.innerHTML = '<option value="">Error loading weights</option>';
+    }
+}
+
+function _showYoloClasses(classes) {
+    const container = document.getElementById('yolo-classes-display');
+    if (!classes || classes.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+    container.innerHTML = classes.map(c =>
+        `<span style="background: rgba(59,130,246,0.2); border: 1px solid rgba(59,130,246,0.5); border-radius: 4px; padding: 2px 6px; font-size: 10px; color: var(--text-primary);">${c}</span>`
+    ).join('');
+}
+
+async function uploadWeightsFile() {
+    const fileInput = document.getElementById('yolo-weights-file');
+    const responseEl = document.getElementById('model-response');
+    if (!fileInput.files || !fileInput.files[0]) {
+        responseEl.textContent = 'Please select a .pt file first';
+        responseEl.className = 'control-response error';
+        return;
+    }
+
+    const file = fileInput.files[0];
+    if (!file.name.endsWith('.pt')) {
+        responseEl.textContent = 'Only .pt files are allowed';
+        responseEl.className = 'control-response error';
+        return;
+    }
+
+    responseEl.textContent = `Uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)...`;
+    responseEl.className = 'control-response';
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const resp = await fetch('/api/models/upload-weights', { method: 'POST', body: formData });
+        const data = await resp.json();
+        if (resp.ok) {
+            responseEl.textContent = `Uploaded & activated: ${data.filename} (${data.replicas_updated} replicas)`;
+            responseEl.className = 'control-response success';
+            _showYoloClasses(data.classes);
+            loadExistingWeights();
+        } else {
+            responseEl.textContent = data.error || 'Upload failed';
+            responseEl.className = 'control-response error';
+        }
+    } catch (e) {
+        responseEl.textContent = 'Error: ' + e.message;
+        responseEl.className = 'control-response error';
+    }
+    setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 5000);
+}
+
+async function activateExistingWeights() {
+    const sel = document.getElementById('yolo-weights-select');
+    const responseEl = document.getElementById('model-response');
+    const filename = sel.value;
+
+    if (!filename) {
+        responseEl.textContent = 'Please select a weight file';
+        responseEl.className = 'control-response error';
+        return;
+    }
+
+    responseEl.textContent = `Activating ${filename}...`;
+    responseEl.className = 'control-response';
+
+    try {
+        const resp = await fetch('/api/models/activate-weights', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename })
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            responseEl.textContent = `Activated: ${data.filename} (${data.replicas_updated} replicas)`;
+            responseEl.className = 'control-response success';
+            _showYoloClasses(data.classes);
+        } else {
+            responseEl.textContent = data.error || 'Activation failed';
+            responseEl.className = 'control-response error';
+        }
+    } catch (e) {
+        responseEl.textContent = 'Error: ' + e.message;
+        responseEl.className = 'control-response error';
+    }
+    setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 5000);
 }
 
 function renderPipelinesList(pipelines, currentPipeline) {
@@ -1732,6 +1863,9 @@ function loadModelForEdit(modelId) {
         modelSelect.appendChild(option);
         modelSelect.value = modelValue;
     }
+
+    // Toggle YOLO weights / Gradio sections based on model type
+    handleModelTypeChange();
 }
 
 async function activatePipeline(pipelineName) {
@@ -2329,8 +2463,13 @@ function updateQueueChart(canvasId, history, currentValue, maxValue, color) {
     if (history.length > _QUEUE_HISTORY_MAX) history.shift();
 
     const ctx = canvas.getContext('2d');
-    const w = canvas.width = canvas.offsetWidth * (window.devicePixelRatio || 1);
-    const h = canvas.height = 50 * (window.devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.round(canvas.offsetWidth * dpr);
+    const targetH = Math.round(50 * dpr);
+    // Only resize if dimensions changed — avoids expensive layout recalc
+    if (canvas.width !== targetW) canvas.width = targetW;
+    if (canvas.height !== targetH) canvas.height = targetH;
+    const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
 
     if (history.length < 2) return;
@@ -2358,12 +2497,12 @@ function updateQueueChart(canvasId, history, currentValue, maxValue, color) {
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5 * (window.devicePixelRatio || 1);
+    ctx.lineWidth = 1.5 * dpr;
     ctx.stroke();
 
     // Current value text (bottom-right)
     ctx.fillStyle = color;
-    ctx.font = `${9 * (window.devicePixelRatio || 1)}px Inter, sans-serif`;
+    ctx.font = `${9 * dpr}px Inter, sans-serif`;
     ctx.textAlign = 'right';
     ctx.fillText(`${currentValue}/${maxValue}`, w - 4, h - 4);
 }
@@ -2381,8 +2520,12 @@ function updateInfQueueChart(canvasId, hotHistory, coldHistory, hotVal, coldVal,
 
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
-    const w = canvas.width = canvas.offsetWidth * dpr;
-    const h = canvas.height = 50 * dpr;
+    const targetW = Math.round(canvas.offsetWidth * dpr);
+    const targetH = Math.round(50 * dpr);
+    // Only resize if dimensions changed — avoids expensive layout recalc
+    if (canvas.width !== targetW) canvas.width = targetW;
+    if (canvas.height !== targetH) canvas.height = targetH;
+    const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
 
     if (hotHistory.length < 2) return;
