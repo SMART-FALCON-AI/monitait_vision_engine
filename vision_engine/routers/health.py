@@ -1,5 +1,6 @@
 """Health, status, and system metrics routes."""
 
+import os
 import time
 import json
 import logging
@@ -65,11 +66,16 @@ async def health_check(request: Request):
             except:
                 pass
 
-        # Check cameras dynamically
+        # Check cameras dynamically (verify device node exists for USB)
         cameras_status = {}
         if watcher and hasattr(watcher, 'cameras'):
             for cam_id, cam in watcher.cameras.items():
-                cameras_status[f"cam_{cam_id}"] = cam is not None and cam.success if cam else False
+                cam_path = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else None
+                is_usb = True
+                if hasattr(watcher, 'camera_metadata') and cam_id in watcher.camera_metadata:
+                    is_usb = watcher.camera_metadata[cam_id].get("type", "usb") == "usb"
+                device_exists = os.path.exists(cam_path) if is_usb and cam_path else True
+                cameras_status[f"cam_{cam_id}"] = (cam is not None and cam.success and device_exists) if cam else False
 
         # Check serial availability
         serial_available = watcher.serial_available if watcher else False
@@ -304,6 +310,8 @@ async def api_status(request: Request):
             "downtime_seconds": getattr(watcher, "downtime_seconds", 0) if watcher else 0,
             "ok_counter": getattr(watcher, "ok_counter", 0) if watcher else 0,
             "ng_counter": getattr(watcher, "ng_counter", 0) if watcher else 0,
+            "eject_ok_counter": getattr(watcher, "eject_ok_counter", 0) if watcher else 0,
+            "eject_ng_counter": getattr(watcher, "eject_ng_counter", 0) if watcher else 0,
             "analog_value": getattr(watcher, "analog_value", 0) if watcher else 0,
             "power_value": getattr(watcher, "power_value", 0) if watcher else 0,
             "is_moving": watcher.is_moving if watcher else False,
@@ -402,6 +410,8 @@ async def status_stream(request: Request):
                     "downtime_seconds": getattr(watcher, "downtime_seconds", 0) if watcher else 0,
                     "ok_counter": getattr(watcher, "ok_counter", 0) if watcher else 0,
                     "ng_counter": getattr(watcher, "ng_counter", 0) if watcher else 0,
+                    "eject_ok_counter": getattr(watcher, "eject_ok_counter", 0) if watcher else 0,
+                    "eject_ng_counter": getattr(watcher, "eject_ng_counter", 0) if watcher else 0,
                     "analog_value": getattr(watcher, "analog_value", 0) if watcher else 0,
                     "power_value": getattr(watcher, "power_value", 0) if watcher else 0,
                     "is_moving": watcher.is_moving if watcher else False,

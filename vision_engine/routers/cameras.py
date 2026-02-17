@@ -211,13 +211,19 @@ async def get_cameras_status(request: Request):
         if hasattr(watcher, 'camera_metadata') and cam_id in watcher.camera_metadata:
             metadata = watcher.camera_metadata[cam_id]
 
+        # For USB cameras, verify device node still exists
+        is_usb = metadata.get("type", "usb") == "usb"
+        device_exists = os.path.exists(cam_path) if is_usb and cam_path != "unknown" else True
+        is_connected = cam is not None and getattr(cam, 'success', False) and device_exists
+
         cam_info = {
             "id": cam_id,
             "path": cam_path,
             "name": metadata.get("name", f"Camera {cam_id}"),
             "type": metadata.get("type", "usb"),
-            "connected": cam is not None and getattr(cam, 'success', False),
+            "connected": is_connected,
             "running": cam is not None and not getattr(cam, 'stop', True),
+            "device_exists": device_exists,
         }
 
         # Add IP camera specific info
@@ -247,6 +253,24 @@ async def get_cameras_status(request: Request):
         cameras.append(cam_info)
 
     return JSONResponse(content=cameras)
+
+
+@router.post("/api/cameras/rescan")
+async def rescan_cameras(request: Request):
+    """Re-scan /dev/video* for USB cameras (hot-plug support).
+
+    Detects newly plugged cameras and removes disconnected ones.
+    """
+    watcher = request.app.state.watcher_instance
+    if watcher is None:
+        return JSONResponse(content={"error": "Watcher not initialized"}, status_code=503)
+
+    try:
+        result = watcher.rescan_cameras()
+        return JSONResponse(content={"success": True, **result})
+    except Exception as e:
+        logger.error(f"Camera rescan failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @router.post("/api/camera/{camera_id}/restart")

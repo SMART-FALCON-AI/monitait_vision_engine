@@ -5,6 +5,8 @@ function updateStatusUI(data) {
     document.getElementById('pps-value').textContent = data.pps || 0;
     document.getElementById('ok-counter').textContent = data.ok_counter || 0;
     document.getElementById('ng-counter').textContent = data.ng_counter || 0;
+    document.getElementById('eject-ok-counter').textContent = data.eject_ok_counter || 0;
+    document.getElementById('eject-ng-counter').textContent = data.eject_ng_counter || 0;
     document.getElementById('downtime-value').textContent = data.downtime_seconds || 0;
     document.getElementById('analog-value').textContent = data.analog_value || 0;
     document.getElementById('power-value').textContent = data.power_value || 0;
@@ -13,9 +15,29 @@ function updateStatusUI(data) {
         shipmentText.textContent = data.shipment || 'no_shipment';
     }
     document.getElementById('ejector-queue').textContent = data.ejector_queue_length || 0;
-    document.getElementById('ejector-running').textContent = data.ejector_running ? 'Yes' : 'No';
-    document.getElementById('ejector-enabled').textContent = data.ejector_enabled ? 'Yes' : 'No';
     document.getElementById('ejector-offset').textContent = data.ejector_offset || 0;
+
+    // Ejector Active indicator
+    const ejRunInd = document.getElementById('ejector-running-indicator');
+    const ejRunVal = document.getElementById('ejector-running');
+    if (data.ejector_running) {
+        ejRunInd.className = 'movement-indicator movement-moving';
+        ejRunVal.textContent = '';
+    } else {
+        ejRunInd.className = 'movement-indicator movement-stopped';
+        ejRunVal.textContent = '';
+    }
+
+    // Ejector Enabled indicator
+    const ejEnInd = document.getElementById('ejector-enabled-indicator');
+    const ejEnVal = document.getElementById('ejector-enabled');
+    if (data.ejector_enabled) {
+        ejEnInd.className = 'movement-indicator movement-moving';
+        ejEnVal.textContent = '';
+    } else {
+        ejEnInd.className = 'movement-indicator movement-stopped';
+        ejEnVal.textContent = '';
+    }
 
     // Update movement status
     const movementIndicator = document.getElementById('movement-indicator');
@@ -1008,7 +1030,20 @@ async function saveCameraConfig(cameraId) {
     } finally { _btnDone(_b); }
 }
 
-function refreshCameras() {
+async function refreshCameras() {
+    const statusEl = document.getElementById('camera-refresh-status');
+    try {
+        statusEl.textContent = 'Scanning...';
+        statusEl.className = 'camera-refresh-status';
+        // Rescan /dev/video* for hot-plugged cameras, then fetch updated status
+        const res = await fetch('/api/cameras/rescan', { method: 'POST' });
+        const result = await res.json();
+        if (result.added?.length || result.removed?.length) {
+            console.log('Camera rescan:', result);
+        }
+    } catch (e) {
+        console.warn('Camera rescan failed, falling back to status fetch:', e);
+    }
     fetchCameraStatus();
 }
 

@@ -26,7 +26,7 @@ from typing import Dict, Any, List
 
 import config as cfg
 from services.camera import (
-    CameraBuffer, DETECTED_CAMERAS,
+    CameraBuffer, DETECTED_CAMERAS, detect_video_devices,
     CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
     apply_camera_config_from_saved,
 )
@@ -370,6 +370,8 @@ class ArduinoSocket:
         self.downtime_seconds = 0
         self.ok_counter = 0
         self.ng_counter = 0
+        self.eject_ok_counter = 0   # Software: frames that passed (no eject)
+        self.eject_ng_counter = 0   # Software: frames that triggered eject
         self.status_value = 0
         self.u_status = False
         self.b_status = False
@@ -459,10 +461,7 @@ class ArduinoSocket:
                 }
 
         # Legacy attribute compatibility (cam_1, cam_2, cam_3, cam_4)
-        self.cam_1 = self.cameras.get(1)
-        self.cam_2 = self.cameras.get(2)
-        self.cam_3 = self.cameras.get(3)
-        self.cam_4 = self.cameras.get(4)
+        self._sync_legacy_cam_attrs()
 
         # Note: Service config is now loaded via apply_saved_config_at_startup() after watcher init
 
@@ -486,6 +485,94 @@ class ArduinoSocket:
         time.sleep(0.5)
         threading.Thread(target=self.run_barcode_scanner, daemon=True).start()
 
+
+    def _sync_legacy_cam_attrs(self):
+        """Keep cam_1..cam_4 attributes in sync with dynamic cameras dict."""
+        self.cam_1 = self.cameras.get(1)
+        self.cam_2 = self.cameras.get(2)
+        self.cam_3 = self.cameras.get(3)
+        self.cam_4 = self.cameras.get(4)
+
+    def rescan_cameras(self):
+        """Re-detect USB cameras and update the cameras dict.
+
+        - New devices that appeared get a CameraBuffer created
+        - Existing cameras whose device node disappeared get stopped and removed
+        - Returns summary of changes: {added: [...], removed: [...], unchanged: [...]}
+        """
+        current_devices = detect_video_devices()  # e.g. ['/dev/video0', '/dev/video2', '/dev/video4']
+        # Filter to devices that actually exist right now
+        current_devices = [d for d in current_devices if os.path.exists(d)]
+
+        # Build reverse map: device_path → cam_id for existing cameras
+        existing_paths = {}
+        for cam_id, cam in list(self.cameras.items()):
+            path = self.camera_paths[cam_id - 1] if cam_id <= len(self.camera_paths) else None
+            if path:
+                existing_paths[path] = cam_id
+
+        added = []
+        removed = []
+        unchanged = []
+
+        # Check for removed cameras (device node gone)
+        for path, cam_id in list(existing_paths.items()):
+            if path not in current_devices:
+                # Device disappeared — stop and remove
+                cam = self.cameras.get(cam_id)
+                if cam and hasattr(cam, 'stop'):
+                    cam.stop = True
+                    if hasattr(cam, 'camera'):
+                        try:
+                            cam.camera.release()
+                        except Exception:
+                            pass
+                del self.cameras[cam_id]
+                if cam_id in self.camera_metadata:
+                    del self.camera_metadata[cam_id]
+                removed.append({"id": cam_id, "path": path})
+                logger.info(f"Camera {cam_id} removed (device gone): {path}")
+            else:
+                # Device still exists — check if cam.success is valid
+                cam = self.cameras.get(cam_id)
+                if cam and not getattr(cam, 'success', False):
+                    # Camera object exists but failing — try restart
+                    try:
+                        cam.restart_camera()
+                        logger.info(f"Camera {cam_id} restarted at {path}")
+                    except Exception as e:
+                        logger.warning(f"Camera {cam_id} restart failed: {e}")
+                unchanged.append({"id": cam_id, "path": path})
+
+        # Check for new cameras (device node appeared but not tracked)
+        existing_device_set = set(existing_paths.keys())
+        for dev_path in current_devices:
+            if dev_path not in existing_device_set:
+                # New device — assign next available cam_id
+                next_id = max(self.cameras.keys()) + 1 if self.cameras else 1
+                try:
+                    cam = CameraBuffer(dev_path, exposure=100, gain=100)
+                    self.cameras[next_id] = cam
+                    # Extend camera_paths list if needed
+                    while len(self.camera_paths) < next_id:
+                        self.camera_paths.append(None)
+                    self.camera_paths[next_id - 1] = dev_path
+                    self.camera_metadata[next_id] = {
+                        "name": f"USB Camera {next_id}",
+                        "type": "usb",
+                        "path": dev_path,
+                        "source": dev_path,
+                    }
+                    added.append({"id": next_id, "path": dev_path})
+                    logger.info(f"Camera {next_id} added (hot-plug): {dev_path}")
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"Failed to init new camera at {dev_path}: {e}")
+
+        # Sync legacy attributes
+        self._sync_legacy_cam_attrs()
+
+        return {"added": added, "removed": removed, "unchanged": unchanged}
 
     def on_up_down_off(self):
         self._send_message('1\n')
@@ -1045,16 +1132,16 @@ class ArduinoSocket:
                         logger.warning(f"Invalid ejector queue data: {e}")
 
                 # Process ejection queue based on encoder position
-                if self.ejection_queue:
-                    # Check if we've reached the target encoder value for the first item
-                    if self.encoder_value >= self.ejection_queue[0]["target"]:
-                        # Start ejector
-                        if not self.ejector_running:
-                            self._send_message('6\n')
-                            self.ejector_running = True
-                            self.ejector_start_ts = time.time()
-                            self.redis_connection.update_queue_messages_redis("Eject", stream_name="speaker")
-                            self.ejection_queue.pop(0)
+                # Drain all entries whose target the encoder has already passed
+                while self.ejection_queue and self.encoder_value >= self.ejection_queue[0]["target"]:
+                    entry = self.ejection_queue.pop(0)
+                    if not self.ejector_running:
+                        # Fire the ejector for the first ready entry
+                        self._send_message('6\n')
+                        self.ejector_running = True
+                        self.ejector_start_ts = time.time()
+                        self.redis_connection.update_queue_messages_redis("Eject", stream_name="speaker")
+                    # Remaining stale entries are discarded (ejector already firing)
 
                 # Stop ejector after cfg.EJECTOR_DURATION
                 if self.ejector_running and (time.time() - self.ejector_start_ts > cfg.EJECTOR_DURATION):

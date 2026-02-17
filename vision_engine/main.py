@@ -58,7 +58,7 @@ pipeline_manager: Optional[PipelineManager] = None
 app = FastAPI(
     title="Counter Service",
     description="Service for counting and tracking packages with camera processing",
-    version="3.3.0"
+    version="3.4.0"
 )
 
 # Mount static files
@@ -679,7 +679,10 @@ def _process_frame_batch(frames_data, allow_eject=True):
                 if should_eject:
                     eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
                     watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
+                    watcher.eject_ng_counter += 1
                     logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
+                else:
+                    watcher.eject_ok_counter += 1
         except Exception as e:
             logger.warning(f"Procedure eject evaluation error: {e}")
 

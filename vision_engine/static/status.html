@@ -7,7 +7,7 @@
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>Monitait Vision Engine v3.3.0</title>
+        <title>Monitait Vision Engine v3.4.0</title>
         <link rel="stylesheet" href="/static/css/main.css">
     </head>
     <body>
@@ -21,7 +21,7 @@
                     <div style="font-size: 18px; font-weight: 700; line-height: 1.2; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                         Monitait<br>Vision<br>Engine
                     </div>
-                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v3.3.0</div>
+                    <div style="font-size: 9px; color: var(--text-secondary); margin-top: 2px;">v3.4.0</div>
                 </div>
 
                 <!-- CENTER: Tab Navigation -->
@@ -103,11 +103,17 @@
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_active">Ej Active</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_active">Whether the ejector is currently firing.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-running">-</div>
+                                    <div style="display: flex; align-items: center; gap: 2px;">
+                                        <span class="movement-indicator" id="ejector-running-indicator" style="width: 7px; height: 7px;"></span>
+                                        <span style="font-size: 9px; font-weight: 600;" id="ejector-running">-</span>
+                                    </div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_enable">Ej Enable</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_enable">Whether ejection is enabled. Disable to inspect without ejecting.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</div>
+                                    <div style="display: flex; align-items: center; gap: 2px;">
+                                        <span class="movement-indicator" id="ejector-enabled-indicator" style="width: 7px; height: 7px;"></span>
+                                        <span style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</span>
+                                    </div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_offset">Ej Offset</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_offset">Encoder count delay between camera and ejector position.</span></span></div>
@@ -120,6 +126,14 @@
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ng">NG</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ng">Total count of rejected (No Good) items.</span></span></div>
                                     <div style="font-size: 10px; font-weight: 600; color: var(--danger-color);" id="ng-counter">-</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_ok">Ej OK</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_ok">Software count of frames that passed (no eject).</span></span></div>
+                                    <div style="font-size: 10px; font-weight: 600; color: var(--success-color);" id="eject-ok-counter">-</div>
+                                </div>
+                                <div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_ng">Ej NG</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_ng">Software count of frames that triggered ejection.</span></span></div>
+                                    <div style="font-size: 10px; font-weight: 600; color: var(--danger-color);" id="eject-ng-counter">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="downtime">Downtime</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_downtime">Seconds since the conveyor last stopped moving.</span></span></div>
@@ -625,21 +639,15 @@
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_offset">Ejector Offset (encoder counts)</div>
-                            <input type="number" class="control-input" id="ejector-offset-input" min="0" value="0">
+                            <input type="number" class="control-input" id="ejector-offset-input" min="0" value="1">
                             <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)">Set Offset</button>
                             <div class="control-response" id="config-ejector_offset-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_duration">Ejector Duration (seconds)</div>
-                            <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.1" value="0.4">
+                            <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.01" value="0.01">
                             <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>
                             <div class="control-response" id="config-ejector_duration-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="ejector_poll">Ejector Poll Interval (seconds)</div>
-                            <input type="number" class="control-input" id="ejector-poll-input" min="0.001" step="0.01" value="0.03">
-                            <button class="control-button" onclick="updateConfig('ejector_poll_interval', document.getElementById('ejector-poll-input').value)">Set Poll Interval</button>
-                            <div class="control-response" id="config-ejector_poll_interval-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="class_count_check">Class Count Check (equal counts)</div>

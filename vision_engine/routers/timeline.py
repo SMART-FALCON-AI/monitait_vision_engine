@@ -217,6 +217,7 @@ def get_timeline_composite(request: Request):
             image_rotation = tl_config.get('image_rotation', 0)
         except Exception as e:
             logger.debug(f"Could not load timeline config for stitching, using defaults: {e}")
+            tl_config = None
             quality = 85
             image_rotation = 0
 
@@ -236,7 +237,8 @@ def get_timeline_composite(request: Request):
                 return int(k.split(":")[-1])
             except ValueError:
                 return 0
-        all_keys.sort(key=extract_cam_id)
+        camera_order = tl_config.get('camera_order', 'normal') if tl_config else 'normal'
+        all_keys.sort(key=extract_cam_id, reverse=(camera_order == 'reverse'))
 
         # Build one horizontal row per camera (left=oldest, right=newest)
         camera_rows = []
@@ -371,7 +373,8 @@ async def timeline_image(request: Request, page: int = 0):
 
         # Build one horizontal row per camera for this page
         # Also collect per-column metadata across all cameras
-        sorted_cam_ids = sorted(camera_frames_raw.keys())
+        camera_order = tl_config.get('camera_order', 'normal')
+        sorted_cam_ids = sorted(camera_frames_raw.keys(), reverse=(camera_order == 'reverse'))
         cam_page_slices = {}  # cam_id -> list of (ts, jpeg_bytes, detections, meta)
         num_columns = 0
 
