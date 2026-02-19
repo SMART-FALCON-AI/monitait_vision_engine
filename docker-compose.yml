@@ -110,6 +110,7 @@ services:
   grafana:
     container_name: "monitait_grafana"
     image: grafana/grafana:latest
+    user: "0"
     expose:
       - 3000
     environment:
