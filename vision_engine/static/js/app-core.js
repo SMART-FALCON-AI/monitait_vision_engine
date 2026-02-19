@@ -386,12 +386,6 @@ function fetchConfig() {
                 document.getElementById('dm-confidence-input').value = data.datamatrix.confidence_threshold || 0.8;
                 document.getElementById('dm-overlap-input').value = data.datamatrix.overlap_threshold || 0.2;
             }
-            // Class count check configuration
-            if (data.class_count_check) {
-                document.getElementById('check-class-enabled-input').value = data.class_count_check.enabled ? 'true' : 'false';
-                document.getElementById('check-class-classes-input').value = (data.class_count_check.classes || []).join(',');
-                document.getElementById('check-class-confidence-input').value = data.class_count_check.confidence || 0.5;
-            }
             // Light control configuration
             if (data.light_control) {
                 document.getElementById('light-status-check-input').value = data.light_control.status_check_enabled ? 'true' : 'false';

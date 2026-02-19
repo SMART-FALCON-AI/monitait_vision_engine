@@ -359,7 +359,7 @@ function addRule(procId) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc) return;
     const firstClass = detectedObjectClasses.size > 0 ? Array.from(detectedObjectClasses).sort()[0] : '';
-    proc.rules.push({ object: firstClass, condition: 'present', min_confidence: 30 });
+    proc.rules.push({ object: firstClass, condition: 'present', min_confidence: 30, count: 1 });
     renderProcedures();
 }
 
@@ -379,11 +379,13 @@ function updateProcedureField(procId, field, value) {
 function updateRuleField(procId, ruleIndex, field, value) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc || !proc.rules[ruleIndex]) return;
-    if (field === 'min_confidence') {
-        proc.rules[ruleIndex][field] = Math.max(0, Math.min(100, parseInt(value) || 0));
+    if (field === 'min_confidence' || field === 'count') {
+        proc.rules[ruleIndex][field] = Math.max(0, parseInt(value) || 0);
+        if (field === 'min_confidence') proc.rules[ruleIndex][field] = Math.min(100, proc.rules[ruleIndex][field]);
     } else {
         proc.rules[ruleIndex][field] = value;
     }
+    if (field === 'condition') renderProcedures();
 }
 
 function renderProcedures() {
@@ -408,7 +410,15 @@ function renderProcedures() {
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                     <option value="present" ${rule.condition === 'present' ? 'selected' : ''}>Present</option>
                     <option value="not_present" ${rule.condition === 'not_present' ? 'selected' : ''}>Not Present</option>
+                    <option value="count_equals" ${rule.condition === 'count_equals' ? 'selected' : ''}>Count =</option>
+                    <option value="count_greater" ${rule.condition === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
+                    <option value="count_less" ${rule.condition === 'count_less' ? 'selected' : ''}>Count &lt;</option>
                 </select>
+                ${['count_equals','count_greater','count_less'].includes(rule.condition) ? `
+                <input type="number" value="${rule.count || 1}" min="0" step="1"
+                    onchange="updateRuleField('${proc.id}', ${ri}, 'count', this.value)"
+                    style="width: 45px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                ` : ''}
                 <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
                 <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"

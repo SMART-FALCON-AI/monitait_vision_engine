@@ -95,9 +95,14 @@ def add_detection_event(event_type: str, details: dict = None):
 
 
 def evaluate_eject_from_detections(detections_list, procedures):
-    """Evaluate eject rules from stored detections and current procedures config.
+    """Evaluate eject rules from stored detections and procedures config.
 
-    Also checks class count equality if CHECK_CLASS_COUNTS_ENABLED.
+    Supports 5 condition types:
+        present      — object detected with >= min_confidence
+        not_present  — object NOT detected or below min_confidence
+        count_equals — exactly N instances detected
+        count_greater— more than N instances detected
+        count_less   — fewer than N instances detected
 
     Args:
         detections_list: list of detection dicts (from one or more cameras at the same timestamp)
@@ -112,6 +117,7 @@ def evaluate_eject_from_detections(detections_list, procedures):
     if not detections_list:
         return False, []
 
+    # Build max-confidence-per-class dict (for present/not_present)
     all_detected = {}
     for det in detections_list:
         if isinstance(det, dict) and det.get('name'):
@@ -119,26 +125,6 @@ def evaluate_eject_from_detections(detections_list, procedures):
             conf = det.get('confidence', 0)
             if name not in all_detected or conf > all_detected[name]:
                 all_detected[name] = conf
-
-    # --- Class count check ---
-    if cfg.CHECK_CLASS_COUNTS_ENABLED:
-        target_classes = cfg.CHECK_CLASS_COUNTS_CLASSES
-        conf_threshold = cfg.CHECK_CLASS_COUNTS_CONFIDENCE
-        from collections import Counter
-        class_counts = Counter(
-            det['name'] for det in detections_list
-            if isinstance(det, dict) and det.get('name') in target_classes
-            and det.get('confidence', 1.0) >= conf_threshold
-        )
-        for cls in target_classes:
-            if cls not in class_counts:
-                class_counts[cls] = 0
-        if class_counts:
-            counts = list(class_counts.values())
-            if len(set(counts)) > 1:
-                should_eject = True
-                count_detail = ", ".join(f"{cls}={class_counts[cls]}" for cls in target_classes)
-                eject_reasons.append(f"Count mismatch ({count_detail})")
 
     # --- Procedure rules ---
     for proc in (procedures or []):
@@ -153,26 +139,55 @@ def evaluate_eject_from_detections(detections_list, procedures):
             obj = rule.get('object', '')
             cond = rule.get('condition', 'present')
             min_conf = rule.get('min_confidence', 0) / 100.0
+            expected_count = rule.get('count', 1)
+
             if cond == 'present':
                 return obj in all_detected and all_detected[obj] >= min_conf
             elif cond == 'not_present':
                 return obj not in all_detected or all_detected[obj] < min_conf
+            elif cond in ('count_equals', 'count_greater', 'count_less'):
+                # Count raw occurrences above confidence threshold
+                actual = sum(
+                    1 for det in detections_list
+                    if isinstance(det, dict) and det.get('name') == obj
+                    and det.get('confidence', 0) >= min_conf
+                )
+                if cond == 'count_equals':
+                    return actual == expected_count
+                elif cond == 'count_greater':
+                    return actual > expected_count
+                elif cond == 'count_less':
+                    return actual < expected_count
             return False
+
+        def _rule_detail(rule, triggered):
+            """Build human-readable detail string for a triggered rule."""
+            if not triggered:
+                return None
+            obj = rule.get('object', '?')
+            cond = rule.get('condition', 'present')
+            expected = rule.get('count', 1)
+            min_conf = rule.get('min_confidence', 0) / 100.0
+            if cond == 'present':
+                return f"'{obj}' detected"
+            elif cond == 'not_present':
+                return f"'{obj}' missing"
+            else:
+                actual = sum(
+                    1 for det in detections_list
+                    if isinstance(det, dict) and det.get('name') == obj
+                    and det.get('confidence', 0) >= min_conf
+                )
+                op = {'count_equals': '!=', 'count_greater': '>', 'count_less': '<'}[cond]
+                return f"'{obj}' count {actual} {op} {expected}"
 
         results = [_eval_rule(r) for r in rules]
         triggered = all(results) if logic == 'all' else any(results)
         if triggered:
             should_eject = True
             proc_name = proc.get('name', 'Unnamed')
-            details = []
-            for r, res in zip(rules, results):
-                if res:
-                    obj = r.get('object', '?')
-                    cond = r.get('condition', 'present')
-                    if cond == 'present':
-                        details.append(f"'{obj}' detected")
-                    elif cond == 'not_present':
-                        details.append(f"'{obj}' missing")
+            details = [_rule_detail(r, res) for r, res in zip(rules, results) if res]
+            details = [d for d in details if d]
             reason = f"{proc_name}: {', '.join(details)}" if details else proc_name
             eject_reasons.append(reason)
 
@@ -878,19 +893,6 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
         frame_data = [frame_id, image, yolo_res, 5]
 
         if yolo_res:
-            # Check if specific class counts are equal (only if enabled)
-            if cfg.CHECK_CLASS_COUNTS_ENABLED and not check_class_counts(yolo_res):
-                frame_data.append(None)
-                frame_data[1] = None  # make the frame light by deleting image part
-                queue_message = {
-                    "ts": frame_data[0],
-                    "dms": frame_data[4:],
-                    "priority": frame_data[3],
-                    "detection": frame_data[2],
-                    "shipment": _watcher.shipment
-                }
-                return queue_message, frame_data
-
             nested = nest_objects(yolo_res)
             q = 0
 
