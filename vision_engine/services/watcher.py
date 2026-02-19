@@ -1219,7 +1219,7 @@ class ArduinoSocket:
                                         cr.ltrim("capture_timestamps", 0, 9)
                                         # Atomic counter: total captured frames (all cameras)
                                         cr.lpush("cap_frame_timestamps", str(capture_ts))
-                                        cr.ltrim("cap_frame_timestamps", 0, 199)  # Keep last 200
+                                        cr.ltrim("cap_frame_timestamps", 0, 1999)  # Keep last 2000
                                     except Exception:
                                         globals()['_cap_redis'] = None  # Reset, will reconnect
                     else:

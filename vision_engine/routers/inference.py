@@ -59,11 +59,11 @@ async def get_inference_stats(request: Request):
         times_raw = redis_conn.lrange("inference_times", 0, -1)
         redis_inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
 
-        # Total inference throughput timestamps (all workers, last 200)
+        # Total inference throughput timestamps (all workers, last 2000)
         inf_raw = redis_conn.lrange("inf_frame_timestamps", 0, -1)
         inf_frame_timestamps = [float(t.decode('utf-8')) for t in inf_raw if t]
 
-        # Total capture throughput timestamps (all cameras, last 200)
+        # Total capture throughput timestamps (all cameras, last 2000)
         cap_raw = redis_conn.lrange("cap_frame_timestamps", 0, -1)
         cap_frame_timestamps = [float(t.decode('utf-8')) for t in cap_raw if t]
     except Exception as e:

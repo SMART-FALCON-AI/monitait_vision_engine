@@ -768,7 +768,7 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             now = time.time()
             redis_client.incr("inf_frame_count")
             redis_client.lpush("inf_frame_timestamps", str(now))
-            redis_client.ltrim("inf_frame_timestamps", 0, 199)  # Keep last 200
+            redis_client.ltrim("inf_frame_timestamps", 0, 1999)  # Keep last 2000
 
             # Legacy: single-worker frame interval (kept for backward compat)
             last_ts_raw = redis_client.get("last_inference_timestamp")
