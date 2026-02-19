@@ -709,6 +709,10 @@ def _process_frame_batch(frames_data, allow_eject=True):
 
 
 # ── Inference worker thread: hot (RAM, LIFO) first, then cold (disk, FIFO) ──
+# Stop events for scale-down: autoscaler appends events here, workers check & exit
+_worker_stop_events = []
+_worker_stop_lock = threading.Lock()
+
 def inference_worker_thread():
     """
     Two-phase inference worker:
@@ -721,9 +725,14 @@ def inference_worker_thread():
     hot_q = _watcher_mod._hot_queue
     cold_q = _watcher_mod._cold_queue_disk
 
+    # Register stop event for this worker (autoscaler can signal it to exit)
+    stop_event = threading.Event()
+    with _worker_stop_lock:
+        _worker_stop_events.append(stop_event)
+
     logger.info("Inference worker thread started")
 
-    while True:
+    while not stop_event.is_set():
         try:
             # Phase 1: Try hot queue (LIFO — newest first for ejector)
             try:
@@ -789,6 +798,8 @@ logger.info(f"{INFERENCE_WORKERS} inference worker thread(s) started")
 AUTOSCALE_INTERVAL = 30    # seconds between checks
 MAX_DISK_WRITERS = _max_disk_writers
 MAX_INFERENCE_WORKERS = _max_inference_workers
+MIN_INFERENCE_WORKERS = INFERENCE_WORKERS  # baseline — never go below startup count
+_ok_streak = 0  # consecutive OK checks before scaling down
 
 def _autoscaler():
     """Background thread: checks queue depth every 5 min and scales resources.
@@ -869,29 +880,55 @@ def _autoscaler():
                     add_disk_writers(add)
                     logger.warning(f"[Autoscaler] WARNING disk — scaled {disk_count} -> {_watcher_mod._disk_writers_count}")
 
-            # ── Scale inference workers ──
+            # ── Scale inference workers (up AND down) ──
             if inf_level == "CRITICAL":
+                _ok_streak = 0
                 new_workers = min(INFERENCE_WORKERS * 4, MAX_INFERENCE_WORKERS)
             elif inf_level == "WARNING":
+                _ok_streak = 0
                 new_workers = min(INFERENCE_WORKERS * 2, MAX_INFERENCE_WORKERS)
             else:
+                _ok_streak += 1
                 new_workers = INFERENCE_WORKERS
 
+            # Scale UP — spawn new threads
             if new_workers > INFERENCE_WORKERS:
                 old_count = INFERENCE_WORKERS
-
-                # Spawn additional inference worker threads
                 for i in range(old_count, new_workers):
                     t = threading.Thread(
                         target=inference_worker_thread, daemon=True,
                         name=f"inference-worker-{i+1}"
                     )
                     t.start()
-
                 INFERENCE_WORKERS = new_workers
                 logger.warning(
-                    f"[Autoscaler] {'CRITICAL' if inf_level == 'CRITICAL' else 'WARNING'} inference — "
-                    f"scaled {old_count} → {new_workers} workers"
+                    f"[Autoscaler] {inf_level} inference — "
+                    f"scaled UP {old_count} → {new_workers} workers"
+                )
+
+            # Scale DOWN — after 3 consecutive OK checks (~90s idle), halve workers
+            elif inf_level == "OK" and _ok_streak >= 3 and INFERENCE_WORKERS > MIN_INFERENCE_WORKERS:
+                old_count = INFERENCE_WORKERS
+                target = max(MIN_INFERENCE_WORKERS, INFERENCE_WORKERS // 2)
+                kill_count = old_count - target
+
+                # Signal excess workers to stop via their stop events
+                with _worker_stop_lock:
+                    stopped = 0
+                    for ev in reversed(_worker_stop_events):
+                        if stopped >= kill_count:
+                            break
+                        if not ev.is_set():
+                            ev.set()
+                            stopped += 1
+                    # Clean up signaled events
+                    _worker_stop_events[:] = [ev for ev in _worker_stop_events if not ev.is_set()]
+
+                INFERENCE_WORKERS = target
+                _ok_streak = 0
+                logger.info(
+                    f"[Autoscaler] OK inference — "
+                    f"scaled DOWN {old_count} → {target} workers (freed {stopped} threads)"
                 )
 
         except Exception as e:
