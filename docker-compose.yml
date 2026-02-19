@@ -8,9 +8,11 @@ services:
       - ./vision_engine:/code
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
       - ./volumes/weights:/weights
+      - /dev:/dev  # Linux: serial (/dev/ttyUSB*), cameras (/dev/video*), barcode scanner (/dev/input/*)
     ports:
       - "80:5050"  # Vision engine status page
     privileged: ${PRIVILEGED:-false}
+    # Set by start.py: true on Linux (device access), false on Windows
     networks:
       - main_network
     environment:
@@ -152,5 +154,5 @@ networks:
   main_network:
     driver: bridge
 
-# DATA_ROOT defaults to "." (project dir) on Windows/dev, set to "/mnt/SSD-RESERVE" on production Linux
-# PRIVILEGED defaults to false on Windows/dev, set to true on production Linux (for /dev access)
+# Use start.py (or start.sh / start.bat) to auto-detect OS, hardware,
+# and generate .env with correct DATA_ROOT, PRIVILEGED, YOLO tuning, etc.

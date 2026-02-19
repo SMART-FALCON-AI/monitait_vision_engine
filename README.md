@@ -10,18 +10,11 @@ MonitaQC combines advanced image processing, object detection, and hardware inte
 
 ### Lightweight by Design
 
-MonitaQC v1.1.0 features a **streamlined architecture** with only essential services:
-- **4 core containers** instead of 11+ (60% reduction)
-- **Minimal memory footprint** with optimized Redis (256MB limit)
+MonitaQC features a **streamlined architecture** with only essential services:
+- **7 containers** covering vision, AI inference, database, caching, and monitoring
+- **Minimal memory footprint** with optimized Redis (auto-tuned)
 - **Reduced logging** overhead (5-10MB max per service)
-- **Optional full-stack mode** available when needed
-
-**Resource Comparison:**
-
-| Mode | Containers | RAM Usage | Disk I/O | Best For |
-|------|------------|-----------|----------|----------|
-| Lightweight | 4 | ~2-3GB | Low | Basic QC operations, edge devices |
-| Full | 11 | ~6-8GB | High | Full shipment tracking, analytics |
+- **Auto-tuned resources** based on detected CPU, RAM, and GPU
 
 ### Key Features
 
@@ -41,22 +34,69 @@ MonitaQC v1.1.0 features a **streamlined architecture** with only essential serv
 
 ## Architecture
 
+```mermaid
+graph LR
+    subgraph Hardware
+        CAM[USB/IP Cameras]
+        SER[Serial PLC/Arduino]
+        BAR[Barcode Scanner]
+    end
+
+    subgraph Docker Containers
+        VE[Vision Engine<br/>:80]
+        YOLO1[YOLO Inference<br/>Replica 1]
+        YOLO2[YOLO Inference<br/>Replica 2]
+        RED[Redis<br/>:6379]
+        TS[TimescaleDB<br/>:5432]
+        GF[Grafana<br/>:3000]
+        PG[PiGallery2<br/>:5000]
+    end
+
+    subgraph Storage
+        SSD[/mnt/SSD-RESERVE/]
+    end
+
+    CAM -->|frames| VE
+    SER <-->|commands| VE
+    BAR -->|scans| VE
+    VE -->|detect| YOLO1
+    VE -->|detect| YOLO2
+    VE <-->|cache| RED
+    VE -->|metrics| TS
+    TS -->|query| GF
+    VE -->|images| SSD
+    SSD -->|browse| PG
+```
+
 MonitaQC uses a microservices architecture:
 
 ```
 MonitaQC/
-├── vision_engine/                   # Core QC processing engine
-│   ├── main.py                #   Main processing logic (3371 lines)
-│   ├── Dockerfile             #   Container build config
-│   └── requirements.txt       #   Python dependencies
-├── yolo_inference/            # AI object detection service
-├── cleanup/                   # Automated disk space management
-├── ocr/                       # OCR service (optional)
-├── stream/                    # Video streaming (optional)
-├── scanner/                   # Barcode scanner (optional)
-├── speaker/                   # Audio feedback (optional)
-├── shipment_fulfillment/      # Django backend (optional)
-└── docker-compose.yml         # Lightweight orchestration
+├── vision_engine/             # Core QC processing engine
+│   ├── main.py                #   FastAPI app entrypoint
+│   ├── config.py              #   Configuration & startup
+│   ├── routers/               #   API route handlers
+│   │   ├── ai.py              #   AI provider config
+│   │   ├── cameras.py         #   Camera management
+│   │   ├── health.py          #   Health checks
+│   │   ├── inference.py       #   Detection pipeline
+│   │   ├── timeline.py        #   Timeline & history
+│   │   └── websocket.py       #   Real-time updates
+│   ├── services/              #   Business logic
+│   │   ├── camera.py          #   Camera capture
+│   │   ├── db.py              #   TimescaleDB client
+│   │   ├── detection.py       #   Detection processing
+│   │   ├── pipeline.py        #   Pipeline management
+│   │   ├── state_machine.py   #   Multi-phase states
+│   │   └── watcher.py         #   Serial & capture orchestration
+│   └── static/                #   Web UI (status page)
+├── yolo_inference/            # YOLO AI inference service
+├── timescaledb/               # Database init scripts
+├── deploy/                    # Offline deployment scripts
+├── start.py                   # Auto-detect OS/hardware & launch
+├── start.sh                   # Linux launcher (calls start.py)
+├── start.bat                  # Windows launcher (calls start.py)
+└── docker-compose.yml         # Service orchestration
 ```
 
 ## Getting Started
@@ -64,214 +104,138 @@ MonitaQC/
 ### Prerequisites
 
 - Docker & Docker Compose
-- NVIDIA GPU with CUDA support (for YOLO inference)
-- NVIDIA Container Toolkit (for GPU access in Docker)
-- Camera devices (USB or compatible)
-- Serial device (Arduino/PLC) at `/dev/ttyUSB0`
-- Optional: Barcode scanner
+- Python 3 (for the startup script)
+- NVIDIA GPU + NVIDIA Container Toolkit (for YOLO inference)
+- Optional: USB cameras, serial device (Arduino/PLC), barcode scanner
 
-### 1. Load AI Weights
+### Quick Start (New Server)
 
-Train your custom model using [ai-trainer.monitait.com](https://ai-trainer.monitait.com), then:
+1. **Clone the repository:**
+   ```bash
+   git clone http://gitlab.virasad.ir/monitait/monitaqc.git
+   cd monitaqc
+   ```
 
-1. Download the `best.pt` weight file
-2. Place it in `yolo_inference/best.pt`
+2. **Load AI weights:**
+   Train your model at [ai-trainer.monitait.com](https://ai-trainer.monitait.com), then place `best.pt` in `volumes/weights/best.pt`.
 
-For multi-camera setups, you can use different models:
-- `yolo_inference/best.pt` - Default model
-- `yolo_inference/cam2_best.pt` - Camera 2 specific model
+3. **Start the application:**
+   ```bash
+   # Linux
+   ./start.sh
 
-### 2. Prepare Query Data
+   # Windows
+   start.bat
+   ```
 
-Configure product identification mappings in `.env.prepared_query_data`:
+   `start.py` will automatically:
+   - Detect OS (Linux → production mode, Windows → dev mode)
+   - Detect hardware (CPU cores, RAM, GPUs)
+   - Auto-tune YOLO replicas/workers, shared memory, Redis memory
+   - Set `PRIVILEGED=true` on Linux for device access (serial, cameras, barcode scanner)
+   - Set `DATA_ROOT=/mnt/SSD-RESERVE` on Linux (`.` on Windows)
+   - Write `.env` and run `docker compose up -d`
 
-```json
-[
-    {
-        "dm": "6263957101037",
-        "chars": [
-            ["box"],
-            ["logo_en", "logo_fa"],
-            ["specific_object_name_in_yolo"]
-        ]
-    }
-]
-```
+4. **Open the web interface:** `http://<server-ip>`
 
-**How it works**: If the system detects objects matching the specified annotations (e.g., "box", "logo_en", "specific_object_name_in_yolo"), it will identify the product as DataMatrix `6263957101037`.
+   All configuration (cameras, inference, serial, ejector, capture settings, etc.)
+   is done via the web interface and persisted to `.env.prepared_query_data`.
 
-### 3. Configure Scanner (Optional)
+### Manual Start (Advanced)
 
-If using a barcode scanner:
-
-1. Find the scanner device: `ls /dev/input/event*`
-2. Plug/unplug scanner to identify the new device
-3. Update `scanner/.env.scanner` with the device path
-
-### 4. Pre-load Docker Image (Optional)
-
-For faster build times, load pre-built YOLO image:
+If you prefer to configure manually instead of using `start.py`:
 
 ```bash
-sudo docker load -i yolo.tar
+# Create .env file
+cat > .env << EOF
+DATA_ROOT=/mnt/SSD-RESERVE
+PRIVILEGED=true
+YOLO_REPLICAS=2
+YOLO_WORKERS=2
+SHM_SIZE=2g
+REDIS_MAXMEMORY=256
+EOF
+
+# Build and run
+docker compose up -d
 ```
 
-### 5. Build and Run
+### Offline Deployment
 
-**Lightweight Mode (Recommended):**
+For air-gapped servers, use the deployment scripts in `deploy/`:
+
 ```bash
-# Core services only (Vision Engine, Redis, YOLO, Cleanup)
-sudo docker compose up -d
-```
+# On a machine with internet: pack images
+./deploy/pack.sh
 
-**Full Mode (All Features):**
-```bash
-# Includes web interface, database, streaming, gallery
-sudo docker compose -f docker-compose.full.yml up -d
+# On the target server: install from pack
+./deploy/install.sh
 ```
-
-Access the counter status page at `http://localhost:5050`
-(Full mode: Web interface at `http://localhost:8000`)
 
 ## Configuration
 
-### Environment Variables
+All settings are configured via the **web interface** at `http://<server-ip>/status` and saved to `.env.prepared_query_data` for persistence across restarts.
 
-Key configuration options in `docker-compose.yml`:
+Configurable settings include:
+- Camera paths (USB and IP cameras)
+- Inference URL, model selection, confidence thresholds
+- Serial port, baud rate, serial mode
+- Ejector offset and duration
+- Capture mode and timing
+- Lighting states and phases
+- AI provider (OpenAI, Anthropic, Google)
+- Image processing and histogram settings
 
-```yaml
-# Ejector Configuration
-EJECTOR_OFFSET=0              # Encoder offset from camera to ejector
-EJECTOR_DURATION=0.4          # Ejection duration in seconds
+### Environment Variables (.env)
 
-# Capture Configuration
-CAPTURE_MODE=single           # single or continuous
-TIME_BETWEEN_TWO_PACKAGE=0.305
+Auto-generated by `start.py`. Override manually if needed:
 
-# Camera Paths
-CAM_1_PATH=/dev/video0
-CAM_2_PATH=/dev/video2
-CAM_3_PATH=/dev/video4
-CAM_4_PATH=/dev/video6
-
-# Redis Configuration
-REDIS_HOST=redis
-REDIS_PORT=6379
-
-# YOLO Configuration
-YOLO_INFERENCE_URL=http://yolo_inference:4442/v1/object-detection/yolov5s/detect/
-YOLO_CONF_THRESHOLD=0.3
-YOLO_IOU_THRESHOLD=0.4
-
-# Serial/Watcher Configuration
-WATCHER_USB=/dev/ttyUSB0
-BAUD_RATE=57600
-SERIAL_MODE=legacy            # legacy or new
-
-# Web Server
-WEB_SERVER_PORT=5050
-WEB_SERVER_HOST=0.0.0.0
-```
-
-### Hardware Commands
-
-Arduino/PLC command mapping:
-
-```yaml
-WATCHER_CMD_U_ON_B_OFF=1      # Uplight on, backlight off
-WATCHER_CMD_B_ON_U_OFF=2      # Backlight on, uplight off
-WATCHER_CMD_RST_ENCODER=3     # Reset encoder
-WATCHER_CMD_U_SET_PWM=4       # Set uplight PWM (0-255)
-WATCHER_CMD_B_SET_PWM=5       # Set backlight PWM (0-255)
-WATCHER_CMD_WARNING_ON=6      # Warning indicator on
-WATCHER_CMD_WARNING_OFF=7     # Warning indicator off
-WATCHER_CMD_B_OFF_U_OFF=8     # Both lights off
-WATCHER_CMD_U_ON_B_ON=9       # Both lights on
-```
+| Variable | Default (Linux) | Default (Windows) | Description |
+|----------|----------------|-------------------|-------------|
+| `DATA_ROOT` | `/mnt/SSD-RESERVE` | `.` | Root path for images and volumes |
+| `PRIVILEGED` | `true` | `false` | Docker privileged mode for `/dev` access |
+| `YOLO_REPLICAS` | auto-detected | auto-detected | Number of YOLO container replicas |
+| `YOLO_WORKERS` | auto-detected | auto-detected | Uvicorn workers per replica |
+| `SHM_SIZE` | auto-detected | auto-detected | Shared memory for YOLO containers |
+| `REDIS_MAXMEMORY` | auto-detected | auto-detected | Redis max memory (MB) |
 
 ## Services
 
-MonitaQC uses a lightweight architecture by default with only essential services:
-
-| Service | Port | Description | Required |
-|---------|------|-------------|----------|
-| **monitaqc_vision** | 5050 | Main processing engine and status page | ✅ Core |
-| **monitaqc_redis** | 6379 | Message queue and cache | ✅ Core |
-| **monitaqc_yolo** | 4442 | AI inference service | ✅ Core |
-| **monitaqc_cleanup** | - | Automated disk space management | ✅ Core |
-
-### Optional Services
-
-For full functionality, use `docker-compose.full.yml`:
-
-```bash
-docker compose -f docker-compose.full.yml up -d
-```
-
-Additional services in full configuration:
-
-| Service | Port | Description |
-|---------|------|-------------|
-| **monitait_shipment_web** | 8000, 6789 | Django shipment fulfillment interface |
-| **monitait_postgres** | 5432 | PostgreSQL database |
-| **monitait_stream** | 5000 | Real-time video streaming (legacy) |
-| **monitait_gallery** | 80 | Image gallery browser (Pigallery2) |
-| **monitait_celery_worker1** | - | Celery high priority task worker |
-| **monitait_celery_worker2** | - | Celery low priority task worker |
-| **monitait_celery_beat** | - | Celery periodic scheduler |
+| Service | Container | Port | Description |
+|---------|-----------|------|-------------|
+| Vision Engine | `monitait_vision_engine` | 80 (→5050) | Core QC engine, web UI, API |
+| YOLO Inference | `yolo_inference` (x2) | 4442 | AI object detection (GPU) |
+| Redis | `monitait_redis` | 6379 | Cache & message queue |
+| TimescaleDB | `monitait_timescaledb` | 5432 | Time-series database |
+| Grafana | `monitait_grafana` | 3000 | Metrics visualization |
+| PiGallery2 | `monitait_pigallery2` | 5000 | Image gallery browser |
 
 ## Data Storage
 
-- **Raw Images**: `/mnt/SSD-RESERVE/raw_images/` (configurable volume)
-- **Processed Images**: `./volumes/images/`
-- **Database**: PostgreSQL persistent volume
-- **Weights**: `./volumes/weights/`
-- **Logs**: `./volumes/logs/`
-
-Automatic cleanup service monitors disk usage and removes old images when reaching 90% capacity.
+- **Raw Images**: `${DATA_ROOT}/raw_images/`
+- **YOLO Weights**: `./volumes/weights/`
+- **TimescaleDB**: `${DATA_ROOT}/volumes/timescaledb/`
+- **Redis**: `${DATA_ROOT}/volumes/redis/`
+- **Grafana**: `${DATA_ROOT}/volumes/grafana/`
+- **Gallery**: `${DATA_ROOT}/volumes/pigallery2_*/`
 
 ## API Endpoints
 
-### Vision Engine Service (Port 5050)
+### Vision Engine (Port 80)
 - `GET /` - Status monitoring web interface
 - `GET /health` - Health check
-- WebSocket `/ws` - Real-time updates
-
-### Shipment Fulfillment (Port 8000)
-- Django admin interface at `/admin`
-- REST API for shipment management
-- WebSocket at port 6789
-
-### Stream Service (Port 5000)
-- `GET /video_feed/{stream_id}` - Live video stream
-- `GET /stream/` - Stream status
-
-## Development
-
-### Project Structure
-
-```
-vision_engine/main.py (3371 lines)
-├── ArduinoSocket        # Hardware interface and capture orchestration
-├── StateManager         # Multi-phase capture state machine
-├── CameraBuffer         # Video stream buffering
-└── Processing Pipeline  # YOLO → Nesting → DataMatrix → Matching
-```
-
-See [vision_engine/README.md](vision_engine/README.md) for detailed counter service documentation.
+- `GET /status` - Configuration page
+- `WS /ws/timeline` - Real-time timeline updates
 
 ### Key Technologies
 
-- **Python 3.10.4**
-- **FastAPI** - API framework
-- **Django 5.1.2** - Admin backend
-- **OpenCV 4.7.0** - Image processing
+- **Python 3.10** / **FastAPI** - API framework
+- **OpenCV 4.7** - Image processing
 - **YOLOv5** (PyTorch) - Object detection
-- **EasyOCR** - Text recognition
 - **pylibdmtx** - DataMatrix decoding
-- **Redis 4.3.4** - Message broker
-- **PostgreSQL 13** - Database
-- **Celery** - Task queue
+- **Redis** - Message broker & cache
+- **TimescaleDB** (PostgreSQL 15) - Time-series database
+- **Grafana** - Metrics dashboards
 
 ## Roadmap
 
