@@ -935,15 +935,14 @@ document.addEventListener('DOMContentLoaded', function() {
             // Remove existing popup
             removePopup();
 
-            // Build popup
+            // Build popup with full image preview
             popup = document.createElement("div");
-            popup.style.cssText = "position:fixed;z-index:100000;background:#1a2332;border:1px solid rgba(100,160,255,0.5);border-radius:8px;padding:10px 14px;box-shadow:0 6px 24px rgba(0,0,0,0.5);font-size:12px;color:#e2e8f0;line-height:1.6;min-width:180px;";
+            popup.style.cssText = "position:fixed;z-index:100000;background:#1a2332;border:1px solid rgba(100,160,255,0.5);border-radius:8px;padding:10px;box-shadow:0 6px 24px rgba(0,0,0,0.5);font-size:12px;color:#e2e8f0;line-height:1.6;max-width:80vw;max-height:90vh;overflow:auto;";
 
-            // Position near click
-            const popX = Math.min(e.clientX + 10, window.innerWidth - 220);
-            const popY = Math.min(e.clientY + 10, window.innerHeight - 140);
-            popup.style.left = popX + "px";
-            popup.style.top = popY + "px";
+            // Center on screen
+            popup.style.left = "50%";
+            popup.style.top = "50%";
+            popup.style.transform = "translate(-50%, -50%)";
 
             // Folder path for gallery
             const parts = dPath.split("/");
@@ -955,18 +954,23 @@ document.addEventListener('DOMContentLoaded', function() {
             const encText = col.encoder != null ? `Enc: ${col.encoder}` : '';
             const tsText = col.ts ? new Date(col.ts * 1000).toLocaleTimeString() : '';
 
+            // Try annotated image first, fall back to raw
+            const annotatedUrl = `/api/raw_image/${encodeURI(dPath)}_DETECTED.jpg`;
+            const rawUrl = `/api/raw_image/${encodeURI(dPath)}.jpg`;
+
             popup.innerHTML = `
-                <div style="margin-bottom:6px;font-weight:bold;color:#fff;">${ejectText} ${encText ? '| ' + encText : ''}</div>
-                <div style="margin-bottom:8px;color:#aaa;font-size:11px;">${tsText} | Cam ${camId}</div>
-                <div style="display:flex;gap:8px;">
-                    <a href="http://${location.hostname}:5000/#/gallery/${encodeURI(folder)}" target="_blank"
-                       style="flex:1;text-align:center;padding:6px 10px;background:#2b5797;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Gallery</a>
-                    <a href="/api/raw_image/${encodeURI(dPath)}.jpg" download="${filename}.jpg"
-                       style="flex:1;text-align:center;padding:6px 10px;background:#2d7d46;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Download</a>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <div style="font-weight:bold;color:#fff;">${ejectText} ${encText ? '| ' + encText : ''} ${tsText ? '| ' + tsText : ''} | Cam ${camId}</div>
+                    <span style="cursor:pointer;font-size:18px;color:#aaa;padding:0 4px;" onclick="this.closest('div[style*=z-index]').remove()">✕</span>
                 </div>
-                <div style="margin-top:6px;text-align:center;">
-                    <a href="/api/raw_image/${encodeURI(dPath)}_DETECTED.jpg" download="${filename}_DETECTED.jpg"
-                       style="color:#aaa;font-size:10px;text-decoration:underline;">Download Annotated</a>
+                <img src="${annotatedUrl}" onerror="this.src='${rawUrl}'" style="max-width:100%;max-height:70vh;border-radius:4px;display:block;margin:0 auto;" />
+                <div style="display:flex;gap:8px;margin-top:8px;justify-content:center;">
+                    <a href="http://${location.hostname}:5000/#/gallery/${encodeURI(folder)}" target="_blank"
+                       style="padding:6px 12px;background:#2b5797;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Gallery</a>
+                    <a href="${rawUrl}" download="${filename}.jpg"
+                       style="padding:6px 12px;background:#2d7d46;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Download</a>
+                    <a href="${annotatedUrl}" download="${filename}_DETECTED.jpg"
+                       style="padding:6px 12px;background:#7d462d;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Download Annotated</a>
                 </div>
             `;
 
