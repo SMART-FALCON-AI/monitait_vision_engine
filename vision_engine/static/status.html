@@ -33,6 +33,7 @@
                     <button class="tab-button" onclick="switchTab('hardware')">🔧 <span data-i18n="tab_hardware">Hardware</span></button>
                     <button class="tab-button" onclick="switchTab('cameras')">📷 <span data-i18n="tab_cameras">Cameras</span></button>
                     <button class="tab-button" onclick="switchTab('infrastructure')">🔮 <span data-i18n="tab_inference">Inference</span></button>
+                    <button class="tab-button" onclick="switchTab('process')">⚙️ <span data-i18n="tab_process">Process</span></button>
                     <button class="tab-button" onclick="switchTab('advanced')">⚡ <span data-i18n="tab_advanced">Advanced</span></button>
                 </div>
 
@@ -395,84 +396,6 @@
                     </div>
                 </div>
 
-                <div class="control-section">
-                    <h3 data-i18n="image_processing">Image Processing Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label" data-i18n="parent_objects">Parent Object List (comma-separated, use _root for no parent requirement)</div>
-                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
-                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
-                            <div class="control-response" id="config-parent_object_list-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="remove_raw">Remove Raw Image After DM Decode</div>
-                            <select class="control-input" id="remove-raw-image-input">
-                                <option value="false">No</option>
-                                <option value="true">Yes</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
-                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3 data-i18n="dm_config">DataMatrix Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="valid_dm_sizes">Valid DM Char Sizes (comma-separated)</div>
-                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
-                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
-                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="confidence_threshold">Confidence Threshold (0-1)</div>
-                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
-                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
-                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="overlap_threshold">Overlap Threshold (0-1)</div>
-                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
-                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
-                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3 data-i18n="feature_toggles">Feature Toggles</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="histogram_feature">Histogram Feature</div>
-                            <select class="control-input" id="histogram-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-histogram_enabled-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="save_histogram">Save Histogram Images</div>
-                            <select class="control-input" id="histogram-save-image-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
-                            <div class="control-response" id="config-histogram_save_image-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
-                            <select class="control-input" id="light-status-check-input">
-                                <option value="false" selected>Disabled (open-loop, faster)</option>
-                                <option value="true">Enabled (verify via serial)</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
-                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
-                        </div>
-                    </div>
-                </div>
-
             </div>
             </div>
             <!-- End Cameras Tab -->
@@ -549,153 +472,6 @@
                                 <button class="control-button" onclick="sendCommand('WARNING_OFF')" style="margin-top: 5px;">Warning Off</button>
                                 <div class="control-response" id="cmd-WARNING-response"></div>
                             </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- OK Configuration -->
-                <div class="control-section">
-                    <h3 data-i18n="ok_config">OK Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="ok_counter_adj">OK Counter Adjustment</div>
-                            <input type="number" class="control-input" id="ok-adjust" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)">Adjust OK Counter</button>
-                            <div class="control-response" id="cmd-OK_ADJUST-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds)</div>
-                            <input type="number" class="control-input" id="ok-offset-delay" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)">Set Offset Delay</button>
-                            <div class="control-response" id="cmd-OK_OFFSET_DELAY-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each)</div>
-                            <input type="number" class="control-input" id="ok-duration-pulses" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)">Set Duration Pulses</button>
-                            <div class="control-response" id="cmd-OK_DURATION_PULSES-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="duration_percent">Duration Percent</div>
-                            <input type="number" class="control-input" id="ok-duration-percent" min="0" max="100" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)">Set Duration Percent</button>
-                            <div class="control-response" id="cmd-OK_DURATION_PERCENT-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor</div>
-                            <input type="number" class="control-input" id="ok-encoder-factor" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)">Set Encoder Factor</button>
-                            <div class="control-response" id="cmd-OK_ENCODER_FACTOR-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3 data-i18n="ng_config">NG Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="ng_counter_adj">NG Counter Adjustment</div>
-                            <input type="number" class="control-input" id="ng-adjust" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)">Adjust NG Counter</button>
-                            <div class="control-response" id="cmd-NG_ADJUST-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds)</div>
-                            <input type="number" class="control-input" id="ng-offset-delay" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)">Set Offset Delay</button>
-                            <div class="control-response" id="cmd-NG_OFFSET_DELAY-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each)</div>
-                            <input type="number" class="control-input" id="ng-duration-pulses" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)">Set Duration Pulses</button>
-                            <div class="control-response" id="cmd-NG_DURATION_PULSES-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="duration_percent">Duration Percent</div>
-                            <input type="number" class="control-input" id="ng-duration-percent" min="0" max="100" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)">Set Duration Percent</button>
-                            <div class="control-response" id="cmd-NG_DURATION_PERCENT-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor</div>
-                            <input type="number" class="control-input" id="ng-encoder-factor" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)">Set Encoder Factor</button>
-                            <div class="control-response" id="cmd-NG_ENCODER_FACTOR-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3 data-i18n="ejector_config">Ejector Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="ejector_enabled">Ejector Enabled</div>
-                            <select class="control-input" id="ejector-enabled-input">
-                                <option value="true">Enabled</option>
-                                <option value="false">Disabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('ejector_enabled', document.getElementById('ejector-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-ejector_enabled-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="ejector_offset">Ejector Offset (encoder counts)</div>
-                            <input type="number" class="control-input" id="ejector-offset-input" min="0" value="1">
-                            <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)">Set Offset</button>
-                            <div class="control-response" id="config-ejector_offset-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="ejector_duration">Ejector Duration (seconds)</div>
-                            <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.01" value="0.01">
-                            <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>
-                            <div class="control-response" id="config-ejector_duration-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="class_count_check">Class Count Check (equal counts)</div>
-                            <select class="control-input" id="check-class-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="classes_to_check">Classes to Check (comma-separated)</div>
-                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
-                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
-                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="class_confidence">Class Count Confidence Threshold</div>
-                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
-                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
-                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="capture_mode">Capture Mode</div>
-                            <select class="control-input" id="capture-mode-input">
-                                <option value="single">Single</option>
-                                <option value="multiple">Multiple</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('capture_mode', document.getElementById('capture-mode-input').value)">Set Mode</button>
-                            <div class="control-response" id="config-capture_mode-response"></div>
-                        </div>
-                    </div>
-
-                    <!-- Ejection Procedures -->
-                    <div style="margin-top: 15px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3);">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-                            <h4 style="margin: 0; color: #ef4444;">Ejection Procedures</h4>
-                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;">+ Add Procedure</button>
-                        </div>
-                        <div id="procedures-list">
-                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
-                                No ejection procedures configured.
-                            </div>
-                        </div>
-                        <div style="margin-top: 10px; text-align: right;">
-                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);">Save Procedures</button>
-                            <span id="procedures-save-status" style="margin-left: 8px; font-size: 12px; color: var(--text-secondary);"></span>
                         </div>
                     </div>
                 </div>
@@ -1050,6 +826,261 @@
             </div>
             <!-- End AI Assistant Tab -->
 
+            <!-- Process Tab -->
+            <div id="tab-process" class="tab-content">
+                <h2 style="margin: 0 0 20px 0; color: var(--text-primary); font-weight: 600;" data-i18n="process_config">⚙️ Process Configuration</h2>
+
+                <!-- Ejector Configuration (from Hardware) -->
+                <div class="control-section">
+                    <h3 data-i18n="ejector_config">Ejector Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="ejector_enabled">Ejector Enabled</div>
+                            <select class="control-input" id="ejector-enabled-input">
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('ejector_enabled', document.getElementById('ejector-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-ejector_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="ejector_offset">Ejector Offset (encoder counts)</div>
+                            <input type="number" class="control-input" id="ejector-offset-input" min="0" value="1">
+                            <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)">Set Offset</button>
+                            <div class="control-response" id="config-ejector_offset-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="ejector_duration">Ejector Duration (seconds)</div>
+                            <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.01" value="0.01">
+                            <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>
+                            <div class="control-response" id="config-ejector_duration-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="class_count_check">Class Count Check (equal counts)</div>
+                            <select class="control-input" id="check-class-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('check_class_counts_enabled', document.getElementById('check-class-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="classes_to_check">Classes to Check (comma-separated)</div>
+                            <input type="text" class="control-input" id="check-class-classes-input" value="socket,nozzle">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_classes', document.getElementById('check-class-classes-input').value)">Set Classes</button>
+                            <div class="control-response" id="config-check_class_counts_classes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="class_confidence">Class Count Confidence Threshold</div>
+                            <input type="number" class="control-input" id="check-class-confidence-input" value="0.5" min="0" max="1" step="0.05">
+                            <button class="control-button" onclick="updateConfig('check_class_counts_confidence', document.getElementById('check-class-confidence-input').value)">Set</button>
+                            <div class="control-response" id="config-check_class_counts_confidence-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="capture_mode">Capture Mode</div>
+                            <select class="control-input" id="capture-mode-input">
+                                <option value="single">Single</option>
+                                <option value="multiple">Multiple</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('capture_mode', document.getElementById('capture-mode-input').value)">Set Mode</button>
+                            <div class="control-response" id="config-capture_mode-response"></div>
+                        </div>
+                    </div>
+
+                    <!-- Ejection Procedures -->
+                    <div style="margin-top: 15px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                            <h4 style="margin: 0; color: #ef4444;">Ejection Procedures</h4>
+                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;">+ Add Procedure</button>
+                        </div>
+                        <div id="procedures-list">
+                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
+                                No ejection procedures configured.
+                            </div>
+                        </div>
+                        <div style="margin-top: 10px; text-align: right;">
+                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);">Save Procedures</button>
+                            <span id="procedures-save-status" style="margin-left: 8px; font-size: 12px; color: var(--text-secondary);"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- OK Configuration (from Hardware) -->
+                <div class="control-section">
+                    <h3 data-i18n="ok_config">OK Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="ok_counter_adj">OK Counter Adjustment</div>
+                            <input type="number" class="control-input" id="ok-adjust" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)">Adjust OK Counter</button>
+                            <div class="control-response" id="cmd-OK_ADJUST-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds)</div>
+                            <input type="number" class="control-input" id="ok-offset-delay" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)">Set Offset Delay</button>
+                            <div class="control-response" id="cmd-OK_OFFSET_DELAY-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each)</div>
+                            <input type="number" class="control-input" id="ok-duration-pulses" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)">Set Duration Pulses</button>
+                            <div class="control-response" id="cmd-OK_DURATION_PULSES-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="duration_percent">Duration Percent</div>
+                            <input type="number" class="control-input" id="ok-duration-percent" min="0" max="100" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)">Set Duration Percent</button>
+                            <div class="control-response" id="cmd-OK_DURATION_PERCENT-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor</div>
+                            <input type="number" class="control-input" id="ok-encoder-factor" value="0">
+                            <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)">Set Encoder Factor</button>
+                            <div class="control-response" id="cmd-OK_ENCODER_FACTOR-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- NG Configuration (from Hardware) -->
+                <div class="control-section">
+                    <h3 data-i18n="ng_config">NG Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="ng_counter_adj">NG Counter Adjustment</div>
+                            <input type="number" class="control-input" id="ng-adjust" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)">Adjust NG Counter</button>
+                            <div class="control-response" id="cmd-NG_ADJUST-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds)</div>
+                            <input type="number" class="control-input" id="ng-offset-delay" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)">Set Offset Delay</button>
+                            <div class="control-response" id="cmd-NG_OFFSET_DELAY-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each)</div>
+                            <input type="number" class="control-input" id="ng-duration-pulses" min="0" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)">Set Duration Pulses</button>
+                            <div class="control-response" id="cmd-NG_DURATION_PULSES-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="duration_percent">Duration Percent</div>
+                            <input type="number" class="control-input" id="ng-duration-percent" min="0" max="100" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)">Set Duration Percent</button>
+                            <div class="control-response" id="cmd-NG_DURATION_PERCENT-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor</div>
+                            <input type="number" class="control-input" id="ng-encoder-factor" value="0">
+                            <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)">Set Encoder Factor</button>
+                            <div class="control-response" id="cmd-NG_ENCODER_FACTOR-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Per-Object Detection & Alerts (from Advanced) -->
+                <div class="control-section">
+                    <h3>Per-Object Detection & Alerts</h3>
+                    <div style="background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(51, 65, 85, 0.6);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                            <h4 style="margin: 0; color: var(--text-primary);">Per-Object Detection & Alerts</h4>
+                            <button onclick="fetchModelClasses()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: var(--secondary-color);">Fetch Classes</button>
+                        </div>
+
+                        <!-- Per-Object Cards (dynamically populated) -->
+                        <div id="audio-objects-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;">
+                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
+                                No objects detected yet. Start detection to see objects here.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Image Processing Configuration (from Cameras) -->
+                <div class="control-section">
+                    <h3 data-i18n="image_processing">Image Processing Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label" data-i18n="parent_objects">Parent Object List (comma-separated, use _root for no parent requirement)</div>
+                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
+                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
+                            <div class="control-response" id="config-parent_object_list-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="remove_raw">Remove Raw Image After DM Decode</div>
+                            <select class="control-input" id="remove-raw-image-input">
+                                <option value="false">No</option>
+                                <option value="true">Yes</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
+                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DataMatrix Configuration (from Cameras) -->
+                <div class="control-section">
+                    <h3 data-i18n="dm_config">DataMatrix Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="valid_dm_sizes">Valid DM Char Sizes (comma-separated)</div>
+                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
+                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
+                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="confidence_threshold">Confidence Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
+                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
+                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="overlap_threshold">Overlap Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
+                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
+                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Feature Toggles (from Cameras) -->
+                <div class="control-section">
+                    <h3 data-i18n="feature_toggles">Feature Toggles</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="histogram_feature">Histogram Feature</div>
+                            <select class="control-input" id="histogram-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="save_histogram">Save Histogram Images</div>
+                            <select class="control-input" id="histogram-save-image-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_save_image-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
+                            <select class="control-input" id="light-status-check-input">
+                                <option value="false" selected>Disabled (open-loop, faster)</option>
+                                <option value="true">Enabled (verify via serial)</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
+                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+            <!-- End Process Tab -->
+
             <!-- Advanced Tab -->
             <div id="tab-advanced" class="tab-content">
                 <!-- Timeline Configuration Section -->
@@ -1102,21 +1133,6 @@
                                 ✓ Apply Timeline Configuration
                             </button>
                             <div class="control-response" id="timeline-config-response"></div>
-                        </div>
-                    </div>
-
-                    <!-- Per-Object Detection & Audio Configuration (merged) -->
-                    <div style="margin-top: 20px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(51, 65, 85, 0.6);">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-                            <h4 style="margin: 0; color: var(--text-primary);">Per-Object Detection & Alerts</h4>
-                            <button onclick="fetchModelClasses()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: var(--secondary-color);">Fetch Classes</button>
-                        </div>
-
-                        <!-- Per-Object Cards (dynamically populated) -->
-                        <div id="audio-objects-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;">
-                            <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
-                                No objects detected yet. Start detection to see objects here.
-                            </div>
                         </div>
                     </div>
 
