@@ -1,6 +1,12 @@
 // Update UI with status data (used by SSE stream)
 function updateStatusUI(data) {
     document.getElementById('encoder-value').textContent = data.encoder_value || 0;
+    // Show server timestamp next to encoder
+    const tsEl = document.getElementById('server-timestamp');
+    if (tsEl && data.timestamp) {
+        const parts = data.timestamp.split(' ');
+        tsEl.textContent = parts.length > 1 ? parts[1] : data.timestamp;
+    }
     document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
     document.getElementById('pps-value').textContent = data.pps || 0;
     document.getElementById('ok-counter').textContent = data.ok_counter || 0;
@@ -111,6 +117,8 @@ function updateStatusUI(data) {
 
 // Server-Sent Events for real-time status updates
 let statusEventSource = null;
+let _lastSSETime = Date.now();
+let _sseWatchdog = null;
 
 function startStatusStream() {
     if (statusEventSource) {
@@ -120,8 +128,20 @@ function startStatusStream() {
     statusEventSource = new EventSource('/api/status/stream');
     const dataSource = document.getElementById('dataSource');
 
+    // Watchdog: if no SSE message received for 15s, force reconnect
+    if (_sseWatchdog) clearInterval(_sseWatchdog);
+    _sseWatchdog = setInterval(function() {
+        if (Date.now() - _lastSSETime > 15000) {
+            console.log('[SSE] No data for 15s, reconnecting...');
+            if (statusEventSource) statusEventSource.close();
+            statusEventSource = null;
+            startStatusStream();
+        }
+    }, 5000);
+
     statusEventSource.onmessage = function(event) {
         try {
+            _lastSSETime = Date.now();
             const data = JSON.parse(event.data);
 
             // Debug: Log detection events
@@ -198,9 +218,26 @@ function startStatusStream() {
 
     statusEventSource.onopen = function() {
         console.log('SSE connected');
+        _lastSSETime = Date.now();
         if (dataSource) { dataSource.textContent = 'LIVE'; dataSource.className = 'data-source serial'; }
     };
 }
+
+// Auto-resume when tab becomes visible again (after inactivity/sleep)
+document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) {
+        console.log('[Dashboard] Tab visible again, reconnecting...');
+        startStatusStream();
+        if (typeof connectTimelineWs === 'function' && !timelineWs) {
+            connectTimelineWs();
+        }
+        // Auto-resume timeline if it was paused
+        const toggleBtn = document.getElementById('timeline-toggle-auto');
+        if (toggleBtn && !window.timelineAutoUpdate) {
+            toggleBtn.click(); // triggers resume
+        }
+    }
+});
 
 // Timeline WebSocket — event-driven push (replaces polling)
 let timelineWs = null;

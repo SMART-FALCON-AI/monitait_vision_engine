@@ -174,17 +174,128 @@ For air-gapped servers, use the deployment scripts in `deploy/`:
 
 ## Configuration
 
-All settings are configured via the **web interface** at `http://<server-ip>/status` and saved to `.env.prepared_query_data` for persistence across restarts.
+All settings are configured via the **web interface** at `http://<server-ip>/status` and saved to `.env.prepared_query_data` for persistence across restarts. Click **"Save All Configuration"** in the top-right to persist changes.
 
-Configurable settings include:
-- Camera paths (USB and IP cameras)
-- Inference URL, model selection, confidence thresholds
-- Serial port, baud rate, serial mode
-- Ejector offset and duration
-- Capture mode and timing
-- Lighting states and phases
-- AI provider (OpenAI, Anthropic, Google)
-- Image processing and histogram settings
+### Step-by-Step Setup Guide
+
+After starting the application for the first time, configure it in this order:
+
+#### 1. Connect Cameras (Cameras Tab)
+
+**USB cameras** are auto-detected on startup. For **IP cameras**:
+
+1. Go to the **Cameras** tab
+2. Enter your network subnet (e.g., `192.168.0`) and click **Scan**
+3. Discovered cameras will appear — click **Save** to add them
+4. Adjust per-camera settings: FPS, resolution, exposure, gain, brightness, contrast, saturation
+5. Optionally set **ROI (Region of Interest)** to crop to a specific area
+
+#### 2. Configure Capture States (Cameras Tab → States)
+
+States define **how** the system captures images using multi-phase lighting:
+
+1. Scroll to **State Management** in the Cameras tab
+2. Create a state with one or more **phases**, each defining:
+   - **Light Mode**: `U_ON_B_OFF` (uplight), `B_ON_U_OFF` (backlight), `U_ON_B_ON` (both), `U_OFF_B_OFF` (off)
+   - **Delay**: seconds to wait after setting lights before capturing
+   - **Cameras**: which camera IDs to capture in this phase (comma-separated)
+   - **Steps**: capture every N encoder pulses (`-1` = continuous loop)
+   - **Analog Threshold**: analog sensor trigger value (`-1` = disabled)
+3. Set the **active state** for production
+
+#### 3. Set Up Inference Pipeline (Inference Tab)
+
+Define what AI model processes the captured images:
+
+**Single model:**
+1. Go to the **Inference** tab
+2. Select the inference module: `Local YOLO` or `Gradio HuggingFace`
+3. Set the **inference URL** (e.g., `http://yolo_inference:4442/v1/object-detection/yolov5s/detect/`)
+4. Choose the **model** and set **confidence threshold**
+
+**Multi-model pipeline:**
+1. Create multiple **models** (e.g., one YOLO for defect detection, one Gradio for classification)
+2. Create a **pipeline** with ordered phases, each referencing a model
+3. **Activate** the pipeline — frames will pass through each model in sequence
+
+**Upload custom weights:**
+1. Train your model at [ai-trainer.monitait.com](https://ai-trainer.monitait.com)
+2. Upload the `.pt` file via the **Upload Weights** button
+3. Click **Activate Weights** to load on all YOLO replicas
+
+#### 4. Configure the Ejector (Hardware Tab)
+
+Set up automatic rejection of defective items:
+
+1. Go to the **Hardware** tab → **Ejector Configuration**
+2. Enable the ejector toggle
+3. Set **Ejector Offset**: encoder counts from camera position to ejector position
+4. Set **Ejector Duration**: how long to activate the ejector (seconds)
+5. Define **OK** and **NG** parameters:
+   - **Offset Delay** (ms): timing between capture and trigger
+   - **Duration Pulses**: output pulse length (16μs units)
+   - **Encoder Factor**: scaling multiplier
+6. Optionally configure **Class Count Check** to validate expected object counts
+
+#### 5. Configure Serial Communication (Hardware Tab)
+
+Connect to Arduino/PLC for hardware control:
+
+1. Go to **Hardware** tab → **Serial Port Configuration**
+2. Set **Device Path** (e.g., `/dev/ttyUSB0`)
+3. Set **Baud Rate** (typically `57600`)
+4. Choose **Serial Mode**: `new` (recommended) or `legacy`
+5. Use the **Light Controls** to verify communication:
+   - Both On / U On, B Off / B On, U Off / Both Off
+   - Set PWM values (0-255) for fine brightness control
+
+#### 6. Set Up Image Processing (Cameras Tab)
+
+Configure how detected objects are processed:
+
+1. **Parent Object List**: enforce parent-child relationships (e.g., a "box" must contain a "logo")
+2. **DataMatrix Settings**: valid character sizes, confidence/overlap thresholds
+3. **Histogram**: enable for quality distribution analysis
+4. **Store Annotations**: save detection results to TimescaleDB
+
+#### 7. View Results on Dashboard
+
+The **Dashboard** tab shows real-time results:
+
+- **Left column**: encoder, speed, counters (OK/NG), ejector status, system metrics
+- **Right column**: live timeline of captured images with detection overlays
+- Use timeline navigation (First/Prev/Next/Last) to browse history
+- Timeline auto-resumes after 30 seconds of inactivity
+- Click images to zoom, use Reset to restore default view
+
+#### 8. Configure Product Matching (Advanced Tab)
+
+Map detected objects to product identifiers:
+
+1. Go to **Advanced** tab → **Data File**
+2. Edit the JSON mapping:
+   ```json
+   [
+       {
+           "dm": "6263957101037",
+           "chars": [["box"], ["logo_en", "logo_fa"], ["product_name"]]
+       }
+   ]
+   ```
+3. If all specified objects are detected, the system identifies the product by its DataMatrix code
+
+### Web Interface Tabs
+
+| Tab | Purpose |
+|-----|---------|
+| **Dashboard** | Real-time monitoring, timeline, counters |
+| **AI Assistant** | Chat with AI about detections and quality |
+| **Gallery** | Browse images with PiGallery2 |
+| **Charts** | Grafana metrics and analytics |
+| **Hardware** | Serial, ejector, lighting, commands |
+| **Cameras** | Camera config, states, IP discovery, image processing |
+| **Inference** | Models, pipelines, weights, confidence |
+| **Advanced** | Global settings, data file, config export/import |
 
 ### Environment Variables (.env)
 

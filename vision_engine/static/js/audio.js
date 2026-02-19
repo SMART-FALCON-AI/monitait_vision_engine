@@ -784,11 +784,30 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // Auto-resume after 30s of inactivity when paused
+    let _autoResumeTimer = null;
+    function scheduleAutoResume() {
+        if (_autoResumeTimer) clearTimeout(_autoResumeTimer);
+        _autoResumeTimer = setTimeout(() => {
+            if (!autoUpdate) {
+                autoUpdate = true;
+                window.timelineAutoUpdate = true;
+                toggleBtn.textContent = "Stop";
+                toggleBtn.classList.remove("stopped");
+                currentPage = 0;
+                startAutoRefresh();
+                refreshImage();
+                panzoom.reset();
+            }
+        }, 30000);
+    }
+
     // Toggle auto-update
     toggleBtn.onclick = () => {
         autoUpdate = !autoUpdate;
         window.timelineAutoUpdate = autoUpdate;
         if (autoUpdate) {
+            if (_autoResumeTimer) clearTimeout(_autoResumeTimer);
             toggleBtn.textContent = "Stop";
             toggleBtn.classList.remove("stopped");
             currentPage = 0;
@@ -799,6 +818,7 @@ document.addEventListener('DOMContentLoaded', function() {
             toggleBtn.classList.add("stopped");
             stopAutoRefresh();
             counter.textContent = "Paused";
+            scheduleAutoResume();
         }
     };
 
@@ -810,6 +830,7 @@ document.addEventListener('DOMContentLoaded', function() {
         toggleBtn.textContent = "Resume";
         toggleBtn.classList.add("stopped");
         loadPage(totalPages - 1); // Oldest page
+        scheduleAutoResume();
     });
 
     document.getElementById("timeline-prev").addEventListener('click', () => {
@@ -819,6 +840,7 @@ document.addEventListener('DOMContentLoaded', function() {
         toggleBtn.textContent = "Resume";
         toggleBtn.classList.add("stopped");
         loadPage(Math.min(totalPages - 1, currentPage + 1)); // Older page
+        scheduleAutoResume();
     });
 
     document.getElementById("timeline-next").addEventListener('click', () => {
@@ -828,6 +850,7 @@ document.addEventListener('DOMContentLoaded', function() {
         toggleBtn.textContent = "Resume";
         toggleBtn.classList.add("stopped");
         loadPage(Math.max(0, currentPage - 1)); // Newer page
+        scheduleAutoResume();
     });
 
     document.getElementById("timeline-last").addEventListener('click', () => {
@@ -837,6 +860,7 @@ document.addEventListener('DOMContentLoaded', function() {
         toggleBtn.textContent = "Resume";
         toggleBtn.classList.add("stopped");
         loadPage(0); // Latest page
+        scheduleAutoResume();
     });
 
     // Update page count periodically
