@@ -379,7 +379,7 @@ function updateProcedureField(procId, field, value) {
 function updateRuleField(procId, ruleIndex, field, value) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc || !proc.rules[ruleIndex]) return;
-    if (field === 'min_confidence' || field === 'count') {
+    if (field === 'min_confidence' || field === 'count' || field === 'area') {
         proc.rules[ruleIndex][field] = Math.max(0, parseInt(value) || 0);
         if (field === 'min_confidence') proc.rules[ruleIndex][field] = Math.min(100, proc.rules[ruleIndex][field]);
     } else if (field === 'max_delta_e') {
@@ -419,11 +419,20 @@ function renderProcedures() {
 
     container.innerHTML = procedures.map(proc => {
         const rulesHtml = proc.rules.map((rule, ri) => {
-            const isColor = rule.condition === 'color_delta';
-            const countInput = isColor ? '' : `
+            const cond = rule.condition || 'count_equals';
+            const isColor = cond === 'color_delta';
+            const isArea = cond.startsWith('area_');
+            const isCount = !isColor && !isArea;
+            const countInput = !isCount ? '' : `
                 <input type="number" value="${rule.count != null ? rule.count : 1}" min="0" step="1"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'count', this.value)"
                     style="width: 45px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">`;
+            const areaInput = !isArea ? '' : `
+                <input type="number" value="${rule.area != null ? rule.area : 10000}" min="0" step="100"
+                    onchange="updateRuleField('${proc.id}', ${ri}, 'area', this.value)"
+                    title="Area threshold (pixels)"
+                    style="width: 65px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                <span style="font-size: 10px; color: var(--text-secondary);">px</span>`;
             const colorControls = !isColor ? '' : `
                 <input type="number" value="${rule.max_delta_e != null ? rule.max_delta_e : 5.0}" min="0" step="0.5"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'max_delta_e', this.value)"
@@ -450,12 +459,16 @@ function renderProcedures() {
                 </select>
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'condition', this.value)"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
-                    <option value="count_equals" ${rule.condition === 'count_equals' ? 'selected' : ''}>Count =</option>
-                    <option value="count_greater" ${rule.condition === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
-                    <option value="count_less" ${rule.condition === 'count_less' ? 'selected' : ''}>Count &lt;</option>
-                    <option value="color_delta" ${rule.condition === 'color_delta' ? 'selected' : ''}>Color ΔE &gt;</option>
+                    <option value="count_equals" ${cond === 'count_equals' ? 'selected' : ''}>Count =</option>
+                    <option value="count_greater" ${cond === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
+                    <option value="count_less" ${cond === 'count_less' ? 'selected' : ''}>Count &lt;</option>
+                    <option value="area_greater" ${cond === 'area_greater' ? 'selected' : ''}>Area &gt;</option>
+                    <option value="area_less" ${cond === 'area_less' ? 'selected' : ''}>Area &lt;</option>
+                    <option value="area_equals" ${cond === 'area_equals' ? 'selected' : ''}>Area =</option>
+                    <option value="color_delta" ${cond === 'color_delta' ? 'selected' : ''}>Color ΔE &gt;</option>
                 </select>
                 ${countInput}
+                ${areaInput}
                 ${colorControls}
                 <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
                 <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
@@ -486,6 +499,12 @@ function renderProcedures() {
                             <option value="any" ${proc.logic === 'any' ? 'selected' : ''}>ANY rule (OR)</option>
                             <option value="all" ${proc.logic === 'all' ? 'selected' : ''}>ALL rules (AND)</option>
                         </select>
+                        <span style="font-size: 10px; color: var(--text-secondary);">Cams:</span>
+                        <input type="text" value="${(proc.cameras || []).join(',')}"
+                            onchange="updateProcedureField('${proc.id}', 'cameras', this.value.split(',').map(s=>parseInt(s.trim())).filter(n=>!isNaN(n)))"
+                            placeholder="all"
+                            title="Camera IDs (e.g. 1,2) or leave empty for all"
+                            style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                         <button onclick="removeProcedure('${proc.id}')"
                             style="padding: 3px 8px; background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>
                     </div>

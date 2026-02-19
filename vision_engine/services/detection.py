@@ -210,19 +210,42 @@ def set_fixed_color_reference(class_name, lab_color):
         return False
 
 
+def _has_color_delta_procedure():
+    """Check if any enabled procedure has a color_delta condition."""
+    try:
+        if _app is None:
+            return False
+        tl_cfg = getattr(_app.state, 'timeline_config', {})
+        for proc in tl_cfg.get('procedures', []):
+            if not proc.get('enabled', False):
+                continue
+            for rule in proc.get('rules', []):
+                if rule.get('condition') == 'color_delta':
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def evaluate_eject_from_detections(detections_list, procedures):
     """Evaluate eject rules from stored detections and procedures config.
 
-    Supports 6 condition types:
-        count_equals — exactly N instances detected
-        count_greater— more than N instances detected
-        count_less   — fewer than N instances detected
-        color_delta  — color ΔE exceeds threshold vs reference
-        present      — (legacy) count > 0
-        not_present  — (legacy) count = 0
+    Supports 9 condition types:
+        count_equals  — exactly N instances detected
+        count_greater — more than N instances detected
+        count_less    — fewer than N instances detected
+        area_greater  — object bbox area > N pixels
+        area_less     — object bbox area < N pixels
+        area_equals   — object bbox area = N pixels
+        color_delta   — color ΔE exceeds threshold vs reference
+        present       — (legacy) count > 0
+        not_present   — (legacy) count = 0
+
+    Each procedure can optionally specify ``cameras`` (list of int camera IDs).
+    When set, only detections from those cameras are evaluated.
 
     Args:
-        detections_list: list of detection dicts (from one or more cameras at the same timestamp)
+        detections_list: list of detection dicts (from one or more cameras)
         procedures: list of procedure configs from timeline_config
 
     Returns:
@@ -234,15 +257,6 @@ def evaluate_eject_from_detections(detections_list, procedures):
     if not detections_list:
         return False, []
 
-    # Build max-confidence-per-class dict (for present/not_present)
-    all_detected = {}
-    for det in detections_list:
-        if isinstance(det, dict) and det.get('name'):
-            name = det['name']
-            conf = det.get('confidence', 0)
-            if name not in all_detected or conf > all_detected[name]:
-                all_detected[name] = conf
-
     # --- Procedure rules ---
     for proc in (procedures or []):
         if not proc.get('enabled', False):
@@ -252,40 +266,63 @@ def evaluate_eject_from_detections(detections_list, procedures):
             continue
         logic = proc.get('logic', 'any')
 
-        def _eval_rule(rule):
+        # Per-procedure camera filter
+        proc_cameras = proc.get('cameras', [])
+        if proc_cameras:
+            proc_dets = [d for d in detections_list
+                         if isinstance(d, dict) and d.get('_cam') in proc_cameras]
+        else:
+            proc_dets = detections_list  # all cameras
+
+        def _eval_rule(rule, dets=proc_dets):
             obj = rule.get('object', '')
             cond = rule.get('condition', 'count_equals')
             min_conf = rule.get('min_confidence', 0) / 100.0
             expected_count = rule.get('count', 1)
 
-            # Count detections above confidence threshold
-            actual = sum(
-                1 for det in detections_list
-                if isinstance(det, dict) and det.get('name') == obj
-                and det.get('confidence', 0) >= min_conf
-            )
+            # Filtered detections for this object above confidence
+            obj_dets = [d for d in dets
+                        if isinstance(d, dict) and d.get('name') == obj
+                        and d.get('confidence', 0) >= min_conf]
+            actual = len(obj_dets)
 
-            # Legacy conditions mapped to count equivalents
+            # Legacy conditions
             if cond == 'present':
                 return actual > 0
             elif cond == 'not_present':
                 return actual == 0
+            # Count conditions
             elif cond == 'count_equals':
                 return actual == expected_count
             elif cond == 'count_greater':
                 return actual > expected_count
             elif cond == 'count_less':
                 return actual < expected_count
+            # Area conditions (compare bbox area in pixels)
+            elif cond in ('area_greater', 'area_less', 'area_equals'):
+                threshold = rule.get('area', 10000)
+                if not obj_dets:
+                    return False
+                # Use highest-confidence detection's area
+                best = max(obj_dets, key=lambda d: d.get('confidence', 0))
+                w = int(best.get('xmax', 0)) - int(best.get('xmin', 0))
+                h = int(best.get('ymax', 0)) - int(best.get('ymin', 0))
+                area = w * h
+                best['_area'] = area
+                if cond == 'area_greater':
+                    return area > threshold
+                elif cond == 'area_less':
+                    return area < threshold
+                elif cond == 'area_equals':
+                    return area == threshold
+            # Color Delta E
             elif cond == 'color_delta':
                 max_de = rule.get('max_delta_e', 5.0)
                 ref_mode = rule.get('reference_mode', 'previous')
-                # Find highest-confidence detection with lab_color
-                best_det, best_conf = None, -1
-                for det in detections_list:
-                    if (isinstance(det, dict) and det.get('name') == obj
-                            and det.get('confidence', 0) >= min_conf
-                            and 'lab_color' in det
-                            and det['confidence'] > best_conf):
+                best_det = None
+                best_conf = -1
+                for det in obj_dets:
+                    if 'lab_color' in det and det['confidence'] > best_conf:
                         best_det = det
                         best_conf = det['confidence']
                 if best_det is None:
@@ -307,18 +344,23 @@ def evaluate_eject_from_detections(detections_list, procedures):
             cond = rule.get('condition', 'count_equals')
 
             if cond == 'color_delta':
-                for det in detections_list:
+                for det in proc_dets:
                     if isinstance(det, dict) and det.get('name') == obj and '_delta_e' in det:
                         return f"'{obj}' ΔE {det['_delta_e']} > {rule.get('max_delta_e', 5.0)}"
                 return f"'{obj}' color ΔE exceeded"
 
+            if cond in ('area_greater', 'area_less', 'area_equals'):
+                for det in proc_dets:
+                    if isinstance(det, dict) and det.get('name') == obj and '_area' in det:
+                        op = {'area_greater': '>', 'area_less': '<', 'area_equals': '='}[cond]
+                        return f"'{obj}' area {det['_area']}px {op} {rule.get('area', 10000)}"
+                return f"'{obj}' area out of range"
+
             expected = rule.get('count', 1)
             min_conf = rule.get('min_confidence', 0) / 100.0
-            actual = sum(
-                1 for det in detections_list
-                if isinstance(det, dict) and det.get('name') == obj
-                and det.get('confidence', 0) >= min_conf
-            )
+            actual = len([d for d in proc_dets
+                         if isinstance(d, dict) and d.get('name') == obj
+                         and d.get('confidence', 0) >= min_conf])
             op = {'count_equals': '=', 'count_greater': '>', 'count_less': '<',
                   'present': '>', 'not_present': '='}
             return f"'{obj}' count {actual} {op.get(cond, '?')} {expected}"
@@ -970,12 +1012,21 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             cv2.imwrite(annotated_path, annotated_image)
             logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections (model: {model_name_used})")
 
-            # Extract L*a*b* color for each detection (for color Delta E procedures)
+            # Attach camera ID to each detection for per-camera procedure filtering
+            try:
+                cam_id = int(frame_id.rsplit('_', 1)[-1])
+            except (ValueError, IndexError):
+                cam_id = 0
             for det in yolo_res:
-                lab = extract_lab_color(image, det)
-                if lab is not None:
-                    det['lab_color'] = lab
-            update_color_references(yolo_res)
+                det['_cam'] = cam_id
+
+            # Extract L*a*b* color only if a color_delta procedure exists
+            if _has_color_delta_procedure():
+                for det in yolo_res:
+                    lab = extract_lab_color(image, det)
+                    if lab is not None:
+                        det['lab_color'] = lab
+                update_color_references(yolo_res)
 
             # Add audio notification with detected object names
             try:
