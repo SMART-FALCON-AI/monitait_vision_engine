@@ -81,10 +81,10 @@ async def get_inference_stats(request: Request):
         min_inference = 0
         max_inference = 0
 
-    # FPS = number of frames in the last 1 second
+    # FPS = frames counted over last 10 seconds, divided by 10
     now = time.time()
-    inference_fps = len([t for t in inf_frame_timestamps if now - t <= 1.0])
-    capture_fps = len([t for t in cap_frame_timestamps if now - t <= 1.0])
+    inference_fps = len([t for t in inf_frame_timestamps if now - t <= 10.0]) / 10.0
+    capture_fps = len([t for t in cap_frame_timestamps if now - t <= 10.0]) / 10.0
 
     # Autoscaler status and system capacity from app.state
     autoscaler = getattr(request.app.state, 'autoscaler', {})
