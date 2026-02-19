@@ -6,7 +6,8 @@ var translations = {
         // Tabs
         tab_dashboard: "Dashboard", tab_ai: "AI Assistant", tab_gallery: "Gallery",
         tab_charts: "Charts", tab_hardware: "Hardware", tab_cameras: "Cameras",
-        tab_inference: "Inference", tab_advanced: "Advanced",
+        tab_inference: "Inference", tab_process: "Process", tab_advanced: "Advanced",
+        process_config: "Process Configuration",
         // Header
         save_all: "Save All Configuration", last_saved: "Last:", never: "Never",
         // Dashboard
@@ -143,7 +144,8 @@ var translations = {
     fa: {
         tab_dashboard: "داشبورد", tab_ai: "دستیار هوشمند", tab_gallery: "گالری",
         tab_charts: "نمودارها", tab_hardware: "سخت‌افزار", tab_cameras: "دوربین‌ها",
-        tab_inference: "استنتاج", tab_advanced: "پیشرفته",
+        tab_inference: "استنتاج", tab_process: "فرآیند", tab_advanced: "پیشرفته",
+        process_config: "تنظیمات فرآیند",
         save_all: "ذخیره تمام تنظیمات", last_saved: "آخرین:", never: "هرگز",
         shipment: "محموله", status: "وضعیت", encoder: "انکودر", speed: "سرعت",
         movement: "حرکت", ej_queue: "صف خروج", ej_active: "خروجی فعال",
@@ -260,7 +262,8 @@ var translations = {
     ar: {
         tab_dashboard: "لوحة التحكم", tab_ai: "مساعد ذكي", tab_gallery: "معرض",
         tab_charts: "رسوم بيانية", tab_hardware: "أجهزة", tab_cameras: "كاميرات",
-        tab_inference: "استدلال", tab_advanced: "متقدم",
+        tab_inference: "استدلال", tab_process: "العملية", tab_advanced: "متقدم",
+        process_config: "إعدادات العملية",
         save_all: "حفظ جميع الإعدادات", last_saved: "آخر:", never: "أبداً",
         shipment: "شحنة", status: "الحالة", encoder: "المشفر", speed: "السرعة",
         movement: "الحركة", ej_queue: "طابور الطرد", ej_active: "الطرد نشط",
@@ -374,7 +377,8 @@ var translations = {
     de: {
         tab_dashboard: "Dashboard", tab_ai: "KI-Assistent", tab_gallery: "Galerie",
         tab_charts: "Diagramme", tab_hardware: "Hardware", tab_cameras: "Kameras",
-        tab_inference: "Inferenz", tab_advanced: "Erweitert",
+        tab_inference: "Inferenz", tab_process: "Prozess", tab_advanced: "Erweitert",
+        process_config: "Prozesskonfiguration",
         save_all: "Alle Einstellungen speichern", last_saved: "Zuletzt:", never: "Nie",
         shipment: "Sendung", status: "Status", encoder: "Encoder", speed: "Geschwindigkeit",
         movement: "Bewegung", ej_queue: "Ausw. Warteschlange", ej_active: "Ausw. Aktiv",
@@ -487,7 +491,8 @@ var translations = {
     tr: {
         tab_dashboard: "Panel", tab_ai: "Yapay Zeka", tab_gallery: "Galeri",
         tab_charts: "Grafikler", tab_hardware: "Donanım", tab_cameras: "Kameralar",
-        tab_inference: "Çıkarım", tab_advanced: "Gelişmiş",
+        tab_inference: "Çıkarım", tab_process: "İşlem", tab_advanced: "Gelişmiş",
+        process_config: "İşlem Yapılandırması",
         save_all: "Tüm Ayarları Kaydet", last_saved: "Son:", never: "Hiç",
         shipment: "Sevkiyat", status: "Durum", encoder: "Enkoder", speed: "Hız",
         movement: "Hareket", ej_queue: "Atıcı Kuyruk", ej_active: "Atıcı Aktif",
@@ -568,7 +573,8 @@ var translations = {
     ja: {
         tab_dashboard: "ダッシュボード", tab_ai: "AIアシスタント", tab_gallery: "ギャラリー",
         tab_charts: "チャート", tab_hardware: "ハードウェア", tab_cameras: "カメラ",
-        tab_inference: "推論", tab_advanced: "詳細設定",
+        tab_inference: "推論", tab_process: "プロセス", tab_advanced: "詳細設定",
+        process_config: "プロセス設定",
         save_all: "全設定を保存", last_saved: "最終:", never: "なし",
         shipment: "出荷", status: "状態", encoder: "エンコーダ", speed: "速度",
         movement: "動作", ej_queue: "排出キュー", ej_active: "排出中",
@@ -644,7 +650,8 @@ var translations = {
     es: {
         tab_dashboard: "Panel", tab_ai: "Asistente IA", tab_gallery: "Galería",
         tab_charts: "Gráficos", tab_hardware: "Hardware", tab_cameras: "Cámaras",
-        tab_inference: "Inferencia", tab_advanced: "Avanzado",
+        tab_inference: "Inferencia", tab_process: "Proceso", tab_advanced: "Avanzado",
+        process_config: "Configuración de proceso",
         save_all: "Guardar toda la configuración", last_saved: "Último:", never: "Nunca",
         shipment: "Envío", status: "Estado", encoder: "Codificador", speed: "Velocidad",
         movement: "Movimiento", ej_queue: "Cola eyector", ej_active: "Eyector activo",
