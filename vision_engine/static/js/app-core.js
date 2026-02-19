@@ -281,6 +281,12 @@ function fetchHealth() {
     fetch('/health')
         .then(response => response.json())
         .then(data => {
+            // Update version display
+            const versionEl = document.getElementById('app-version');
+            if (versionEl && data.version) {
+                versionEl.textContent = 'v' + data.version;
+                document.title = 'MonitaQC v' + data.version;
+            }
             const restartWarning = document.getElementById('gradio-restart-warning');
             if (restartWarning) {
                 restartWarning.style.display = data.gradio_needs_restart ? 'inline' : 'none';

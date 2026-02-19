@@ -6,6 +6,7 @@ services:
     command: "python3 main.py"
     volumes:
       - ./vision_engine:/code
+      - ./VERSION:/code/VERSION:ro
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
       - ./volumes/weights:/weights
       - /dev:/dev  # Linux: serial (/dev/ttyUSB*), cameras (/dev/video*), barcode scanner (/dev/input/*)

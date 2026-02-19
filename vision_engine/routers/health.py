@@ -186,6 +186,7 @@ async def health_check(request: Request):
 
         response_content = {
             "status": "healthy" if status_code == 200 else "unhealthy",
+            "version": request.app.version,
             "device": "connected" if device_ok else ("camera-only" if not serial_available else "disconnected"),
             "serial": "connected" if serial_available else "not available",
             "redis": "connected" if redis_ok else "disconnected",

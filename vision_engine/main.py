@@ -54,11 +54,26 @@ pipeline_manager: Optional[PipelineManager] = None
 
 # =============================================================================
 
+# Read version from VERSION file (single source of truth)
+# Docker: mounted at /code/VERSION; local dev: ../VERSION relative to main.py
+_code_dir = os.path.dirname(os.path.abspath(__file__))
+for _vpath in [os.path.join(_code_dir, 'VERSION'), os.path.join(_code_dir, '..', 'VERSION')]:
+    if os.path.exists(_vpath):
+        _version_file = _vpath
+        break
+else:
+    _version_file = None
+try:
+    with open(_version_file) as _vf:
+        APP_VERSION = _vf.read().strip()
+except Exception:
+    APP_VERSION = "0.0.0"
+
 # Initialize FastAPI app
 app = FastAPI(
-    title="Counter Service",
-    description="Service for counting and tracking packages with camera processing",
-    version="3.4.0"
+    title="MonitaQC Vision Engine",
+    description="Industrial quality control and object detection platform",
+    version=APP_VERSION
 )
 
 # Mount static files
