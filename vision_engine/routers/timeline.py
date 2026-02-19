@@ -17,7 +17,7 @@ router = APIRouter()
 _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 
 # Header strip height in pixels
-_HEADER_HEIGHT = 28
+_HEADER_HEIGHT = 36
 
 
 def _unpack_timeline_entry(frame_data):
@@ -93,6 +93,13 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
             enc_text = str(int(enc_val))
             cv2.putText(header, enc_text, (x_start + 2, 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (220, 220, 220), 1)
+
+        # Capture timestamp (below encoder, small)
+        col_ts = col.get('ts')
+        if col_ts is not None:
+            ts_text = time.strftime("%H:%M:%S", time.localtime(col_ts))
+            cv2.putText(header, ts_text, (x_start + 2, 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, (180, 180, 180), 1)
 
         # Eject reason text (bottom-left, small, only for red columns)
         if should_eject is True and reasons:

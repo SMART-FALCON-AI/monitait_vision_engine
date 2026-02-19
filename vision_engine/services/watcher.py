@@ -1155,7 +1155,7 @@ class ArduinoSocket:
     
     def capture_frames(self):
         """Capture frames when a signal is detected."""
-        
+
         light_sleep = True
         while True:
             try:
