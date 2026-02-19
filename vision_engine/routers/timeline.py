@@ -17,7 +17,7 @@ router = APIRouter()
 _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 
 # Header strip height in pixels
-_HEADER_HEIGHT = 36
+_HEADER_HEIGHT = 28
 
 
 def _unpack_timeline_entry(frame_data):
@@ -87,19 +87,18 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
         # Thin separator line between columns
         cv2.line(header, (x_end - 1, 0), (x_end - 1, _HEADER_HEIGHT - 1), (30, 30, 30), 1)
 
-        # Encoder text (top-left, small)
+        # Encoder + timestamp on same line (top-left, small)
         enc_val = col.get('encoder')
-        if enc_val is not None:
-            enc_text = str(int(enc_val))
-            cv2.putText(header, enc_text, (x_start + 2, 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (220, 220, 220), 1)
-
-        # Capture timestamp (below encoder, small)
         col_ts = col.get('ts')
+        label_parts = []
+        if enc_val is not None:
+            label_parts.append(str(int(enc_val)))
         if col_ts is not None:
-            ts_text = time.strftime("%H:%M:%S", time.localtime(col_ts))
-            cv2.putText(header, ts_text, (x_start + 2, 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, (180, 180, 180), 1)
+            label_parts.append(time.strftime("%H:%M:%S", time.localtime(col_ts)))
+        if label_parts:
+            label = " | ".join(label_parts)
+            cv2.putText(header, label, (x_start + 2, 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, (220, 220, 220), 1)
 
         # Eject reason text (bottom-left, small, only for red columns)
         if should_eject is True and reasons:
