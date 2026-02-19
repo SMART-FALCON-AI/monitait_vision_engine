@@ -1,6 +1,6 @@
 # MonitaQC - How-To Guide
 
-**Version:** 3.5.0 | **Zero to Hero Configuration Guide**
+**Version:** 3.6.0 | **Zero to Hero Configuration Guide**
 
 This guide walks you through every tab and configuration option in MonitaQC, from first boot to full production use.
 
