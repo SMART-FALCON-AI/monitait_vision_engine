@@ -382,10 +382,30 @@ function updateRuleField(procId, ruleIndex, field, value) {
     if (field === 'min_confidence' || field === 'count') {
         proc.rules[ruleIndex][field] = Math.max(0, parseInt(value) || 0);
         if (field === 'min_confidence') proc.rules[ruleIndex][field] = Math.min(100, proc.rules[ruleIndex][field]);
+    } else if (field === 'max_delta_e') {
+        proc.rules[ruleIndex][field] = Math.max(0, parseFloat(value) || 5.0);
     } else {
         proc.rules[ruleIndex][field] = value;
     }
-    if (field === 'condition') renderProcedures();
+    if (field === 'condition' || field === 'reference_mode') renderProcedures();
+}
+
+async function captureColorReference(className) {
+    try {
+        const resp = await fetch('/api/color-reference/' + encodeURIComponent(className), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ capture: true })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            alert('Fixed reference captured for "' + className + '": L*=' + data.lab[0] + ', a*=' + data.lab[1] + ', b*=' + data.lab[2]);
+        } else {
+            alert('Failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (e) {
+        alert('Error capturing color reference: ' + e.message);
+    }
 }
 
 function renderProcedures() {
@@ -398,7 +418,29 @@ function renderProcedures() {
     }
 
     container.innerHTML = procedures.map(proc => {
-        const rulesHtml = proc.rules.map((rule, ri) => `
+        const rulesHtml = proc.rules.map((rule, ri) => {
+            const isColor = rule.condition === 'color_delta';
+            const countInput = isColor ? '' : `
+                <input type="number" value="${rule.count != null ? rule.count : 1}" min="0" step="1"
+                    onchange="updateRuleField('${proc.id}', ${ri}, 'count', this.value)"
+                    style="width: 45px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">`;
+            const colorControls = !isColor ? '' : `
+                <input type="number" value="${rule.max_delta_e != null ? rule.max_delta_e : 5.0}" min="0" step="0.5"
+                    onchange="updateRuleField('${proc.id}', ${ri}, 'max_delta_e', this.value)"
+                    title="ΔE threshold"
+                    style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                <select onchange="updateRuleField('${proc.id}', ${ri}, 'reference_mode', this.value)"
+                    style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
+                    <option value="previous" ${(rule.reference_mode || 'previous') === 'previous' ? 'selected' : ''}>vs Previous</option>
+                    <option value="running_avg" ${rule.reference_mode === 'running_avg' ? 'selected' : ''}>vs Average</option>
+                    <option value="fixed" ${rule.reference_mode === 'fixed' ? 'selected' : ''}>vs Fixed</option>
+                </select>
+                ${rule.reference_mode === 'fixed' ? `
+                    <button onclick="captureColorReference('${rule.object}')"
+                        style="padding: 2px 6px; background: rgba(34,197,94,0.3); color: #22c55e; border: 1px solid rgba(34,197,94,0.4); border-radius: 4px; cursor: pointer; font-size: 10px;"
+                        title="Capture current color as fixed reference">Capture</button>
+                ` : ''}`;
+            return `
             <div style="display: flex; gap: 6px; align-items: center; padding: 6px; background: rgba(15, 23, 42, 0.4); border-radius: 4px; flex-wrap: wrap;">
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'object', this.value)"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; min-width: 100px;">
@@ -411,10 +453,10 @@ function renderProcedures() {
                     <option value="count_equals" ${rule.condition === 'count_equals' ? 'selected' : ''}>Count =</option>
                     <option value="count_greater" ${rule.condition === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
                     <option value="count_less" ${rule.condition === 'count_less' ? 'selected' : ''}>Count &lt;</option>
+                    <option value="color_delta" ${rule.condition === 'color_delta' ? 'selected' : ''}>Color ΔE &gt;</option>
                 </select>
-                <input type="number" value="${rule.count != null ? rule.count : 1}" min="0" step="1"
-                    onchange="updateRuleField('${proc.id}', ${ri}, 'count', this.value)"
-                    style="width: 45px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                ${countInput}
+                ${colorControls}
                 <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
                 <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"
@@ -423,8 +465,8 @@ function renderProcedures() {
                 <button onclick="removeRule('${proc.id}', ${ri})"
                     style="padding: 2px 6px; background: rgba(239,68,68,0.3); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); border-radius: 4px; cursor: pointer; font-size: 11px;"
                     title="Remove rule">X</button>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
 
         return `
             <div style="padding: 12px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; margin-bottom: 8px; border: 1px solid ${proc.enabled ? 'rgba(239,68,68,0.4)' : 'rgba(51,65,85,0.6)'};">

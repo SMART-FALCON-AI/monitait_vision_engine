@@ -94,15 +94,132 @@ def add_detection_event(event_type: str, details: dict = None):
         logger.error(f"Error adding detection event to Redis: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Color Delta E helpers
+# ---------------------------------------------------------------------------
+_COLOR_REF_PREFIX = "color_ref:"
+_COLOR_RUNNING_AVG_SIZE = 20  # Window size for running average
+
+
+def extract_lab_color(image, detection):
+    """Extract mean CIE L*a*b* color from a detection's bounding box.
+
+    Uses center 50% of the crop to avoid edge artifacts.
+    Normalizes OpenCV LAB (L 0-255, a/b 0-255) to standard CIE scale
+    (L* 0-100, a*/b* centered at 0).
+
+    Returns [L*, a*, b*] or None on failure.
+    """
+    try:
+        h, w = image.shape[:2]
+        x1 = max(0, int(detection.get('xmin', 0)))
+        y1 = max(0, int(detection.get('ymin', 0)))
+        x2 = min(w, int(detection.get('xmax', 0)))
+        y2 = min(h, int(detection.get('ymax', 0)))
+
+        if (x2 - x1) < 4 or (y2 - y1) < 4:
+            return None
+
+        crop = image[y1:y2, x1:x2]
+
+        # Use center 50% to avoid edge artifacts
+        ch, cw = crop.shape[:2]
+        my, mx = ch // 4, cw // 4
+        if my > 0 and mx > 0:
+            crop = crop[my:ch - my, mx:cw - mx]
+
+        lab_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+        mean_lab = lab_crop.mean(axis=(0, 1))
+
+        L_star = round(float(mean_lab[0]) * 100.0 / 255.0, 2)
+        a_star = round(float(mean_lab[1]) - 128.0, 2)
+        b_star = round(float(mean_lab[2]) - 128.0, 2)
+        return [L_star, a_star, b_star]
+    except Exception as e:
+        logger.debug(f"LAB extraction failed: {e}")
+        return None
+
+
+def update_color_references(detections):
+    """Update Redis color references (previous + running_avg) after LAB extraction."""
+    try:
+        redis_client = _get_timeline_redis()
+        best_per_class = {}
+        for det in detections:
+            if not isinstance(det, dict) or 'lab_color' not in det:
+                continue
+            name = det.get('name', '')
+            conf = det.get('confidence', 0)
+            if name not in best_per_class or conf > best_per_class[name]['confidence']:
+                best_per_class[name] = det
+
+        if not best_per_class:
+            return
+
+        pipe = redis_client.pipeline()
+        for class_name, det in best_per_class.items():
+            lab_json = json.dumps(det['lab_color'])
+            pipe.set(f"{_COLOR_REF_PREFIX}{class_name}:previous", lab_json)
+            running_key = f"{_COLOR_REF_PREFIX}{class_name}:running_avg_list"
+            pipe.lpush(running_key, lab_json)
+            pipe.ltrim(running_key, 0, _COLOR_RUNNING_AVG_SIZE - 1)
+        pipe.execute()
+    except Exception as e:
+        logger.debug(f"Color reference update failed: {e}")
+
+
+def get_color_reference(class_name, mode):
+    """Retrieve a color reference [L*, a*, b*] from Redis, or None."""
+    try:
+        redis_client = _get_timeline_redis()
+        if mode in ("fixed", "previous"):
+            raw = redis_client.get(f"{_COLOR_REF_PREFIX}{class_name}:{mode}")
+            return json.loads(raw) if raw else None
+        elif mode == "running_avg":
+            raw_list = redis_client.lrange(
+                f"{_COLOR_REF_PREFIX}{class_name}:running_avg_list", 0, -1
+            )
+            if not raw_list:
+                return None
+            total = [0.0, 0.0, 0.0]
+            count = 0
+            for raw in raw_list:
+                try:
+                    lab = json.loads(raw)
+                    total[0] += lab[0]; total[1] += lab[1]; total[2] += lab[2]
+                    count += 1
+                except (json.JSONDecodeError, IndexError, TypeError):
+                    continue
+            if count == 0:
+                return None
+            return [round(total[i] / count, 2) for i in range(3)]
+        return None
+    except Exception as e:
+        logger.debug(f"Color reference read failed: {e}")
+        return None
+
+
+def set_fixed_color_reference(class_name, lab_color):
+    """Set a fixed color reference (called from API)."""
+    try:
+        redis_client = _get_timeline_redis()
+        redis_client.set(f"{_COLOR_REF_PREFIX}{class_name}:fixed", json.dumps(lab_color))
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set fixed color reference: {e}")
+        return False
+
+
 def evaluate_eject_from_detections(detections_list, procedures):
     """Evaluate eject rules from stored detections and procedures config.
 
-    Supports 5 condition types:
-        present      — object detected with >= min_confidence
-        not_present  — object NOT detected or below min_confidence
+    Supports 6 condition types:
         count_equals — exactly N instances detected
         count_greater— more than N instances detected
         count_less   — fewer than N instances detected
+        color_delta  — color ΔE exceeds threshold vs reference
+        present      — (legacy) count > 0
+        not_present  — (legacy) count = 0
 
     Args:
         detections_list: list of detection dicts (from one or more cameras at the same timestamp)
@@ -159,6 +276,27 @@ def evaluate_eject_from_detections(detections_list, procedures):
                 return actual > expected_count
             elif cond == 'count_less':
                 return actual < expected_count
+            elif cond == 'color_delta':
+                max_de = rule.get('max_delta_e', 5.0)
+                ref_mode = rule.get('reference_mode', 'previous')
+                # Find highest-confidence detection with lab_color
+                best_det, best_conf = None, -1
+                for det in detections_list:
+                    if (isinstance(det, dict) and det.get('name') == obj
+                            and det.get('confidence', 0) >= min_conf
+                            and 'lab_color' in det
+                            and det['confidence'] > best_conf):
+                        best_det = det
+                        best_conf = det['confidence']
+                if best_det is None:
+                    return False
+                cur = best_det['lab_color']
+                ref = get_color_reference(obj, ref_mode)
+                if ref is None:
+                    return False
+                de = math.sqrt((cur[0]-ref[0])**2 + (cur[1]-ref[1])**2 + (cur[2]-ref[2])**2)
+                best_det['_delta_e'] = round(de, 2)
+                return de > max_de
             return False
 
         def _rule_detail(rule, triggered):
@@ -167,6 +305,13 @@ def evaluate_eject_from_detections(detections_list, procedures):
                 return None
             obj = rule.get('object', '?')
             cond = rule.get('condition', 'count_equals')
+
+            if cond == 'color_delta':
+                for det in detections_list:
+                    if isinstance(det, dict) and det.get('name') == obj and '_delta_e' in det:
+                        return f"'{obj}' ΔE {det['_delta_e']} > {rule.get('max_delta_e', 5.0)}"
+                return f"'{obj}' color ΔE exceeded"
+
             expected = rule.get('count', 1)
             min_conf = rule.get('min_confidence', 0) / 100.0
             actual = sum(
@@ -824,6 +969,13 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")
             cv2.imwrite(annotated_path, annotated_image)
             logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections (model: {model_name_used})")
+
+            # Extract L*a*b* color for each detection (for color Delta E procedures)
+            for det in yolo_res:
+                lab = extract_lab_color(image, det)
+                if lab is not None:
+                    det['lab_color'] = lab
+            update_color_references(yolo_res)
 
             # Add audio notification with detected object names
             try:
