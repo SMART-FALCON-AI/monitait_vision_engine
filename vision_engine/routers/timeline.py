@@ -660,6 +660,101 @@ async def serve_raw_image(path: str):
     return FileResponse(str(resolved), media_type="image/jpeg")
 
 
+@router.get("/api/timeline_frame")
+async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int = 0):
+    """Serve full-res raw image with bboxes drawn from timeline detection data.
+
+    This ensures the popup shows the same detections as the stitched thumbnail,
+    even when consecutive captures share the same underlying camera frame.
+    """
+    try:
+        tl_config = getattr(request.app.state, 'timeline_config', {})
+        frames_per_page = tl_config.get('num_rows', 10)
+        image_rotation = tl_config.get('image_rotation', 0)
+        obj_filters = tl_config.get('object_filters', {})
+        show_bbox = tl_config.get('show_bounding_boxes', True)
+
+        redis_client = Redis("redis", 6379, db=0)
+        redis_key = f"{TIMELINE_REDIS_PREFIX}{cam}"
+        frames_raw = redis_client.lrange(redis_key, 0, -1)
+        if not frames_raw:
+            raise HTTPException(status_code=404, detail="No frames")
+
+        import pickle as _pkl
+        all_frames = []
+        for fd in frames_raw:
+            try:
+                ts, jpeg_bytes, detections, meta = _pkl.loads(fd)
+                all_frames.append((ts, jpeg_bytes, detections, meta))
+            except Exception:
+                pass
+        all_frames.sort(key=lambda x: x[0])
+
+        total = len(all_frames)
+        end_index = total - page * frames_per_page
+        start_index = max(0, end_index - frames_per_page)
+        page_slice = all_frames[start_index:end_index] if end_index > 0 else []
+
+        if col < 0 or col >= len(page_slice):
+            raise HTTPException(status_code=404, detail="Column out of range")
+
+        ts, jpeg_bytes, detections, meta = page_slice[col]
+        d_path = meta.get('d_path') if meta else None
+
+        # Try to load full-res image from disk
+        image = None
+        if d_path:
+            raw_path = pathlib.Path("raw_images") / f"{d_path}.jpg"
+            if raw_path.exists():
+                image = cv2.imread(str(raw_path))
+
+        # Fallback to timeline thumbnail if disk file missing
+        if image is None:
+            image = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
+
+        if image is None:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        # Draw bboxes from timeline detection data
+        if show_bbox and detections:
+            for det in detections:
+                try:
+                    name = det.get('name', '')
+                    confidence = det.get('confidence', 0)
+                    of = obj_filters.get(name, {})
+                    if of.get('show') is False:
+                        continue
+                    if confidence < of.get('min_confidence', 0.01):
+                        continue
+                    x1 = int(det.get('xmin', det.get('x1', 0)))
+                    y1 = int(det.get('ymin', det.get('y1', 0)))
+                    x2 = int(det.get('xmax', det.get('x2', 0)))
+                    y2 = int(det.get('ymax', det.get('y2', 0)))
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                    label = f"{name} {confidence:.0%}"
+                    (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.rectangle(image, (x1, y1 - lh - 10), (x1 + lw + 10, y1), (0, 255, 0), -1)
+                    cv2.putText(image, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                except Exception:
+                    pass
+
+        # Apply rotation
+        if image_rotation == 90:
+            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        elif image_rotation == 180:
+            image = cv2.rotate(image, cv2.ROTATE_180)
+        elif image_rotation == 270:
+            image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        _, jpeg = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving timeline frame: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/api/timeline_meta")
 async def timeline_meta(request: Request, page: int = 0):
     """Get metadata for each column in the timeline composite (used by frontend click handler)."""
