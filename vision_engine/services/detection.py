@@ -137,27 +137,28 @@ def evaluate_eject_from_detections(detections_list, procedures):
 
         def _eval_rule(rule):
             obj = rule.get('object', '')
-            cond = rule.get('condition', 'present')
+            cond = rule.get('condition', 'count_equals')
             min_conf = rule.get('min_confidence', 0) / 100.0
             expected_count = rule.get('count', 1)
 
+            # Count detections above confidence threshold
+            actual = sum(
+                1 for det in detections_list
+                if isinstance(det, dict) and det.get('name') == obj
+                and det.get('confidence', 0) >= min_conf
+            )
+
+            # Legacy conditions mapped to count equivalents
             if cond == 'present':
-                return obj in all_detected and all_detected[obj] >= min_conf
+                return actual > 0
             elif cond == 'not_present':
-                return obj not in all_detected or all_detected[obj] < min_conf
-            elif cond in ('count_equals', 'count_greater', 'count_less'):
-                # Count raw occurrences above confidence threshold
-                actual = sum(
-                    1 for det in detections_list
-                    if isinstance(det, dict) and det.get('name') == obj
-                    and det.get('confidence', 0) >= min_conf
-                )
-                if cond == 'count_equals':
-                    return actual == expected_count
-                elif cond == 'count_greater':
-                    return actual > expected_count
-                elif cond == 'count_less':
-                    return actual < expected_count
+                return actual == 0
+            elif cond == 'count_equals':
+                return actual == expected_count
+            elif cond == 'count_greater':
+                return actual > expected_count
+            elif cond == 'count_less':
+                return actual < expected_count
             return False
 
         def _rule_detail(rule, triggered):
@@ -165,21 +166,17 @@ def evaluate_eject_from_detections(detections_list, procedures):
             if not triggered:
                 return None
             obj = rule.get('object', '?')
-            cond = rule.get('condition', 'present')
+            cond = rule.get('condition', 'count_equals')
             expected = rule.get('count', 1)
             min_conf = rule.get('min_confidence', 0) / 100.0
-            if cond == 'present':
-                return f"'{obj}' detected"
-            elif cond == 'not_present':
-                return f"'{obj}' missing"
-            else:
-                actual = sum(
-                    1 for det in detections_list
-                    if isinstance(det, dict) and det.get('name') == obj
-                    and det.get('confidence', 0) >= min_conf
-                )
-                op = {'count_equals': '!=', 'count_greater': '>', 'count_less': '<'}[cond]
-                return f"'{obj}' count {actual} {op} {expected}"
+            actual = sum(
+                1 for det in detections_list
+                if isinstance(det, dict) and det.get('name') == obj
+                and det.get('confidence', 0) >= min_conf
+            )
+            op = {'count_equals': '=', 'count_greater': '>', 'count_less': '<',
+                  'present': '>', 'not_present': '='}
+            return f"'{obj}' count {actual} {op.get(cond, '?')} {expected}"
 
         results = [_eval_rule(r) for r in rules]
         triggered = all(results) if logic == 'all' else any(results)
