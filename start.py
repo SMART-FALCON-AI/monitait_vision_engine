@@ -41,28 +41,46 @@ def _detect_hardware():
         else:
             ram_gb = 8.0
 
-    # GPU (nvidia-smi)
+    # GPU (nvidia-smi) — detect count and per-GPU VRAM
     gpu_count = 0
+    gpu_vram_mb = 0  # VRAM of first GPU in MB
     try:
         r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5
         )
         if r.returncode == 0 and r.stdout.strip():
-            gpu_count = len(r.stdout.strip().split("\n"))
+            lines = r.stdout.strip().split("\n")
+            gpu_count = len(lines)
+            # Parse VRAM from first GPU: "NVIDIA GeForce RTX 3050, 8192"
+            try:
+                gpu_vram_mb = int(lines[0].split(",")[-1].strip())
+            except (ValueError, IndexError):
+                gpu_vram_mb = 0
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         pass
 
-    return cpu_count, ram_gb, gpu_count
+    return cpu_count, ram_gb, gpu_count, gpu_vram_mb
 
 
-def _compute_resources(cpu, ram_gb, gpu_count):
-    """Compute optimal docker-compose resource settings from hardware."""
+def _compute_resources(cpu, ram_gb, gpu_count, gpu_vram_mb=0):
+    """Compute optimal docker-compose resource settings from hardware.
+
+    GPU strategy: each YOLO worker loads the model into ~500MB VRAM.
+    Use 80% of VRAM, split across replicas (1 per GPU).
+    More workers = more concurrent inference = higher throughput.
+    """
     has_gpu = gpu_count > 0
 
     if has_gpu:
+        # Replicas = 1 per GPU (Docker assigns GPUs to containers)
+        # Workers = fill VRAM within each replica (~500MB per worker, use 80%)
         yolo_replicas = max(1, gpu_count)
-        yolo_workers = 2  # GPU is the bottleneck, not uvicorn workers
+        if gpu_vram_mb > 0:
+            usable_vram = int(gpu_vram_mb * 0.80)
+            yolo_workers = max(2, usable_vram // 500)
+        else:
+            yolo_workers = 2  # fallback if VRAM unknown
         shm_gb = min(4, max(1, int(ram_gb // 4)))
     else:
         # CPU-only: spread YOLO processes across cores, leave ~40% for vision engine
@@ -94,10 +112,11 @@ def detect_and_write_env():
         mode = f"DEVELOPMENT ({system})"
 
     # Detect hardware
-    cpu, ram_gb, gpu_count = _detect_hardware()
-    resources = _compute_resources(cpu, ram_gb, gpu_count)
+    cpu, ram_gb, gpu_count, gpu_vram_mb = _detect_hardware()
+    resources = _compute_resources(cpu, ram_gb, gpu_count, gpu_vram_mb)
 
-    print(f"[MonitaQC] Hardware: {cpu} CPU cores, {ram_gb:.1f} GB RAM, {gpu_count} GPU(s)")
+    vram_str = f", {gpu_vram_mb}MB VRAM" if gpu_vram_mb else ""
+    print(f"[MonitaQC] Hardware: {cpu} CPU cores, {ram_gb:.1f} GB RAM, {gpu_count} GPU(s){vram_str}")
     print(f"[MonitaQC] Auto-tuned: {resources['YOLO_REPLICAS']} YOLO replicas x "
           f"{resources['YOLO_WORKERS']} workers, SHM={resources['SHM_SIZE']}, "
           f"Redis={resources['REDIS_MAXMEMORY']}MB")

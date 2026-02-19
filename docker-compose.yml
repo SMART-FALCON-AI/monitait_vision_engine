@@ -56,7 +56,7 @@ services:
     image: yolo_inference
     build: "./yolo_inference"
     shm_size: '${SHM_SIZE:-2g}'
-    command: "uvicorn main:app --host 0.0.0.0 --port 4442 --workers ${YOLO_WORKERS:-4}"
+    command: "uvicorn main:app --host 0.0.0.0 --port 4442 --workers ${YOLO_WORKERS:-2}"
     expose:
       - 4442
     volumes:
@@ -73,7 +73,7 @@ services:
         max-file: "2"
     restart: "always"
     deploy:
-      replicas: ${YOLO_REPLICAS:-3}
+      replicas: ${YOLO_REPLICAS:-1}
       resources:
         reservations:
           devices:
