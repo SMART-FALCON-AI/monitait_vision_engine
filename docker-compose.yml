@@ -73,7 +73,7 @@ services:
         max-file: "2"
     restart: "always"
     deploy:
-      replicas: ${YOLO_REPLICAS:-2}
+      replicas: ${YOLO_REPLICAS:-3}
       resources:
         reservations:
           devices:
