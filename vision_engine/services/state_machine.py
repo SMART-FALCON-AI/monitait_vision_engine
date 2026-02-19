@@ -218,7 +218,7 @@ class StateManager:
                     analog=-1  # -1 = no analog threshold
                 )
             ],
-            enabled=True
+            light_status_check=False
         )
         self.current_state = self.states["default"]
 
