@@ -426,19 +426,21 @@ function renderProcedures() {
             const countInput = !isCount ? '' : `
                 <input type="number" value="${rule.count != null ? rule.count : 1}" min="0" step="1"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'count', this.value)"
+                    title="Number of detected objects to compare against"
                     style="width: 45px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">`;
             const areaInput = !isArea ? '' : `
                 <input type="number" value="${rule.area != null ? rule.area : 10000}" min="0" step="100"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'area', this.value)"
-                    title="Area threshold (pixels)"
+                    title="Area threshold in pixels (width × height of bounding box)"
                     style="width: 65px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                 <span style="font-size: 10px; color: var(--text-secondary);">px</span>`;
             const colorControls = !isColor ? '' : `
                 <input type="number" value="${rule.max_delta_e != null ? rule.max_delta_e : 5.0}" min="0" step="0.5"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'max_delta_e', this.value)"
-                    title="ΔE threshold"
+                    title="ΔE threshold — color difference limit. Values: <1 imperceptible, 2-3 noticeable, >5 clearly different"
                     style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'reference_mode', this.value)"
+                    title="Color reference mode: Previous = last product, Average = rolling avg of last 20, Fixed = user-captured golden sample"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                     <option value="previous" ${(rule.reference_mode || 'previous') === 'previous' ? 'selected' : ''}>vs Previous</option>
                     <option value="running_avg" ${rule.reference_mode === 'running_avg' ? 'selected' : ''}>vs Average</option>
@@ -452,12 +454,14 @@ function renderProcedures() {
             return `
             <div style="display: flex; gap: 6px; align-items: center; padding: 6px; background: rgba(15, 23, 42, 0.4); border-radius: 4px; flex-wrap: wrap;">
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'object', this.value)"
+                    title="Target object class to monitor"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; min-width: 100px;">
                     ${Array.from(detectedObjectClasses).sort().map(name =>
                         '<option value="' + name + '" ' + (rule.object === name ? 'selected' : '') + '>' + name + '</option>'
                     ).join('')}
                 </select>
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'condition', this.value)"
+                    title="Condition type: Count = number of objects, Area = bounding box size in pixels, Color ΔE = color difference from reference"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                     <option value="count_equals" ${cond === 'count_equals' ? 'selected' : ''}>Count =</option>
                     <option value="count_greater" ${cond === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
@@ -473,6 +477,7 @@ function renderProcedures() {
                 <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
                 <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"
+                    title="Minimum detection confidence (%) — only detections above this threshold are considered"
                     style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                 <span style="font-size: 11px; color: var(--text-secondary);">%</span>
                 <button onclick="removeRule('${proc.id}', ${ri})"
@@ -486,15 +491,18 @@ function renderProcedures() {
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap;">
                     <input type="text" value="${proc.name}"
                         onchange="updateProcedureField('${proc.id}', 'name', this.value)"
+                        title="Procedure name — a descriptive label for this ejection rule set"
                         style="flex: 1; min-width: 120px; padding: 4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 13px; font-weight: 600;">
                     <div style="display: flex; gap: 8px; align-items: center;">
-                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; color: ${proc.enabled ? '#ef4444' : 'var(--text-secondary)'};">
+                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; color: ${proc.enabled ? '#ef4444' : 'var(--text-secondary)'};"
+                            title="Enable or disable this procedure — disabled procedures are ignored during evaluation">
                             <input type="checkbox" ${proc.enabled ? 'checked' : ''}
                                 onchange="updateProcedureField('${proc.id}', 'enabled', this.checked)"
                                 style="width: 14px; height: 14px; cursor: pointer;">
                             Enabled
                         </label>
                         <select onchange="updateProcedureField('${proc.id}', 'logic', this.value)"
+                            title="Rule logic: ANY = eject if at least one rule matches (OR), ALL = eject only if every rule matches (AND)"
                             style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                             <option value="any" ${proc.logic === 'any' ? 'selected' : ''}>ANY rule (OR)</option>
                             <option value="all" ${proc.logic === 'all' ? 'selected' : ''}>ALL rules (AND)</option>
@@ -506,6 +514,7 @@ function renderProcedures() {
                             title="Camera IDs (e.g. 1,2) or leave empty for all"
                             style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                         <button onclick="removeProcedure('${proc.id}')"
+                            title="Delete this entire procedure and all its rules"
                             style="padding: 3px 8px; background: rgba(239,68,68,0.2); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>
                     </div>
                 </div>
@@ -513,6 +522,7 @@ function renderProcedures() {
                     ${rulesHtml || '<div style="padding: 8px; text-align: center; color: var(--text-secondary); font-size: 12px; font-style: italic;">No rules. Add a rule to define when this procedure triggers.</div>'}
                 </div>
                 <button onclick="addRule('${proc.id}')"
+                    title="Add a new rule to this procedure — rules are combined using the logic (AND/OR) above"
                     style="padding: 3px 10px; background: rgba(59,130,246,0.2); color: var(--primary-color); border: 1px solid rgba(59,130,246,0.4); border-radius: 4px; cursor: pointer; font-size: 11px;">+ Add Rule</button>
             </div>
         `;
