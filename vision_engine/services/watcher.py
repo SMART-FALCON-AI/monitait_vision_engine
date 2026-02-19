@@ -161,6 +161,35 @@ class ColdDiskQueue:
         with self._lock:
             return len(self._index)
 
+    def flush_stale(self, max_age_seconds=600):
+        """Remove all files older than max_age_seconds from the queue.
+
+        Called at startup to clear leftover frames that are too old to be useful.
+        """
+        now = time.time()
+        flushed = 0
+        with self._lock:
+            remaining = collections.deque()
+            for path in self._index:
+                # Extract enqueue timestamp from filename: <timestamp>_<encoder>.pkl
+                try:
+                    fname = os.path.basename(path)
+                    ts = float(fname.split('_')[0])
+                    if now - ts > max_age_seconds:
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+                        flushed += 1
+                        continue
+                except (ValueError, IndexError):
+                    pass
+                remaining.append(path)
+            self._index = remaining
+        if flushed:
+            logger.info(f"Cold queue: flushed {flushed} stale frames (>{max_age_seconds}s old)")
+        return flushed
+
 
 class InferenceQueueFacade:
     """Unified producer interface: tries hot first, spills to cold. Never drops."""

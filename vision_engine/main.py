@@ -573,6 +573,10 @@ INFERENCE_WORKERS = max(4, _num_cameras * 4)
 from services.watcher import init_queues
 init_queues(_num_cameras, cfg_module.EJECTOR_OFFSET, cfg_module.EJECTOR_ENABLED)
 
+# Flush stale cold queue frames from previous run (no point processing old frames)
+from services.watcher import _cold_queue_disk
+_cold_queue_disk.flush_stale(max_age_seconds=600)
+
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
 # Update autoscaler initial state with actual values
@@ -754,6 +758,11 @@ def inference_worker_thread():
             # Phase 2: Hot queue empty — try cold queue (FIFO — oldest first)
             frames_data = cold_q.get()
             if frames_data:
+                # Skip stale frames — no point running inference on frames
+                # whose raw images have already been cleaned up
+                enqueue_age = time.time() - frames_data.get('_enqueue_t', 0)
+                if enqueue_age > 600:  # older than 10 minutes → discard
+                    continue
                 try:
                     _process_frame_batch(frames_data, allow_eject=False)
                 except Exception as e:
