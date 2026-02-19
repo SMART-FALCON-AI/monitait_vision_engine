@@ -954,9 +954,10 @@ document.addEventListener('DOMContentLoaded', function() {
             const encText = col.encoder != null ? `Enc: ${col.encoder}` : '';
             const tsText = col.ts ? new Date(col.ts * 1000).toLocaleTimeString() : '';
 
-            // Try annotated image first, fall back to raw
-            const annotatedUrl = `/api/raw_image/${encodeURI(dPath)}_DETECTED.jpg`;
-            const rawUrl = `/api/raw_image/${encodeURI(dPath)}.jpg`;
+            // Try annotated image first, fall back to raw (cache-bust to avoid stale images)
+            const _cb = Date.now();
+            const annotatedUrl = `/api/raw_image/${encodeURI(dPath)}_DETECTED.jpg?t=${_cb}`;
+            const rawUrl = `/api/raw_image/${encodeURI(dPath)}.jpg?t=${_cb}`;
 
             popup.innerHTML = `
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
