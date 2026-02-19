@@ -77,7 +77,7 @@ class State:
 
     This class defines a complete capture sequence:
     - Multiple capture phases (each with light mode, delay, cameras)
-    - Whether state is enabled
+    - Light status check (closed-loop serial verification before capture)
     - Trigger thresholds (steps and analog) for when to activate
 
     Default: Single phase with U_ON_B_OFF light, 0.1s delay, all detected cameras.
@@ -86,7 +86,7 @@ class State:
     phases: List[CapturePhase] = field(default_factory=lambda: [
         CapturePhase(light_mode="U_ON_B_OFF", delay=0.1, cameras=_get_default_cameras())
     ])
-    enabled: bool = True
+    light_status_check: bool = False  # Verify light state via serial before capturing
     # Trigger thresholds (kept for backward compatibility, prefer phase-level thresholds)
     steps: int = 1  # Step/encoder count threshold (1 = every step, -1 = infinite loop)
     analog: int = -1  # Analog value threshold (-1 = disabled)
@@ -121,7 +121,7 @@ class State:
         return {
             "name": self.name,
             "phases": [p.to_dict() for p in self.phases],
-            "enabled": self.enabled,
+            "light_status_check": self.light_status_check,
             "steps": self.steps,
             "analog": self.analog
         }
@@ -143,7 +143,7 @@ class State:
         return cls(
             name=data.get('name', 'default'),
             phases=phases,
-            enabled=data.get('enabled', True),
+            light_status_check=data.get('light_status_check', False),
             steps=int(data.get('steps', 1)),
             analog=int(data.get('analog', -1))
         )
@@ -320,8 +320,6 @@ class StateManager:
         """
         if self.current_state is None:
             return True  # Default to always capture if no state
-        if not self.current_state.enabled:
-            return False
         if len(self.current_state.phases) == 0:
             return False
         # Check trigger thresholds (steps and analog)

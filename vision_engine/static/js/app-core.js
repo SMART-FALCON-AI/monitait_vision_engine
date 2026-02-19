@@ -386,10 +386,6 @@ function fetchConfig() {
                 document.getElementById('dm-confidence-input').value = data.datamatrix.confidence_threshold || 0.8;
                 document.getElementById('dm-overlap-input').value = data.datamatrix.overlap_threshold || 0.2;
             }
-            // Light control configuration
-            if (data.light_control) {
-                document.getElementById('light-status-check-input').value = data.light_control.status_check_enabled ? 'true' : 'false';
-            }
             // Histogram configuration
             if (data.histogram) {
                 document.getElementById('histogram-enabled-input').value = data.histogram.enabled ? 'true' : 'false';
@@ -1339,7 +1335,7 @@ function renderStatesList(states) {
         btn.innerHTML = `
             <span style="font-weight: bold;">${name}</span>
             <span style="font-size: 10px; opacity: 0.8;">${phaseCount} phase${phaseCount !== 1 ? 's' : ''} | Cams: ${allCameras.join(',')}</span>
-            <span style="font-size: 10px; opacity: 0.8;">Steps: ${stepsDisplay} | Analog: ${analogDisplay}</span>
+            <span style="font-size: 10px; opacity: 0.8;">Steps: ${stepsDisplay} | Analog: ${analogDisplay}${state.light_status_check ? ' | Light Check' : ''}</span>
             <span style="font-size: 9px; opacity: 0.7;">${phasesInfo || 'No phases'}</span>
         `;
         btn.onclick = () => activateState(name);
@@ -1352,7 +1348,7 @@ function renderStatesList(states) {
 function loadStateToEditor(name, state) {
     // Load state into editor form
     document.getElementById('state-name-input').value = name;
-    document.getElementById('state-enabled-input').value = state.enabled ? 'true' : 'false';
+    document.getElementById('state-light-check-input').value = state.light_status_check ? 'true' : 'false';
 
     // Clear existing phases and rebuild
     const container = document.getElementById('phases-container');
@@ -1515,7 +1511,7 @@ async function createOrUpdateState() {
     const stateData = {
         name: name,
         phases: phases,
-        enabled: document.getElementById('state-enabled-input').value === 'true'
+        light_status_check: document.getElementById('state-light-check-input').value === 'true'
     };
 
     try {

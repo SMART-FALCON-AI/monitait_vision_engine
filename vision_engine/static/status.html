@@ -340,10 +340,10 @@
                                 <input type="text" class="control-input" id="state-name-input" placeholder="e.g., default">
                             </div>
                             <div class="control-item">
-                                <div class="control-label" data-i18n="enabled">Enabled</div>
-                                <select class="control-input" id="state-enabled-input">
-                                    <option value="true">Yes</option>
-                                    <option value="false">No</option>
+                                <div class="control-label" data-i18n="light_status">Light Status Check</div>
+                                <select class="control-input" id="state-light-check-input">
+                                    <option value="false">Disabled</option>
+                                    <option value="true">Enabled</option>
                                 </select>
                             </div>
                         </div>
@@ -1040,15 +1040,6 @@
                             </select>
                             <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
                             <div class="control-response" id="config-histogram_save_image-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
-                            <select class="control-input" id="light-status-check-input">
-                                <option value="false" selected>Disabled (open-loop, faster)</option>
-                                <option value="true">Enabled (verify via serial)</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
-                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
                         </div>
                     </div>
                 </div>

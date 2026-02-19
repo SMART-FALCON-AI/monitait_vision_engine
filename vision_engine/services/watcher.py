@@ -637,11 +637,11 @@ class ArduinoSocket:
     def _set_light_mode(self, mode: str, force: bool = False):
         """Set light mode based on state configuration.
 
-        If cfg.LIGHT_STATUS_CHECK_ENABLED is True (closed-loop):
+        If light_status_check is True on the current state (closed-loop):
             Checks actual serial status before sending command.
             Only sends command if current status differs from requested mode.
 
-        If cfg.LIGHT_STATUS_CHECK_ENABLED is False (open-loop):
+        If light_status_check is False (open-loop, default):
             Always sends command without checking serial status.
 
         Supported modes:
@@ -655,7 +655,9 @@ class ArduinoSocket:
             force: If True, send command regardless of current status
         """
         # Check if current status already matches requested mode (closed-loop mode)
-        if not force and cfg.LIGHT_STATUS_CHECK_ENABLED and self.serial_available:
+        current_state = _state_manager.current_state if _state_manager else None
+        light_check = getattr(current_state, 'light_status_check', False)
+        if not force and light_check and self.serial_available:
             current_mode = self._get_current_light_mode()
             if current_mode == mode:
                 logger.debug(f"Light mode already {mode} (verified via serial), skipping command")
