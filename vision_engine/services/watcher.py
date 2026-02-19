@@ -1222,7 +1222,7 @@ class ArduinoSocket:
                     # Get current state from _state_manager
                     current_state = _state_manager.current_state if _state_manager else None
 
-                    if current_state and current_state.enabled:
+                    if current_state:
                         # Track last light mode for open-loop optimization
                         last_light_mode = None
                         num_phases = len(current_state.phases)
