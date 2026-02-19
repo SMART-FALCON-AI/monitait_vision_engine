@@ -1,6 +1,6 @@
 # MonitaQC - Universal Quality Control Platform
 
-**Version:** 3.5.0 | **Status:** Production-Ready | **Documentation:** [User Manual](USER_MANUAL.md) | [Audit Report](AUDIT_REPORT.md)
+**Version:** 3.5.0 | **Status:** Production-Ready | **Documentation:** [How-To Guide](HOW-TO.md) | [User Manual](USER_MANUAL.md) | [Audit Report](AUDIT_REPORT.md)
 
 **MonitaQC** is an industrial computer vision platform for automated quality control and product identification. Forked from PartQC Box Vision Engine, this project is the foundation for a unified quality control system.
 
