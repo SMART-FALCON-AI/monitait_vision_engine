@@ -310,84 +310,6 @@
                 </table>
 
                 <div class="control-section">
-                    <h3 data-i18n="image_processing">Image Processing Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label" data-i18n="parent_objects">Parent Object List (comma-separated, use _root for no parent requirement)</div>
-                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
-                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
-                            <div class="control-response" id="config-parent_object_list-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="remove_raw">Remove Raw Image After DM Decode</div>
-                            <select class="control-input" id="remove-raw-image-input">
-                                <option value="false">No</option>
-                                <option value="true">Yes</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
-                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3 data-i18n="dm_config">DataMatrix Configuration</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="valid_dm_sizes">Valid DM Char Sizes (comma-separated)</div>
-                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
-                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
-                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="confidence_threshold">Confidence Threshold (0-1)</div>
-                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
-                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
-                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="overlap_threshold">Overlap Threshold (0-1)</div>
-                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
-                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
-                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
-                    <h3 data-i18n="feature_toggles">Feature Toggles</h3>
-                    <div class="control-grid">
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="histogram_feature">Histogram Feature</div>
-                            <select class="control-input" id="histogram-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
-                            <div class="control-response" id="config-histogram_enabled-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="save_histogram">Save Histogram Images</div>
-                            <select class="control-input" id="histogram-save-image-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
-                            <div class="control-response" id="config-histogram_save_image-response"></div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
-                            <select class="control-input" id="light-status-check-input">
-                                <option value="false" selected>Disabled (open-loop, faster)</option>
-                                <option value="true">Enabled (verify via serial)</option>
-                            </select>
-                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
-                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="control-section">
                     <h3 data-i18n="state_management">State Management (Camera Capture Control)</h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
@@ -472,6 +394,85 @@
                         <div class="control-response" id="state-config-response"></div>
                     </div>
                 </div>
+
+                <div class="control-section">
+                    <h3 data-i18n="image_processing">Image Processing Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label" data-i18n="parent_objects">Parent Object List (comma-separated, use _root for no parent requirement)</div>
+                            <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
+                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
+                            <div class="control-response" id="config-parent_object_list-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="remove_raw">Remove Raw Image After DM Decode</div>
+                            <select class="control-input" id="remove-raw-image-input">
+                                <option value="false">No</option>
+                                <option value="true">Yes</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
+                            <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3 data-i18n="dm_config">DataMatrix Configuration</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="valid_dm_sizes">Valid DM Char Sizes (comma-separated)</div>
+                            <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
+                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
+                            <div class="control-response" id="config-dm_chars_sizes-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="confidence_threshold">Confidence Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
+                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
+                            <div class="control-response" id="config-dm_confidence_threshold-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="overlap_threshold">Overlap Threshold (0-1)</div>
+                            <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
+                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
+                            <div class="control-response" id="config-dm_overlap_threshold-response"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-section">
+                    <h3 data-i18n="feature_toggles">Feature Toggles</h3>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="histogram_feature">Histogram Feature</div>
+                            <select class="control-input" id="histogram-enabled-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_enabled-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="save_histogram">Save Histogram Images</div>
+                            <select class="control-input" id="histogram-save-image-input">
+                                <option value="false" selected>Disabled</option>
+                                <option value="true">Enabled</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
+                            <div class="control-response" id="config-histogram_save_image-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="light_status">Light Status Check (closed-loop)</div>
+                            <select class="control-input" id="light-status-check-input">
+                                <option value="false" selected>Disabled (open-loop, faster)</option>
+                                <option value="true">Enabled (verify via serial)</option>
+                            </select>
+                            <button class="control-button" onclick="updateConfig('light_status_check_enabled', document.getElementById('light-status-check-input').value)">Set</button>
+                            <div class="control-response" id="config-light_status_check_enabled-response"></div>
+                        </div>
+                    </div>
+                </div>
+
             </div>
             </div>
             <!-- End Cameras Tab -->
