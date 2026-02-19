@@ -574,6 +574,13 @@ async def timeline_clear(request: Request):
         return {"success": False, "error": str(e)}
 
 
+@router.get("/api/timeline_config")
+async def get_timeline_config(request: Request):
+    """Return current in-memory timeline configuration."""
+    config = getattr(request.app.state, 'timeline_config', {})
+    return JSONResponse(content=config)
+
+
 @router.post("/api/timeline_config")
 async def update_timeline_config(request: Request):
     """Update timeline configuration (bounding boxes, camera order, quality, rows, buffer size)."""

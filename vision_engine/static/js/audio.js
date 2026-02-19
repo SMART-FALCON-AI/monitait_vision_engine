@@ -1008,42 +1008,31 @@ document.addEventListener('DOMContentLoaded', function() {
     const bufferValue = document.getElementById('timeline-buffer-value');
     const applyBtn = document.getElementById('timeline-apply-config');
 
-    // Load saved configuration from server
+    // Load current in-memory configuration from server
     async function loadSavedConfig() {
         try {
-            const response = await fetch('/api/timeline_count');
-            const data = await response.json();
-            if (data.rows_per_page) {
-                rowsSlider.value = data.rows_per_page;
-                rowsValue.textContent = data.rows_per_page;
+            const response = await fetch('/api/timeline_config');
+            const cfg = await response.json();
+            if (cfg.image_quality) {
+                qualitySlider.value = cfg.image_quality;
+                qualityValue.textContent = cfg.image_quality + '%';
             }
-            // Note: Quality is stored in timeline_config but not returned by timeline_count API
-            // We'll load it from the data file via getData API
-            const configResponse = await fetch('/api/data-file');
-            const configData = await configResponse.json();
-            if (configData.timeline_config) {
-                if (configData.timeline_config.image_quality) {
-                    qualitySlider.value = configData.timeline_config.image_quality;
-                    qualityValue.textContent = configData.timeline_config.image_quality + '%';
-                }
-                if (configData.timeline_config.num_rows) {
-                    rowsSlider.value = configData.timeline_config.num_rows;
-                    rowsValue.textContent = configData.timeline_config.num_rows;
-                }
-                if (configData.timeline_config.buffer_size) {
-                    bufferSlider.value = configData.timeline_config.buffer_size;
-                    bufferValue.textContent = configData.timeline_config.buffer_size;
-                }
-                // Load per-object filters into audioSettings
-                if (configData.timeline_config.object_filters) {
-                    const filters = configData.timeline_config.object_filters;
-                    Object.keys(filters).forEach(name => {
-                        detectedObjectClasses.add(name);
-                        audioSettings.showObjects[name] = filters[name].show !== false;
-                        audioSettings.objectConfidence[name] = Math.round((filters[name].min_confidence || 0.01) * 100);
-                    });
-                    updateObjectsList();
-                }
+            if (cfg.num_rows) {
+                rowsSlider.value = cfg.num_rows;
+                rowsValue.textContent = cfg.num_rows;
+            }
+            if (cfg.buffer_size) {
+                bufferSlider.value = cfg.buffer_size;
+                bufferValue.textContent = cfg.buffer_size;
+            }
+            if (cfg.object_filters) {
+                const filters = cfg.object_filters;
+                Object.keys(filters).forEach(name => {
+                    detectedObjectClasses.add(name);
+                    audioSettings.showObjects[name] = filters[name].show !== false;
+                    audioSettings.objectConfidence[name] = Math.round((filters[name].min_confidence || 0.01) * 100);
+                });
+                updateObjectsList();
             }
         } catch (error) {
             console.error('Error loading timeline config:', error);
