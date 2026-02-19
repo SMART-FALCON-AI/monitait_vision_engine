@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-02-19
+
+### Added
+- **Color Delta E Condition**: New ejection procedure condition `Color ΔE >` compares detected object color (CIE L*a*b*) against a reference. Three reference modes: vs Previous, vs Running Average (last 20), vs Fixed (user-captured)
+- **Color Reference API**: `POST/GET /api/color-reference/{class_name}` for setting and querying fixed color references
+- **Per-State Light Status Check**: Light status check (closed-loop serial verification) is now configured per camera state instead of a global toggle
+
+### Changed
+- **Ejection Conditions Simplified**: Removed `Present`/`Not Present` conditions — replaced by `Count > 0` and `Count = 0`. Only 4 conditions remain: Count =, Count >, Count <, Color ΔE >
+- **Class Count Check Merged**: Standalone class count check (enable/disable, classes, confidence) removed from Process tab — functionality merged into procedure count conditions
+- **State `enabled` Field Removed**: Replaced with `light_status_check` boolean on each State
+
 ## [3.7.0] - 2026-02-19
 
 ### Added
