@@ -1,12 +1,6 @@
 // Update UI with status data (used by SSE stream)
 function updateStatusUI(data) {
     document.getElementById('encoder-value').textContent = data.encoder_value || 0;
-    // Show server timestamp next to encoder
-    const tsEl = document.getElementById('server-timestamp');
-    if (tsEl && data.timestamp) {
-        const parts = data.timestamp.split(' ');
-        tsEl.textContent = parts.length > 1 ? parts[1] : data.timestamp;
-    }
     document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
     document.getElementById('pps-value').textContent = data.pps || 0;
     document.getElementById('ok-counter').textContent = data.ok_counter || 0;
