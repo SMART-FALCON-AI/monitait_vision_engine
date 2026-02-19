@@ -166,6 +166,15 @@ class PipelineManager:
         # Gradio client cache (for reuse)
         self._gradio_clients: Dict[str, Any] = {}
 
+        # HTTP session with connection pooling for YOLO requests
+        self._http_session = requests.Session() if requests else None
+        if self._http_session:
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=8, pool_maxsize=32, max_retries=1
+            )
+            self._http_session.mount("http://", adapter)
+            self._http_session.mount("https://", adapter)
+
         # Initialize default models and pipeline
         self._init_defaults()
 
@@ -391,7 +400,8 @@ class PipelineManager:
     def _run_yolo_inference(self, image_bytes: bytes, model: InferenceModel) -> List[Dict]:
         """Run inference through YOLO API."""
         try:
-            response = requests.post(
+            http = self._http_session or requests
+            response = http.post(
                 model.inference_url,
                 files={"image": image_bytes},
                 timeout=10

@@ -524,7 +524,7 @@ _cpu_physical = psutil.cpu_count(logical=False) or 1
 _mem = psutil.virtual_memory()
 _mem_total_gb = round(_mem.total / (1024**3), 1)
 _max_disk_writers = max(4, _cpu_logical)
-_max_inference_workers = max(8, _cpu_logical * 4)
+_max_inference_workers = max(8, min(_cpu_logical * 2, 32))
 app.state.system_capacity = {
     "cpu_logical": _cpu_logical,
     "cpu_physical": _cpu_physical,
@@ -818,12 +818,12 @@ def _autoscaler():
             else:
                 disk_level = "OK"
 
-            if inf_hot > 10:
-                inf_level = "CRITICAL"    # Hot frames backing up — ejector at risk
-            elif inf_hot > 3:
+            if inf_hot > 10 or inf_cold > 1000:
+                inf_level = "CRITICAL"    # Hot backing up OR cold growing large
+            elif inf_hot > 3 or inf_cold > 100:
                 inf_level = "WARNING"
             else:
-                inf_level = "OK"          # Hot frames draining fast, cold is fine
+                inf_level = "OK"
 
             # ── Publish state so API/dashboard can read it ──
             app.state.autoscaler = {

@@ -101,16 +101,23 @@ class HotQueue:
 
 
 class ColdDiskQueue:
-    """Disk-based FIFO queue for historical frame processing. No frame is ever dropped."""
+    """Disk-based FIFO queue for historical frame processing. No frame is ever dropped.
+
+    Uses an in-memory sorted index (SortedList) for O(log n) put/get instead of
+    globbing the entire directory on every get() call.  Thread-safe: the lock
+    protects both the index and the filesystem read/delete so no two threads can
+    race for the same file.
+    """
 
     def __init__(self, directory="cold_queue"):
         self._dir = directory
         os.makedirs(self._dir, exist_ok=True)
         self._lock = threading.Lock()
-        # Count files on startup (may have leftovers from previous run)
-        self._count = len(_glob_mod.glob(os.path.join(self._dir, '*.pkl')))
-        if self._count > 0:
-            logger.info(f"Cold queue: {self._count} leftover frames from previous run")
+        # Build in-memory index from any leftover files (sorted = FIFO order)
+        existing = sorted(_glob_mod.glob(os.path.join(self._dir, '*.pkl')))
+        self._index = collections.deque(existing)   # deque of full paths, FIFO order
+        if self._index:
+            logger.info(f"Cold queue: {len(self._index)} leftover frames from previous run")
 
     def put(self, item):
         """Serialize frame batch to disk. Never fails (unless disk is full)."""
@@ -121,38 +128,38 @@ class ColdDiskQueue:
             with open(path, 'wb') as f:
                 pickle.dump(item, f, protocol=pickle.HIGHEST_PROTOCOL)
             with self._lock:
-                self._count += 1
+                self._index.append(path)
         except Exception as e:
             logger.error(f"Cold queue write failed: {e}")
 
     def get(self):
-        """FIFO: pick oldest file, deserialize, delete. Returns None if empty."""
-        try:
-            files = sorted(_glob_mod.glob(os.path.join(self._dir, '*.pkl')))
-            if not files:
+        """FIFO: pop oldest path from index, deserialize, delete. Returns None if empty.
+
+        Thread-safe: only one thread can claim a file at a time.
+        """
+        with self._lock:
+            if not self._index:
                 return None
-            path = files[0]
+            path = self._index.popleft()
+
+        # Read + delete outside the lock (I/O can be slow)
+        try:
             with open(path, 'rb') as f:
                 item = pickle.load(f)
             os.remove(path)
-            with self._lock:
-                self._count = max(0, self._count - 1)
             return item
         except Exception as e:
-            logger.error(f"Cold queue read failed: {e}")
-            # Try to remove corrupt file
+            logger.error(f"Cold queue read failed ({path}): {e}")
+            # Remove corrupt file if it still exists
             try:
-                if files:
-                    os.remove(files[0])
-                    with self._lock:
-                        self._count = max(0, self._count - 1)
+                os.remove(path)
             except Exception:
                 pass
             return None
 
     def qsize(self):
         with self._lock:
-            return self._count
+            return len(self._index)
 
 
 class InferenceQueueFacade:
