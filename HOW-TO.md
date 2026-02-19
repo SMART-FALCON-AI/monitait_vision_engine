@@ -106,10 +106,17 @@ start.bat           # Windows
 
 The `start.py` script automatically:
 - Detects your OS (Linux = production, Windows = development)
-- Detects hardware (CPU cores, RAM, GPUs)
-- Auto-tunes YOLO replicas, workers, shared memory, and Redis memory
+- Detects hardware (CPU cores, RAM, GPU count, GPU VRAM)
+- Auto-tunes YOLO replicas (1 per GPU) and workers (80% VRAM / 500MB per worker)
+- Auto-tunes shared memory and Redis memory
 - Generates a `.env` file
 - Runs `docker compose up -d`
+
+Example output for RTX 3050 (8GB VRAM):
+```
+[MonitaQC] Hardware: 24 CPU cores, 31.1 GB RAM, 1 GPU(s), 8192MB VRAM
+[MonitaQC] Auto-tuned: 1 YOLO replicas x 13 workers, SHM=4g, Redis=1554MB
+```
 
 ### Verifying Installation
 
@@ -124,10 +131,11 @@ Open your browser to `http://<server-ip>` and verify:
 After starting MonitaQC for the first time, configure the system in this order:
 
 1. **Cameras** - Connect and configure cameras
-2. **Hardware** - Set up serial communication, lighting, ejector
+2. **Hardware** - Set up serial communication and lighting
 3. **Inference** - Choose AI model and set confidence thresholds
-4. **Advanced** - Fine-tune timeline display and detection filters
-5. **Dashboard** - Monitor production in real-time
+4. **Process** - Configure ejector, OK/NG timing, image processing, and detection alerts
+5. **Advanced** - Fine-tune timeline display and global settings
+6. **Dashboard** - Monitor production in real-time
 
 > **Important:** After configuring each section, click **"Save All Configuration"** (top-right corner) to persist settings across restarts.
 
@@ -297,32 +305,6 @@ Control physical hardware connected via serial (Arduino/PLC).
 
 - **Warning On / Off** - Control the external warning indicator
 
-### OK Ejector Configuration
-
-| Setting | Description |
-|---------|-------------|
-| **OK Counter Adjustment** | Manually adjust the OK counter value |
-| **Offset Delay (ms)** | Time delay from detection to OK signal |
-| **Duration Pulses** | Output pulse length (each pulse = 16 microseconds) |
-| **Duration Percent (0-100)** | Duty cycle of the output signal |
-| **Encoder Factor** | Scaling multiplier for encoder-based timing |
-
-### NG Ejector Configuration
-
-Same settings as OK but for rejected items (NG = Not Good):
-
-| Setting | Description |
-|---------|-------------|
-| **NG Counter Adjustment** | Manually adjust the NG counter value |
-| **Offset Delay (ms)** | Time delay from detection to NG ejection signal |
-| **Duration Pulses** | Ejection pulse length |
-| **Duration Percent (0-100)** | Duty cycle |
-| **Encoder Factor** | Scaling multiplier |
-
-### Ejector Enable/Disable
-
-Toggle the ejector on or off. When disabled, detections are still recorded but no physical ejection occurs.
-
 ---
 
 ## 8. Cameras Tab 📷
@@ -472,33 +454,39 @@ Pipeline: "Full Inspection"
 
 ---
 
-## 10. Advanced Tab ⚡
+## 10. Process Tab ⚙️
 
-Fine-tune system behavior, manage data, and configure external services.
+Configure ejection, detection alerts, and image processing — all in one place.
 
-### Timeline Configuration
-
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| **Camera Order** | Ascending / Descending | Ascending | Order of camera rows in timeline |
-| **Image Rotation** | 0, 90, 180, 270 | 0 | Rotate all timeline images |
-| **Image Quality** | 50-100% | 85 | JPEG quality for timeline thumbnails |
-| **Rows per Page** | 1-50 | 20 | How many capture columns per page |
-| **Total Frames Stored** | 10-5000 | 100 | Maximum frames kept in Redis |
-
-Click **Apply Timeline Configuration** to save.
-
-### Per-Object Detection & Alerts
-
-1. Click **Fetch Classes** to load object classes from the active model
-2. For each detected object class, configure:
+### Ejector Configuration
 
 | Setting | Description |
 |---------|-------------|
-| **Show** | Toggle visibility of this class in the timeline |
-| **Min Confidence** | Minimum confidence to display (0.0 - 1.0) |
-| **Audio Alert** | Enable audio notification when detected |
-| **Audio File** | Select which sound to play |
+| **Ejector Enabled** | Toggle ejector on/off. When disabled, detections are recorded but no ejection occurs |
+| **Ejector Offset** | Encoder counts from camera position to ejector position |
+| **Ejector Duration** | How long to activate the ejector (seconds) |
+
+### OK Configuration
+
+| Setting | Description |
+|---------|-------------|
+| **OK Counter Adjustment** | Manually adjust the OK counter value |
+| **Offset Delay (ms)** | Time delay from detection to OK signal |
+| **Duration Pulses** | Output pulse length (each pulse = 16 microseconds) |
+| **Duration Percent (0-100)** | Duty cycle of the output signal |
+| **Encoder Factor** | Scaling multiplier for encoder-based timing |
+
+### NG Configuration
+
+Same settings as OK but for rejected items (NG = Not Good):
+
+| Setting | Description |
+|---------|-------------|
+| **NG Counter Adjustment** | Manually adjust the NG counter value |
+| **Offset Delay (ms)** | Time delay from detection to NG ejection signal |
+| **Duration Pulses** | Ejection pulse length |
+| **Duration Percent (0-100)** | Duty cycle |
+| **Encoder Factor** | Scaling multiplier |
 
 ### Ejection Procedures
 
@@ -519,7 +507,59 @@ Define rules for when to eject items:
 - **logic: "any"** = eject if ANY rule matches
 - **logic: "all"** = eject only if ALL rules match
 - **condition: "present"** = object is detected
-- **condition: "absent"** = object is NOT detected
+- **condition: "not_present"** = object is NOT detected
+
+### Per-Object Detection & Alerts
+
+1. Click **Fetch Classes** to load object classes from the active model
+2. For each detected object class, configure:
+
+| Setting | Description |
+|---------|-------------|
+| **Show** | Toggle visibility of this class in the timeline |
+| **Min Confidence** | Minimum confidence to display (0.0 - 1.0) |
+| **Audio Alert** | Enable audio notification when detected |
+| **Audio File** | Select which sound to play |
+
+### Image Processing Configuration
+
+| Setting | Description |
+|---------|-------------|
+| **Parent Object List** | Comma-separated parent objects for hierarchy checking (e.g., `_root,box,pack`) |
+| **Remove Raw Images** | Auto-delete raw images after processing to save disk space |
+
+### DataMatrix Configuration
+
+| Setting | Description |
+|---------|-------------|
+| **Valid Char Sizes** | Accepted DataMatrix character lengths (e.g., `13,19,26`) |
+| **Confidence Threshold** | Minimum match confidence for DataMatrix |
+| **Overlap Threshold** | IoU threshold for duplicate detection |
+
+### Feature Toggles
+
+| Setting | Description |
+|---------|-------------|
+| **Histogram Enabled** | Enable quality distribution histogram analysis |
+| **Light Status Check** | Verify light status before capture |
+
+---
+
+## 11. Advanced Tab ⚡
+
+Fine-tune system behavior, manage data, and configure external services.
+
+### Timeline Configuration
+
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| **Camera Order** | Ascending / Descending | Ascending | Order of camera rows in timeline |
+| **Image Rotation** | 0, 90, 180, 270 | 0 | Rotate all timeline images |
+| **Image Quality** | 50-100% | 85 | JPEG quality for timeline thumbnails |
+| **Rows per Page** | 1-50 | 20 | How many capture columns per page |
+| **Total Frames Stored** | 10-5000 | 100 | Maximum frames kept in Redis |
+
+Click **Apply Timeline Configuration** to save.
 
 ### Redis Configuration
 

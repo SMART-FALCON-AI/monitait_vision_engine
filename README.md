@@ -292,10 +292,11 @@ Map detected objects to product identifiers:
 | **AI Assistant** | Chat with AI about detections and quality |
 | **Gallery** | Browse images with PiGallery2 |
 | **Charts** | Grafana metrics and analytics |
-| **Hardware** | Serial, ejector, lighting, commands |
-| **Cameras** | Camera config, states, IP discovery, image processing |
+| **Hardware** | Serial communication, lighting controls, encoder |
+| **Cameras** | Camera config, states, IP discovery |
 | **Inference** | Models, pipelines, weights, confidence |
-| **Advanced** | Global settings, data file, config export/import |
+| **Process** | Ejector, OK/NG config, detection alerts, image processing |
+| **Advanced** | Timeline, Redis, AI, database, data file, config export/import |
 
 ### Environment Variables (.env)
 
