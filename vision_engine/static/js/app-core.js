@@ -44,10 +44,10 @@ function updateStatusUI(data) {
     const movementValue = document.getElementById('movement-value');
     if (data.is_moving) {
         movementIndicator.className = 'movement-indicator movement-moving';
-        movementValue.textContent = 'Moving';
+        movementValue.textContent = '';
     } else {
         movementIndicator.className = 'movement-indicator movement-stopped';
-        movementValue.textContent = 'Stopped';
+        movementValue.textContent = '';
     }
 
     // Update U/B/Warning status circles
