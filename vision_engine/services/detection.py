@@ -149,6 +149,8 @@ def update_color_references(detections):
             if not isinstance(det, dict) or 'lab_color' not in det:
                 continue
             name = det.get('name', '')
+            if not name:
+                continue
             conf = det.get('confidence', 0)
             if name not in best_per_class or conf > best_per_class[name]['confidence']:
                 best_per_class[name] = det
@@ -307,6 +309,8 @@ def evaluate_eject_from_detections(detections_list, procedures):
                 best = max(obj_dets, key=lambda d: d.get('confidence', 0))
                 w = int(best.get('xmax', 0)) - int(best.get('xmin', 0))
                 h = int(best.get('ymax', 0)) - int(best.get('ymin', 0))
+                if w <= 0 or h <= 0:
+                    return False
                 area = w * h
                 best['_area'] = area
                 if cond == 'area_greater':
@@ -327,9 +331,9 @@ def evaluate_eject_from_detections(detections_list, procedures):
                         best_conf = det['confidence']
                 if best_det is None:
                     return False
-                cur = best_det['lab_color']
+                cur = best_det.get('lab_color')
                 ref = get_color_reference(obj, ref_mode)
-                if ref is None:
+                if not cur or not ref or len(cur) != 3 or len(ref) != 3:
                     return False
                 de = math.sqrt((cur[0]-ref[0])**2 + (cur[1]-ref[1])**2 + (cur[2]-ref[2])**2)
                 best_det['_delta_e'] = round(de, 2)

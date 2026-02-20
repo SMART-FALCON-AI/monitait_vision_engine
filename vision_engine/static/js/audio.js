@@ -359,7 +359,7 @@ function addRule(procId) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc) return;
     const firstClass = detectedObjectClasses.size > 0 ? Array.from(detectedObjectClasses).sort()[0] : '';
-    proc.rules.push({ object: firstClass, condition: 'count_equals', min_confidence: 30, count: 1 });
+    proc.rules.push({ object: firstClass, condition: 'count_equals', min_confidence: 30, count: 1, area: 10000, max_delta_e: 5.0, reference_mode: 'previous' });
     renderProcedures();
 }
 
@@ -374,6 +374,7 @@ function updateProcedureField(procId, field, value) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc) return;
     proc[field] = value;
+    if (field === 'enabled' || field === 'cameras') renderProcedures();
 }
 
 function updateRuleField(procId, ruleIndex, field, value) {

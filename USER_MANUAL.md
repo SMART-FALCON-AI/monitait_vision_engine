@@ -1,7 +1,7 @@
 # MonitaQC Vision Engine - Comprehensive User Manual
-**Version:** 1.0.0
-**Last Updated:** 2026-01-06
-**Application URL:** http://localhost:5050
+**Version:** 3.10.0
+**Last Updated:** 2026-02-20
+**Application URL:** http://localhost (port 80)
 
 ---
 
@@ -16,13 +16,14 @@
 7. [Camera Setup](#7-camera-setup)
 8. [YOLO AI Detection](#8-yolo-ai-detection)
 9. [Audio Alerts](#9-audio-alerts)
-10. [Image Processing](#10-image-processing)
-11. [Timeline & Review](#11-timeline--review)
-12. [Database Integration](#12-database-integration)
-13. [Advanced Features](#13-advanced-features)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Best Practices](#15-best-practices)
-16. [FAQ](#16-faq)
+10. [Ejection Procedures](#10-ejection-procedures)
+11. [Image Processing](#11-image-processing)
+12. [Timeline & Review](#12-timeline--review)
+13. [Database Integration](#13-database-integration)
+14. [Advanced Features](#14-advanced-features)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Best Practices](#16-best-practices)
+17. [FAQ](#17-faq)
 
 ---
 
@@ -34,13 +35,17 @@ MonitaQC Vision Engine is an industrial-grade quality control system that uses A
 
 ### Key Features
 
-- **AI Object Detection** - YOLO-based defect detection with customizable models
-- **Multi-Camera Support** - Monitor multiple cameras simultaneously
+- **AI Object Detection** - YOLO-based defect detection with customizable models and multi-model pipelines
+- **Multi-Camera Support** - Unlimited cameras with auto-detection (USB + IP cameras)
+- **Ejection Procedures** - Rule-based product rejection with count, area, and color ΔE conditions
+- **Color Quality Control** - CIE L\*a\*b\* color comparison with fixed, previous, and running average reference modes
+- **Camera States** - Multi-phase capture with configurable lighting, delays, and per-state light status check
 - **Real-time Audio Alerts** - Voice narration and beep sounds for detected objects
 - **Timeline Playback** - Review captured images with frame-by-frame navigation
 - **Database Storage** - PostgreSQL/TimescaleDB integration for annotation storage
 - **Automatic Disk Cleanup** - Self-managing storage to prevent disk full
 - **Serial Communication** - Arduino/PLC integration for motor control and sensors
+- **Multi-Language Support** - 7 languages (EN, FA, AR, DE, TR, JA, ES)
 - **Web Interface** - Browser-based control panel, no installation needed
 
 ### System Architecture
@@ -109,31 +114,26 @@ git clone http://gitlab.virasad.ir/monitait/monitaqc.git
 cd MonitaQC
 ```
 
-### Step 2: Configure Environment
-
-No manual environment configuration needed! All settings are managed through the web interface at http://localhost:5050/status.
-
-### Step 3: Start the System
+### Step 2: Start the System
 
 ```bash
-# Start all services
-docker compose up -d
+# Linux
+./start.sh
 
-# Check service status
-docker compose ps
-
-# View logs (optional)
-docker logs -f monitait_vision_engine
+# Windows
+start.bat
 ```
 
-### Step 4: Access the Web Interface
+`start.py` automatically detects OS, GPU, and hardware to generate optimal settings.
+
+### Step 3: Access the Web Interface
 
 Open your browser and navigate to:
 ```
-http://localhost:5050
+http://localhost
 ```
 
-You should see the MonitaQC Vision Engine interface.
+You should see the MonitaQC Vision Engine interface. All settings are configured via the web interface and persisted automatically.
 
 ### Step 5: Verify Services
 
@@ -211,12 +211,15 @@ Check that all services are running:
 
 | Tab | Purpose | Key Features |
 |-----|---------|-------------|
-| **Status** | Live view & stats | Real-time stream, detection counts, status |
-| **Infrastructure** | Camera & serial config | Camera setup, serial port, motor control |
-| **YOLO Config** | AI model settings | Model selection, confidence threshold, ROI |
-| **Image Processing** | Capture settings | Image quality, rotation, resolution |
-| **Timeline** | Review mode | Frame-by-frame navigation, slideshow |
-| **Advanced** | Expert settings | Timeline buffer, audio, database, data file |
+| **Dashboard** | Live monitoring | Real-time timeline, counters, system metrics |
+| **AI Assistant** | Chat with AI | Ask questions about detections and quality |
+| **Gallery** | Image browser | Browse captured images via PiGallery2 |
+| **Charts** | Analytics | Grafana metrics and dashboards |
+| **Hardware** | Serial & ejector | Serial port, lighting, encoder, ejector config |
+| **Cameras** | Camera config | Camera settings, states, IP discovery |
+| **Inference** | AI models | Models, pipelines, weights, confidence |
+| **Process** | Detection rules | Ejection procedures, audio alerts, image processing |
+| **Advanced** | Expert settings | Timeline, Redis, AI provider, database, data file |
 
 ---
 
@@ -334,7 +337,7 @@ ffmpeg -list_devices true -f dshow -i dummy
 
 ### Multi-Camera Configuration
 
-To monitor multiple cameras, configure them individually in the **Cameras** section (coming in future version). Currently, one camera is active per vision engine instance.
+MonitaQC supports unlimited cameras. USB cameras are auto-detected, and IP cameras can be added via the **Cameras** tab by scanning your network subnet. Configure individual settings (FPS, resolution, exposure, ROI) per camera.
 
 ---
 
@@ -490,11 +493,79 @@ Click **✅ Enable All** to quickly enable audio for all detected objects.
 
 ---
 
-## 10. Image Processing
+## 10. Ejection Procedures
+
+### Overview
+
+Ejection procedures define rules for automatic product rejection. Each procedure contains one or more rules that evaluate detected objects.
+
+**Location:** Process tab → Ejection Procedures
+
+### Creating a Procedure
+
+1. Click **+ Add Procedure**
+2. Enter a descriptive name (e.g., "Color QC" or "Missing Part Check")
+3. Choose **logic**: ANY rule (OR) or ALL rules (AND)
+4. Optionally set **Cameras** (e.g., "1,2") to limit which cameras this procedure applies to
+5. Add one or more rules
+
+### Condition Types
+
+| Condition | Description | Input |
+|-----------|-------------|-------|
+| **Count =** | Exactly N objects detected | Count number |
+| **Count >** | More than N objects detected | Count number |
+| **Count <** | Fewer than N objects detected | Count number |
+| **Area >** | Object bounding box area exceeds threshold | Pixels |
+| **Area <** | Object bounding box area below threshold | Pixels |
+| **Area =** | Object bounding box area matches threshold | Pixels |
+| **Color ΔE >** | Color difference exceeds threshold | ΔE value + reference mode |
+
+### Color ΔE Condition
+
+The Color ΔE condition compares the detected object's color (CIE L\*a\*b\*) against a reference. This is useful for detecting color drift in production (e.g., fabric fading).
+
+**ΔE Values:**
+- < 1: Imperceptible difference
+- 1-2: Barely noticeable
+- 2-3.5: Noticeable to trained eye
+- 3.5-5: Clearly noticeable
+- \> 5: Significantly different
+
+**Reference Modes:**
+- **vs Previous** — compare against the last captured product
+- **vs Average** — compare against the rolling average of the last 20 products
+- **vs Fixed** — compare against a user-captured golden sample (use the "Capture" button)
+
+### Per-Rule Settings
+
+- **Object**: which detected class to evaluate
+- **Min Confidence (%)**: only consider detections above this confidence threshold
+
+### Example Procedures
+
+**Missing Label Check:**
+- Logic: ANY
+- Rule: "label" Count < 1 (min confidence: 50%)
+- Ejects if no label is detected
+
+**Color Drift Detection:**
+- Logic: ANY
+- Rule: "jean" Color ΔE > 5.0, vs Average (min confidence: 40%)
+- Ejects if the jean color has drifted more than 5 ΔE from the running average
+
+**Size Anomaly:**
+- Logic: ANY
+- Rule: "product" Area < 5000, min confidence: 30%
+- Ejects if the product appears too small (possibly misaligned)
+
+---
+
+## 11. Image Processing
 
 ### Capture Configuration
 
-**Location:** Image Processing tab
+**Location:** Process tab → Image Processing
 
 #### Image Quality
 
@@ -559,7 +630,7 @@ Encoder Step: 100  # Capture every 100 encoder ticks
 
 ---
 
-## 11. Timeline & Review
+## 12. Timeline & Review
 
 ### Overview
 
@@ -629,7 +700,7 @@ Each frame shows:
 
 ---
 
-## 12. Database Integration
+## 13. Database Integration
 
 ### Overview
 
@@ -704,7 +775,7 @@ Access Grafana at http://localhost:3000 (admin/admin)
 
 ---
 
-## 13. Advanced Features
+## 14. Advanced Features
 
 ### Data File Editor
 
@@ -746,7 +817,7 @@ Export your entire service configuration:
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 ### Camera Issues
 
@@ -918,7 +989,7 @@ Export your entire service configuration:
 
 ---
 
-## 15. Best Practices
+## 16. Best Practices
 
 ### Camera Configuration
 
@@ -964,11 +1035,11 @@ Export your entire service configuration:
 
 ---
 
-## 16. FAQ
+## 17. FAQ
 
 ### Q: How many cameras can I monitor?
 
-**A:** Currently, one camera per vision engine instance. To monitor multiple cameras, deploy multiple vision engine instances with different ports.
+**A:** Unlimited cameras. USB cameras are auto-detected, and IP cameras can be added via the Cameras tab. All cameras are managed by a single vision engine instance.
 
 ### Q: Can I use MonitaQC without a camera?
 
@@ -1013,7 +1084,7 @@ Enable automatic disk cleanup to manage storage automatically.
 
 ### Q: Can I use multiple YOLO models?
 
-**A:** Yes (coming in future version). Currently, one YOLO model is active per vision engine instance.
+**A:** Yes! Create multiple models in the Inference tab, then create a pipeline with ordered phases. Each phase references a model, and frames pass through each model in sequence.
 
 ### Q: Where are images stored?
 
@@ -1169,8 +1240,8 @@ docker compose down --volumes
 **Documentation:** This manual
 **System Audit:** See AUDIT_REPORT.md
 **Repository:** http://gitlab.virasad.ir/monitait/monitaqc
-**Version:** 1.0.0
-**Last Updated:** 2026-01-06
+**Version:** 3.10.0
+**Last Updated:** 2026-02-20
 
 ---
 

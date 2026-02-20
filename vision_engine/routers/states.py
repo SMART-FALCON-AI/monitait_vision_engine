@@ -42,7 +42,7 @@ async def create_or_update_state(request: Request):
         "light_mode": "U_ON_B_OFF",
         "encoder_threshold": 100,
         "analog_threshold": -1,
-        "enabled": true
+        "light_status_check": false
     }
     """
     sm = request.app.state.state_manager

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.0] - 2026-02-20
+
+### Fixed
+- **Negative bbox area guard**: Area conditions now return False for malformed bounding boxes (negative width/height)
+- **LAB color validation**: Color ΔE condition validates L\*a\*b\* array integrity before comparison
+- **Empty class name filtering**: `update_color_references()` skips detections with empty class names
+- **Procedure UI re-render**: Toggling "Enabled" or changing cameras now immediately updates the UI
+- **New rule defaults**: Adding a rule now initializes all fields (area, max_delta_e, reference_mode) to prevent undefined values
+- **States API docstring**: Fixed outdated `"enabled": true` → `"light_status_check": false`
+
+### Changed
+- **Tooltips added**: All ejection procedure UI elements now have descriptive hover tooltips
+- **Documentation overhaul**: Updated README (v3.10.0, ejection procedures, new API endpoints, 7 languages), CHANGELOG (fixed version ordering, pre-release labels), USER_MANUAL (v3.10.0, correct tabs, ejection procedures section, multi-camera FAQ, pipelines FAQ)
+
 ## [3.9.0] - 2026-02-19
 
 ### Added
@@ -25,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-State Light Status Check**: Light status check (closed-loop serial verification) is now configured per camera state instead of a global toggle
 
 ### Changed
-- **Ejection Conditions Simplified**: Removed `Present`/`Not Present` conditions — replaced by `Count > 0` and `Count = 0`. Only 4 conditions remain: Count =, Count >, Count <, Color ΔE >
+- **Ejection Conditions Simplified**: Removed `Present`/`Not Present` conditions — replaced by `Count > 0` and `Count = 0`. Count-based conditions: Count =, Count >, Count <
 - **Class Count Check Merged**: Standalone class count check (enable/disable, classes, confidence) removed from Process tab — functionality merged into procedure count conditions
 - **State `enabled` Field Removed**: Replaced with `light_status_check` boolean on each State
 
@@ -161,78 +175,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Advanced analytics and reporting
 - Cloud synchronization improvements
 
-## [1.2.0] - 2025-12-29
+## Pre-release (2025-12-29)
 
-### Changed
-- **Project Reorganization**: Moved core service files to dedicated `vision_engine/` directory
-- **Service Renamed**: `monitaqc_counter` → `monitaqc_vision` (better reflects functionality)
+### 0.3.0 — Project Reorganization
+- Moved core service files to dedicated `vision_engine/` directory
+- Service renamed: `monitaqc_counter` → `monitaqc_vision`
 - Updated docker-compose.yml build context to `./vision_engine`
-- Cleaner main directory structure with only service folders
 
-### Added
-- `vision_engine/README.md` - Comprehensive vision engine documentation
-- `vision_engine/.dockerignore` - Docker build optimization
-- Better name reflects computer vision and AI processing capabilities
+### 0.2.0 — Lightweight Architecture
+- Reduced from 11+ containers to 4 core services
+- Optimized Redis with 256MB memory limit and LRU eviction
+- Changed Redis from `redis:latest` to `redis:7-alpine`
+- Created `docker-compose.full.yml` with all optional services
 
-### Improved
-- Main directory is now less crowded with only service directories
-- Better separation of concerns for each microservice
-- Easier navigation and maintenance
-- More descriptive service naming (vision_engine vs generic counter)
-
-## [1.1.0] - 2025-12-29
-
-### Changed
-- **Lightweight Architecture**: Reduced from 11+ containers to 4 core services
-- Optimized Redis with 256MB memory limit and LRU eviction policy
-- Reduced logging overhead (5-10MB max per service vs 10MB)
-- Simplified docker-compose.yml to essential services only
-- Changed Redis from `redis:latest` to `redis:7-alpine` for smaller image size
-- Reduced YOLO shared memory from 2GB to 1GB
-- Removed YOLO replicas (deploy.replicas: 2 → 1) for simpler deployment
-
-### Added
-- `docker-compose.full.yml` with all optional services
-- Cleanup service now included in lightweight mode (prevents disk full)
-- Lightweight/Full mode documentation in README
-- Resource comparison table in README
-
-### Removed
-- Shipment fulfillment web interface (moved to full mode)
-- PostgreSQL database (moved to full mode)
-- Celery workers (2 workers + beat moved to full mode)
-- Video streaming service (moved to full mode)
-- Image gallery service (moved to full mode)
-- Port 554 from counter service (unused RTSP port)
-- Dataset volume mount from YOLO (unnecessary in production)
-
-### Fixed
-- Container naming consistency across all services
-- Network configuration simplified to bridge driver
-
-## [1.0.0] - 2025-12-29
-
-### Added
-- Initial fork from PartQC Box Counter
-- Comprehensive README with full documentation
+### 0.1.0 — Initial Fork
+- Fork from PartQC Box Counter
 - MonitaQC branding and naming
 - Standardized docker-compose container names
-- .gitignore for project files
-- CONTRIBUTING.md guidelines
-- This CHANGELOG.md file
-
-### Changed
-- Renamed all container services with `monitaqc_` prefix
-- Updated documentation to reflect MonitaQC platform vision
-- Improved README structure and clarity
-
-### Project Status
-- Forked from PartQC Box Counter
-- Foundation for unified quality control platform
-- Active development phase
-
----
-
-## Version History
-
-- **1.0.0** - Initial MonitaQC release (fork from PartQC Box Counter)
