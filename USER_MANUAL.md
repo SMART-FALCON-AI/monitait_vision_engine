@@ -159,13 +159,13 @@ Check that all services are running:
    ```
 
 2. **Configure Camera (Infrastructure Tab)**
-   - Click **Infrastructure** tab
+   - Click **Cameras** tab
    - Set camera type: `USB` or `IP`
    - Set camera device/URL
    - Click **Save Service Config**
 
 3. **Configure YOLO Model (YOLO Config Tab)**
-   - Click **YOLO Config** tab
+   - Click **Inference** tab
    - Set API Type: `Gradio API` or `Traditional YOLO`
    - Set YOLO URL (e.g., `http://monitait_yolo:4442`)
    - Set model name (e.g., `best.pt`)
