@@ -687,6 +687,9 @@ class ArduinoSocket:
     def _send_message(self, msg):
         if self.serial_available and self.serial:
             self.serial.write(msg.encode('utf-8'))
+            logger.debug(f"[SERIAL_TX] Sent: {msg.strip()}")
+        else:
+            logger.warning(f"[SERIAL_TX] Cannot send '{msg.strip()}': serial_available={self.serial_available}, serial={self.serial is not None}")
 
     def set_PWM_backlight(self, pwm):
         if self.serial_available and self.serial:

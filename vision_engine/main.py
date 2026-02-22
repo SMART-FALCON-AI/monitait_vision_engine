@@ -685,7 +685,8 @@ def _process_frame_batch(frames_data, allow_eject=True):
         try:
             _tl_cfg = getattr(app.state, 'timeline_config', {})
             _procedures = _tl_cfg.get('procedures', [])
-            if _procedures and cfg_module.EJECTOR_ENABLED:
+            _enabled_procs = [p for p in _procedures if p.get('enabled', True)]
+            if _enabled_procs and cfg_module.EJECTOR_ENABLED:
                 # Collect all detections across all messages
                 all_detections = []
                 for msg in queue_messages:
@@ -693,7 +694,9 @@ def _process_frame_batch(frames_data, allow_eject=True):
                     if isinstance(det_list, list):
                         all_detections.extend(d for d in det_list if isinstance(d, dict))
 
-                should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _procedures)
+                should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _enabled_procs)
+                det_names = [d.get('name', '?') for d in all_detections]
+                logger.info(f"[EJECT_EVAL] {len(_enabled_procs)} procs, {len(all_detections)} dets ({','.join(det_names)}), result={'EJECT' if should_eject else 'OK'}")
 
                 if should_eject:
                     eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})

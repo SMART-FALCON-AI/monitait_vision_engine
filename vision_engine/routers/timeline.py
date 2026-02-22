@@ -667,11 +667,11 @@ async def serve_raw_image(path: str):
 
 
 @router.get("/api/timeline_frame")
-async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int = 0):
+async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int = 0, path: str = ""):
     """Serve full-res raw image with bboxes drawn from timeline detection data.
 
-    This ensures the popup shows the same detections as the stitched thumbnail,
-    even when consecutive captures share the same underlying camera frame.
+    If `path` is provided, look up the exact frame by d_path (stable across
+    timeline updates). Otherwise fall back to column-index lookup.
     """
     try:
         tl_config = getattr(request.app.state, 'timeline_config', {})
@@ -696,15 +696,26 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
                 pass
         all_frames.sort(key=lambda x: x[0])
 
-        total = len(all_frames)
-        end_index = total - page * frames_per_page
-        start_index = max(0, end_index - frames_per_page)
-        page_slice = all_frames[start_index:end_index] if end_index > 0 else []
+        # Stable lookup by d_path (preferred — immune to timeline shifts)
+        matched = None
+        if path:
+            for frame in all_frames:
+                m = frame[3]
+                if m and m.get('d_path') == path:
+                    matched = frame
+                    break
 
-        if col < 0 or col >= len(page_slice):
-            raise HTTPException(status_code=404, detail="Column out of range")
+        # Fallback to column-index lookup
+        if not matched:
+            total = len(all_frames)
+            end_index = total - page * frames_per_page
+            start_index = max(0, end_index - frames_per_page)
+            page_slice = all_frames[start_index:end_index] if end_index > 0 else []
+            if col < 0 or col >= len(page_slice):
+                raise HTTPException(status_code=404, detail="Column out of range")
+            matched = page_slice[col]
 
-        ts, jpeg_bytes, detections, meta = page_slice[col]
+        ts, jpeg_bytes, detections, meta = matched
         d_path = meta.get('d_path') if meta else None
 
         # Try to load full-res image from disk

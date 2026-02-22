@@ -1032,8 +1032,8 @@ document.addEventListener('DOMContentLoaded', function() {
             const encText = col.encoder != null ? `Enc: ${col.encoder}` : '';
             const tsText = col.ts ? new Date(col.ts * 1000).toLocaleTimeString() : '';
 
-            // Use timeline_frame API to get full-res image with correct per-column detections
-            const frameUrl = `/api/timeline_frame?cam=${camId}&col=${colIndex}&page=${currentPage}&t=${Date.now()}`;
+            // Use timeline_frame API with d_path for stable lookup (immune to timeline shifts)
+            const frameUrl = `/api/timeline_frame?cam=${camId}&col=${colIndex}&page=${currentPage}&path=${encodeURIComponent(dPath)}&t=${Date.now()}`;
             const rawUrl = `/api/raw_image/${encodeURI(dPath)}.jpg`;
 
             popup.innerHTML = `

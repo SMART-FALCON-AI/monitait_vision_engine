@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.10.2] - 2026-02-22
+
+### Fixed
+- **Ejector dashboard icon always red**: SSE stream was missing `ejector_enabled` field, causing dashboard to always show ejector as disabled. Now reads runtime value via config module reference
+- **SSE ejector_offset stale value**: Both SSE and REST status endpoints now read ejector config from live module reference instead of import-time snapshot
+- **Click-to-view wrong image**: Timeline popup now uses `d_path` for stable frame lookup instead of column index, which could shift as new frames arrived
+- **Ejection evaluation filtered enabled procs**: Only enabled procedures are now passed to the evaluation function
+- **Serial send logging**: `_send_message` now logs warnings when serial is unavailable, aiding hardware debugging
+
 ## [3.10.1] - 2026-02-22
 
 ### Fixed

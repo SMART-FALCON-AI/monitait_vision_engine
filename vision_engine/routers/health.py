@@ -19,6 +19,8 @@ from fastapi.responses import (
     RedirectResponse,
 )
 
+import config as cfg_module  # Direct module ref for runtime-updated values (SSE)
+
 from config import (
     YOLO_INFERENCE_URL,
     EJECTOR_OFFSET,
@@ -319,8 +321,8 @@ async def api_status(request: Request):
             "shipment": watcher.shipment if watcher else "no_shipment",
             "ejector_queue_length": len(watcher.ejection_queue) if watcher else 0,
             "ejector_running": watcher.ejector_running if watcher else False,
-            "ejector_offset": EJECTOR_OFFSET,
-            "ejector_enabled": EJECTOR_ENABLED,
+            "ejector_offset": cfg_module.EJECTOR_OFFSET,
+            "ejector_enabled": cfg_module.EJECTOR_ENABLED,
             "histogram_enabled": HISTOGRAM_ENABLED,
             "status": {
                 "U": getattr(watcher, "u_status", False) if watcher else False,
@@ -419,6 +421,8 @@ async def status_stream(request: Request):
                     "shipment": watcher.shipment if watcher else "no_shipment",
                     "ejector_queue_length": len(watcher.ejection_queue) if watcher else 0,
                     "ejector_running": watcher.ejector_running if watcher else False,
+                    "ejector_enabled": cfg_module.EJECTOR_ENABLED,
+                    "ejector_offset": cfg_module.EJECTOR_OFFSET,
                     "status": {
                         "U": getattr(watcher, "u_status", False) if watcher else False,
                         "B": getattr(watcher, "b_status", False) if watcher else False,
