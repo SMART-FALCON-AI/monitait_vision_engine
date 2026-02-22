@@ -97,7 +97,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
         full_data: Full data file (including root-level keys like timeline_config)
     Returns tuple of (settings_applied: dict, cameras_loaded: int).
     """
-    global EJECTOR_ENABLED, EJECTOR_OFFSET, EJECTOR_DURATION, EJECTOR_POLL_INTERVAL
+    global EJECTOR_ENABLED, EJECTOR_OFFSET, EJECTOR_DELAY, EJECTOR_DURATION, EJECTOR_POLL_INTERVAL
     global CAPTURE_MODE, REMOVE_RAW_IMAGE_WHEN_DM_DECODED
     global PARENT_OBJECT_LIST, HISTOGRAM_ENABLED, HISTOGRAM_SAVE_IMAGE
     global CHECK_CLASS_COUNTS_ENABLED, CHECK_CLASS_COUNTS_CLASSES, CHECK_CLASS_COUNTS_CONFIDENCE
@@ -158,6 +158,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     if "ejector" in config:
         EJECTOR_ENABLED = config["ejector"].get("enabled", EJECTOR_ENABLED)
         EJECTOR_OFFSET = config["ejector"].get("offset", EJECTOR_OFFSET)
+        EJECTOR_DELAY = config["ejector"].get("delay", EJECTOR_DELAY)
         EJECTOR_DURATION = config["ejector"].get("duration", EJECTOR_DURATION)
         EJECTOR_POLL_INTERVAL = config["ejector"].get("poll_interval", EJECTOR_POLL_INTERVAL)
         settings_applied["ejector"] = True
@@ -318,7 +319,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
 
     # Sync all config changes back to the config module so other modules see them
     for _name in [
-        'EJECTOR_ENABLED', 'EJECTOR_OFFSET', 'EJECTOR_DURATION', 'EJECTOR_POLL_INTERVAL',
+        'EJECTOR_ENABLED', 'EJECTOR_OFFSET', 'EJECTOR_DELAY', 'EJECTOR_DURATION', 'EJECTOR_POLL_INTERVAL',
         'CAPTURE_MODE', 'REMOVE_RAW_IMAGE_WHEN_DM_DECODED',
         'PARENT_OBJECT_LIST', 'HISTOGRAM_ENABLED', 'HISTOGRAM_SAVE_IMAGE',
         'CHECK_CLASS_COUNTS_ENABLED', 'CHECK_CLASS_COUNTS_CLASSES', 'CHECK_CLASS_COUNTS_CONFIDENCE',

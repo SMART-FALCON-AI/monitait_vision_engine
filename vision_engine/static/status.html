@@ -846,6 +846,12 @@
                             <div class="control-response" id="config-ejector_offset-response"></div>
                         </div>
                         <div class="control-item">
+                            <div class="control-label" data-i18n="ejector_delay">Ejector Delay (seconds)</div>
+                            <input type="number" class="control-input" id="ejector-delay-input" min="0" step="0.1" value="0">
+                            <button class="control-button" onclick="updateConfig('ejector_delay', document.getElementById('ejector-delay-input').value)">Set Delay</button>
+                            <div class="control-response" id="config-ejector_delay-response"></div>
+                        </div>
+                        <div class="control-item">
                             <div class="control-label" data-i18n="ejector_duration">Ejector Duration (seconds)</div>
                             <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.01" value="0.01">
                             <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>

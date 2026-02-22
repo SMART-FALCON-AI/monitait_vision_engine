@@ -369,6 +369,7 @@ function fetchConfig() {
             if (data.ejector) {
                 document.getElementById('ejector-enabled-input').value = data.ejector.enabled ? 'true' : 'false';
                 document.getElementById('ejector-offset-input').value = data.ejector.offset || 0;
+                document.getElementById('ejector-delay-input').value = data.ejector.delay || 0;
                 document.getElementById('ejector-duration-input').value = data.ejector.duration || 0.4;
                 document.getElementById('ejector-poll-input').value = data.ejector.poll_interval || 0.03;
             }
@@ -2805,6 +2806,7 @@ applyLanguage(currentLang);
         // Counter Service
         'ejector_enabled': 'Enable or disable the physical ejector mechanism.',
         'ejector_offset': 'Encoder count delay between detection and ejection. Adjusts for physical distance.',
+        'ejector_delay': 'Time delay (seconds) after encoder target is reached before sending the ejector command.',
         'ejector_duration': 'How long the ejector solenoid stays activated in seconds.',
         'ejector_poll': 'How frequently the system checks for packages to eject. Lower = more responsive.',
         'time_between': 'Minimum time gap between two consecutive package captures. Prevents double-captures.',

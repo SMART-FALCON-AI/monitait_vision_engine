@@ -114,6 +114,7 @@ def build_current_service_config(app_state):
         "ejector": {
             "enabled": config.EJECTOR_ENABLED,
             "offset": config.EJECTOR_OFFSET,
+            "delay": config.EJECTOR_DELAY,
             "duration": config.EJECTOR_DURATION,
             "poll_interval": config.EJECTOR_POLL_INTERVAL
         },
@@ -173,6 +174,7 @@ async def get_config(request: Request):
         "ejector": {
             "enabled": config.EJECTOR_ENABLED,
             "offset": config.EJECTOR_OFFSET,
+            "delay": config.EJECTOR_DELAY,
             "duration": config.EJECTOR_DURATION,
             "poll_interval": config.EJECTOR_POLL_INTERVAL
         },
@@ -233,6 +235,7 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
 
     Supported keys:
         - ejector_offset: int - Encoder counts from camera to ejector
+        - ejector_delay: float - Seconds to wait before firing ejector after encoder target reached
         - ejector_duration: float - Seconds to run ejector motor
         - ejector_poll_interval: float - Seconds between ejector checks
 
@@ -264,6 +267,11 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
             config.EJECTOR_OFFSET = int(config_data["ejector_offset"])
             updated["ejector_offset"] = config.EJECTOR_OFFSET
             logger.info(f"Updated EJECTOR_OFFSET to {config.EJECTOR_OFFSET}")
+
+        if "ejector_delay" in config_data:
+            config.EJECTOR_DELAY = float(config_data["ejector_delay"])
+            updated["ejector_delay"] = config.EJECTOR_DELAY
+            logger.info(f"Updated EJECTOR_DELAY to {config.EJECTOR_DELAY}")
 
         if "ejector_duration" in config_data:
             config.EJECTOR_DURATION = float(config_data["ejector_duration"])

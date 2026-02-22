@@ -322,6 +322,7 @@ async def api_status(request: Request):
             "ejector_queue_length": len(watcher.ejection_queue) if watcher else 0,
             "ejector_running": watcher.ejector_running if watcher else False,
             "ejector_offset": cfg_module.EJECTOR_OFFSET,
+            "ejector_delay": cfg_module.EJECTOR_DELAY,
             "ejector_enabled": cfg_module.EJECTOR_ENABLED,
             "histogram_enabled": HISTOGRAM_ENABLED,
             "status": {
@@ -423,6 +424,7 @@ async def status_stream(request: Request):
                     "ejector_running": watcher.ejector_running if watcher else False,
                     "ejector_enabled": cfg_module.EJECTOR_ENABLED,
                     "ejector_offset": cfg_module.EJECTOR_OFFSET,
+                    "ejector_delay": cfg_module.EJECTOR_DELAY,
                     "status": {
                         "U": getattr(watcher, "u_status", False) if watcher else False,
                         "B": getattr(watcher, "b_status", False) if watcher else False,

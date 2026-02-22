@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # Ejector configuration
 EJECTOR_ENABLED = os.environ.get("EJECTOR_ENABLED", "true").lower() == "true"
 EJECTOR_OFFSET = int(os.environ.get("EJECTOR_OFFSET", 1))
+EJECTOR_DELAY = float(os.environ.get("EJECTOR_DELAY", 0))
 EJECTOR_DURATION = float(os.environ.get("EJECTOR_DURATION", 0.01))
 EJECTOR_POLL_INTERVAL = float(os.environ.get("EJECTOR_POLL_INTERVAL", 0.005))
 

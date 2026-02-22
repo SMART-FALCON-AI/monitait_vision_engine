@@ -439,6 +439,7 @@ class ArduinoSocket:
         self.ejector_start_ts = time.time()
         self.ejector_running = False
         self.ejection_queue = []  # Queue of encoder targets for ejection
+        self._ejector_pending = []  # Entries waiting for EJECTOR_DELAY before firing
         self.shipment="no_shipment"
         self.stream_histogram_data = []  # Histogram data for detected objects
         self.old_shipment = "no_shipment"
@@ -1153,6 +1154,7 @@ class ArduinoSocket:
                         self.ejector_running = False
                     # Clear any pending ejection requests
                     self.ejection_queue.clear()
+                    self._ejector_pending.clear()
                     time.sleep(cfg.EJECTOR_POLL_INTERVAL)
                     continue
 
@@ -1174,22 +1176,29 @@ class ArduinoSocket:
                         logger.warning(f"Invalid ejector queue data: {e}")
 
                 # Process ejection queue based on encoder position
-                # Drain all entries whose target the encoder has already passed
+                # Move entries whose target the encoder has reached into "waiting" state
+                now = time.time()
                 while self.ejection_queue and self.encoder_value >= self.ejection_queue[0]["target"]:
                     entry = self.ejection_queue.pop(0)
-                    logger.info(f"[EJ_QUEUE] Ready: target={entry['target']}, current_enc={self.encoder_value}, remaining={len(self.ejection_queue)}")
-                    if not self.ejector_running:
-                        # Fire the ejector for the first ready entry
-                        logger.info(f"[EJ_FIRE] Sending '6' (ON) | target={entry['target']}, enc={self.encoder_value}")
-                        self._send_message('6\n')
-                        self.ejector_running = True
-                        self.ejector_start_ts = time.time()
-                        self.redis_connection.update_queue_messages_redis("Eject", stream_name="speaker")
-                    else:
-                        logger.info(f"[EJ_QUEUE] Discarded stale entry (ejector already running)")
+                    entry["ready_at"] = now
+                    logger.info(f"[EJ_QUEUE] Ready: target={entry['target']}, current_enc={self.encoder_value}, delay={cfg.EJECTOR_DELAY}s, remaining={len(self.ejection_queue)}")
+                    self._ejector_pending.append(entry)
+
+                # Fire pending entries after EJECTOR_DELAY has elapsed
+                if hasattr(self, '_ejector_pending') and self._ejector_pending:
+                    while self._ejector_pending and (now - self._ejector_pending[0]["ready_at"]) >= cfg.EJECTOR_DELAY:
+                        entry = self._ejector_pending.pop(0)
+                        if not self.ejector_running:
+                            logger.info(f"[EJ_FIRE] Sending '6' (ON) | target={entry['target']}, enc={self.encoder_value}, delay={cfg.EJECTOR_DELAY}s")
+                            self._send_message('6\n')
+                            self.ejector_running = True
+                            self.ejector_start_ts = now
+                            self.redis_connection.update_queue_messages_redis("Eject", stream_name="speaker")
+                        else:
+                            logger.info(f"[EJ_QUEUE] Discarded stale entry (ejector already running)")
 
                 # Stop ejector after cfg.EJECTOR_DURATION
-                if self.ejector_running and (time.time() - self.ejector_start_ts > cfg.EJECTOR_DURATION):
+                if self.ejector_running and (now - self.ejector_start_ts > cfg.EJECTOR_DURATION):
                     logger.info(f"[EJ_FIRE] Sending '7' (OFF) | duration={cfg.EJECTOR_DURATION}s elapsed")
                     self._send_message('7\n')
                     self.ejector_running = False
