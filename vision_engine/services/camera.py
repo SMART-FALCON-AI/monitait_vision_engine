@@ -384,7 +384,7 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
     return config
 
 def apply_camera_config_from_saved(cam, saved_config):
-    """Apply saved configuration to camera."""
+    """Apply saved configuration to camera and store for reconnect persistence."""
     if cam is None or saved_config is None:
         return
 
@@ -395,21 +395,22 @@ def apply_camera_config_from_saved(cam, saved_config):
     cam.roi_xmax = saved_config.get('roi_xmax', 1280)
     cam.roi_ymax = saved_config.get('roi_ymax', 720)
 
-    # Apply OpenCV settings
+    # Apply OpenCV settings and store in _saved_props for reconnect persistence
+    prop_map = {
+        'exposure': cv2.CAP_PROP_EXPOSURE,
+        'gain': cv2.CAP_PROP_GAIN,
+        'brightness': cv2.CAP_PROP_BRIGHTNESS,
+        'contrast': cv2.CAP_PROP_CONTRAST,
+        'saturation': cv2.CAP_PROP_SATURATION,
+        'fps': cv2.CAP_PROP_FPS,
+    }
     if hasattr(cam, 'camera'):
         try:
-            if 'exposure' in saved_config:
-                cam.camera.set(cv2.CAP_PROP_EXPOSURE, saved_config['exposure'])
-            if 'gain' in saved_config:
-                cam.camera.set(cv2.CAP_PROP_GAIN, saved_config['gain'])
-            if 'brightness' in saved_config:
-                cam.camera.set(cv2.CAP_PROP_BRIGHTNESS, saved_config['brightness'])
-            if 'contrast' in saved_config:
-                cam.camera.set(cv2.CAP_PROP_CONTRAST, saved_config['contrast'])
-            if 'saturation' in saved_config:
-                cam.camera.set(cv2.CAP_PROP_SATURATION, saved_config['saturation'])
-            if 'fps' in saved_config:
-                cam.camera.set(cv2.CAP_PROP_FPS, saved_config['fps'])
+            for key, prop in prop_map.items():
+                if key in saved_config:
+                    cam.camera.set(prop, saved_config[key])
+                    if hasattr(cam, '_saved_props'):
+                        cam._saved_props[prop] = saved_config[key]
         except Exception as e:
             logger.error(f"Error applying camera config: {e}")
 
@@ -481,7 +482,40 @@ class CameraBuffer:
         self.roi_ymin = 0
         self.roi_xmax = 1280  # Default to full width
         self.roi_ymax = 720   # Default to full height
+        # Saved camera properties — re-applied after reconnect
+        self._saved_props = {}
+        self._save_current_props()
         threading.Thread(target=self.buffer).start()
+
+    def _save_current_props(self):
+        """Snapshot current camera properties so they can be re-applied after reconnect."""
+        try:
+            self._saved_props = {
+                cv2.CAP_PROP_EXPOSURE: int(self.camera.get(cv2.CAP_PROP_EXPOSURE)),
+                cv2.CAP_PROP_GAIN: int(self.camera.get(cv2.CAP_PROP_GAIN)),
+                cv2.CAP_PROP_BRIGHTNESS: int(self.camera.get(cv2.CAP_PROP_BRIGHTNESS)),
+                cv2.CAP_PROP_CONTRAST: int(self.camera.get(cv2.CAP_PROP_CONTRAST)),
+                cv2.CAP_PROP_SATURATION: int(self.camera.get(cv2.CAP_PROP_SATURATION)),
+                cv2.CAP_PROP_FPS: int(self.camera.get(cv2.CAP_PROP_FPS)),
+            }
+        except Exception:
+            pass
+
+    def _apply_saved_props(self):
+        """Re-apply saved camera properties after reconnect."""
+        if not self._saved_props:
+            return
+        for prop, val in self._saved_props.items():
+            try:
+                self.camera.set(prop, val)
+            except Exception:
+                pass
+        logger.info(f"Re-applied saved camera config after reconnect: {self.source}")
+
+    def update_prop(self, prop, value):
+        """Update a camera property and save it for reconnect persistence."""
+        self.camera.set(prop, value)
+        self._saved_props[prop] = value
 
     def buffer(self):
         failure_count = 0
@@ -524,6 +558,9 @@ class CameraBuffer:
                                 self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
                                 logger.info(f"Reconnecting USB camera: {self.source}")
 
+                            # Re-apply saved camera properties
+                            self._apply_saved_props()
+
                             # Reset failure counter after reconnect attempt
                             failure_count = 0
                             logger.info("Camera reconnection attempted")
@@ -550,6 +587,8 @@ class CameraBuffer:
             self.camera = cv2.VideoCapture(self.source)
         else:
             self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+        # Re-apply saved camera properties
+        self._apply_saved_props()
         success, frame = self.camera.retrieve(0)
         self.success = success
         self.frame = frame

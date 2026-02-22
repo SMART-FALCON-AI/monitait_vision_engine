@@ -308,7 +308,7 @@ async def update_camera_config(camera_id: int, request: Request):
     try:
         body = await request.json()
 
-        # Apply configuration
+        # Apply configuration via update_prop (persists across reconnects)
         prop_map = {
             'fps': cv2.CAP_PROP_FPS,
             'exposure': cv2.CAP_PROP_EXPOSURE,
@@ -323,7 +323,10 @@ async def update_camera_config(camera_id: int, request: Request):
         updated = []
         for key, value in body.items():
             if key in prop_map:
-                cam.camera.set(prop_map[key], value)
+                if hasattr(cam, 'update_prop'):
+                    cam.update_prop(prop_map[key], value)
+                else:
+                    cam.camera.set(prop_map[key], value)
                 updated.append(key)
 
         # Handle ROI settings (stored on CameraBuffer object, not OpenCV)
@@ -332,6 +335,16 @@ async def update_camera_config(camera_id: int, request: Request):
             if key in body:
                 setattr(cam, key, body[key])
                 updated.append(key)
+
+        # Auto-save to disk so settings persist across restarts
+        if updated:
+            try:
+                svc_config = build_current_service_config(request.app.state)
+                if svc_config:
+                    save_service_config(svc_config)
+                    logger.info(f"Camera {camera_id} config auto-saved: {updated}")
+            except Exception as save_err:
+                logger.warning(f"Camera config auto-save failed: {save_err}")
 
         return JSONResponse(content={"success": True, "updated": updated})
     except Exception as e:

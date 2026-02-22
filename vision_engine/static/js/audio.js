@@ -817,13 +817,14 @@ document.addEventListener('DOMContentLoaded', function() {
     function loadPage(page) {
         if (page < 0 || page >= totalPages) return;
         currentPage = page;
-        // Use WebSocket if available, else fall back to HTTP
+        // Tell WebSocket server which page we want (for future auto-pushes)
         if (typeof timelineWsSendPage === 'function') {
             timelineWsSendPage(page);
-        } else {
+        }
+        // When paused, WebSocket onmessage drops images, so always use HTTP for manual nav
+        if (!autoUpdate) {
             const timestamp = new Date().getTime();
             slide.src = `/timeline_image?page=${page}&t=${timestamp}`;
-            // Fetch metadata via HTTP when not using WebSocket
             fetch('/api/timeline_meta?page=' + page)
                 .then(r => r.json())
                 .then(meta => { if (meta.type === 'timeline_meta') window._timelineMeta = meta; })

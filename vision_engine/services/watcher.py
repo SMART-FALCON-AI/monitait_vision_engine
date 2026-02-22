@@ -1169,6 +1169,7 @@ class ArduinoSocket:
                             "dm": dm,
                             "queued_at": capture_encoder
                         })
+                        logger.info(f"[EJ_QUEUE] Added: capture_enc={capture_encoder}, target_enc={target_encoder}, offset={cfg.EJECTOR_OFFSET}, queue_size={len(self.ejection_queue)}, current_enc={self.encoder_value}")
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid ejector queue data: {e}")
 
@@ -1176,16 +1177,20 @@ class ArduinoSocket:
                 # Drain all entries whose target the encoder has already passed
                 while self.ejection_queue and self.encoder_value >= self.ejection_queue[0]["target"]:
                     entry = self.ejection_queue.pop(0)
+                    logger.info(f"[EJ_QUEUE] Ready: target={entry['target']}, current_enc={self.encoder_value}, remaining={len(self.ejection_queue)}")
                     if not self.ejector_running:
                         # Fire the ejector for the first ready entry
+                        logger.info(f"[EJ_FIRE] Sending '6' (ON) | target={entry['target']}, enc={self.encoder_value}")
                         self._send_message('6\n')
                         self.ejector_running = True
                         self.ejector_start_ts = time.time()
                         self.redis_connection.update_queue_messages_redis("Eject", stream_name="speaker")
-                    # Remaining stale entries are discarded (ejector already firing)
+                    else:
+                        logger.info(f"[EJ_QUEUE] Discarded stale entry (ejector already running)")
 
                 # Stop ejector after cfg.EJECTOR_DURATION
                 if self.ejector_running and (time.time() - self.ejector_start_ts > cfg.EJECTOR_DURATION):
+                    logger.info(f"[EJ_FIRE] Sending '7' (OFF) | duration={cfg.EJECTOR_DURATION}s elapsed")
                     self._send_message('7\n')
                     self.ejector_running = False
 
