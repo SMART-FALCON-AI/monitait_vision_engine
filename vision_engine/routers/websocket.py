@@ -202,6 +202,12 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     if show_bbox and detections:
+                        # Scale bbox coords from original resolution to thumbnail
+                        th, tw = thumb.shape[:2]
+                        orig_h = meta.get('orig_h', th) if meta else th
+                        orig_w = meta.get('orig_w', tw) if meta else tw
+                        sx = tw / orig_w if orig_w else 1
+                        sy = th / orig_h if orig_h else 1
                         for det in detections:
                             try:
                                 name = det.get('name', '')
@@ -211,10 +217,10 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
                                     continue
                                 if confidence < of.get('min_confidence', 0.01):
                                     continue
-                                x1 = int(det.get('xmin', det.get('x1', 0)))
-                                y1 = int(det.get('ymin', det.get('y1', 0)))
-                                x2 = int(det.get('xmax', det.get('x2', 0)))
-                                y2 = int(det.get('ymax', det.get('y2', 0)))
+                                x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
+                                y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
+                                x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
+                                y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
                                 cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
                                 label = f"{name} {confidence:.0%}"
                                 (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)

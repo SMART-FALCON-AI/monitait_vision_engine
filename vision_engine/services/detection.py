@@ -426,7 +426,7 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None, d_p
         # Store in Redis list (FIFO with max length)
         redis_key = f"{cfg.TIMELINE_REDIS_PREFIX}{camera_id}"
         ts = capture_t if capture_t else time.time()
-        meta = {"d_path": d_path, "encoder": encoder}
+        meta = {"d_path": d_path, "encoder": encoder, "orig_h": h, "orig_w": w}
         frame_data = pickle.dumps((ts, jpeg.tobytes(), detections, meta))
 
         # Use Redis pipeline for atomic operations

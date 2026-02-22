@@ -443,6 +443,12 @@ async def timeline_image(request: Request, page: int = 0):
                 if thumb is not None:
                     # Draw bounding boxes if enabled and detections exist
                     if show_bbox and detections:
+                        # Scale bbox coords from original resolution to thumbnail
+                        th, tw = thumb.shape[:2]
+                        orig_h = meta.get('orig_h', th) if meta else th
+                        orig_w = meta.get('orig_w', tw) if meta else tw
+                        sx = tw / orig_w if orig_w else 1
+                        sy = th / orig_h if orig_h else 1
                         for det in detections:
                             try:
                                 name = det.get('name', '')
@@ -452,10 +458,10 @@ async def timeline_image(request: Request, page: int = 0):
                                     continue
                                 if confidence < of.get('min_confidence', 0.01):
                                     continue
-                                x1 = int(det.get('xmin', det.get('x1', 0)))
-                                y1 = int(det.get('ymin', det.get('y1', 0)))
-                                x2 = int(det.get('xmax', det.get('x2', 0)))
-                                y2 = int(det.get('ymax', det.get('y2', 0)))
+                                x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
+                                y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
+                                x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
+                                y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
                                 cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
                                 label = f"{name} {confidence:.0%}"
                                 (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
@@ -703,10 +709,13 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
 
         # Try to load full-res image from disk
         image = None
+        is_full_res = False
         if d_path:
             raw_path = pathlib.Path("raw_images") / f"{d_path}.jpg"
             if raw_path.exists():
                 image = cv2.imread(str(raw_path))
+                if image is not None:
+                    is_full_res = True
 
         # Fallback to timeline thumbnail if disk file missing
         if image is None:
@@ -717,6 +726,15 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
 
         # Draw bboxes from timeline detection data
         if show_bbox and detections:
+            # If using thumbnail fallback, scale coords from original to thumb
+            ih, iw = image.shape[:2]
+            orig_h = meta.get('orig_h', ih) if meta else ih
+            orig_w = meta.get('orig_w', iw) if meta else iw
+            if is_full_res:
+                sx, sy = 1.0, 1.0
+            else:
+                sx = iw / orig_w if orig_w else 1
+                sy = ih / orig_h if orig_h else 1
             for det in detections:
                 try:
                     name = det.get('name', '')
@@ -726,10 +744,10 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
                         continue
                     if confidence < of.get('min_confidence', 0.01):
                         continue
-                    x1 = int(det.get('xmin', det.get('x1', 0)))
-                    y1 = int(det.get('ymin', det.get('y1', 0)))
-                    x2 = int(det.get('xmax', det.get('x2', 0)))
-                    y2 = int(det.get('ymax', det.get('y2', 0)))
+                    x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
+                    y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
+                    x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
+                    y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
                     cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
                     label = f"{name} {confidence:.0%}"
                     (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
