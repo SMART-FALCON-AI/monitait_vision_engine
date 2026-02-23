@@ -233,15 +233,22 @@ async def get_cameras_status(request: Request):
 
         if cam is not None and hasattr(cam, 'camera'):
             try:
+                # Use _saved_props (user-configured values) when available;
+                # fall back to live camera.get() for props not in _saved_props
+                saved = getattr(cam, '_saved_props', {})
+                def _get(prop):
+                    if prop in saved:
+                        return int(saved[prop])
+                    return int(cam.camera.get(prop))
                 cam_info["config"] = {
-                    "fps": int(cam.camera.get(cv2.CAP_PROP_FPS)),
+                    "fps": _get(cv2.CAP_PROP_FPS),
                     "width": int(cam.camera.get(cv2.CAP_PROP_FRAME_WIDTH)),
                     "height": int(cam.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                    "exposure": int(cam.camera.get(cv2.CAP_PROP_EXPOSURE)),
-                    "gain": int(cam.camera.get(cv2.CAP_PROP_GAIN)),
-                    "brightness": int(cam.camera.get(cv2.CAP_PROP_BRIGHTNESS)),
-                    "contrast": int(cam.camera.get(cv2.CAP_PROP_CONTRAST)),
-                    "saturation": int(cam.camera.get(cv2.CAP_PROP_SATURATION)),
+                    "exposure": _get(cv2.CAP_PROP_EXPOSURE),
+                    "gain": _get(cv2.CAP_PROP_GAIN),
+                    "brightness": _get(cv2.CAP_PROP_BRIGHTNESS),
+                    "contrast": _get(cv2.CAP_PROP_CONTRAST),
+                    "saturation": _get(cv2.CAP_PROP_SATURATION),
                     "roi_enabled": getattr(cam, 'roi_enabled', False),
                     "roi_xmin": getattr(cam, 'roi_xmin', 0),
                     "roi_ymin": getattr(cam, 'roi_ymin', 0),

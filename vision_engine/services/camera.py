@@ -370,14 +370,26 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         cam_type = config.get("type", "usb")
         config["name"] = f"{'IP' if cam_type == 'ip' else 'USB'} Camera {cam_id}"
 
-    if hasattr(cam, 'camera'):
+    # Prefer _saved_props (user-configured values) over live camera.get() which
+    # may return auto-exposure defaults if the camera reset itself
+    saved = getattr(cam, '_saved_props', {})
+    prop_to_key = {
+        cv2.CAP_PROP_EXPOSURE: "exposure",
+        cv2.CAP_PROP_GAIN: "gain",
+        cv2.CAP_PROP_BRIGHTNESS: "brightness",
+        cv2.CAP_PROP_CONTRAST: "contrast",
+        cv2.CAP_PROP_SATURATION: "saturation",
+        cv2.CAP_PROP_FPS: "fps",
+    }
+    if saved:
+        for prop, key in prop_to_key.items():
+            if prop in saved:
+                config[key] = int(saved[prop])
+    elif hasattr(cam, 'camera'):
+        # Fallback: read live values only if no saved props exist
         try:
-            config["exposure"] = int(cam.camera.get(cv2.CAP_PROP_EXPOSURE))
-            config["gain"] = int(cam.camera.get(cv2.CAP_PROP_GAIN))
-            config["brightness"] = int(cam.camera.get(cv2.CAP_PROP_BRIGHTNESS))
-            config["contrast"] = int(cam.camera.get(cv2.CAP_PROP_CONTRAST))
-            config["saturation"] = int(cam.camera.get(cv2.CAP_PROP_SATURATION))
-            config["fps"] = int(cam.camera.get(cv2.CAP_PROP_FPS))
+            for prop, key in prop_to_key.items():
+                config[key] = int(cam.camera.get(prop))
         except:
             pass
 
@@ -396,6 +408,7 @@ def apply_camera_config_from_saved(cam, saved_config):
     cam.roi_ymax = saved_config.get('roi_ymax', 720)
 
     # Apply OpenCV settings and store in _saved_props for reconnect persistence
+    # Order matters: disable auto-exposure first, then set manual values
     prop_map = {
         'exposure': cv2.CAP_PROP_EXPOSURE,
         'gain': cv2.CAP_PROP_GAIN,
@@ -406,11 +419,26 @@ def apply_camera_config_from_saved(cam, saved_config):
     }
     if hasattr(cam, 'camera'):
         try:
+            # For USB cameras: disable auto-exposure before setting manual values
+            if not getattr(cam, 'is_ip_camera', False):
+                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # aperture priority (reset)
+                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # manual mode
+            applied = {}
             for key, prop in prop_map.items():
                 if key in saved_config:
                     cam.camera.set(prop, saved_config[key])
                     if hasattr(cam, '_saved_props'):
                         cam._saved_props[prop] = saved_config[key]
+                    applied[key] = saved_config[key]
+            # Verify: read back values to confirm they took effect
+            verify = {}
+            for key, prop in prop_map.items():
+                if key in applied:
+                    actual = int(cam.camera.get(prop))
+                    verify[key] = actual
+                    if actual != applied[key]:
+                        logger.warning(f"Camera {key}: set {applied[key]} but got {actual}")
+            logger.info(f"Applied saved camera settings: {applied} | Readback: {verify}")
         except Exception as e:
             logger.error(f"Error applying camera config: {e}")
 
@@ -482,9 +510,10 @@ class CameraBuffer:
         self.roi_ymin = 0
         self.roi_xmax = 1280  # Default to full width
         self.roi_ymax = 720   # Default to full height
-        # Saved camera properties — re-applied after reconnect
+        # Saved camera properties — re-applied after reconnect.
+        # NOT snapshotted here because saved config hasn't been applied yet;
+        # apply_camera_config_from_saved() will populate _saved_props with correct values.
         self._saved_props = {}
-        self._save_current_props()
         threading.Thread(target=self.buffer).start()
 
     def _save_current_props(self):
@@ -503,6 +532,20 @@ class CameraBuffer:
 
     def _apply_saved_props(self):
         """Re-apply saved camera properties after reconnect."""
+        # Re-apply base camera settings (resolution, format)
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        if not self.is_ip_camera:
+            try:
+                self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                # Disable auto-exposure so manual values stick
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
+                self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
+                self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            except Exception:
+                pass
         if not self._saved_props:
             return
         for prop, val in self._saved_props.items():
@@ -510,7 +553,7 @@ class CameraBuffer:
                 self.camera.set(prop, val)
             except Exception:
                 pass
-        logger.info(f"Re-applied saved camera config after reconnect: {self.source}")
+        logger.info(f"Re-applied saved camera config after reconnect: {self.source} | props={self._saved_props}")
 
     def update_prop(self, prop, value):
         """Update a camera property and save it for reconnect persistence."""

@@ -896,50 +896,37 @@ document.addEventListener('DOMContentLoaded', function() {
             toggleBtn.textContent = "Resume";
             toggleBtn.classList.add("stopped");
             stopAutoRefresh();
-            counter.textContent = "Paused";
+            updateCounter(); // show current page instead of "Paused"
             scheduleAutoResume();
         }
     };
 
     // Navigation buttons (page navigation)
-    document.getElementById("timeline-first").addEventListener('click', () => {
+    async function pauseAndNav(getPage) {
         stopAutoRefresh();
         autoUpdate = false;
         window.timelineAutoUpdate = false;
         toggleBtn.textContent = "Resume";
         toggleBtn.classList.add("stopped");
-        loadPage(totalPages - 1); // Oldest page
+        await updatePageCount(); // ensure totalPages is fresh
+        loadPage(getPage());
         scheduleAutoResume();
+    }
+
+    document.getElementById("timeline-first").addEventListener('click', () => {
+        pauseAndNav(() => totalPages - 1); // Oldest page
     });
 
     document.getElementById("timeline-prev").addEventListener('click', () => {
-        stopAutoRefresh();
-        autoUpdate = false;
-        window.timelineAutoUpdate = false;
-        toggleBtn.textContent = "Resume";
-        toggleBtn.classList.add("stopped");
-        loadPage(Math.min(totalPages - 1, currentPage + 1)); // Older page
-        scheduleAutoResume();
+        pauseAndNav(() => Math.min(totalPages - 1, currentPage + 1)); // Older page
     });
 
     document.getElementById("timeline-next").addEventListener('click', () => {
-        stopAutoRefresh();
-        autoUpdate = false;
-        window.timelineAutoUpdate = false;
-        toggleBtn.textContent = "Resume";
-        toggleBtn.classList.add("stopped");
-        loadPage(Math.max(0, currentPage - 1)); // Newer page
-        scheduleAutoResume();
+        pauseAndNav(() => Math.max(0, currentPage - 1)); // Newer page
     });
 
     document.getElementById("timeline-last").addEventListener('click', () => {
-        stopAutoRefresh();
-        autoUpdate = false;
-        window.timelineAutoUpdate = false;
-        toggleBtn.textContent = "Resume";
-        toggleBtn.classList.add("stopped");
-        loadPage(0); // Latest page
-        scheduleAutoResume();
+        pauseAndNav(() => 0); // Latest page
     });
 
     // Update page count periodically

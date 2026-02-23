@@ -107,6 +107,22 @@ function updateStatusUI(data) {
     setVerbose('v-ext', 'EXT');
     setVerbose('v-bud', 'BUD');
     setVerbose('v-dwt', 'DWT');
+
+    // Populate OK/NG config inputs from verbose data (skip if user is editing)
+    const setInput = (id, key) => {
+        const el = document.getElementById(id);
+        if (el && document.activeElement !== el && v[key] !== undefined && v[key] !== null) {
+            el.value = v[key];
+        }
+    };
+    setInput('ok-offset-delay', 'OOD');
+    setInput('ok-duration-pulses', 'ODP');
+    setInput('ok-duration-percent', 'ODL');
+    setInput('ok-encoder-factor', 'OEF');
+    setInput('ng-offset-delay', 'NOD');
+    setInput('ng-duration-pulses', 'NDP');
+    setInput('ng-duration-percent', 'NDL');
+    setInput('ng-encoder-factor', 'NEF');
 }
 
 // Server-Sent Events for real-time status updates

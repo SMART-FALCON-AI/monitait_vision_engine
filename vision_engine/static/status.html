@@ -428,50 +428,25 @@
                 <!-- Basic Controls -->
                 <div class="control-section">
                     <h3 data-i18n="basic_controls">Basic Controls</h3>
-                    <div class="control-grid" style="grid-template-columns: 1fr 1fr;">
-                        <div class="control-item" style="display: grid; grid-template-rows: repeat(3, 1fr); gap: 10px;">
-                            <div class="control-item">
-                                <button class="control-button" onclick="sendCommand('U_ON_B_ON')">Both On</button>
-                                <div class="control-response" id="cmd-U_ON_B_ON-response"></div>
-                            </div>
-                            <div class="control-item" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                                <div>
-                                    <button class="control-button" onclick="sendCommand('U_ON_B_OFF')">U On, B Off</button>
-                                    <div class="control-response" id="cmd-U_ON_B_OFF-response"></div>
-                                </div>
-                                <div>
-                                    <button class="control-button" onclick="sendCommand('B_ON_U_OFF')">B On, U Off</button>
-                                    <div class="control-response" id="cmd-B_ON_U_OFF-response"></div>
-                                </div>
-                            </div>
-                            <div class="control-item">
-                                <button class="control-button" onclick="sendCommand('B_OFF_U_OFF')">Both Off</button>
-                                <div class="control-response" id="cmd-B_OFF_U_OFF-response"></div>
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label" data-i18n="upper_pwm">Upper PWM Value (0-255)</div>
-                                <input type="number" class="control-input" id="pwm-up" min="0" max="255" value="255">
-                                <button class="control-button" onclick="sendCommand('U_SET_PWM', document.getElementById('pwm-up').value)">Set Upper PWM</button>
-                                <div class="control-response" id="cmd-U_SET_PWM-response"></div>
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label" data-i18n="bottom_pwm">Bottom PWM Value (0-255)</div>
-                                <input type="number" class="control-input" id="pwm-down" min="0" max="255" value="255">
-                                <button class="control-button" onclick="sendCommand('B_SET_PWM', document.getElementById('pwm-down').value)">Set Bottom PWM</button>
-                                <div class="control-response" id="cmd-B_SET_PWM-response"></div>
-                            </div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('U_ON_B_ON')">Both On</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('U_ON_B_OFF')">U On, B Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('B_ON_U_OFF')">B On, U Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('B_OFF_U_OFF')">Both Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('RESET_ENCODER')">Reset Encoder</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('WARNING_ON')">Warning On</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('WARNING_OFF')">Warning Off</button>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 500px;">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;" data-i18n="upper_pwm">Upper PWM (0-255)</span>
+                            <input type="number" class="control-input" id="pwm-up" min="0" max="255" value="255" style="margin: 0; padding: 4px 6px; width: 70px; font-size: 12px;">
+                            <button class="control-button" style="width: auto; padding: 4px 10px; font-size: 11px;" onclick="sendCommand('U_SET_PWM', document.getElementById('pwm-up').value)">Set</button>
                         </div>
-                        <div class="control-item" style="display: grid; grid-template-rows: repeat(3, 1fr); gap: 10px;">
-                            <div class="control-item">
-                                <button class="control-button" onclick="sendCommand('RESET_ENCODER')">Reset Encoder</button>
-                                <div class="control-response" id="cmd-RESET_ENCODER-response"></div>
-                            </div>
-                            <div class="control-item">
-                                <div class="control-label" data-i18n="warning_led">Warning LED</div>
-                                <button class="control-button" onclick="sendCommand('WARNING_ON')">Warning On</button>
-                                <button class="control-button" onclick="sendCommand('WARNING_OFF')" style="margin-top: 5px;">Warning Off</button>
-                                <div class="control-response" id="cmd-WARNING-response"></div>
-                            </div>
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;" data-i18n="bottom_pwm">Bottom PWM (0-255)</span>
+                            <input type="number" class="control-input" id="pwm-down" min="0" max="255" value="255" style="margin: 0; padding: 4px 6px; width: 70px; font-size: 12px;">
+                            <button class="control-button" style="width: auto; padding: 4px 10px; font-size: 11px;" onclick="sendCommand('B_SET_PWM', document.getElementById('pwm-down').value)">Set</button>
                         </div>
                     </div>
                 </div>
@@ -606,31 +581,31 @@
                     <h3 data-i18n="ok_config">OK Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label" data-i18n="ok_counter_adj">OK Counter Adjustment <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_counter_adj">Subtract from the hardware counter to correct miscounts. Use negative values to add.</span></span></div>
+                            <div class="control-label"><span data-i18n="ok_counter_adj">OK Counter Adjustment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_counter_adj">Subtract from the hardware counter to correct miscounts. Use negative values to add.</span></span></div>
                             <input type="number" class="control-input" id="ok-adjust" value="0">
                             <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)">Set</button>
                             <div class="control-response" id="cmd-OK_ADJUST-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds) <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_offset_delay">Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.</span></span></div>
+                            <div class="control-label"><span data-i18n="offset_delay">Offset Delay (milliseconds)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_offset_delay">Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.</span></span></div>
                             <input type="number" class="control-input" id="ok-offset-delay" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)">Set</button>
                             <div class="control-response" id="cmd-OK_OFFSET_DELAY-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each) <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_pulses">Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.</span></span></div>
+                            <div class="control-label"><span data-i18n="duration_pulses">Duration Pulses (16us each)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_pulses">Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.</span></span></div>
                             <input type="number" class="control-input" id="ok-duration-pulses" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)">Set</button>
                             <div class="control-response" id="cmd-OK_DURATION_PULSES-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="duration_percent">Duration Percent <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_percent">Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.</span></span></div>
+                            <div class="control-label"><span data-i18n="duration_percent">Duration Percent</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_percent">Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.</span></span></div>
                             <input type="number" class="control-input" id="ok-duration-percent" min="0" max="100" value="0">
                             <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)">Set</button>
                             <div class="control-response" id="cmd-OK_DURATION_PERCENT-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder_factor">Multiplier for encoder counts per detection. Default 1 = one count per product.</span></span></div>
+                            <div class="control-label"><span data-i18n="encoder_factor">Encoder Factor</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder_factor">Multiplier for encoder counts per detection. Default 1 = one count per product.</span></span></div>
                             <input type="number" class="control-input" id="ok-encoder-factor" value="0">
                             <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)">Set</button>
                             <div class="control-response" id="cmd-OK_ENCODER_FACTOR-response"></div>
@@ -643,31 +618,31 @@
                     <h3 data-i18n="ng_config">NG Configuration</h3>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label" data-i18n="ng_counter_adj">NG Counter Adjustment <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_counter_adj">Subtract from the hardware counter to correct miscounts. Use negative values to add.</span></span></div>
+                            <div class="control-label"><span data-i18n="ng_counter_adj">NG Counter Adjustment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_counter_adj">Subtract from the hardware counter to correct miscounts. Use negative values to add.</span></span></div>
                             <input type="number" class="control-input" id="ng-adjust" value="0">
                             <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)">Set</button>
                             <div class="control-response" id="cmd-NG_ADJUST-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="offset_delay">Offset Delay (milliseconds) <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_offset_delay">Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.</span></span></div>
+                            <div class="control-label"><span data-i18n="offset_delay">Offset Delay (milliseconds)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_offset_delay">Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.</span></span></div>
                             <input type="number" class="control-input" id="ng-offset-delay" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)">Set</button>
                             <div class="control-response" id="cmd-NG_OFFSET_DELAY-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="duration_pulses">Duration Pulses (16us each) <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_pulses">Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.</span></span></div>
+                            <div class="control-label"><span data-i18n="duration_pulses">Duration Pulses (16us each)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_pulses">Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.</span></span></div>
                             <input type="number" class="control-input" id="ng-duration-pulses" min="0" value="0">
                             <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)">Set</button>
                             <div class="control-response" id="cmd-NG_DURATION_PULSES-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="duration_percent">Duration Percent <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_percent">Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.</span></span></div>
+                            <div class="control-label"><span data-i18n="duration_percent">Duration Percent</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_percent">Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.</span></span></div>
                             <input type="number" class="control-input" id="ng-duration-percent" min="0" max="100" value="0">
                             <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)">Set</button>
                             <div class="control-response" id="cmd-NG_DURATION_PERCENT-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label" data-i18n="encoder_factor">Encoder Factor <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder_factor">Multiplier for encoder counts per detection. Default 1 = one count per product.</span></span></div>
+                            <div class="control-label"><span data-i18n="encoder_factor">Encoder Factor</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder_factor">Multiplier for encoder counts per detection. Default 1 = one count per product.</span></span></div>
                             <input type="number" class="control-input" id="ng-encoder-factor" value="0">
                             <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)">Set</button>
                             <div class="control-response" id="cmd-NG_ENCODER_FACTOR-response"></div>
