@@ -494,8 +494,19 @@ except Exception as e:
 # Startup
 # =============================================================================
 
+# Load saved camera settings BEFORE creating cameras so they initialize correctly
+_startup_cam_configs = {}
+try:
+    _startup_config = load_service_config()
+    if _startup_config and "cameras" in _startup_config:
+        _startup_cam_configs = _startup_config["cameras"]
+        logger.info(f"Pre-loaded camera configs for {len(_startup_cam_configs)} camera(s)")
+except Exception as e:
+    logger.warning(f"Could not pre-load camera config: {e}")
+
 watcher = ArduinoSocket(
     camera_paths=DETECTED_CAMERAS if DETECTED_CAMERAS else None,
+    camera_configs=_startup_cam_configs,
     serial_port=WATCHER_USB,
     serial_baudrate=SERIAL_BAUDRATE
 )

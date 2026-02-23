@@ -396,7 +396,10 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
     return config
 
 def apply_camera_config_from_saved(cam, saved_config):
-    """Apply saved configuration to camera and store for reconnect persistence."""
+    """Apply configuration to a running camera (runtime changes from UI/API).
+
+    Also used at startup for IP cameras added after initial USB camera creation.
+    """
     if cam is None or saved_config is None:
         return
 
@@ -407,8 +410,7 @@ def apply_camera_config_from_saved(cam, saved_config):
     cam.roi_xmax = saved_config.get('roi_xmax', 1280)
     cam.roi_ymax = saved_config.get('roi_ymax', 720)
 
-    # Apply OpenCV settings and store in _saved_props for reconnect persistence
-    # Order matters: disable auto-exposure first, then set manual values
+    # Apply OpenCV settings and update _saved_props for reconnect persistence
     prop_map = {
         'exposure': cv2.CAP_PROP_EXPOSURE,
         'gain': cv2.CAP_PROP_GAIN,
@@ -421,24 +423,14 @@ def apply_camera_config_from_saved(cam, saved_config):
         try:
             # For USB cameras: disable auto-exposure before setting manual values
             if not getattr(cam, 'is_ip_camera', False):
-                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # aperture priority (reset)
-                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # manual mode
-            applied = {}
+                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             for key, prop in prop_map.items():
                 if key in saved_config:
                     cam.camera.set(prop, saved_config[key])
                     if hasattr(cam, '_saved_props'):
                         cam._saved_props[prop] = saved_config[key]
-                    applied[key] = saved_config[key]
-            # Verify: read back values to confirm they took effect
-            verify = {}
-            for key, prop in prop_map.items():
-                if key in applied:
-                    actual = int(cam.camera.get(prop))
-                    verify[key] = actual
-                    if actual != applied[key]:
-                        logger.warning(f"Camera {key}: set {applied[key]} but got {actual}")
-            logger.info(f"Applied saved camera settings: {applied} | Readback: {verify}")
+            logger.info(f"Applied camera config: { {k: saved_config[k] for k in prop_map if k in saved_config} }")
         except Exception as e:
             logger.error(f"Error applying camera config: {e}")
 
@@ -458,77 +450,76 @@ def format_relative_time(timestamp):
 
 
 class CameraBuffer:
-    def __init__(self, source, exposure, gain) -> None:
+    def __init__(self, source, exposure=100, gain=100, brightness=100,
+                 contrast=0, saturation=50, fps=10, roi_config=None) -> None:
         self.source = source
         self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
 
         # Initialize camera with appropriate backend
         if self.is_ip_camera:
-            # IP camera - use default backend (FFMPEG for streams)
             self.camera = cv2.VideoCapture(source)
             logger.info(f"Initializing IP camera: {source.split('@')[-1] if '@' in source else source}")
         else:
-            # USB/V4L2 camera
             self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
             logger.info(f"Initializing USB camera: {source}")
 
-        # Set properties
+        # Set resolution
         self.camera.set(cv2.CAP_PROP_FPS, 30)
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
         if self.is_ip_camera:
-            # IP camera settings (limited control via RTSP)
-            # Note: Not all IP cameras support these settings via OpenCV
             self.camera.set(cv2.CAP_PROP_BRIGHTNESS, IP_CAMERA_BRIGHTNESS)
             self.camera.set(cv2.CAP_PROP_CONTRAST, IP_CAMERA_CONTRAST)
             self.camera.set(cv2.CAP_PROP_SATURATION, IP_CAMERA_SATURATION)
-            logger.info(f"IP camera settings - Brightness: {IP_CAMERA_BRIGHTNESS}, Contrast: {IP_CAMERA_CONTRAST}, Saturation: {IP_CAMERA_SATURATION}")
         else:
-            # USB camera specific settings
+            # USB camera: set format, disable auto-exposure, apply saved settings
             self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J', 'P', 'G'))
             self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
             self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
             self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
-            self.camera.set(cv2.CAP_PROP_BRIGHTNESS, 100)
-            self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
-            self.camera.set(cv2.CAP_PROP_SATURATION, 50)
-            self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
-            self.camera.set(cv2.CAP_PROP_GAIN, gain)
-            self.camera.set(cv2.CAP_PROP_GAMMA, 1)
             self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-            self.camera.set(cv2.CAP_PROP_CONTRAST, 0)
+            self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
+            self.camera.set(cv2.CAP_PROP_GAMMA, 1)
+            self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
+            self.camera.set(cv2.CAP_PROP_GAIN, gain)
+            self.camera.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
+            self.camera.set(cv2.CAP_PROP_CONTRAST, contrast)
+            self.camera.set(cv2.CAP_PROP_SATURATION, saturation)
+            self.camera.set(cv2.CAP_PROP_FPS, fps)
 
         success, frame = self.camera.retrieve(0)
         self.success = success
         self.frame = frame
         self.stop = False
-        # ROI (Region of Interest) settings - None means full frame
-        self.roi_enabled = False
-        self.roi_xmin = 0
-        self.roi_ymin = 0
-        self.roi_xmax = 1280  # Default to full width
-        self.roi_ymax = 720   # Default to full height
-        # Saved camera properties — re-applied after reconnect.
-        # NOT snapshotted here because saved config hasn't been applied yet;
-        # apply_camera_config_from_saved() will populate _saved_props with correct values.
-        self._saved_props = {}
-        threading.Thread(target=self.buffer).start()
 
-    def _save_current_props(self):
-        """Snapshot current camera properties so they can be re-applied after reconnect."""
-        try:
-            self._saved_props = {
-                cv2.CAP_PROP_EXPOSURE: int(self.camera.get(cv2.CAP_PROP_EXPOSURE)),
-                cv2.CAP_PROP_GAIN: int(self.camera.get(cv2.CAP_PROP_GAIN)),
-                cv2.CAP_PROP_BRIGHTNESS: int(self.camera.get(cv2.CAP_PROP_BRIGHTNESS)),
-                cv2.CAP_PROP_CONTRAST: int(self.camera.get(cv2.CAP_PROP_CONTRAST)),
-                cv2.CAP_PROP_SATURATION: int(self.camera.get(cv2.CAP_PROP_SATURATION)),
-                cv2.CAP_PROP_FPS: int(self.camera.get(cv2.CAP_PROP_FPS)),
-            }
-        except Exception:
-            pass
+        # ROI (Region of Interest) settings
+        if roi_config:
+            self.roi_enabled = roi_config.get('roi_enabled', False)
+            self.roi_xmin = roi_config.get('roi_xmin', 0)
+            self.roi_ymin = roi_config.get('roi_ymin', 0)
+            self.roi_xmax = roi_config.get('roi_xmax', 1280)
+            self.roi_ymax = roi_config.get('roi_ymax', 720)
+        else:
+            self.roi_enabled = False
+            self.roi_xmin = 0
+            self.roi_ymin = 0
+            self.roi_xmax = 1280
+            self.roi_ymax = 720
+
+        # Store user-configured values for reconnect persistence and save-to-disk.
+        # These are the SOURCE OF TRUTH — not camera.get() which may differ.
+        self._saved_props = {
+            cv2.CAP_PROP_EXPOSURE: exposure,
+            cv2.CAP_PROP_GAIN: gain,
+            cv2.CAP_PROP_BRIGHTNESS: brightness,
+            cv2.CAP_PROP_CONTRAST: contrast,
+            cv2.CAP_PROP_SATURATION: saturation,
+            cv2.CAP_PROP_FPS: fps,
+        }
+        logger.info(f"Camera {source}: exposure={exposure}, gain={gain}, brightness={brightness}, contrast={contrast}, saturation={saturation}, fps={fps}")
+        threading.Thread(target=self.buffer).start()
 
     def _apply_saved_props(self):
         """Re-apply saved camera properties after reconnect."""

@@ -367,11 +367,13 @@ def set_app(app):
 
 
 class ArduinoSocket:
-    def __init__(self, camera_paths: List[str] = None, serial_port=None, serial_baudrate=None):
+    def __init__(self, camera_paths: List[str] = None, camera_configs: dict = None,
+                 serial_port=None, serial_baudrate=None):
         """Initialize ArduinoSocket with dynamic camera support.
 
         Args:
             camera_paths: List of video device paths to use. If None, uses auto-detected cameras.
+            camera_configs: Dict of saved per-camera settings from config file, keyed by cam_id string.
             serial_port: Serial port path (default from env)
             serial_baudrate: Serial baud rate (default from env)
         """
@@ -466,9 +468,20 @@ class ArduinoSocket:
             logger.info("No USB cameras configured. Use IP Camera Discovery to add IP cameras.")
 
         # Initialize cameras dynamically (1-indexed for backward compatibility)
+        _cam_cfgs = camera_configs or {}
         for idx, cam_path in enumerate(camera_paths, start=1):
             try:
-                cam = CameraBuffer(cam_path, exposure=100, gain=100)
+                cc = _cam_cfgs.get(str(idx), {})
+                cam = CameraBuffer(
+                    cam_path,
+                    exposure=cc.get('exposure', 100),
+                    gain=cc.get('gain', 100),
+                    brightness=cc.get('brightness', 100),
+                    contrast=cc.get('contrast', 0),
+                    saturation=cc.get('saturation', 50),
+                    fps=cc.get('fps', 10),
+                    roi_config=cc if cc.get('roi_enabled') else None,
+                )
                 self.cameras[idx] = cam
                 logger.info(f"Camera {idx} initialized: {cam_path} (success={cam.success})")
 
