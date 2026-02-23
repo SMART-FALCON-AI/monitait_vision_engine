@@ -102,6 +102,7 @@ function initAudioContext() {
     }
 
     // Try silent unlock first (works if site is in Chrome's autoplay allowlist)
+    // For industrial kiosks: no blocking overlay — show a small toast instead
     window.addEventListener('load', function() {
         initAudioContext();
         // Give browser a moment to resolve autoplay policy
@@ -110,24 +111,27 @@ function initAudioContext() {
                 console.log('[Audio] Unlocked automatically (allowlisted)');
                 return;
             }
-            // Not allowlisted — show click-to-start overlay
-            const overlay = document.createElement('div');
-            overlay.id = 'audio-unlock-overlay';
-            overlay.style.cssText =
-                'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.7);' +
-                'display:flex;align-items:center;justify-content:center;cursor:pointer;';
-            overlay.innerHTML =
-                '<div style="background:#1e293b;border:2px solid #3b82f6;border-radius:16px;' +
-                'padding:40px 60px;text-align:center;color:#e2e8f0;font-family:Inter,sans-serif;">' +
-                '<div style="font-size:48px;margin-bottom:16px;">🔊</div>' +
-                '<div style="font-size:20px;font-weight:600;margin-bottom:8px;">MonitaQC</div>' +
-                '<div style="font-size:14px;color:#94a3b8;">Click anywhere to enable audio alerts</div>' +
-                '</div>';
-            overlay.addEventListener('click', function() {
+            // Not allowlisted — show small non-blocking toast at bottom
+            const toast = document.createElement('div');
+            toast.id = 'audio-unlock-overlay';
+            toast.style.cssText =
+                'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:99999;' +
+                'background:#1e293b;border:1px solid #3b82f6;border-radius:8px;' +
+                'padding:10px 20px;color:#e2e8f0;font-family:Inter,sans-serif;font-size:13px;' +
+                'cursor:pointer;opacity:0.9;transition:opacity 0.3s;';
+            toast.textContent = '🔊 Tap to enable audio alerts';
+            toast.addEventListener('click', function() {
                 unlockAudio();
-                overlay.remove();
+                toast.remove();
             }, { once: true });
-            document.body.appendChild(overlay);
+            document.body.appendChild(toast);
+            // Auto-fade after 8 seconds (doesn't block anything)
+            setTimeout(function() {
+                if (toast.parentNode) {
+                    toast.style.opacity = '0';
+                    setTimeout(function() { if (toast.parentNode) toast.remove(); }, 500);
+                }
+            }, 8000);
         }, 500);
     });
 
@@ -934,16 +938,32 @@ document.addEventListener('DOMContentLoaded', function() {
     updatePageCount();
 
     // Zoom controls
-    document.getElementById("timeline-zoom-in").addEventListener('click', panzoom.zoomIn);
-    document.getElementById("timeline-zoom-out").addEventListener('click', panzoom.zoomOut);
+    document.getElementById("timeline-zoom-in").addEventListener('click', () => { panzoom.zoomIn(); scheduleZoomReset(); });
+    document.getElementById("timeline-zoom-out").addEventListener('click', () => { panzoom.zoomOut(); scheduleZoomReset(); });
     document.getElementById("timeline-reset-zoom").addEventListener('click', panzoom.reset);
 
+    // Auto-reset zoom after 30s of inactivity (industrial kiosk — no one to un-zoom)
+    let _zoomResetTimer = null;
+    function scheduleZoomReset() {
+        if (_zoomResetTimer) clearTimeout(_zoomResetTimer);
+        _zoomResetTimer = setTimeout(() => {
+            if (panzoom.getScale() !== 1) {
+                panzoom.reset();
+                console.log('[Timeline] Zoom auto-reset after inactivity');
+            }
+        }, 30000);
+    }
+
     // Wheel zoom
-    wrapper.addEventListener("wheel", panzoom.zoomWithWheel);
+    wrapper.addEventListener("wheel", function(e) {
+        panzoom.zoomWithWheel(e);
+        scheduleZoomReset();
+    });
 
     // Double-click to toggle zoom
     slide.addEventListener("dblclick", () => {
         panzoom.zoom(panzoom.getScale() === 1 ? 2 : 1);
+        scheduleZoomReset();
     });
 
     // Click-to-view: click on a frame to view in gallery or download raw image
