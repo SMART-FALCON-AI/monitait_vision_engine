@@ -74,12 +74,6 @@ services:
     restart: "always"
     deploy:
       replicas: ${YOLO_REPLICAS:-1}
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   # TimescaleDB PostgreSQL Database
   timescaledb:
