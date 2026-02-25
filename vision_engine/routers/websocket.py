@@ -103,6 +103,7 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
             obj_filters = tl_config.get('object_filters', {})
             procedures = tl_config.get('procedures', [])
         except Exception:
+            tl_config = None
             quality = 85
             frames_per_page = 10
             image_rotation = 0
@@ -144,7 +145,21 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
         total_pages = max(1, (max_total_frames + frames_per_page - 1) // frames_per_page)
         safe_page = page if 0 <= page < total_pages else 0
 
-        sorted_cam_ids = sorted(camera_frames_raw.keys())
+        camera_order = tl_config.get('camera_order', 'normal') if tl_config else 'normal'
+        if camera_order == 'custom':
+            custom_order_str = tl_config.get('custom_camera_order', '') if tl_config else ''
+            order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
+            if order_list:
+                def _custom_cam_key(cid):
+                    try:
+                        return order_list.index(cid)
+                    except ValueError:
+                        return len(order_list) + cid
+                sorted_cam_ids = sorted(camera_frames_raw.keys(), key=_custom_cam_key)
+            else:
+                sorted_cam_ids = sorted(camera_frames_raw.keys())
+        else:
+            sorted_cam_ids = sorted(camera_frames_raw.keys(), reverse=(camera_order == 'reverse'))
         cam_page_slices = {}
         num_columns = 0
 
