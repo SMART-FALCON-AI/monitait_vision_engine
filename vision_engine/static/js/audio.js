@@ -1098,6 +1098,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const bufferValue = document.getElementById('timeline-buffer-value');
     const applyBtn = document.getElementById('timeline-apply-config');
 
+    // Show/hide custom order input based on radio selection
+    document.querySelectorAll('input[name="camera-order"]').forEach(radio => {
+        radio.addEventListener('change', () => {
+            const container = document.getElementById('custom-camera-order-container');
+            if (container) container.style.display = radio.value === 'custom' ? 'block' : 'none';
+        });
+    });
+
     // Load current in-memory configuration from server
     async function loadSavedConfig() {
         try {
@@ -1114,6 +1122,17 @@ document.addEventListener('DOMContentLoaded', function() {
             if (cfg.buffer_size) {
                 bufferSlider.value = cfg.buffer_size;
                 bufferValue.textContent = cfg.buffer_size;
+            }
+            // Restore camera order radio + custom input
+            if (cfg.camera_order) {
+                const radio = document.querySelector(`input[name="camera-order"][value="${cfg.camera_order}"]`);
+                if (radio) radio.checked = true;
+                const container = document.getElementById('custom-camera-order-container');
+                if (container) container.style.display = cfg.camera_order === 'custom' ? 'block' : 'none';
+            }
+            if (cfg.custom_camera_order) {
+                const input = document.getElementById('custom-camera-order');
+                if (input) input.value = cfg.custom_camera_order;
             }
             if (cfg.object_filters) {
                 const filters = cfg.object_filters;
@@ -1176,6 +1195,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({
                     show_bounding_boxes: audioSettings.showBoundingBoxes !== false,
                     camera_order: cameraOrder,
+                    custom_camera_order: cameraOrder === 'custom' ? (document.getElementById('custom-camera-order').value || '') : '',
                     image_quality: parseInt(quality),
                     num_rows: parseInt(rows),
                     buffer_size: parseInt(buffer),

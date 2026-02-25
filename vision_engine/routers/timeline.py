@@ -244,7 +244,21 @@ def get_timeline_composite(request: Request):
             except ValueError:
                 return 0
         camera_order = tl_config.get('camera_order', 'normal') if tl_config else 'normal'
-        all_keys.sort(key=extract_cam_id, reverse=(camera_order == 'reverse'))
+        if camera_order == 'custom':
+            custom_order_str = tl_config.get('custom_camera_order', '') if tl_config else ''
+            order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
+            if order_list:
+                def _custom_key(key):
+                    cid = extract_cam_id(key)
+                    try:
+                        return order_list.index(cid)
+                    except ValueError:
+                        return len(order_list) + cid
+                all_keys.sort(key=_custom_key)
+            else:
+                all_keys.sort(key=extract_cam_id)
+        else:
+            all_keys.sort(key=extract_cam_id, reverse=(camera_order == 'reverse'))
 
         # Build one horizontal row per camera (left=oldest, right=newest)
         camera_rows = []
@@ -380,7 +394,20 @@ async def timeline_image(request: Request, page: int = 0):
         # Build one horizontal row per camera for this page
         # Also collect per-column metadata across all cameras
         camera_order = tl_config.get('camera_order', 'normal')
-        sorted_cam_ids = sorted(camera_frames_raw.keys(), reverse=(camera_order == 'reverse'))
+        if camera_order == 'custom':
+            custom_order_str = tl_config.get('custom_camera_order', '')
+            order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
+            if order_list:
+                def _custom_cam_key(cid):
+                    try:
+                        return order_list.index(cid)
+                    except ValueError:
+                        return len(order_list) + cid
+                sorted_cam_ids = sorted(camera_frames_raw.keys(), key=_custom_cam_key)
+            else:
+                sorted_cam_ids = sorted(camera_frames_raw.keys())
+        else:
+            sorted_cam_ids = sorted(camera_frames_raw.keys(), reverse=(camera_order == 'reverse'))
         cam_page_slices = {}  # cam_id -> list of (ts, jpeg_bytes, detections, meta)
         num_columns = 0
 
@@ -596,6 +623,7 @@ async def update_timeline_config(request: Request):
         # Extract configuration values
         show_bounding_boxes = data.get('show_bounding_boxes', True)  # Global bbox toggle
         camera_order = data.get('camera_order', 'normal')
+        custom_camera_order = data.get('custom_camera_order', '')
         image_quality = data.get('image_quality', 85)
         num_rows = data.get('num_rows', 10)
         buffer_size = data.get('buffer_size', 20)  # Total frames to store
@@ -612,6 +640,7 @@ async def update_timeline_config(request: Request):
         request.app.state.timeline_config = {
             'show_bounding_boxes': show_bounding_boxes,
             'camera_order': camera_order,
+            'custom_camera_order': custom_camera_order,
             'image_quality': image_quality,
             'num_rows': num_rows,
             'buffer_size': buffer_size,

@@ -12,7 +12,7 @@ services:
       - /dev:/dev  # Linux: serial (/dev/ttyUSB*), cameras (/dev/video*), barcode scanner (/dev/input/*)
     ports:
       - "80:5050"  # Vision engine status page
-    privileged: ${PRIVILEGED:-false}
+    privileged: ${PRIVILEGED:-true}
     # Set by start.py: true on Linux (device access), false on Windows
     networks:
       - main_network
