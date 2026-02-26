@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.11.1] - 2026-02-26
+
+### Fixed
+- **Autoscaler `_ok_streak` crash**: Added missing `global _ok_streak` declaration in `_autoscaler()` — variable was treated as local, causing `UnboundLocalError` on every autoscaler cycle
+- **Capture error missing traceback**: `Capture error:` log now includes full `traceback.format_exc()` to identify the exact source of recurring "timestamp too large to convert to C _PyTime_t" errors
+- **`time.sleep` timestamp overflow**: Clamped `phase.delay` to 10s max in the capture loop to prevent `OverflowError` from excessively large delay values
+- **Camera restart skipping `grab()`**: `restart_camera()` called `retrieve()` without `grab()` first, causing all cameras to report `success=False` after every restart until the buffer thread caught up
+
+### Added
+- **GPU support for YOLO inference**: Added NVIDIA GPU device reservation to YOLO inference Docker service
+- **Custom camera order**: Cameras can now be reordered in the UI and the order is persisted and applied in the WebSocket timeline view
+
 ## [3.10.4] - 2026-02-22
 
 ### Added
