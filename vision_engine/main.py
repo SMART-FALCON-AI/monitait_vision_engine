@@ -824,7 +824,7 @@ def _autoscaler():
         WARNING  — queues building up         → double current resources
         CRITICAL — queues overflowing         → quadruple current resources
     """
-    global INFERENCE_WORKERS
+    global INFERENCE_WORKERS, _ok_streak
     import services.watcher as _watcher_mod
     from services.watcher import _disk_queue, add_disk_writers
 

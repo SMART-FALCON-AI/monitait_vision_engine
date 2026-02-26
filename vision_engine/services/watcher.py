@@ -21,6 +21,7 @@ import serial
 import requests
 import threading
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, Any, List
 
@@ -1265,9 +1266,9 @@ class ArduinoSocket:
                                 logger.info(f"Phase {phase_idx+1}/{num_phases}: {phase.light_mode}")
                                 last_light_mode = phase.light_mode
 
-                            # Wait for configured delay
+                            # Wait for configured delay (clamp to 10s max to prevent overflow)
                             if phase.delay > 0:
-                                time.sleep(phase.delay)
+                                time.sleep(min(phase.delay, 10.0))
 
                             # Clear signal before capture
                             self.clear_signal()
@@ -1321,7 +1322,7 @@ class ArduinoSocket:
                     }
                     _inference_queue.put(frames_data)  # Hot → cold spill. Never drops.
             except Exception as e:
-                logger.error(f"Capture error: {e}")
+                logger.error(f"Capture error: {e}\n{traceback.format_exc()}")
                 # Restart all cameras dynamically
                 for cam_id, cam in self.cameras.items():
                     if cam and hasattr(cam, 'restart_camera'):

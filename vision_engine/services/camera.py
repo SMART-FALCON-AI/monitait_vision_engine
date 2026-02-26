@@ -623,6 +623,8 @@ class CameraBuffer:
             self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
         # Re-apply saved camera properties
         self._apply_saved_props()
+        # grab() must be called before retrieve() to fill the internal buffer
+        self.camera.grab()
         success, frame = self.camera.retrieve(0)
         self.success = success
         self.frame = frame
