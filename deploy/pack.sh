@@ -88,9 +88,9 @@ rsync -a --progress \
     --exclude '*.tar.gz' \
     "$PROJECT_DIR/" "$STAGE_DIR/project/"
 
-# Copy the install script to root of archive
-cp "$SCRIPT_DIR/install.sh" "$STAGE_DIR/install.sh"
-chmod +x "$STAGE_DIR/install.sh"
+# setup.sh is copied as part of the project tree above (it lives at project root).
+# Make sure it's executable inside the staged archive.
+chmod +x "$STAGE_DIR/project/setup.sh" 2>/dev/null || true
 
 # ---- 4. Create archive ----
 echo ""
@@ -107,6 +107,6 @@ echo "==========================================="
 echo ""
 echo " Transfer this file to the remote machine, then run:"
 echo "   tar xzf ${PACK_NAME}.tar.gz"
-echo "   cd ${PACK_NAME}"
-echo "   sudo bash install.sh"
+echo "   cd ${PACK_NAME}/project"
+echo "   sudo bash setup.sh"
 echo ""

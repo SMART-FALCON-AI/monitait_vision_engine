@@ -12,7 +12,9 @@ import platform
 import subprocess
 import shutil
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+# start.py lives in deploy/, but operates on the project root (parent dir)
+# where docker-compose.yml, .env, and volumes/ live.
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV_FILE = os.path.join(PROJECT_DIR, ".env")
 
 

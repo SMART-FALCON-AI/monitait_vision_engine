@@ -1,6 +1,6 @@
 # MonitaQC - Universal Quality Control Platform
 
-**Version:** 3.10.0 | **Status:** Production-Ready | **Documentation:** [User Manual](USER_MANUAL.md) | [Audit Report](AUDIT_REPORT.md)
+**Version:** 3.10.0 | **Status:** Production-Ready | **Documentation:** [User Manual](docs/USER_MANUAL.md) | [Audit Report](docs/AUDIT_REPORT.md)
 
 **MonitaQC** is an industrial computer vision platform for automated quality control and product identification. Forked from PartQC Box Vision Engine, this project is the foundation for a unified quality control system.
 
@@ -96,10 +96,12 @@ MonitaQC/
 │   └── static/                #   Web UI (status page)
 ├── yolo_inference/            # YOLO AI inference service
 ├── timescaledb/               # Database init scripts
-├── deploy/                    # Offline deployment scripts
-├── start.py                   # Auto-detect OS/hardware & launch
-├── start.sh                   # Linux launcher (calls start.py)
-├── start.bat                  # Windows launcher (calls start.py)
+├── deploy/                    # Packer + launcher + startup scripts
+│   ├── pack.sh                #   Build an offline deployment archive
+│   ├── start.py               #   Auto-detect OS/hardware & run compose
+│   ├── start.sh               #   Linux launcher (calls start.py)
+│   └── start.bat              #   Windows launcher (calls start.py)
+├── setup.sh                   # Interactive installer (sudo bash setup.sh)
 └── docker-compose.yml         # Service orchestration
 ```
 
@@ -126,10 +128,10 @@ MonitaQC/
 3. **Start the application:**
    ```bash
    # Linux
-   ./start.sh
+   ./deploy/start.sh
 
    # Windows
-   start.bat
+   deploy\start.bat
    ```
 
    `start.py` will automatically:
@@ -166,15 +168,21 @@ docker compose up -d
 
 ### Offline Deployment
 
-For air-gapped servers, use the deployment scripts in `deploy/`:
+For air-gapped servers:
 
 ```bash
 # On a machine with internet: pack images
 ./deploy/pack.sh
 
-# On the target server: install from pack
-./deploy/install.sh
+# On the target server: extract, then run the interactive installer
+tar xzf monitaqc-v*-offline.tar.gz
+cd monitaqc-v*-offline/project
+sudo bash setup.sh
 ```
+
+`setup.sh` can also be double-clicked in the Ubuntu file manager
+(right-click → **Run as a Program**) — it re-launches itself in a
+terminal and prompts for your sudo password.
 
 ## Configuration
 

@@ -11,4 +11,8 @@ deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main 
     apt-get clean && rm -rf /var/lib/apt/lists/* 
 COPY requirements.txt /code/requirements.txt
 WORKDIR /code/
-RUN pip3 install -r requirements.txt
+RUN pip3 install --no-cache-dir setuptools wheel && \
+    pip3 install --no-cache-dir -r requirements.txt
+# Bundle source so the image is self-contained (registry/production use).
+# For local dev, mount `./vision_engine:/code` via compose override to shadow this.
+COPY . /code/
