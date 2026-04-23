@@ -1,0 +1,7 @@
+fastapi==0.115.0
+uvicorn==0.30.6
+python-multipart==0.0.9
+numpy==1.26.4
+scipy==1.14.1
+opencv-python-headless==4.10.0.84
+cupy-cuda12x==13.3.0 ; platform_machine == "x86_64"

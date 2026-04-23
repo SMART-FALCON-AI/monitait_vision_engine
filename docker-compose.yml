@@ -83,6 +83,42 @@ services:
               count: all
               capabilities: [gpu]
 
+  # Math Inference Service — pure-math measurement channels (FFT, gradients,
+  # morphology, band stats, tile anomalies, etc.). GPU reservation is SOFT
+  # (Compose v2 reservation semantics): uses GPU if present, falls back to
+  # CPU cleanly if not. Runtime backend auto-selected inside the container
+  # (CuPy → numpy). Register it in the Inference tab as a YOLO-type model
+  # with URL http://math_inference:4443/v1/math/analyze — no MVE code change.
+  math_inference:
+    image: math_inference
+    build: "./math_inference"
+    command: "uvicorn main:app --host 0.0.0.0 --port 4443 --workers ${MATH_WORKERS:-1}"
+    expose:
+      - 4443
+    volumes:
+      - ./math_inference:/code
+    environment:
+      - MATH_TILES_X=${MATH_TILES_X:-1}
+      - MATH_TILES_Y=${MATH_TILES_Y:-1}
+      - MATH_BANDS=${MATH_BANDS:-8}
+      - MATH_FFT_TOP_K=${MATH_FFT_TOP_K:-3}
+      - MATH_FLAT_FIELD_ENABLE=${MATH_FLAT_FIELD_ENABLE:-false}
+    networks:
+      - main_network
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: "always"
+    deploy:
+      replicas: ${MATH_REPLICAS:-1}
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
   # TimescaleDB PostgreSQL Database
   timescaledb:
     container_name: "monitait_timescaledb"
