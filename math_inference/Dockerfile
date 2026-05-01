@@ -19,6 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /code
 COPY requirements.txt /code/
-RUN pip install --break-system-packages -r requirements.txt
+# Ubuntu 22.04's pip (≈22.x) predates PEP 668 enforcement and doesn't accept
+# --break-system-packages; newer images (Ubuntu 24.04+) need it. Try with the
+# flag first, fall back to plain install so the Dockerfile works on both.
+RUN pip install --break-system-packages -r requirements.txt \
+ || pip install -r requirements.txt
 
 COPY . /code/

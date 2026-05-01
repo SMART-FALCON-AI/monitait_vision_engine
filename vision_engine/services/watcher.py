@@ -1394,9 +1394,28 @@ class ArduinoSocket:
                             text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
                             text_w, text_h = text_size
                             x, y = int(res['xmin']), int(res['ymin'])
-                            bottom_left = (x, y)
-                            cv2.rectangle(stream_frame[1], bottom_left, (x + text_w, y - text_h), (120, 120, 120), -1)
-                            cv2.putText(stream_frame[1], text, bottom_left, font, font_scale, font_color, thickness)
+                            # Clamp label inside the visible frame. When the bbox top sits at
+                            # y=0 (full-frame detections from the math module) the original
+                            # `y - text_h` puts the label above the canvas → invisible. Draw
+                            # inside-the-bbox in that case; also clamp x against the right edge.
+                            frame_h, frame_w = stream_frame[1].shape[:2]
+                            label_inside = (y - text_h - 4) < 0
+                            if label_inside:
+                                label_top = min(y + 2, max(0, frame_h - text_h - 6))
+                            else:
+                                label_top = y - text_h - 4
+                            label_x = min(max(x, 0), max(0, frame_w - text_w - 4))
+                            cv2.rectangle(
+                                stream_frame[1],
+                                (label_x, label_top),
+                                (label_x + text_w + 4, label_top + text_h + 4),
+                                (120, 120, 120), -1,
+                            )
+                            cv2.putText(
+                                stream_frame[1], text,
+                                (label_x + 2, label_top + text_h + 1),
+                                font, font_scale, font_color, thickness,
+                            )
 
                             # Calculate and save histogram for each detected object (if enabled)
                             if cfg.HISTOGRAM_ENABLED:

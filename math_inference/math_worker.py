@@ -14,6 +14,7 @@ The public API does not care which one is active.
 from __future__ import annotations
 
 import math
+import os
 import logging
 from typing import Any, Dict, List
 
@@ -24,32 +25,48 @@ import scipy.signal as _np_signal
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
-# Device auto-selection (mirrors torch's is_cuda_available pattern)
+# Device auto-selection (mirrors torch's is_cuda_available pattern).
+#
+# Honors MATH_DEVICE env (auto|cpu|cuda). On auto, tries CuPy with a STRONG
+# probe — a typed-array multiplication that forces NVRTC JIT compilation.
+# If JIT is broken (e.g. CUDA `runtime` base image lacks headers like
+# vector_types.h), this raises and we fall back to numpy cleanly.
 # --------------------------------------------------------------------------
 USING_GPU = False
 _cp = None
+_device_env = os.getenv("MATH_DEVICE", "auto").lower()
 
-try:
-    import cupy as _cp  # type: ignore
-    import cupyx.scipy.ndimage as _cp_ndimage  # type: ignore
-    import cupyx.scipy.signal as _cp_signal  # type: ignore
-
-    # Probe: will raise if no GPU or CUDA runtime is broken.
-    _cp.cuda.runtime.getDeviceCount()
-    _ = _cp.asarray([0.0]).sum().item()  # force a kernel launch
-
-    xp = _cp
-    ximg = _cp_ndimage
-    xsig = _cp_signal
-    USING_GPU = True
-    logger.info("math worker: GPU backend (CuPy)")
-except Exception as e:  # pragma: no cover - depends on runtime hardware
+if _device_env == "cpu":
     xp = np
     ximg = _np_ndimage
     xsig = _np_signal
-    logger.info(
-        f"math worker: CPU backend (numpy) — reason: {type(e).__name__}: {e}"
-    )
+    logger.info("math worker: CPU backend (forced via MATH_DEVICE=cpu)")
+else:
+    try:
+        import cupy as _cp  # type: ignore
+        import cupyx.scipy.ndimage as _cp_ndimage  # type: ignore
+        import cupyx.scipy.signal as _cp_signal  # type: ignore
+
+        # Probe 1: device visible.
+        _cp.cuda.runtime.getDeviceCount()
+        # Probe 2: NVRTC JIT works. The element-wise float32 multiply will trigger
+        # kernel compilation on first call — exposes missing CUDA headers in the
+        # runtime base image (vector_types.h, cuda_fp16.h chain).
+        _probe = _cp.asarray([1.0, 2.0, 3.0], dtype=_cp.float32) * 0.5
+        _ = float(_probe.sum().item())
+
+        xp = _cp
+        ximg = _cp_ndimage
+        xsig = _cp_signal
+        USING_GPU = True
+        logger.info("math worker: GPU backend (CuPy)")
+    except Exception as e:  # pragma: no cover - depends on runtime hardware
+        xp = np
+        ximg = _np_ndimage
+        xsig = _np_signal
+        logger.info(
+            f"math worker: CPU backend (numpy) — reason: {type(e).__name__}: {e}"
+        )
 
 
 def _to_host(a) -> np.ndarray:
