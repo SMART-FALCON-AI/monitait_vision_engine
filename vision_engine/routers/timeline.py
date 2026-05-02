@@ -492,8 +492,29 @@ async def timeline_image(request: Request, page: int = 0):
                                 cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
                                 label = f"{name} {confidence:.0%}"
                                 (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
-                                cv2.rectangle(thumb, (x1, y1 - lh - 4), (x1 + lw + 4, y1), (0, 255, 0), -1)
-                                cv2.putText(thumb, label, (x1 + 2, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+                                # Clamp label inside the thumbnail. Full-frame detections
+                                # (math-module channels touching y=0) used to put their
+                                # label at y = -lh, off-canvas. When there is no room
+                                # above the bbox draw the label inside the bbox top; also
+                                # clamp x against the right edge.
+                                fh, fw = thumb.shape[:2]
+                                if y1 - lh - 4 < 0:
+                                    label_top = min(y1 + 1, max(0, fh - lh - 6))
+                                    text_y = label_top + lh + 1
+                                else:
+                                    label_top = y1 - lh - 4
+                                    text_y = y1 - 2
+                                label_x = min(max(x1, 0), max(0, fw - lw - 4))
+                                cv2.rectangle(
+                                    thumb,
+                                    (label_x, label_top),
+                                    (label_x + lw + 4, label_top + lh + 4),
+                                    (0, 255, 0), -1,
+                                )
+                                cv2.putText(
+                                    thumb, label, (label_x + 2, text_y),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1,
+                                )
                             except Exception:
                                 pass
 
