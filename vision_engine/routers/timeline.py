@@ -552,12 +552,10 @@ async def timeline_image(request: Request, page: int = 0):
                                 x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
                                 y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
 
-                                # Whole-frame-ish detections (analyzer-agnostic rule):
-                                # if bbox covers ≥90% of the thumbnail area, route to
-                                # the side panel as key:value(conf) and skip both the
-                                # rectangle and the in-frame label. Their borders just
-                                # outline the entire thumbnail (visually noisy and
-                                # carry no spatial info).
+                                # If bbox covers ≥90% of the frame area, replace
+                                # rectangle+label with a key:value row in the
+                                # top-left overlay. Anything smaller draws as a
+                                # normal bbox.
                                 bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
                                 if bbox_area >= 0.9 * frame_area:
                                     panel_dets.append((name, confidence))
