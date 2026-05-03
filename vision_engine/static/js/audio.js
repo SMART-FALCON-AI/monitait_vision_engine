@@ -258,106 +258,82 @@ function narrateObject(objectName) {
 }
 
 // Knowledge base for the info-icon tooltip on each object filter card.
-// Tells the operator what the channel measures, what it catches, and what
-// kind of rule pattern it fits. Math channels use formula-based descriptions;
-// anything not recognized falls back to "from YOLO weights".
+// Math channel descriptions live in i18n.js under translations.<lang>.mathTips
+// — they're translatable per language. English is the canonical fallback;
+// any missing key falls back to English. YOLO classes get a generic
+// "trained-model class" message regardless of language.
+//
+// Terms used here are intentionally generic (no fabric-specific jargon like
+// warp/weft/loom): MVE is a general vision-inspection platform — same
+// channels apply to denim, tire-cord, knit, plastic film, glass, metal,
+// PCB, etc.
+
+function _t(key, fallback) {
+    try {
+        const dict = (typeof translations !== 'undefined') ? translations : {};
+        const cur = (typeof currentLang !== 'undefined') ? currentLang : 'en';
+        return (dict[cur] && dict[cur][key]) || (dict.en && dict.en[key]) || fallback;
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function _mathTip(key) {
+    try {
+        const dict = (typeof translations !== 'undefined') ? translations : {};
+        const cur = (typeof currentLang !== 'undefined') ? currentLang : 'en';
+        const tipsCur = dict[cur] && dict[cur].mathTips;
+        const tipsEn  = dict.en && dict.en.mathTips;
+        return (tipsCur && tipsCur[key]) || (tipsEn && tipsEn[key]) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function _formatTip(lines) {
+    return lines.map(s => '<div>' + s + '</div>').join('');
+}
+
 function getObjectInfo(name) {
-    // ------- exact-match math channel descriptions -------
-    const M = {
-        // Family A — global stats
-        'mean_L':       ['Math · global', 'Mean CIE L* over the whole frame.', 'Catches overall brightness drift.', 'Use: shade monitoring on solid-colored fabric.'],
-        'std_L':        ['Math · global', 'Stddev of L* — overall texture energy.', 'Drops on washed-out / foggy frames; rises on heavy texture or defects.', 'Use: detect texture loss.'],
-        'range_L':      ['Math · global', 'p99 − p01 of L* (robust dynamic range).', 'Catches dynamic-range collapse.', 'Use: low-contrast frame detection.'],
-        'skew_L':       ['Math · global', 'Skewness of the L* histogram.', 'Catches mostly-uniform fabric with rare bright or dark blemishes.'],
-        'L_p01':        ['Math · global', '1st percentile of L*.', '"How dark are the darkest pixels."', 'Use: dark-spot rejection rules.'],
-        'L_p05':        ['Math · global', '5th percentile of L*.', 'Slightly noise-tolerant version of L_p01.'],
-        'L_p95':        ['Math · global', '95th percentile of L*.', '"How bright are the brightest pixels."', 'Use: bright-defect / hot-pixel detection.'],
-        'L_p99':        ['Math · global', '99th percentile of L*.', 'Insensitive to a few outliers.', 'Use: missing-dye / hole-with-backlight rules.'],
-        // Family B — quality / image trustworthiness
-        'saturation_fraction':     ['Math · quality', 'Fraction of pixels clipped at 0 or 100 in L*.', 'Use: pre-gate other rules; reject frames with bad exposure.'],
-        'sharpness_laplacian_var': ['Math · quality', 'Variance of the Laplacian — focus measure.', 'Drops on out-of-focus / motion-blurred frames.', 'Use: discard untrustworthy frames before acting on rules.'],
-        'sharpness_tenengrad':     ['Math · quality', 'Mean squared Sobel gradient magnitude.', 'Same idea as Laplacian-variance, less noise sensitive.'],
-        'exposure_balance':        ['Math · quality', '|median(L*) − 50| / 50.', '0 = perfectly mid-grey exposure; 1 = blown out or fully dark.'],
-        // Family I — gradient / orientation
-        'grad_mean':                   ['Math · gradient', 'Mean Sobel-gradient magnitude. Edge density.', 'Rises on hard edges, drops on washed-out fabric.'],
-        'grad_max':                    ['Math · gradient', 'Max Sobel-gradient magnitude.', 'Spikes on sharp defects (cuts, foreign-matter edges).'],
-        'grad_ori_coherence':          ['Math · gradient', 'Anisotropy of gradient orientations (0=isotropic, 1=one direction).', 'High on clean weave; drops on damaged or scrambled regions.'],
-        'grad_ori_dominant_deg':       ['Math · gradient', 'Dominant texture orientation, mod 180°.', 'Diagnostic — read the value to know which way the weave runs.'],
-        'grad_ori_tilt_from_horizontal': ['Math · gradient (one-sided)', '|angle − 0| / 45°.', 'Catches texture noticeably off-horizontal.'],
-        'grad_ori_tilt_from_vertical':   ['Math · gradient (one-sided)', '|angle − 90| / 45°.', 'Catches texture noticeably off-vertical.'],
-        // Family J — morphology
-        'tophat_max':  ['Math · morphology', 'Max grayscale top-hat response.', 'Catches the brightest small bright spot (hot pixel, missing dye, hole-with-backlight).'],
-        'tophat_mean': ['Math · morphology', 'Mean top-hat response. Density of bright spots across the frame.'],
-        'bothat_max':  ['Math · morphology', 'Max grayscale bottom-hat response.', 'Catches the darkest small dark spot (oil spot, knot, foreign matter).'],
-        'bothat_mean': ['Math · morphology', 'Mean bottom-hat response. Density of dark spots.'],
-        // Family G — residuals
-        'row_residual_max':   ['Math · residual', 'Largest abs deviation in row-mean L* from its running median.', 'Catches a single row much brighter or darker than the rest → broken weft / horizontal bar.'],
-        'row_residual_count': ['Math · residual', 'Count of rows beyond a fixed L* deviation threshold.', 'Use: filter narrow noise via area_greater.'],
-        'col_residual_max':   ['Math · residual', 'Largest abs deviation in column-mean L*.', 'Catches a single column much brighter or darker → broken warp / vertical line defect.'],
-        'col_residual_count': ['Math · residual', 'Count of columns beyond threshold. Width of the line defect.'],
-        // Family H — spacing
-        'row_spacing_anomaly': ['Math · spacing', 'Localized weft-gap anomaly.', 'Catches a missing weft or two wefts collapsed into one spacing. One detection per anomalous gap.'],
-        'col_spacing_anomaly': ['Math · spacing', 'Localized warp-gap anomaly. One detection per anomalous gap.'],
-        'row_spacing_std':     ['Math · spacing', 'Global irregularity scalar: stddev(row gaps) / median.', 'Single number that says "how regular is the periodic pattern."'],
-        'col_spacing_std':     ['Math · spacing', 'Same for column gaps.'],
-        // Family K — blobs (variable count, real bboxes)
-        'blob_darkness':   ['Math · blob', 'Per-blob dark anomaly. Real bbox around the blob.', 'Use: blob_darkness area_greater <px²> min_confidence <X> for size + intensity rules.'],
-        'blob_brightness': ['Math · blob', 'Per-blob bright anomaly. Real bbox.', 'Use: missed-dye / hole-with-backlight rules.'],
-    };
-    if (M[name]) return M[name].map(s => '<div>' + s + '</div>').join('');
+    // 1. Exact-match math channels — look up the i18n key
+    const direct = _mathTip(name);
+    if (direct) return _formatTip(Array.isArray(direct) ? direct : [direct]);
 
-    // ------- pattern-based (parameterized) channel descriptions -------
+    // 2. Pattern-based math channels — parameterized names use a template key
+    //    plus the rank/index substituted into a placeholder.
     let m;
-    if ((m = /^fft_row_peak_(\d+)_energy$/.exec(name))) {
-        return [`Math · 1D-FFT row peak #${m[1]}`, 'Strength of horizontal periodic pattern (weft bars / weft tension).', 'Confidence = fractional energy at this peak.', 'Use: count_greater 0 with min_confidence 0.4 = strong horizontal periodicity.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft_row_peak_(\d+)_period_px$/.exec(name))) {
-        return [`Math · 1D-FFT row peak #${m[1]} period`, 'Spatial period in px of the K-th horizontal peak.', 'Diagnostic: which loom part causes the bar spacing.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft_col_peak_(\d+)_energy$/.exec(name))) {
-        return [`Math · 1D-FFT col peak #${m[1]}`, 'Strength of vertical periodic pattern (warp stripes, cord spacing).', 'Confidence = fractional energy.', 'Use: stripe / warp-defect detection.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft_col_peak_(\d+)_period_px$/.exec(name))) {
-        return [`Math · 1D-FFT col peak #${m[1]} period`, 'Stripe spacing in px.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft2d_peak_(\d+)_energy$/.exec(name))) {
-        return [`Math · 2D-FFT peak #${m[1]}`, 'Strength of K-th 2D periodic pattern (any direction).', 'Confidence = fractional energy at that peak.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft2d_peak_(\d+)_period_px$/.exec(name))) {
-        return [`Math · 2D-FFT peak #${m[1]} period`, 'Spatial period along the peak direction.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft2d_peak_(\d+)_angle_deg$/.exec(name))) {
-        return [`Math · 2D-FFT peak #${m[1]} angle`, 'Angle of dominant periodic structure (0..180°).', 'Diagnostic — pair with a tilt_from_* channel to write rules.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft2d_peak_(\d+)_tilt_from_horizontal$/.exec(name))) {
-        return [`Math · 2D-FFT peak #${m[1]} (one-sided)`, '|angle − 90°| / 45°.', 'Catches "fabric is tilted off horizontal." min_confidence 0.15 ≈ 7°.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if ((m = /^fft2d_peak_(\d+)_tilt_from_vertical$/.exec(name))) {
-        return [`Math · 2D-FFT peak #${m[1]} (one-sided)`, '|angle − 0° or 180°| / 45°.', 'Catches "warp running off vertical."'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if (/^band_mean_L$/.test(name)) {
-        return ['Math · band statistic', 'Mean L* of one of N vertical bands across the frame width.', 'One detection per band (small bbox over each band).', 'Use: count_greater 2 min_confidence 0.8 = ≥3 bands too bright.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if (/^band_std_L$/.test(name)) {
-        return ['Math · band statistic', 'Stddev L* per band. Per-band texture energy.', 'Catches local wash-out.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if (/^band_delta_from_median$/.test(name)) {
-        return ['Math · band statistic (one-sided)', '|band_mean_L − median(all bands)| / 30.', 'Spikes when one band is brighter or darker than the rest. Catches cone-shading without two-sided rules.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if (/^band_delta_e$/.test(name)) {
-        return ['Math · band statistic', 'CIE ΔE of band L*a*b* vs frame median (color-aware).', 'Catches a band that is a different shade (hue/chroma drift), not just brighter/darker.', 'Confidence map: min(ΔE / 20, 1). Rule "min_confidence 25" ≈ ΔE > 5.'].map(s => '<div>' + s + '</div>').join('');
-    }
-    if (/^tile_/.test(name)) {
-        return ['Math · tile (localized)', 'Per-tile anomaly metric (only emitted when MATH_TILES_X·Y > 1).', 'One detection per anomalous tile, with a real tile-sized bbox.', 'Use: spatial localization of "where" something is wrong.'].map(s => '<div>' + s + '</div>').join('');
+    const patterns = [
+        [/^fft_row_peak_(\d+)_energy$/,             'tip_fft_row_peak_K_energy'],
+        [/^fft_row_peak_(\d+)_period_px$/,          'tip_fft_row_peak_K_period_px'],
+        [/^fft_col_peak_(\d+)_energy$/,             'tip_fft_col_peak_K_energy'],
+        [/^fft_col_peak_(\d+)_period_px$/,          'tip_fft_col_peak_K_period_px'],
+        [/^fft2d_peak_(\d+)_energy$/,               'tip_fft2d_peak_K_energy'],
+        [/^fft2d_peak_(\d+)_period_px$/,            'tip_fft2d_peak_K_period_px'],
+        [/^fft2d_peak_(\d+)_angle_deg$/,            'tip_fft2d_peak_K_angle_deg'],
+        [/^fft2d_peak_(\d+)_tilt_from_horizontal$/, 'tip_fft2d_peak_K_tilt_from_horizontal'],
+        [/^fft2d_peak_(\d+)_tilt_from_vertical$/,   'tip_fft2d_peak_K_tilt_from_vertical'],
+        [/^tile_/,                                  'tip_tile_generic'],
+    ];
+    for (const [rx, key] of patterns) {
+        if ((m = rx.exec(name))) {
+            const lines = _mathTip(key);
+            if (lines) {
+                const k = m[1] || '';
+                const subbed = (Array.isArray(lines) ? lines : [lines])
+                    .map(s => s.replace(/\{K\}/g, k));
+                return _formatTip(subbed);
+            }
+        }
     }
 
-    // ------- fallback: YOLO class -------
-    return [
-        '<b>YOLO class</b>',
-        'Defined in the loaded YOLO weights file (model.pt → model.names).',
-        'Train your own classes via the AI trainer; rename / add as needed.',
+    // 3. Fallback: YOLO class
+    const yoloTip = _mathTip('tip_yolo_class');
+    if (yoloTip) return _formatTip(Array.isArray(yoloTip) ? yoloTip : [yoloTip]);
+    return _formatTip([
+        '<b>Trained-model class</b>',
+        'Defined in the loaded model weights (model.names).',
         'Rule patterns: present, count_greater, area_greater, color_delta.'
-    ].map(s => '<div>' + s + '</div>').join('');
+    ]);
 }
 
 // Update the objects list in the UI (merged show/confidence + audio)

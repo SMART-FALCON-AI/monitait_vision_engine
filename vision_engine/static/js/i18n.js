@@ -148,7 +148,85 @@ var translations = {
         tip_offset_delay: "Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.",
         tip_duration_pulses: "Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.",
         tip_duration_percent: "Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.",
-        tip_encoder_factor: "Multiplier for encoder counts per detection. Default 1 = one count per product."
+        tip_encoder_factor: "Multiplier for encoder counts per detection. Default 1 = one count per product.",
+
+        // ===== Math channel descriptions for the Process tab info-icons =====
+        // Each entry is an array of lines that the tooltip renders one per row.
+        // Values may use generic terms (no application-specific jargon) so the
+        // same descriptions apply to every inspection domain (textile, glass,
+        // metal, PCB, plastic film, etc).
+        // Patterns containing {K} are replaced with the rank/index from the
+        // channel name (e.g. fft2d_peak_2_energy → K=2).
+        mathTips: {
+            // ----- Family A — global statistics -----
+            mean_L:        ["Math · global stats", "Mean CIE L* over the whole frame.", "Catches overall brightness drift across captures.", "Use: brightness consistency on uniformly-toned samples."],
+            std_L:         ["Math · global stats", "Stddev of L* — overall texture energy.", "Drops on washed-out / blurred frames; rises on heavy texture.", "Use: detect texture loss or motion blur."],
+            range_L:       ["Math · global stats", "p99 − p01 of L* (robust dynamic range).", "Catches dynamic-range collapse.", "Use: low-contrast frame detection."],
+            skew_L:        ["Math · global stats", "Skewness of the L* histogram.", "Catches mostly-uniform samples with rare bright or dark blemishes."],
+            L_p01:         ["Math · global stats", "1st percentile of L*.", "\"How dark are the darkest pixels.\"", "Use: dark-spot rejection rules."],
+            L_p05:         ["Math · global stats", "5th percentile of L*.", "Less noise-sensitive variant of L_p01."],
+            L_p95:         ["Math · global stats", "95th percentile of L*.", "\"How bright are the brightest pixels.\"", "Use: bright-defect / hot-pixel detection."],
+            L_p99:         ["Math · global stats", "99th percentile of L*.", "Insensitive to a few outliers.", "Use: missing material / hole-with-backlight rules."],
+
+            // ----- Family B — quality / image trustworthiness -----
+            saturation_fraction:     ["Math · quality / meta", "Fraction of pixels clipped near 0 or 100 in L*.", "Use: pre-gate other rules; reject frames with bad exposure."],
+            sharpness_laplacian_var: ["Math · quality / meta", "Variance of the Laplacian — focus measure.", "Drops on out-of-focus or motion-blurred frames.", "Use: discard untrustworthy frames before acting on rules."],
+            sharpness_tenengrad:     ["Math · quality / meta", "Mean squared Sobel-gradient magnitude.", "Same idea as Laplacian-variance, less noise sensitive."],
+            exposure_balance:        ["Math · quality / meta", "|median(L*) − 50| / 50.", "0 = mid-grey exposure; 1 = blown out or fully dark."],
+
+            // ----- Family I — gradient / orientation -----
+            grad_mean:                       ["Math · gradient", "Mean Sobel-gradient magnitude — edge density.", "Rises on hard edges, drops on washed-out scenes."],
+            grad_max:                        ["Math · gradient", "Max Sobel-gradient magnitude.", "Spikes on sharp defects (cuts, foreign-matter edges)."],
+            grad_ori_coherence:              ["Math · gradient", "Anisotropy of gradient orientations (0=isotropic, 1=one direction).", "High on regular textures; drops on damaged / scrambled regions."],
+            grad_ori_dominant_deg:           ["Math · gradient", "Dominant texture orientation, mod 180°.", "Diagnostic — read the value to know which way the structure runs."],
+            grad_ori_tilt_from_horizontal:   ["Math · gradient (one-sided)", "|angle − 0°| / 45°.", "Catches texture noticeably off-horizontal."],
+            grad_ori_tilt_from_vertical:     ["Math · gradient (one-sided)", "|angle − 90°| / 45°.", "Catches texture noticeably off-vertical."],
+
+            // ----- Family J — morphology -----
+            tophat_max:  ["Math · morphology", "Max grayscale top-hat response.", "Catches the brightest small bright spot (hot pixel, missing material, hole-with-backlight)."],
+            tophat_mean: ["Math · morphology", "Mean top-hat response — density of bright spots."],
+            bothat_max:  ["Math · morphology", "Max grayscale bottom-hat response.", "Catches the darkest small dark spot (oil spot, knot, foreign matter)."],
+            bothat_mean: ["Math · morphology", "Mean bottom-hat response — density of dark spots."],
+
+            // ----- Family G — residuals (single-line defects) -----
+            row_residual_max:   ["Math · residual", "Largest abs deviation in row-mean L* from running median.", "Catches a single horizontal row much brighter or darker than the rest."],
+            row_residual_count: ["Math · residual", "Count of rows beyond a fixed L* deviation threshold.", "Use: filter narrow noise via area_greater."],
+            col_residual_max:   ["Math · residual", "Largest abs deviation in column-mean L*.", "Catches a single vertical column much brighter or darker than the rest."],
+            col_residual_count: ["Math · residual", "Count of columns beyond threshold."],
+
+            // ----- Family H — periodicity spacing irregularity -----
+            row_spacing_anomaly: ["Math · spacing", "Localized row-period spacing anomaly.", "Catches a missing or collapsed row in a periodic horizontal pattern.", "One detection per anomalous gap."],
+            col_spacing_anomaly: ["Math · spacing", "Localized column-period spacing anomaly.", "One detection per anomalous gap."],
+            row_spacing_std:     ["Math · spacing", "Global irregularity scalar: stddev(row gaps) / median.", "\"How regular is the periodic pattern.\""],
+            col_spacing_std:     ["Math · spacing", "Same for column gaps."],
+
+            // ----- Family K — blob anomalies (real bbox per blob) -----
+            blob_darkness:   ["Math · blob (localized)", "Per-blob dark-anomaly. Real bbox around each blob.", "Use: blob_darkness area_greater <px²> for size + intensity rules."],
+            blob_brightness: ["Math · blob (localized)", "Per-blob bright-anomaly. Real bbox.", "Use: missing-material / hole-with-backlight rules."],
+
+            // ----- Family C/D/E — FFT peaks (parameterized via {K}) -----
+            tip_fft_row_peak_K_energy:    ["Math · 1D-FFT row peak #{K}", "Strength of the K-th horizontal periodic pattern.", "Confidence = fractional energy at this peak.", "Use: count_greater 0 with min_confidence 0.4 = strong horizontal periodicity."],
+            tip_fft_row_peak_K_period_px: ["Math · 1D-FFT row peak #{K} period", "Spatial period (px) of the K-th horizontal peak.", "Diagnostic for what's causing the periodicity."],
+            tip_fft_col_peak_K_energy:    ["Math · 1D-FFT col peak #{K}", "Strength of the K-th vertical periodic pattern.", "Confidence = fractional energy.", "Use: vertical-stripe / line-defect detection."],
+            tip_fft_col_peak_K_period_px: ["Math · 1D-FFT col peak #{K} period", "Vertical pattern spacing in px."],
+            tip_fft2d_peak_K_energy:      ["Math · 2D-FFT peak #{K}", "Strength of the K-th 2D periodic pattern (any direction).", "Confidence = fractional energy at that peak."],
+            tip_fft2d_peak_K_period_px:   ["Math · 2D-FFT peak #{K} period", "Spatial period along the peak direction."],
+            tip_fft2d_peak_K_angle_deg:   ["Math · 2D-FFT peak #{K} angle", "Angle of dominant periodic structure (0..180°).", "Diagnostic — pair with a tilt_from_* channel for rule-able anomalies."],
+            tip_fft2d_peak_K_tilt_from_horizontal: ["Math · 2D-FFT peak #{K} (one-sided)", "|angle − 90°| / 45°.", "Catches \"sample running tilted off horizontal.\" min_confidence 0.15 ≈ 7° tilt."],
+            tip_fft2d_peak_K_tilt_from_vertical:   ["Math · 2D-FFT peak #{K} (one-sided)", "|angle − 0° or 180°| / 45°.", "Catches structure running off vertical."],
+
+            // ----- Family F — bands (one detection per band) -----
+            band_mean_L:             ["Math · band statistic", "Mean L* of one of N vertical bands across the frame.", "One detection per band.", "Use: count_greater 2 min_confidence 0.8 = ≥3 bands too bright."],
+            band_std_L:              ["Math · band statistic", "Stddev L* per band — per-band texture energy.", "Catches local wash-out."],
+            band_delta_from_median:  ["Math · band statistic (one-sided)", "|band_mean_L − median(all bands)| / 30.", "Spikes when one band is brighter or darker than the rest.", "Catches cross-direction brightness gradient without two-sided rules."],
+            band_delta_e:            ["Math · band statistic", "CIE ΔE of band L*a*b* vs frame median (color-aware).", "Catches a band of different shade (hue/chroma drift), not just brighter/darker.", "Confidence map: min(ΔE / 20, 1). Rule \"min_confidence 25\" ≈ ΔE > 5."],
+
+            // ----- Tile family (only when MATH_TILES_X·Y > 1) -----
+            tip_tile_generic: ["Math · tile (localized)", "Per-tile anomaly metric (only emitted when MATH_TILES_X·Y > 1).", "One detection per anomalous tile, with a real tile-sized bbox.", "Use: spatial localization of \"where\" something is wrong."],
+
+            // ----- Fallback for unknown / trained-model classes -----
+            tip_yolo_class: ["<b>Trained-model class</b>", "Defined in the loaded model weights file (model.names).", "Train your own classes via the AI trainer; rename / add as needed.", "Rule patterns: present, count_greater, area_greater, color_delta."]
+        }
     },
     fa: {
         tab_dashboard: "داشبورد", tab_ai: "دستیار هوشمند", tab_gallery: "گالری",

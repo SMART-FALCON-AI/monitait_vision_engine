@@ -1164,7 +1164,10 @@ window.addEventListener('load', () => {
         if (!trigger || !_gTip) return;
         const src = trigger.querySelector('.info-tooltip-text');
         if (!src) return;
-        _gTip.textContent = src.textContent;
+        // Use innerHTML so multi-line / formatted descriptions render.
+        // Source content is internally generated (i18n strings + math
+        // channel descriptions), not user input — safe.
+        _gTip.innerHTML = src.innerHTML;
         _gTip.style.display = 'block';
         const rect = trigger.getBoundingClientRect();
         const tw = _gTip.offsetWidth;
