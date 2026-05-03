@@ -19,52 +19,64 @@ _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 # Header strip height in pixels
 _HEADER_HEIGHT = 28
 
-# Width (px) of the per-thumbnail key:value strip that lists detections whose
-# bbox covers ≥90% of the frame area (analyzer-agnostic — applies to math
-# channels, future workers, anything global). Set 0 to disable.
-_KV_STRIP_WIDTH = 220
+def _draw_kv_overlay(thumb, panel_dets):
+    """Draw a semi-transparent key:value list at the top-left of the thumbnail.
 
-
-def _render_kv_strip(panel_dets, height, width=_KV_STRIP_WIDTH):
-    """Render a vertical key:value strip listing whole-frame detections.
-
-    panel_dets: list of (name, confidence). Sorted by confidence desc, top-K
-    rows fitted to `height`. Designed for tiny thumbnails — no overflow,
-    truncates names/values to fit.
+    panel_dets: list of (name, confidence) — detections whose bbox covered
+    ≥90% of the frame area. Drawn ON the image itself (no extra width),
+    stacked vertically, name truncated to fit. Color by confidence:
+    red ≥0.7, amber 0.4-0.7, white below.
     """
-    strip = np.zeros((height, width, 3), dtype=np.uint8)
-    strip[:] = (32, 32, 32)
     if not panel_dets:
-        return strip
+        return
     rows = sorted(panel_dets, key=lambda kv: kv[1], reverse=True)
+    fh, fw = thumb.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     fs = 0.36
-    th_line, _ = cv2.getTextSize("Ag", font, fs, 1)
-    line_h = th_line[1] + 4              # ~13 px per row at fs=0.36
-    pad_x = 4
-    pad_top = 2
-    max_rows = max(1, (height - pad_top) // line_h)
+    th_line, _ = cv2.getTextSize("Ag0", font, fs, 1)
+    line_h = th_line[1] + 4               # ~13 px per row
+    pad = 4
+    max_rows = max(1, (fh - 2 * pad) // line_h)
     truncated = max(0, len(rows) - max_rows)
     if truncated:
-        rows = rows[: max_rows - 1]      # save last row for the +N indicator
-    for i, (name, conf) in enumerate(rows):
-        y = pad_top + (i + 1) * line_h - 2
-        # Tight format: "name : 0.42" — truncate name if needed
-        max_name_chars = max(4, (width - 60) // 6)  # ~6 px/char at fs=0.36
+        rows = rows[: max_rows - 1]       # leave a row for "+N more"
+
+    # Compute box dimensions to fit the longest text
+    max_w = 0
+    formatted = []
+    max_name_chars = max(4, (fw - 60) // 6)
+    for name, conf in rows:
         n = name if len(name) <= max_name_chars else name[: max_name_chars - 1] + "…"
         text = f"{n} : {conf:.2f}"
-        # Color rows by confidence: red >0.7, amber 0.4–0.7, white otherwise
+        (tw_, _), _ = cv2.getTextSize(text, font, fs, 1)
+        max_w = max(max_w, tw_)
+        formatted.append((text, conf))
+    box_w = min(fw, max_w + 2 * pad)
+    n_visible = len(formatted) + (1 if truncated else 0)
+    box_h = min(fh, n_visible * line_h + 2 * pad)
+    if box_w <= 0 or box_h <= 0:
+        return
+
+    # Semi-transparent dark overlay
+    roi = thumb[0:box_h, 0:box_w]
+    overlay = roi.copy()
+    cv2.rectangle(overlay, (0, 0), (box_w, box_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, roi, 0.4, 0, roi)
+
+    # Text rows
+    for i, (text, conf) in enumerate(formatted):
+        y = pad + (i + 1) * line_h - 2
         if conf >= 0.7:
-            color = (60, 60, 230)
+            color = (60, 60, 230)         # red
         elif conf >= 0.4:
-            color = (60, 180, 230)
+            color = (60, 180, 230)        # amber
         else:
-            color = (210, 210, 210)
-        cv2.putText(strip, text, (pad_x, y), font, fs, color, 1, cv2.LINE_AA)
+            color = (230, 230, 230)       # near-white
+        cv2.putText(thumb, text, (pad, y), font, fs, color, 1, cv2.LINE_AA)
     if truncated:
-        y = pad_top + (len(rows) + 1) * line_h - 2
-        cv2.putText(strip, f"+{truncated} more", (pad_x, y), font, fs, (140, 140, 140), 1, cv2.LINE_AA)
-    return strip
+        y = pad + (len(formatted) + 1) * line_h - 2
+        cv2.putText(thumb, f"+{truncated} more", (pad, y), font, fs,
+                    (170, 170, 170), 1, cv2.LINE_AA)
 
 
 def _unpack_timeline_entry(frame_data):
@@ -586,11 +598,13 @@ async def timeline_image(request: Request, page: int = 0):
                     elif image_rotation == 270:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-                    # Append a key:value strip alongside the thumbnail when there
-                    # are panel-routed detections (full-frame ones).
+                    # Render whole-frame (≥90% area) detections directly ON the
+                    # thumbnail as a semi-transparent key:value list at top-left.
+                    # Replaces drawing N stacked rectangles + N overlapping labels
+                    # for global-scalar channels. Localized detections keep their
+                    # in-frame bbox+label.
                     if panel_dets:
-                        strip = _render_kv_strip(panel_dets, thumb.shape[0])
-                        thumb = np.hstack([thumb, strip])
+                        _draw_kv_overlay(thumb, panel_dets)
 
                     row_frames.append(thumb)
                     # Record thumb dimensions (after rotation)
