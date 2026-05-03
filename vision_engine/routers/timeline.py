@@ -19,65 +19,6 @@ _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 # Header strip height in pixels
 _HEADER_HEIGHT = 28
 
-def _draw_kv_overlay(thumb, panel_dets):
-    """Draw a semi-transparent key:value list at the top-left of the thumbnail.
-
-    panel_dets: list of (name, confidence) — detections whose bbox covered
-    ≥90% of the frame area. Drawn ON the image itself (no extra width),
-    stacked vertically, name truncated to fit. Color by confidence:
-    red ≥0.7, amber 0.4-0.7, white below.
-    """
-    if not panel_dets:
-        return
-    rows = sorted(panel_dets, key=lambda kv: kv[1], reverse=True)
-    fh, fw = thumb.shape[:2]
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    fs = 0.36
-    th_line, _ = cv2.getTextSize("Ag0", font, fs, 1)
-    line_h = th_line[1] + 4               # ~13 px per row
-    pad = 4
-    max_rows = max(1, (fh - 2 * pad) // line_h)
-    truncated = max(0, len(rows) - max_rows)
-    if truncated:
-        rows = rows[: max_rows - 1]       # leave a row for "+N more"
-
-    # Compute box dimensions to fit the longest text
-    max_w = 0
-    formatted = []
-    max_name_chars = max(4, (fw - 60) // 6)
-    for name, conf in rows:
-        n = name if len(name) <= max_name_chars else name[: max_name_chars - 1] + "…"
-        text = f"{n} : {conf:.2f}"
-        (tw_, _), _ = cv2.getTextSize(text, font, fs, 1)
-        max_w = max(max_w, tw_)
-        formatted.append((text, conf))
-    box_w = min(fw, max_w + 2 * pad)
-    n_visible = len(formatted) + (1 if truncated else 0)
-    box_h = min(fh, n_visible * line_h + 2 * pad)
-    if box_w <= 0 or box_h <= 0:
-        return
-
-    # Semi-transparent dark overlay
-    roi = thumb[0:box_h, 0:box_w]
-    overlay = roi.copy()
-    cv2.rectangle(overlay, (0, 0), (box_w, box_h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.6, roi, 0.4, 0, roi)
-
-    # Text rows
-    for i, (text, conf) in enumerate(formatted):
-        y = pad + (i + 1) * line_h - 2
-        if conf >= 0.7:
-            color = (60, 60, 230)         # red
-        elif conf >= 0.4:
-            color = (60, 180, 230)        # amber
-        else:
-            color = (230, 230, 230)       # near-white
-        cv2.putText(thumb, text, (pad, y), font, fs, color, 1, cv2.LINE_AA)
-    if truncated:
-        y = pad + (len(formatted) + 1) * line_h - 2
-        cv2.putText(thumb, f"+{truncated} more", (pad, y), font, fs,
-                    (170, 170, 170), 1, cv2.LINE_AA)
-
 
 def _unpack_timeline_entry(frame_data):
     """Unpack a timeline Redis entry, handling 2/3/4-tuple formats.
@@ -528,8 +469,6 @@ async def timeline_image(request: Request, page: int = 0):
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     # Draw bounding boxes if enabled and detections exist
-                    panel_dets = []   # detections that cover ≥90% of the frame —
-                                       # routed to a side strip instead of in-frame label
                     if show_bbox and detections:
                         # Scale bbox coords from original resolution to thumbnail
                         th, tw = thumb.shape[:2]
@@ -537,7 +476,11 @@ async def timeline_image(request: Request, page: int = 0):
                         orig_w = meta.get('orig_w', tw) if meta else tw
                         sx = tw / orig_w if orig_w else 1
                         sy = th / orig_h if orig_h else 1
-                        frame_area = max(1, th * tw)
+                        # Font scale auto-sized so labels stay readable at any
+                        # thumbnail height. Doubled-thickness on a black->green
+                        # background makes the text legible.
+                        fs = max(0.5, min(1.2, th / 480.0))
+                        kv_y = 4   # next y for whole-frame key:value rows
                         for det in detections:
                             try:
                                 name = det.get('name', '')
@@ -552,39 +495,27 @@ async def timeline_image(request: Request, page: int = 0):
                                 x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
                                 y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
 
-                                # If bbox covers ≥90% of the frame area, replace
-                                # rectangle+label with a key:value row in the
-                                # top-left overlay. Anything smaller draws as a
-                                # normal bbox.
-                                bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
-                                if bbox_area >= 0.9 * frame_area:
-                                    panel_dets.append((name, confidence))
+                                # ONE rule: if bbox covers ≥90% of the frame
+                                # area, draw it as a key:value text line in the
+                                # top-left instead of a rectangle. Otherwise
+                                # draw the original rectangle + label.
+                                if (x2 - x1) * (y2 - y1) >= 0.9 * th * tw:
+                                    text = f"{name} : {confidence:.2f}"
+                                    (kw, kh), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, 2)
+                                    cv2.rectangle(thumb, (2, kv_y),
+                                                  (2 + kw + 6, kv_y + kh + 6), (0, 0, 0), -1)
+                                    cv2.putText(thumb, text, (5, kv_y + kh + 2),
+                                                cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 0), 2, cv2.LINE_AA)
+                                    kv_y += kh + 8
                                     continue
 
                                 cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
                                 label = f"{name} {confidence:.0%}"
-                                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
-                                # Clamp label inside the thumbnail. When there is no
-                                # room above the bbox draw the label inside the bbox
-                                # top; also clamp x against the right edge.
-                                fh, fw = thumb.shape[:2]
-                                if y1 - lh - 4 < 0:
-                                    label_top = min(y1 + 1, max(0, fh - lh - 6))
-                                    text_y = label_top + lh + 1
-                                else:
-                                    label_top = y1 - lh - 4
-                                    text_y = y1 - 2
-                                label_x = min(max(x1, 0), max(0, fw - lw - 4))
-                                cv2.rectangle(
-                                    thumb,
-                                    (label_x, label_top),
-                                    (label_x + lw + 4, label_top + lh + 4),
-                                    (0, 255, 0), -1,
-                                )
-                                cv2.putText(
-                                    thumb, label, (label_x + 2, text_y),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1,
-                                )
+                                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, 2)
+                                cv2.rectangle(thumb, (x1, y1 - lh - 4),
+                                              (x1 + lw + 6, y1), (0, 255, 0), -1)
+                                cv2.putText(thumb, label, (x1 + 3, y1 - 3),
+                                            cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), 2, cv2.LINE_AA)
                             except Exception:
                                 pass
 
@@ -595,14 +526,6 @@ async def timeline_image(request: Request, page: int = 0):
                         thumb = cv2.rotate(thumb, cv2.ROTATE_180)
                     elif image_rotation == 270:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
-
-                    # Render whole-frame (≥90% area) detections directly ON the
-                    # thumbnail as a semi-transparent key:value list at top-left.
-                    # Replaces drawing N stacked rectangles + N overlapping labels
-                    # for global-scalar channels. Localized detections keep their
-                    # in-frame bbox+label.
-                    if panel_dets:
-                        _draw_kv_overlay(thumb, panel_dets)
 
                     row_frames.append(thumb)
                     # Record thumb dimensions (after rotation)
