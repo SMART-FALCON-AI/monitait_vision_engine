@@ -19,6 +19,53 @@ _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 # Header strip height in pixels
 _HEADER_HEIGHT = 28
 
+# Width (px) of the per-thumbnail key:value strip that lists detections whose
+# bbox covers ≥90% of the frame area (analyzer-agnostic — applies to math
+# channels, future workers, anything global). Set 0 to disable.
+_KV_STRIP_WIDTH = 220
+
+
+def _render_kv_strip(panel_dets, height, width=_KV_STRIP_WIDTH):
+    """Render a vertical key:value strip listing whole-frame detections.
+
+    panel_dets: list of (name, confidence). Sorted by confidence desc, top-K
+    rows fitted to `height`. Designed for tiny thumbnails — no overflow,
+    truncates names/values to fit.
+    """
+    strip = np.zeros((height, width, 3), dtype=np.uint8)
+    strip[:] = (32, 32, 32)
+    if not panel_dets:
+        return strip
+    rows = sorted(panel_dets, key=lambda kv: kv[1], reverse=True)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fs = 0.36
+    th_line, _ = cv2.getTextSize("Ag", font, fs, 1)
+    line_h = th_line[1] + 4              # ~13 px per row at fs=0.36
+    pad_x = 4
+    pad_top = 2
+    max_rows = max(1, (height - pad_top) // line_h)
+    truncated = max(0, len(rows) - max_rows)
+    if truncated:
+        rows = rows[: max_rows - 1]      # save last row for the +N indicator
+    for i, (name, conf) in enumerate(rows):
+        y = pad_top + (i + 1) * line_h - 2
+        # Tight format: "name : 0.42" — truncate name if needed
+        max_name_chars = max(4, (width - 60) // 6)  # ~6 px/char at fs=0.36
+        n = name if len(name) <= max_name_chars else name[: max_name_chars - 1] + "…"
+        text = f"{n} : {conf:.2f}"
+        # Color rows by confidence: red >0.7, amber 0.4–0.7, white otherwise
+        if conf >= 0.7:
+            color = (60, 60, 230)
+        elif conf >= 0.4:
+            color = (60, 180, 230)
+        else:
+            color = (210, 210, 210)
+        cv2.putText(strip, text, (pad_x, y), font, fs, color, 1, cv2.LINE_AA)
+    if truncated:
+        y = pad_top + (len(rows) + 1) * line_h - 2
+        cv2.putText(strip, f"+{truncated} more", (pad_x, y), font, fs, (140, 140, 140), 1, cv2.LINE_AA)
+    return strip
+
 
 def _unpack_timeline_entry(frame_data):
     """Unpack a timeline Redis entry, handling 2/3/4-tuple formats.
@@ -469,6 +516,8 @@ async def timeline_image(request: Request, page: int = 0):
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     # Draw bounding boxes if enabled and detections exist
+                    panel_dets = []   # detections that cover ≥90% of the frame —
+                                       # routed to a side strip instead of in-frame label
                     if show_bbox and detections:
                         # Scale bbox coords from original resolution to thumbnail
                         th, tw = thumb.shape[:2]
@@ -476,6 +525,7 @@ async def timeline_image(request: Request, page: int = 0):
                         orig_w = meta.get('orig_w', tw) if meta else tw
                         sx = tw / orig_w if orig_w else 1
                         sy = th / orig_h if orig_h else 1
+                        frame_area = max(1, th * tw)
                         for det in detections:
                             try:
                                 name = det.get('name', '')
@@ -489,14 +539,24 @@ async def timeline_image(request: Request, page: int = 0):
                                 y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
                                 x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
                                 y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
+
+                                # Whole-frame-ish detections (analyzer-agnostic rule):
+                                # if bbox covers ≥90% of the thumbnail area, route to
+                                # the side panel as key:value(conf) and skip both the
+                                # rectangle and the in-frame label. Their borders just
+                                # outline the entire thumbnail (visually noisy and
+                                # carry no spatial info).
+                                bbox_area = max(0, x2 - x1) * max(0, y2 - y1)
+                                if bbox_area >= 0.9 * frame_area:
+                                    panel_dets.append((name, confidence))
+                                    continue
+
                                 cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
                                 label = f"{name} {confidence:.0%}"
                                 (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
-                                # Clamp label inside the thumbnail. Full-frame detections
-                                # (math-module channels touching y=0) used to put their
-                                # label at y = -lh, off-canvas. When there is no room
-                                # above the bbox draw the label inside the bbox top; also
-                                # clamp x against the right edge.
+                                # Clamp label inside the thumbnail. When there is no
+                                # room above the bbox draw the label inside the bbox
+                                # top; also clamp x against the right edge.
                                 fh, fw = thumb.shape[:2]
                                 if y1 - lh - 4 < 0:
                                     label_top = min(y1 + 1, max(0, fh - lh - 6))
@@ -525,6 +585,13 @@ async def timeline_image(request: Request, page: int = 0):
                         thumb = cv2.rotate(thumb, cv2.ROTATE_180)
                     elif image_rotation == 270:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+                    # Append a key:value strip alongside the thumbnail when there
+                    # are panel-routed detections (full-frame ones).
+                    if panel_dets:
+                        strip = _render_kv_strip(panel_dets, thumb.shape[0])
+                        thumb = np.hstack([thumb, strip])
+
                     row_frames.append(thumb)
                     # Record thumb dimensions (after rotation)
                     if thumb_width == 0:
