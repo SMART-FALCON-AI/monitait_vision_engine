@@ -9,6 +9,7 @@ from services.camera import (CameraBuffer, scan_network_for_cameras, scan_networ
                              test_camera_stream, get_camera_config_for_save, apply_camera_config_from_saved,
                              format_relative_time, IP_CAMERA_USER, IP_CAMERA_PASS)
 from services.state_machine import State
+from services.render import draw_detection_on
 import asyncio
 import base64
 import cv2
@@ -76,28 +77,12 @@ async def video_feed(request: Request):
                             detection_age = time.time() - timestamp
                             if detection_age < 10.0 and getattr(app_state, 'timeline_config', {}).get('show_bounding_boxes', True):
                                 _obj_filters = getattr(app_state, 'timeline_config', {}).get('object_filters', {})
+                                kv_y = 4
                                 for det in detections:
-                                    try:
-                                        confidence = det.get('confidence', 0)
-                                        name = det.get('name', f"Class {det.get('class', 0)}")
-                                        # Apply per-object filter: check show flag and min confidence
-                                        obj_f = _obj_filters.get(name, {})
-                                        if obj_f.get('show') is False:
-                                            continue
-                                        min_conf = obj_f.get('min_confidence', 0.01)
-                                        if confidence < min_conf:
-                                            continue
-                                        x1 = int(det.get('xmin', 0))
-                                        y1 = int(det.get('ymin', 0))
-                                        x2 = int(det.get('xmax', 0))
-                                        y2 = int(det.get('ymax', 0))
-                                        cv2.rectangle(camera_frames[0], (x1, y1), (x2, y2), (0, 255, 0), 3)
-                                        label = f"{name} {confidence:.2f}"
-                                        (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                                        cv2.rectangle(camera_frames[0], (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
-                                        cv2.putText(camera_frames[0], label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                                    except Exception as e:
-                                        logger.error(f"Error drawing detection box: {e}")
+                                    kv_y = draw_detection_on(
+                                        camera_frames[0], det, kv_y=kv_y,
+                                        bbox_thickness=3, obj_filters=_obj_filters,
+                                    )
 
                         # Stack all camera frames vertically
                         if len(camera_frames) > 1:
@@ -151,29 +136,13 @@ async def video_feed_detections(request: Request):
                     if os.path.exists(frame_path):
                         frame = cv2.imread(frame_path)
                         if frame is not None and getattr(app_state, 'timeline_config', {}).get('show_bounding_boxes', True):
-                            # Draw detections with bounding boxes (filtered by object_filters)
                             _obj_filters = getattr(app_state, 'timeline_config', {}).get('object_filters', {})
+                            kv_y = 4
                             for det in detections:
-                                try:
-                                    confidence = det.get('confidence', 0)
-                                    name = det.get('name', f"Class {det.get('class', 0)}")
-                                    obj_f = _obj_filters.get(name, {})
-                                    if obj_f.get('show') is False:
-                                        continue
-                                    min_conf = obj_f.get('min_confidence', 0.01)
-                                    if confidence < min_conf:
-                                        continue
-                                    x1 = int(det.get('xmin', 0))
-                                    y1 = int(det.get('ymin', 0))
-                                    x2 = int(det.get('xmax', 0))
-                                    y2 = int(det.get('ymax', 0))
-                                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                                    label = f"{name} {confidence:.2f}"
-                                    (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                                    cv2.rectangle(frame, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
-                                    cv2.putText(frame, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                                except Exception as e:
-                                    logger.error(f"Error drawing detection: {e}")
+                                kv_y = draw_detection_on(
+                                    frame, det, kv_y=kv_y,
+                                    bbox_thickness=3, obj_filters=_obj_filters,
+                                )
 
                             # Encode and yield
                             ret, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])

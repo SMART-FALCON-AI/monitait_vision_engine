@@ -19,6 +19,7 @@ from redis import Redis
 import config as cfg
 from config import TIMELINE_REDIS_PREFIX
 from services.detection import evaluate_eject_from_detections
+from services.render import draw_detection_on
 from routers.timeline import _unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT
 
 logger = logging.getLogger(__name__)
@@ -217,32 +218,17 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
                 thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if thumb is not None:
                     if show_bbox and detections:
-                        # Scale bbox coords from original resolution to thumbnail
                         th, tw = thumb.shape[:2]
                         orig_h = meta.get('orig_h', th) if meta else th
                         orig_w = meta.get('orig_w', tw) if meta else tw
                         sx = tw / orig_w if orig_w else 1
                         sy = th / orig_h if orig_h else 1
+                        kv_y = 4
                         for det in detections:
-                            try:
-                                name = det.get('name', '')
-                                confidence = det.get('confidence', 0)
-                                of = obj_filters.get(name, {})
-                                if of.get('show') is False:
-                                    continue
-                                if confidence < of.get('min_confidence', 0.01):
-                                    continue
-                                x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
-                                y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
-                                x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
-                                y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
-                                cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                                label = f"{name} {confidence:.0%}"
-                                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)
-                                cv2.rectangle(thumb, (x1, y1 - lh - 4), (x1 + lw + 4, y1), (0, 255, 0), -1)
-                                cv2.putText(thumb, label, (x1 + 2, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
-                            except Exception:
-                                pass
+                            kv_y = draw_detection_on(
+                                thumb, det, sx=sx, sy=sy, kv_y=kv_y,
+                                bbox_thickness=2, obj_filters=obj_filters,
+                            )
                     if image_rotation == 90:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
                     elif image_rotation == 180:

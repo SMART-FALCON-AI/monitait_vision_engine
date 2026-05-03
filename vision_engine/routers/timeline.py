@@ -9,6 +9,7 @@ import config as cfg_module
 import cv2, numpy as np, time, json, pickle, logging, os
 from redis import Redis
 from services.detection import evaluate_eject_from_detections
+from services.render import draw_detection_on
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -476,48 +477,12 @@ async def timeline_image(request: Request, page: int = 0):
                         orig_w = meta.get('orig_w', tw) if meta else tw
                         sx = tw / orig_w if orig_w else 1
                         sy = th / orig_h if orig_h else 1
-                        # Font scale auto-sized so labels stay readable at any
-                        # thumbnail height. Doubled-thickness on a black->green
-                        # background makes the text legible.
-                        fs = max(0.5, min(1.2, th / 480.0))
-                        kv_y = 4   # next y for whole-frame key:value rows
+                        kv_y = 4
                         for det in detections:
-                            try:
-                                name = det.get('name', '')
-                                confidence = det.get('confidence', 0)
-                                of = obj_filters.get(name, {})
-                                if of.get('show') is False:
-                                    continue
-                                if confidence < of.get('min_confidence', 0.01):
-                                    continue
-                                x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
-                                y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
-                                x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
-                                y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
-
-                                # ONE rule: if bbox covers ≥90% of the frame
-                                # area, draw it as a key:value text line in the
-                                # top-left instead of a rectangle. Otherwise
-                                # draw the original rectangle + label.
-                                if (x2 - x1) * (y2 - y1) >= 0.9 * th * tw:
-                                    text = f"{name} : {confidence:.2f}"
-                                    (kw, kh), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, 2)
-                                    cv2.rectangle(thumb, (2, kv_y),
-                                                  (2 + kw + 6, kv_y + kh + 6), (0, 0, 0), -1)
-                                    cv2.putText(thumb, text, (5, kv_y + kh + 2),
-                                                cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 255, 0), 2, cv2.LINE_AA)
-                                    kv_y += kh + 8
-                                    continue
-
-                                cv2.rectangle(thumb, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                                label = f"{name} {confidence:.0%}"
-                                (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, 2)
-                                cv2.rectangle(thumb, (x1, y1 - lh - 4),
-                                              (x1 + lw + 6, y1), (0, 255, 0), -1)
-                                cv2.putText(thumb, label, (x1 + 3, y1 - 3),
-                                            cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), 2, cv2.LINE_AA)
-                            except Exception:
-                                pass
+                            kv_y = draw_detection_on(
+                                thumb, det, sx=sx, sy=sy, kv_y=kv_y,
+                                bbox_thickness=2, obj_filters=obj_filters,
+                            )
 
                     # Apply configurable rotation (0, 90, 180, 270)
                     if image_rotation == 90:
@@ -787,9 +752,8 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
         if image is None:
             raise HTTPException(status_code=404, detail="Image not found")
 
-        # Draw bboxes from timeline detection data
+        # Draw bboxes from timeline detection data — single shared helper
         if show_bbox and detections:
-            # If using thumbnail fallback, scale coords from original to thumb
             ih, iw = image.shape[:2]
             orig_h = meta.get('orig_h', ih) if meta else ih
             orig_w = meta.get('orig_w', iw) if meta else iw
@@ -798,26 +762,12 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
             else:
                 sx = iw / orig_w if orig_w else 1
                 sy = ih / orig_h if orig_h else 1
+            kv_y = 4
             for det in detections:
-                try:
-                    name = det.get('name', '')
-                    confidence = det.get('confidence', 0)
-                    of = obj_filters.get(name, {})
-                    if of.get('show') is False:
-                        continue
-                    if confidence < of.get('min_confidence', 0.01):
-                        continue
-                    x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
-                    y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
-                    x2 = int(det.get('xmax', det.get('x2', 0)) * sx)
-                    y2 = int(det.get('ymax', det.get('y2', 0)) * sy)
-                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                    label = f"{name} {confidence:.0%}"
-                    (lw, lh), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                    cv2.rectangle(image, (x1, y1 - lh - 10), (x1 + lw + 10, y1), (0, 255, 0), -1)
-                    cv2.putText(image, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                except Exception:
-                    pass
+                kv_y = draw_detection_on(
+                    image, det, sx=sx, sy=sy, kv_y=kv_y,
+                    bbox_thickness=3, obj_filters=obj_filters,
+                )
 
         # Apply rotation
         if image_rotation == 90:

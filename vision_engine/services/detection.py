@@ -988,28 +988,15 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
         if _watcher:
             _watcher.latest_frame_id = frame_id
 
-        # Save annotated image with bounding boxes
+        # Save annotated image with bounding boxes — single shared helper
         if yolo_res and len(yolo_res) > 0:
+            from services.render import draw_detection_on
             annotated_image = image.copy()
+            kv_y = 4
             for det in yolo_res:
-                try:
-                    x1 = int(det.get('xmin', 0))
-                    y1 = int(det.get('ymin', 0))
-                    x2 = int(det.get('xmax', 0))
-                    y2 = int(det.get('ymax', 0))
-                    confidence = det.get('confidence', 0)
-                    name = det.get('name', f"Class {det.get('class', 0)}")
-
-                    # Draw thick green rectangle
-                    cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 3)
-
-                    # Draw label with background
-                    label = f"{name} {confidence:.2f}"
-                    (label_w, label_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                    cv2.rectangle(annotated_image, (x1, y1 - label_h - 10), (x1 + label_w + 10, y1), (0, 255, 0), -1)
-                    cv2.putText(annotated_image, label, (x1 + 5, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                except Exception as e:
-                    logger.error(f"Error drawing detection on {frame_id}: {e}")
+                kv_y = draw_detection_on(
+                    annotated_image, det, kv_y=kv_y, bbox_thickness=3,
+                )
 
             # Save annotated image with _DETECTED suffix
             annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")
