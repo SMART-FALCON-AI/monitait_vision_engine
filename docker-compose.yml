@@ -8,6 +8,7 @@ services:
     image: monitait/mve:latest
     command: "python3 main.py"
     volumes:
+      - ./vision_engine:/code  # local source shadows image (matches Dockerfile dev comment)
       - ./VERSION:/code/VERSION:ro
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
       - ./volumes/weights:/weights
