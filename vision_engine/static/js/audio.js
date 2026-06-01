@@ -9,7 +9,8 @@ let audioSettings = {
     narrateObjects: {},    // { "socket": true, ... } - per-object narrate
     objectBeepSounds: {},  // { "socket": "sine", ... }
     showObjects: {},       // { "socket": true, ... } - per-object show bbox
-    objectConfidence: {}   // { "socket": 1, ... } - min confidence %
+    objectConfidence: {},  // { "socket": 1, ... } - min confidence %
+    storeObjects: {}       // { "socket": true, ... } - per-object DB persistence; SERVER-SIDE source of truth at /api/store_objects, mirrored here for UI rendering. Default OFF (no DB write).
 };
 let audioContext = null;
 let detectedObjectClasses = new Set();  // Track all detected objects
@@ -59,6 +60,7 @@ async function fetchModelClasses() {
                     if (audioSettings.enabledObjects[name] === undefined) audioSettings.enabledObjects[name] = true;
                     if (audioSettings.narrateObjects[name] === undefined) audioSettings.narrateObjects[name] = true;
                     if (audioSettings.objectConfidence[name] === undefined) audioSettings.objectConfidence[name] = 1;
+                    if (audioSettings.storeObjects[name] === undefined) audioSettings.storeObjects[name] = false;
                 }
             });
             saveAudioSettings();
@@ -195,6 +197,7 @@ function toggleObjectBeep(objectName) {
     saveAudioSettings();
     updateObjectsList();
     console.log('[Audio] Object', objectName, audioSettings.enabledObjects[objectName] ? 'enabled' : 'disabled');
+    if (typeof syncObjectAudioToServer === 'function') syncObjectAudioToServer(objectName);
 }
 
 // Play a beep sound using Web Audio API (non-blocking)
@@ -354,6 +357,7 @@ function updateObjectsList() {
         const confidence = audioSettings.objectConfidence[objectName] !== undefined ? audioSettings.objectConfidence[objectName] : 1;
         const isNarrate = audioSettings.narrateObjects[objectName] || false;
         const isBeep = audioSettings.enabledObjects[objectName] || false;
+        const isStore = audioSettings.storeObjects[objectName] || false;
         const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
         const safeName = objectName.replace(/'/g, "\\'");
 
@@ -386,6 +390,10 @@ function updateObjectsList() {
                     <input type="checkbox" ${isBeep ? 'checked' : ''} onchange="toggleObjectBeep('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
                     Beep
                 </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Persist this class's detections to the database (off = drop, on = write to inference_results)">
+                    <input type="checkbox" ${isStore ? 'checked' : ''} onchange="toggleObjectStore('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Store
+                </label>
             </div>
             <div style="display: flex; gap: 6px; align-items: center;">
                 <select onchange="updateObjectBeepSound('${safeName}', this.value)" style="flex: 1; padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
@@ -402,12 +410,33 @@ function updateObjectsList() {
     });
 }
 
+// Per-class server sync: mirror localStorage toggles into /api/audio_settings
+// so an AI agent (or another browser) can read/change them. Fire-and-forget;
+// failure to sync logs but doesn't block the UI.
+async function syncObjectAudioToServer(objectName) {
+    const payload = {
+        class_name: objectName,
+        show: audioSettings.showObjects[objectName] !== false,
+        narrate: !!audioSettings.narrateObjects[objectName],
+        beep: !!audioSettings.enabledObjects[objectName],
+        min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100  // UI uses 0-100, server uses 0-1
+    };
+    try {
+        await fetch('/api/audio_settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+    } catch (e) { console.error('audio_settings POST failed:', e); }
+}
+
 // Toggle show/hide bounding box for object
 function toggleObjectShow(objectName) {
     const current = audioSettings.showObjects[objectName] !== false;
     audioSettings.showObjects[objectName] = !current;
     saveAudioSettings();
     updateObjectsList();
+    syncObjectAudioToServer(objectName);
 }
 
 // Toggle narrate for object
@@ -415,13 +444,68 @@ function toggleObjectNarrate(objectName) {
     audioSettings.narrateObjects[objectName] = !audioSettings.narrateObjects[objectName];
     saveAudioSettings();
     updateObjectsList();
+    syncObjectAudioToServer(objectName);
 }
 
 // Update confidence threshold for object
 function updateObjectConfidence(objectName, value) {
     audioSettings.objectConfidence[objectName] = Math.max(0, Math.min(100, parseFloat(value) || 1));
     saveAudioSettings();
+    syncObjectAudioToServer(objectName);
 }
+
+// On page load, pull server-side audio_settings so the UI matches what
+// services/* actually uses (localStorage may be stale across browsers).
+async function loadAudioSettingsFromServer() {
+    try {
+        const r = await fetch('/api/audio_settings');
+        if (!r.ok) return;
+        const data = await r.json();
+        const server = data.audio_settings || {};
+        Object.keys(server).forEach(k => {
+            const s = server[k];
+            if (s.show !== undefined)    audioSettings.showObjects[k] = !!s.show;
+            if (s.narrate !== undefined) audioSettings.narrateObjects[k] = !!s.narrate;
+            if (s.beep !== undefined)    audioSettings.enabledObjects[k] = !!s.beep;
+            if (s.min_confidence !== undefined) audioSettings.objectConfidence[k] = Math.round(s.min_confidence * 100);
+        });
+        saveAudioSettings();
+        if (typeof updateObjectsList === 'function') updateObjectsList();
+    } catch (e) { /* not fatal */ }
+}
+document.addEventListener('DOMContentLoaded', loadAudioSettingsFromServer);
+
+// Toggle DB persistence for object. POSTs to server because detection.py reads
+// this server-side to gate writes to inference_results. Default OFF.
+async function toggleObjectStore(objectName) {
+    const next = !audioSettings.storeObjects[objectName];
+    audioSettings.storeObjects[objectName] = next;
+    saveAudioSettings();           // mirror locally so UI doesn't snap back on re-render
+    updateObjectsList();
+    try {
+        await fetch('/api/store_objects', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({class_name: objectName, store: next})
+        });
+    } catch (e) {
+        console.error('store_objects POST failed:', e);
+    }
+}
+
+// On page load, pull server-side store flags so the UI matches what detection.py
+// actually uses for gating (localStorage may be stale across browsers/machines).
+async function loadStoreObjectsFromServer() {
+    try {
+        const r = await fetch('/api/store_objects');
+        if (!r.ok) return;
+        const data = await r.json();
+        const serverMap = data.store_objects || {};
+        Object.keys(serverMap).forEach(k => { audioSettings.storeObjects[k] = !!serverMap[k]; });
+        saveAudioSettings();
+    } catch (e) { /* not fatal */ }
+}
+document.addEventListener('DOMContentLoaded', loadStoreObjectsFromServer);
 
 // ============== EJECTION PROCEDURES ==============
 let procedures = [];
@@ -462,6 +546,16 @@ function updateProcedureField(procId, field, value) {
     if (!proc) return;
     proc[field] = value;
     if (field === 'enabled' || field === 'cameras') renderProcedures();
+}
+
+// Per-procedure DB persistence of ejection events. Persists immediately (like the
+// per-class Store) so charts pick it up without a separate Save click.
+function toggleProcedureStore(procId, checked) {
+    const proc = procedures.find(p => p.id === procId);
+    if (!proc) return;
+    proc.store = checked;
+    renderProcedures();
+    saveProcedures();
 }
 
 function updateRuleField(procId, ruleIndex, field, value) {
@@ -544,9 +638,16 @@ function renderProcedures() {
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'object', this.value)"
                     title="Target object class to monitor"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; min-width: 100px;">
-                    ${Array.from(detectedObjectClasses).sort().map(name =>
-                        '<option value="' + name + '" ' + (rule.object === name ? 'selected' : '') + '>' + name + '</option>'
-                    ).join('')}
+                    ${(() => {
+                        // Always include the rule's saved object even if no live detection
+                        // has populated detectedObjectClasses for it yet. Otherwise the
+                        // dropdown renders empty on a fresh page-load (rules look unbound).
+                        const names = new Set(detectedObjectClasses);
+                        if (rule.object) names.add(rule.object);
+                        return Array.from(names).sort().map(name =>
+                            '<option value="' + name + '" ' + (rule.object === name ? 'selected' : '') + '>' + name + '</option>'
+                        ).join('');
+                    })()}
                 </select>
                 <select onchange="updateRuleField('${proc.id}', ${ri}, 'condition', this.value)"
                     title="Condition type: Count = number of objects, Area = bounding box size in pixels, Color ΔE = color difference from reference"
@@ -588,6 +689,13 @@ function renderProcedures() {
                                 onchange="updateProcedureField('${proc.id}', 'enabled', this.checked)"
                                 style="width: 14px; height: 14px; cursor: pointer;">
                             Enabled
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; color: ${proc.store ? '#10b981' : 'var(--text-secondary)'};"
+                            title="Store this procedure's ejection events to the database (powers the Ejection Insights charts). Off = eject still fires but isn't logged.">
+                            <input type="checkbox" ${proc.store ? 'checked' : ''}
+                                onchange="toggleProcedureStore('${proc.id}', this.checked)"
+                                style="width: 14px; height: 14px; cursor: pointer;">
+                            Store
                         </label>
                         <select onchange="updateProcedureField('${proc.id}', 'logic', this.value)"
                             title="Rule logic: ANY = eject if at least one rule matches (OR), ALL = eject only if every rule matches (AND)"
@@ -763,6 +871,16 @@ function processDetectionForAudio(detectionData) {
                     }
                     saveAudioSettings();
                     updateObjectsList();
+                }
+
+                // Min-confidence gate: skip narrate/beep entirely for this detection
+                // if its confidence is below the per-class floor. UI value is 0-100;
+                // detection.confidence is 0-1. (Server applies the same gate before
+                // emitting the event — this is a defense-in-depth client filter.)
+                const minConfPct = audioSettings.objectConfidence[className] ?? 1;
+                const detConfPct = (det.confidence ?? 0) * 100;
+                if (detConfPct < minConfPct) {
+                    return;  // skip — below threshold
                 }
 
                 // Narrate if global narration ON AND per-object narrate ON
@@ -1000,19 +1118,23 @@ document.addEventListener('DOMContentLoaded', function() {
         scheduleAutoResume();
     }
 
-    document.getElementById("timeline-first").addEventListener('click', () => {
+    // 3.21.6 — guard with `?.` because the < > pagination buttons were removed
+    // in 3.21.2 (lightweight dashboard) but these bindings remained. Without the
+    // guard, the FIRST null deref throws and the whole IIFE aborts BEFORE the
+    // wheel listener gets attached — that was the real cause of "zoom dead".
+    document.getElementById("timeline-first")?.addEventListener('click', () => {
         pauseAndNav(() => totalPages - 1); // Oldest page
     });
 
-    document.getElementById("timeline-prev").addEventListener('click', () => {
+    document.getElementById("timeline-prev")?.addEventListener('click', () => {
         pauseAndNav(() => Math.min(totalPages - 1, currentPage + 1)); // Older page
     });
 
-    document.getElementById("timeline-next").addEventListener('click', () => {
+    document.getElementById("timeline-next")?.addEventListener('click', () => {
         pauseAndNav(() => Math.max(0, currentPage - 1)); // Newer page
     });
 
-    document.getElementById("timeline-last").addEventListener('click', () => {
+    document.getElementById("timeline-last")?.addEventListener('click', () => {
         pauseAndNav(() => 0); // Latest page
     });
 
@@ -1020,10 +1142,10 @@ document.addEventListener('DOMContentLoaded', function() {
     setInterval(updatePageCount, 5000);
     updatePageCount();
 
-    // Zoom controls
-    document.getElementById("timeline-zoom-in").addEventListener('click', () => { panzoom.zoomIn(); scheduleZoomReset(); });
-    document.getElementById("timeline-zoom-out").addEventListener('click', () => { panzoom.zoomOut(); scheduleZoomReset(); });
-    document.getElementById("timeline-reset-zoom").addEventListener('click', panzoom.reset);
+    // Zoom controls (also guarded — present today but cheap insurance)
+    document.getElementById("timeline-zoom-in")?.addEventListener('click', () => { panzoom.zoomIn(); scheduleZoomReset(); });
+    document.getElementById("timeline-zoom-out")?.addEventListener('click', () => { panzoom.zoomOut(); scheduleZoomReset(); });
+    document.getElementById("timeline-reset-zoom")?.addEventListener('click', panzoom.reset);
 
     // Auto-reset zoom after 30s of inactivity (industrial kiosk — no one to un-zoom)
     let _zoomResetTimer = null;
@@ -1037,7 +1159,10 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 30000);
     }
 
-    // Wheel zoom
+    // Wheel zoom (3.21.5: reverted to the proven HEAD baseline that worked in
+    // 3.19 — Panzoom's internal preventDefault is sufficient on a regular div;
+    // the {passive:false} + explicit preventDefault we tried in 3.21.2 was
+    // redundant and appears to have broken zoom on the user's browser).
     wrapper.addEventListener("wheel", function(e) {
         panzoom.zoomWithWheel(e);
         scheduleZoomReset();
@@ -1101,60 +1226,30 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (!dPath) return;
 
-            // Remove existing popup
+            // Remove any legacy popup (we now reuse the unified defect modal)
             removePopup();
 
-            // Build popup with full image preview
-            popup = document.createElement("div");
-            popup.style.cssText = "position:fixed;z-index:100000;background:#1a2332;border:1px solid rgba(100,160,255,0.5);border-radius:8px;padding:10px;box-shadow:0 6px 24px rgba(0,0,0,0.5);font-size:12px;color:#e2e8f0;line-height:1.6;max-width:80vw;max-height:90vh;overflow:auto;";
-
-            // Center on screen
-            popup.style.left = "50%";
-            popup.style.top = "50%";
-            popup.style.transform = "translate(-50%, -50%)";
-
-            // Folder path for gallery
-            const parts = dPath.split("/");
-            const folder = parts.slice(0, -1).join("/");
-            const filename = parts[parts.length - 1];
-
-            // Eject indicator
-            const ejectText = col.should_eject ? '<span style="color:#ff6b6b;">EJECT</span>' : '<span style="color:#69db7c;">OK</span>';
-            const encText = col.encoder != null ? `Enc: ${col.encoder}` : '';
-            const tsText = col.ts ? new Date(col.ts * 1000).toLocaleTimeString() : '';
-
-            // Use timeline_frame API with d_path for stable lookup (immune to timeline shifts)
+            // Build URLs that work even when Store=off (annotated jpg may not be
+            // persisted to raw_images/, so we use the live /api/timeline_frame).
             const frameUrl = `/api/timeline_frame?cam=${camId}&col=${colIndex}&page=${currentPage}&path=${encodeURIComponent(dPath)}&t=${Date.now()}`;
-            const rawUrl = `/api/raw_image/${encodeURI(dPath)}.jpg`;
+            const rawUrl   = `/api/raw_image/${encodeURI(dPath)}.jpg`;
+            const ejectTag = col.should_eject ? 'EJECT' : 'OK';
+            const tags = [ejectTag, 'cam ' + camId];
+            if (col.encoder != null) tags.push('enc ' + col.encoder);
 
-            popup.innerHTML = `
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <div style="font-weight:bold;color:#fff;">${ejectText} ${encText ? '| ' + encText : ''} ${tsText ? '| ' + tsText : ''} | Cam ${camId}</div>
-                    <span style="cursor:pointer;font-size:18px;color:#aaa;padding:0 4px;" onclick="this.closest('div[style*=z-index]').remove()">✕</span>
-                </div>
-                <img src="${frameUrl}" onerror="this.src='${rawUrl}'" style="max-width:100%;max-height:70vh;border-radius:4px;display:block;margin:0 auto;" />
-                <div style="display:flex;gap:8px;margin-top:8px;justify-content:center;">
-                    <a href="http://${location.hostname}:5000/#/gallery/${encodeURI(folder)}" target="_blank"
-                       style="padding:6px 12px;background:#2b5797;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Gallery</a>
-                    <a href="${rawUrl}" download="${filename}.jpg"
-                       style="padding:6px 12px;background:#2d7d46;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Download Raw</a>
-                    <a href="${frameUrl}" download="${filename}_DETECTED.jpg"
-                       style="padding:6px 12px;background:#7d462d;color:#fff;text-decoration:none;border-radius:4px;font-size:11px;">Download Annotated</a>
-                </div>
-            `;
-
-            document.body.appendChild(popup);
-
-            // Dismiss on click outside
-            setTimeout(() => {
-                function dismiss(ev) {
-                    if (popup && !popup.contains(ev.target)) {
-                        removePopup();
-                        document.removeEventListener("pointerdown", dismiss, true);
-                    }
-                }
-                document.addEventListener("pointerdown", dismiss, true);
-            }, 50);
+            // Route through the unified centered modal (3.21.4) — same Annotated /
+            // Raw / Both toggle + Download buttons + Panzoom that the charts use.
+            if (typeof window.openDefectDrawerForFrame === 'function') {
+                window.openDefectDrawerForFrame({
+                    annotated_url: frameUrl,
+                    raw_url:       rawUrl,
+                    shipment:      (dPath.split('/')[0] || ''),
+                    t:             col.ts ? col.ts * 1000 : null,
+                    cls:           tags.join(' • '),
+                    classes:       tags,
+                    best_confidence: 0,
+                });
+            }
         });
 
         // Also dismiss on Escape
@@ -1202,9 +1297,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 rowsSlider.value = cfg.num_rows;
                 rowsValue.textContent = cfg.num_rows;
             }
-            if (cfg.buffer_size) {
+            // buffer slider removed in 3.21.2 — storage now bound to num_rows
+            if (cfg.buffer_size && bufferSlider) {
                 bufferSlider.value = cfg.buffer_size;
-                bufferValue.textContent = cfg.buffer_size;
+                if (bufferValue) bufferValue.textContent = cfg.buffer_size;
             }
             // Restore camera order radio + custom input
             if (cfg.camera_order) {
@@ -1243,8 +1339,8 @@ document.addEventListener('DOMContentLoaded', function() {
         rowsValue.textContent = rowsSlider.value;
     });
 
-    bufferSlider.addEventListener('input', () => {
-        bufferValue.textContent = bufferSlider.value;
+    if (bufferSlider) bufferSlider.addEventListener('input', () => {
+        if (bufferValue) bufferValue.textContent = bufferSlider.value;
     });
 
     // Apply configuration
@@ -1252,7 +1348,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const cameraOrder = document.querySelector('input[name="camera-order"]:checked').value;
         const quality = qualitySlider.value;
         const rows = rowsSlider.value;
-        const buffer = bufferSlider.value;
+        const buffer = bufferSlider ? bufferSlider.value : rows;   // fallback: 3.21.2 ties storage to rows
         const responseDiv = document.getElementById('timeline-config-response');
 
         applyBtn.textContent = '⏳ Applying...';
@@ -1407,6 +1503,21 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // Service Configuration functions
+// Populate the "Last:" saved timestamp from the persisted config on page load,
+// so it survives a refresh. The save itself writes service_config.saved_at; we
+// read it back here instead of relying on the in-DOM client timestamp (which is
+// lost on reload — that's why it showed "Never" after refresh).
+async function loadLastSavedTime() {
+    try {
+        const r = await fetch('/api/cameras/config');
+        const d = await r.json();
+        const ts = (d.config && d.config.saved_at) || d.saved_at;
+        const el = document.getElementById('last-saved-time');
+        if (el && ts) el.textContent = ts;
+    } catch (e) { /* leave the i18n "Never" default */ }
+}
+document.addEventListener('DOMContentLoaded', loadLastSavedTime);
+
 async function saveAllServiceConfig() {
     var _b = _btnLoading();
     try {
@@ -1415,7 +1526,8 @@ async function saveAllServiceConfig() {
 
         if (response.ok) {
             const data = await response.json();
-            const timestamp = new Date().toISOString();
+            // Prefer the server-persisted saved_at; fall back to client time.
+            const timestamp = (data.config && data.config.saved_at) || new Date().toISOString();
             document.getElementById('last-saved-time').textContent = timestamp;
             alert('✓ All settings saved successfully!');
         } else {

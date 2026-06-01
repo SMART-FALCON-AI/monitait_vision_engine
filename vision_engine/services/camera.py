@@ -335,6 +335,10 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         "roi_ymin": getattr(cam, 'roi_ymin', 0),
         "roi_xmax": getattr(cam, 'roi_xmax', 1280),
         "roi_ymax": getattr(cam, 'roi_ymax', 720),
+        # Per-camera auto-exposure opt-in (USB only). Persisted so it survives
+        # restart; watcher.py reads it back on next init via
+        # CameraBuffer(..., auto_exposure=cc.get('auto_exposure', False))
+        "auto_exposure": bool(getattr(cam, 'auto_exposure', False)),
     }
 
     # Include name from metadata if available
@@ -419,18 +423,33 @@ def apply_camera_config_from_saved(cam, saved_config):
         'saturation': cv2.CAP_PROP_SATURATION,
         'fps': cv2.CAP_PROP_FPS,
     }
+    # If the saved config flips the auto-exposure preference, mirror it onto the
+    # CameraBuffer object so subsequent reconnects pick up the new mode.
+    if 'auto_exposure' in saved_config:
+        cam.auto_exposure = bool(saved_config['auto_exposure'])
+
     if hasattr(cam, 'camera'):
         try:
-            # For USB cameras: disable auto-exposure before setting manual values
+            auto_exp = not getattr(cam, 'is_ip_camera', False) and getattr(cam, 'auto_exposure', False)
             if not getattr(cam, 'is_ip_camera', False):
-                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-                cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                if auto_exp:
+                    # Camera-firmware AE. Skip toggling to manual (mode 1) and also
+                    # skip the manual EXPOSURE write below.
+                    cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                else:
+                    cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                    cam.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             for key, prop in prop_map.items():
                 if key in saved_config:
+                    if auto_exp and key == 'exposure':
+                        continue  # don't clobber camera-side AE
                     cam.camera.set(prop, saved_config[key])
                     if hasattr(cam, '_saved_props'):
                         cam._saved_props[prop] = saved_config[key]
-            logger.info(f"Applied camera config: { {k: saved_config[k] for k in prop_map if k in saved_config} }")
+            logger.info(
+                f"Applied camera config: { {k: saved_config[k] for k in prop_map if k in saved_config} }"
+                + (" | auto_exposure=ON (manual exposure skipped)" if auto_exp else "")
+            )
         except Exception as e:
             logger.error(f"Error applying camera config: {e}")
 
@@ -451,8 +470,18 @@ def format_relative_time(timestamp):
 
 class CameraBuffer:
     def __init__(self, source, exposure=100, gain=100, brightness=100,
-                 contrast=0, saturation=50, fps=10, roi_config=None) -> None:
+                 contrast=0, saturation=50, fps=10, roi_config=None,
+                 auto_exposure=False) -> None:
+        """Open a video source (USB /dev/videoX or RTSP URL) and start the buffer thread.
+
+        auto_exposure (USB only): when True, MVE does NOT force the camera into manual
+        exposure mode — the camera firmware's own AE algorithm runs and the user-set
+        `exposure` value is ignored. `gain`, `brightness`, `contrast`, `saturation`,
+        `fps` still apply. Use this for venues where lighting changes a lot and a
+        per-state exposure override (state_machine.State.exposure) isn't enough.
+        """
         self.source = source
+        self.auto_exposure = bool(auto_exposure)
         self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
 
         # Initialize camera with appropriate backend
@@ -473,16 +502,26 @@ class CameraBuffer:
             self.camera.set(cv2.CAP_PROP_CONTRAST, IP_CAMERA_CONTRAST)
             self.camera.set(cv2.CAP_PROP_SATURATION, IP_CAMERA_SATURATION)
         else:
-            # USB camera: set format, disable auto-exposure, apply saved settings
+            # USB camera: set format, then either force manual exposure (default) or
+            # leave auto-exposure on if the user opted in via camera config.
             self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J', 'P', 'G'))
-            self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-            self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            if self.auto_exposure:
+                # Mode 3 = aperture priority / camera-side AE. We deliberately do NOT
+                # toggle back to mode 1 (manual). Skip the `set(CAP_PROP_EXPOSURE, …)`
+                # call too — writing a value would re-enable manual mode on some
+                # firmwares and override the AE we just asked for.
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                logger.info(f"Camera {source}: auto_exposure=True — manual exposure override skipped")
+            else:
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
             self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
             self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
             self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
             self.camera.set(cv2.CAP_PROP_GAMMA, 1)
-            self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
+            if not self.auto_exposure:
+                self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
             self.camera.set(cv2.CAP_PROP_GAIN, gain)
             self.camera.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
             self.camera.set(cv2.CAP_PROP_CONTRAST, contrast)
@@ -522,16 +561,26 @@ class CameraBuffer:
         threading.Thread(target=self.buffer).start()
 
     def _apply_saved_props(self):
-        """Re-apply saved camera properties after reconnect."""
+        """Re-apply saved camera properties after reconnect.
+
+        Mirrors the auto_exposure logic from __init__: if the user opted into
+        camera-firmware AE via the Auto-Exposure checkbox, leave AE mode on and
+        skip the manual CAP_PROP_EXPOSURE write — otherwise the reconnect path
+        would clobber the AE every time the camera dropped and re-attached.
+        """
         # Re-apply base camera settings (resolution, format)
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         if not self.is_ip_camera:
             try:
                 self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-                # Disable auto-exposure so manual values stick
-                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-                self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+                if getattr(self, 'auto_exposure', False):
+                    # Mode 3 = aperture priority / camera-side AE. Do NOT toggle back
+                    # to manual (mode 1). Below we also skip the EXPOSURE prop write.
+                    self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                else:
+                    self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                    self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
                 self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
                 self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
                 self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
@@ -539,12 +588,23 @@ class CameraBuffer:
                 pass
         if not self._saved_props:
             return
+        skip_props = set()
+        if not self.is_ip_camera and getattr(self, 'auto_exposure', False):
+            # Writing CAP_PROP_EXPOSURE re-enables manual mode on most firmwares,
+            # negating the AE we just asked for. Skip just this one prop.
+            skip_props.add(cv2.CAP_PROP_EXPOSURE)
         for prop, val in self._saved_props.items():
+            if prop in skip_props:
+                continue
             try:
                 self.camera.set(prop, val)
             except Exception:
                 pass
-        logger.info(f"Re-applied saved camera config after reconnect: {self.source} | props={self._saved_props}")
+        logger.info(
+            f"Re-applied saved camera config after reconnect: {self.source} | "
+            f"props={ {p: v for p, v in self._saved_props.items() if p not in skip_props} }"
+            + (" | auto_exposure=ON (manual exposure skipped)" if cv2.CAP_PROP_EXPOSURE in skip_props else "")
+        )
 
     def update_prop(self, prop, value):
         """Update a camera property and save it for reconnect persistence."""

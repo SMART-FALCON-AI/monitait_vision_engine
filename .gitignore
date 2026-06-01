@@ -102,3 +102,4 @@ htmlcov/
 .dmypy.json
 dmypy.json
 3D/
+.backups/

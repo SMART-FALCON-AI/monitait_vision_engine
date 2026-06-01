@@ -120,7 +120,7 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
             current_encoder = None
         ejector_offset = int(os.environ.get("EJECTOR_OFFSET", 0))
 
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg.REDIS_DB)
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
         if not all_keys:
             return None
@@ -353,7 +353,7 @@ async def ws_timeline(websocket: WebSocket):
                 """Blocking Redis get_message — runs in executor thread."""
                 return pubsub.get_message(timeout=timeout)
 
-            r = Redis("redis", 6379, db=0)
+            r = Redis("redis", 6379, db=cfg.REDIS_DB)
             pubsub = r.pubsub()
             pubsub.subscribe("ws:timeline_update")
 

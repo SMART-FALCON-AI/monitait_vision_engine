@@ -907,6 +907,13 @@ function createCameraCard(cameraId, camera) {
                     <input type="number" id="cam-cfg-fps-${cameraId}" value="${config.fps || 30}" min="1" max="120"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
                 </div>
+                <div class="camera-config-item">
+                    <label>Auto-Exposure ${tip('When ON, the camera firmware runs its own auto-exposure. The Exposure value above is ignored and any per-state exposure override is also skipped for this camera. Gain still applies.')}</label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;">
+                        <input type="checkbox" id="cam-cfg-auto-exposure-${cameraId}" ${config.auto_exposure ? 'checked' : ''} ${!isConnected ? 'disabled' : ''}>
+                        <span style="font-size:11px;color:var(--text-secondary);">Use camera firmware AE</span>
+                    </label>
+                </div>
             </div>
             <div class="camera-roi-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #333;">
                 <div style="display: flex; align-items: center; margin-bottom: 8px;">
@@ -1030,6 +1037,12 @@ async function applyCameraConfig(cameraId) {
         if (brightnessEl) config.brightness = parseInt(brightnessEl.value) || 100;
         if (contrastEl) config.contrast = parseInt(contrastEl.value) || 0;
         if (saturationEl) config.saturation = parseInt(saturationEl.value) || 50;
+
+        // Per-camera Auto-Exposure opt-in (USB only). When true, the camera firmware
+        // runs its own AE algorithm; MVE skips both the manual exposure write at
+        // connect time AND any per-state exposure override from State.exposure.
+        const autoExpEl = document.getElementById(`cam-cfg-auto-exposure-${cameraId}`);
+        if (autoExpEl) config.auto_exposure = !!autoExpEl.checked;
 
         const response = await fetch(`/api/camera/${cameraId}/config`, {
             method: 'POST',
@@ -1369,6 +1382,11 @@ function loadStateToEditor(name, state) {
     // Load state into editor form
     document.getElementById('state-name-input').value = name;
     document.getElementById('state-light-check-input').value = state.light_status_check ? 'true' : 'false';
+    // Per-state camera-prop override. null/undefined → blank input (= "don't touch").
+    const _g = document.getElementById('state-gain-input');
+    const _e = document.getElementById('state-exposure-input');
+    if (_g) _g.value = (state.gain === null || state.gain === undefined) ? '' : state.gain;
+    if (_e) _e.value = (state.exposure === null || state.exposure === undefined) ? '' : state.exposure;
 
     // Clear existing phases and rebuild
     const container = document.getElementById('phases-container');
@@ -1528,10 +1546,17 @@ async function createOrUpdateState() {
         console.warn('Warning: No phase has cameras configured - no images will be captured');
     }
 
+    // Per-state camera-prop override: empty string = "don't touch", any integer = apply
+    // to every camera in this state's phases on activation. State.from_dict() on the
+    // server treats null/empty as None.
+    const _gainStr = (document.getElementById('state-gain-input')?.value ?? '').trim();
+    const _expStr = (document.getElementById('state-exposure-input')?.value ?? '').trim();
     const stateData = {
         name: name,
         phases: phases,
-        light_status_check: document.getElementById('state-light-check-input').value === 'true'
+        light_status_check: document.getElementById('state-light-check-input').value === 'true',
+        gain: _gainStr === '' ? null : parseInt(_gainStr, 10),
+        exposure: _expStr === '' ? null : parseInt(_expStr, 10)
     };
 
     try {

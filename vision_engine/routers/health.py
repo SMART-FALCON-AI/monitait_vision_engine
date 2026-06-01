@@ -285,9 +285,25 @@ async def root_redirect(request: Request):
 # ---------------------------------------------------------------------------
 @router.get("/status")
 async def status_page(request: Request):
-    """Serve the status page with control panel."""
+    """Serve the status page with control panel.
+
+    The HTML itself is served no-cache (always fresh), but the referenced
+    `/static/js/*.js` files are served by the StaticFiles mount which the
+    browser caches aggressively. After an MVE upgrade the fresh HTML would
+    keep loading a STALE cached JS (e.g. an audio.js without the Store
+    checkbox), which looked like "the feature didn't deploy". To fix it
+    permanently we rewrite each local static JS/CSS include to carry a
+    `?v=<app-version>` query string — the version changes every release, so
+    the browser is forced to refetch the JS whenever MVE is upgraded.
+    """
+    import re
     try:
-        return FileResponse("static/status.html", headers={
+        with open("static/status.html", "r", encoding="utf-8") as f:
+            html = f.read()
+        ver = getattr(request.app, "version", None) or "dev"
+        # Append ?v=<ver> to local /static/js/*.js and /static/css/*.css includes.
+        html = re.sub(r'(/static/(?:js|css)/[\w\-./]+\.(?:js|css))"', rf'\1?v={ver}"', html)
+        return HTMLResponse(content=html, headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0"
@@ -389,7 +405,7 @@ async def status_stream(request: Request):
                 inf_frame_timestamps = []
                 cap_frame_timestamps = []
                 try:
-                    redis_conn = Redis("redis", 6379, db=0)
+                    redis_conn = Redis("redis", 6379, db=cfg_module.REDIS_DB)
                     times_raw = redis_conn.lrange("inference_times", 0, -1)
                     inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
                     inf_raw = redis_conn.lrange("inf_frame_timestamps", 0, -1)

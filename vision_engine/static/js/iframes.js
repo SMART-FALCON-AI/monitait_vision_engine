@@ -1,8 +1,9 @@
 // Dynamic iframe management - iframes are CREATED when tab opens and DESTROYED when leaving
 // This prevents any phantom iframe from blocking the page
 var iframeConfig = {
-    'gallery': { containerId: 'gallery-iframe-container', port: 5000 },
-    'grafana': { containerId: 'grafana-iframe-container', port: 3000 }
+    'gallery': { containerId: 'gallery-iframe-container', port: 5000 }
+    // 'grafana' removed in 3.15.3 — the Charts tab now uses embedded Chart.js
+    // insight panels (charts.js) instead of an external Grafana iframe.
 };
 
 function loadIframeForTab(tabName) {

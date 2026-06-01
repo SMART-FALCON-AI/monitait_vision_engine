@@ -312,6 +312,15 @@ async def update_camera_config(camera_id: int, request: Request):
                 setattr(cam, key, body[key])
                 updated.append(key)
 
+        # Auto-exposure flag: stored on the CameraBuffer object so it persists into
+        # `get_camera_config_for_save()`. NOTE: flipping this at runtime does NOT
+        # currently re-initialise the camera — the V4L2 mode change (manual ↔ auto)
+        # only takes effect on next camera open (restart or reconnect). To make the
+        # change visible immediately, click Restart on this camera after Save.
+        if 'auto_exposure' in body:
+            cam.auto_exposure = bool(body['auto_exposure'])
+            updated.append('auto_exposure')
+
         # Auto-save to disk so settings persist across restarts
         if updated:
             try:
@@ -498,23 +507,52 @@ async def upload_config(request: Request):
         return JSONResponse(content={"error": "Watcher not initialized"}, status_code=503)
 
     try:
+        from config import save_data_file, load_data_file
         body = await request.json()
         config = body.get("config")
 
         if not config:
             return JSONResponse(content={"error": "Invalid configuration format"}, status_code=400)
 
-        # Save the uploaded config
-        if not save_service_config(config):
-            return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
+        # Two accepted shapes:
+        #  (a) FULL bundle (3.15.7+ export): top-level has `service_config` plus
+        #      sibling keys like `timeline_config`. Persist the whole file and
+        #      apply service_config + timeline_config so procedures/store/audio
+        #      all restore.
+        #  (b) LEGACY (pre-3.15.7 export): the flat service_config contents
+        #      (cameras/states/… at top level, no `service_config` wrapper).
+        #      Persist under service_config only.
+        if isinstance(config, dict) and "service_config" in config:
+            full_data = config
+            svc = config.get("service_config", {}) or {}
+            if not save_data_file(full_data):
+                return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
+        else:
+            svc = config
+            if not save_service_config(svc):
+                return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
+            full_data = load_data_file()  # reload merged file so timeline_config (if any) is present
 
-        # Use the helper function to apply all settings
-        settings_applied, cameras_loaded = request.app.state.apply_config_settings(config, watcher)
+        # Apply service_config AND root-level configs (timeline_config/procedures).
+        settings_applied, cameras_loaded = request.app.state.apply_config_settings(
+            svc, watcher, full_data=full_data
+        )
+
+        # Invalidate the per-class caches in services.detection so the freshly
+        # imported store_objects / audio_settings take effect immediately instead
+        # of serving stale values for up to the 5s TTL.
+        try:
+            import services.detection as _det
+            _det._store_objects_loaded_at = 0.0
+            _det._audio_settings_loaded_at = 0.0
+        except Exception:
+            pass
 
         return JSONResponse(content={
             "success": True,
             "message": "Configuration uploaded and applied",
-            "cameras_loaded": cameras_loaded
+            "cameras_loaded": cameras_loaded,
+            "applied": list(settings_applied.keys()) if isinstance(settings_applied, dict) else None
         })
     except Exception as e:
         logger.error(f"Error uploading config: {e}")

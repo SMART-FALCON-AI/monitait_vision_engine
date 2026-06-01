@@ -53,7 +53,7 @@ async def get_inference_stats(request: Request):
     cap_frame_timestamps = []
 
     try:
-        redis_conn = Redis("redis", 6379, db=0)
+        redis_conn = Redis("redis", 6379, db=config.REDIS_DB)
 
         # Per-request inference latency (last 10)
         times_raw = redis_conn.lrange("inference_times", 0, -1)

@@ -21,6 +21,20 @@ _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 _HEADER_HEIGHT = 28
 
 
+def _list_shipment_dirs():
+    """Return shipment-id directory names under raw_images/. Used to surface
+    freshly-created shipments in the dropdown even before any detection has
+    been recorded against them (otherwise the DB DISTINCT query returns
+    only shipments that already have rows in the time window).
+    """
+    try:
+        if not _RAW_IMAGES_ROOT.exists():
+            return []
+        return sorted([p.name for p in _RAW_IMAGES_ROOT.iterdir() if p.is_dir() and not p.name.startswith('.')])
+    except Exception:
+        return []
+
+
 def _unpack_timeline_entry(frame_data):
     """Unpack a timeline Redis entry, handling 2/3/4-tuple formats.
     Returns (ts, jpeg_bytes, detections, meta) where meta is a dict with d_path, encoder.
@@ -229,7 +243,7 @@ def get_timeline_composite(request: Request):
             image_rotation = 0
 
         # Create Redis connection
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
 
         # Find all camera timeline keys (timeline:1, timeline:2, ...)
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
@@ -337,7 +351,7 @@ async def timeline_image(request: Request, page: int = 0):
             image_rotation = 0
 
         # Create Redis connection
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
 
         # Find all camera timeline keys
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
@@ -552,7 +566,7 @@ async def timeline_count(request: Request):
         except:
             rows_per_page = 10
 
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
         # Use the camera with most frames to determine page count
         max_frames = 0
@@ -579,11 +593,642 @@ async def timeline_count(request: Request):
         return {"total_frames": 0, "total_pages": 0, "rows_per_page": 10}
 
 
+@router.get("/api/detection_stats")
+async def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0):
+    """Detection-quality insight for the Charts tab embedded panel.
+
+    Aggregates the `inference_results` hypertable into:
+      - by_class: { class_name: count }  over the window (most-frequent defects)
+      - timeline: [ {t: "HH:MM", count: N}, ... ]  detections per time-bucket
+      - total, window, persisted (whether any rows exist)
+
+    Reads from TimescaleDB, so it only reflects classes with Store=ON (3.14.0
+    per-class DB opt-in). If the DB is unreachable or empty, returns a well-formed
+    empty payload so the frontend can render an informative "no stored detections
+    yet" state instead of erroring.
+    """
+    # window → (interval SQL, bucket SQL, label fmt)
+    _windows = {
+        "1h":  ("1 hour",   "1 minute"),
+        "6h":  ("6 hours",  "10 minutes"),
+        "24h": ("24 hours", "1 hour"),
+        "7d":  ("7 days",   "6 hours"),
+    }
+    interval, bucket = _windows.get(window, _windows["1h"])
+    empty = {"by_class": {}, "timeline": [], "total": 0, "window": window, "persisted": False}
+
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+
+        # Class distribution over the window. Prefer the human-readable `name`
+        # (e.g. "DIE_LINE", "mean_L") over the numeric `class` index. Cap the rows
+        # scanned so a huge hypertable (millions of rows) can't make this query
+        # run for many seconds — a recent sample is representative for the panel.
+        cur.execute(
+            """
+            SELECT COALESCE(elem->>'name', elem->>'class') AS cls, COUNT(*) AS n
+            FROM (
+                SELECT detections FROM inference_results
+                WHERE time > NOW() - INTERVAL %s
+                ORDER BY time DESC
+                LIMIT 20000
+            ) recent,
+            LATERAL jsonb_array_elements(recent.detections) AS elem
+            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+            GROUP BY cls
+            ORDER BY n DESC
+            LIMIT 30
+            """,
+            (interval, float(min_conf or 0.0)),
+        )
+        by_class = {}
+        for cls, n in cur.fetchall():
+            if cls is not None:
+                by_class[str(cls)] = int(n)
+
+        # Detections-per-bucket timeline
+        cur.execute(
+            """
+            SELECT time_bucket(INTERVAL %s, time) AS bkt,
+                   COALESCE(SUM(detection_count), 0) AS n
+            FROM inference_results
+            WHERE time > NOW() - INTERVAL %s
+            GROUP BY bkt
+            ORDER BY bkt
+            """,
+            (bucket, interval),
+        )
+        timeline = [{"t": b.strftime("%m-%d %H:%M"), "count": int(n)} for b, n in cur.fetchall()]
+        cur.close()
+
+        total = sum(by_class.values())
+        return JSONResponse(content={
+            "by_class": by_class,
+            "timeline": timeline,
+            "total": total,
+            "window": window,
+            "persisted": total > 0 or len(timeline) > 0,
+        })
+    except Exception as e:
+        logger.warning(f"detection_stats query failed (returning empty): {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
+@router.get("/api/detection_charts")
+async def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
+    """Rich detection analytics for the Charts tab (3.16.0).
+
+    Returns, scoped to an optional shipment_id and a time window:
+      - shipments:   distinct shipment ids in the window (for the filter dropdown)
+      - size_over_time:   per time-bucket width/height percentiles (p10/p50/p90 +
+                          min/max) → rendered as floating-range "candles"
+      - confidence_over_time: per time-bucket confidence min/avg/max
+      - confidence_by_class:  per time-bucket avg confidence split per class
+                          ({buckets:[...], series:{cls:[...]}}) → one line per class
+      - camera_scatter:   up to N points {x: epoch_ms, y: cam, r: conf, cls: name}
+                          for the camera×time bubble chart (dot size = confidence)
+
+    All aggregation runs over a capped recent slice (LIMIT 20000 rows) so a huge
+    hypertable can't make this slow. Reads from inference_results, so it reflects
+    only Store=ON classes. Returns a well-formed empty payload on any error.
+    """
+    _windows = {
+        "1h":  ("1 hour",   "1 minute"),
+        "6h":  ("6 hours",  "5 minutes"),
+        "24h": ("24 hours", "30 minutes"),
+        "7d":  ("7 days",   "6 hours"),
+    }
+    interval, bucket = _windows.get(window, _windows["24h"])
+    empty = {"shipments": [], "size_over_time": [], "confidence_over_time": [],
+             "confidence_by_class": {"buckets": [], "series": {}},
+             "camera_scatter": [], "camera_scatter_encoder": [],
+             "window": window, "shipment": shipment}
+
+    # Optional shipment filter clause (parameterised)
+    ship_clause = "AND shipment = %s" if shipment else ""
+
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+
+        # --- distinct shipments in the window (for the dropdown) ---
+        cur.execute(
+            f"SELECT DISTINCT shipment FROM inference_results "
+            f"WHERE time > NOW() - INTERVAL %s AND shipment IS NOT NULL "
+            f"ORDER BY shipment LIMIT 100",
+            (interval,),
+        )
+        shipments = sorted(set([r[0] for r in cur.fetchall() if r[0]]) | set(_list_shipment_dirs()))
+
+        # --- recent slice (capped) expanded to per-detection rows ---
+        # Pull bucket, bbox dims, confidence, cam per detection.
+        base_params = [interval] + ([shipment] if shipment else [])
+        cur.execute(
+            f"""
+            WITH recent AS (
+                SELECT time, shipment, detections
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                ORDER BY time DESC
+                LIMIT 20000
+            ),
+            expanded AS (
+                SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
+                       time,
+                       (elem->>'_cam')        AS cam,
+                       (elem->>'name')        AS cls,
+                       (elem->>'confidence')::float AS conf,
+                       ((elem->>'xmax')::float - (elem->>'xmin')::float) AS w,
+                       ((elem->>'ymax')::float - (elem->>'ymin')::float) AS h
+                FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            )
+            SELECT
+                bkt,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY w) AS w_p10,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY w) AS w_p50,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY w) AS w_p90,
+                percentile_cont(0.1) WITHIN GROUP (ORDER BY h) AS h_p10,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY h) AS h_p50,
+                percentile_cont(0.9) WITHIN GROUP (ORDER BY h) AS h_p90,
+                MIN(conf) AS c_min, AVG(conf) AS c_avg, MAX(conf) AS c_max
+            FROM expanded
+            GROUP BY bkt ORDER BY bkt
+            """,
+            base_params,
+        )
+        size_over_time, confidence_over_time = [], []
+        for row in cur.fetchall():
+            bkt, wp10, wp50, wp90, hp10, hp50, hp90, cmin, cavg, cmax = row
+            t = bkt.strftime("%m-%d %H:%M")
+            size_over_time.append({
+                "t": t,
+                "w_lo": round(wp10 or 0, 1), "w_mid": round(wp50 or 0, 1), "w_hi": round(wp90 or 0, 1),
+                "h_lo": round(hp10 or 0, 1), "h_mid": round(hp50 or 0, 1), "h_hi": round(hp90 or 0, 1),
+            })
+            confidence_over_time.append({
+                "t": t,
+                "c_min": round((cmin or 0) * 100, 1),
+                "c_avg": round((cavg or 0) * 100, 1),
+                "c_max": round((cmax or 0) * 100, 1),
+            })
+
+        # --- camera scatter: up to 1500 points ---
+        cur.execute(
+            f"""
+            WITH recent AS (
+                SELECT time, shipment, detections, image_path FROM inference_results
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                ORDER BY time DESC LIMIT 5000
+            )
+            SELECT EXTRACT(EPOCH FROM time) * 1000 AS x_ms,
+                   COALESCE((elem->>'_cam')::int, 0) AS cam,
+                   (elem->>'name') AS cls,
+                   (elem->>'confidence')::float AS conf,
+                   image_path AS img,
+                   shipment AS ship
+            FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            ORDER BY time DESC
+            LIMIT 1500
+            """,
+            base_params,
+        )
+        camera_scatter = [
+            {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
+             "img": img, "ship": ship}
+            for x, cam, cls, conf, img, ship in cur.fetchall()
+        ]
+
+        # --- camera × ENCODER scatter (3.21.0): defect map by roll position ---
+        cur.execute(
+            f"""
+            WITH recent AS (
+                SELECT shipment, detections, image_path, encoder_value FROM inference_results
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                  AND encoder_value IS NOT NULL
+                ORDER BY time DESC LIMIT 5000
+            )
+            SELECT encoder_value AS enc,
+                   COALESCE((elem->>'_cam')::int, 0) AS cam,
+                   (elem->>'name') AS cls,
+                   (elem->>'confidence')::float AS conf,
+                   image_path AS img,
+                   shipment AS ship
+            FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            LIMIT 1500
+            """,
+            base_params,
+        )
+        camera_scatter_encoder = [
+            {"x": int(enc or 0), "y": cam, "cls": cls,
+             "r": round((conf or 0), 3), "img": img, "ship": ship}
+            for enc, cam, cls, conf, img, ship in cur.fetchall()
+        ]
+
+        # --- confidence by class over time (one line per class) ---
+        cur.execute(
+            f"""
+            WITH recent AS (
+                SELECT time, detections FROM inference_results
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                ORDER BY time DESC LIMIT 20000
+            ),
+            expanded AS (
+                SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
+                       (elem->>'name') AS cls,
+                       (elem->>'confidence')::float AS conf
+                FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            )
+            SELECT bkt, cls, AVG(conf) AS c_avg
+            FROM expanded
+            WHERE cls IS NOT NULL
+            GROUP BY bkt, cls ORDER BY bkt
+            """,
+            base_params,
+        )
+        cbc_buckets, _seen_b = [], set()
+        cbc_vals = {}  # cls -> {label: avg_pct}
+        for bkt, cls, cavg in cur.fetchall():
+            label = bkt.strftime("%m-%d %H:%M")
+            if label not in _seen_b:
+                _seen_b.add(label); cbc_buckets.append(label)
+            cbc_vals.setdefault(cls, {})[label] = round((cavg or 0) * 100, 1)
+        confidence_by_class = {
+            "buckets": cbc_buckets,
+            "series": {cls: [vals.get(b) for b in cbc_buckets] for cls, vals in cbc_vals.items()},
+        }
+        cur.close()
+
+        return JSONResponse(content={
+            "shipments": shipments,
+            "size_over_time": size_over_time,
+            "confidence_over_time": confidence_over_time,
+            "confidence_by_class": confidence_by_class,
+            "camera_scatter": camera_scatter,
+            "camera_scatter_encoder": camera_scatter_encoder,
+            "window": window,
+            "shipment": shipment,
+        })
+    except Exception as e:
+        logger.warning(f"detection_charts query failed (returning empty): {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
+@router.get("/api/ejection_stats")
+async def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
+    """Ejection analytics for the Charts tab (3.17.0).
+
+    Reads the ejection_events table (one row per triggered procedure with
+    Store=ON). Scoped to a window + optional shipment, returns:
+      - by_procedure: {procedure_name: count}  → distribution bar + doughnut
+      - timeline:     [{t, count}]             → ejections over time (number)
+      - total:        total ejection events in the window
+      - shipments:    distinct shipment ids (for the dropdown)
+    Returns a well-formed empty payload on any error (e.g. table not created yet).
+    """
+    _windows = {
+        "1h":  ("1 hour",   "1 minute"),
+        "6h":  ("6 hours",  "5 minutes"),
+        "24h": ("24 hours", "30 minutes"),
+        "7d":  ("7 days",   "6 hours"),
+    }
+    interval, bucket = _windows.get(window, _windows["24h"])
+    empty = {"by_procedure": {}, "timeline": [], "total": 0,
+             "shipments": [], "window": window, "shipment": shipment}
+    ship_clause = "AND shipment = %s" if shipment else ""
+    base_params = [interval] + ([shipment] if shipment else [])
+
+    conn = None
+    try:
+        from services.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+
+        # distinct shipments seen in ejection_events within the window
+        cur.execute(
+            "SELECT DISTINCT shipment FROM ejection_events "
+            "WHERE time > NOW() - INTERVAL %s AND shipment IS NOT NULL "
+            "ORDER BY shipment LIMIT 100",
+            (interval,),
+        )
+        shipments = sorted(set([r[0] for r in cur.fetchall() if r[0]]) | set(_list_shipment_dirs()))
+
+        # count per procedure
+        cur.execute(
+            f"""SELECT COALESCE(procedure_name, 'Unnamed') AS p, COUNT(*) AS c
+                FROM ejection_events
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                GROUP BY p ORDER BY c DESC""",
+            base_params,
+        )
+        by_procedure, total = {}, 0
+        for p, c in cur.fetchall():
+            by_procedure[p] = int(c)
+            total += int(c)
+
+        # ejections over time (bucketed count)
+        cur.execute(
+            f"""SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt, COUNT(*) AS c
+                FROM ejection_events
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                GROUP BY bkt ORDER BY bkt""",
+            base_params,
+        )
+        timeline = [
+            {"t": bkt.strftime("%m-%d %H:%M"), "count": int(c)}
+            for bkt, c in cur.fetchall()
+        ]
+        cur.close()
+
+        return JSONResponse(content={
+            "by_procedure": by_procedure,
+            "timeline": timeline,
+            "total": total,
+            "shipments": shipments,
+            "window": window,
+            "shipment": shipment,
+        })
+    except Exception as e:
+        logger.warning(f"ejection_stats query failed (returning empty): {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
+@router.get("/api/production_stats")
+async def production_stats(request: Request, window: str = "24h", shipment: str = ""):
+    """Line KPIs from production_metrics (3.18.0).
+
+    OKC/NGC are *cumulative* hardware counters from the PLC (serial KV: OKC, NGC,
+    DWS downtime, ENC encoder, PPS→is_moving). We diff consecutive samples per
+    bucket and clamp negatives (a restart resets the counter) to get per-bucket
+    OK / NG counts → reject-rate, throughput (units), and uptime %. Also returns
+    overall p̄ + total units so the frontend can draw a proper SPC p-chart.
+    """
+    _windows = {
+        "1h":  ("1 hour",   "1 minute"),
+        "6h":  ("6 hours",  "5 minutes"),
+        "24h": ("24 hours", "30 minutes"),
+        "7d":  ("7 days",   "6 hours"),
+    }
+    interval, bucket = _windows.get(window, _windows["24h"])
+    bucket_seconds = {"1h": 60, "6h": 300, "24h": 1800, "7d": 21600}.get(window, 1800)
+    empty = {"timeline": [], "total_ok": 0, "total_ng": 0, "total_units": 0,
+             "reject_rate_overall": 0.0, "eject_over_total": 0.0,
+             "availability": 0.0, "performance": 0.0, "quality": 0.0, "oee": 0.0,
+             "downtime_total_s": 0.0, "speed_avg": 0.0, "speed_max": 0.0,
+             "shipments": [], "window": window, "shipment": shipment}
+    ship_clause = "AND shipment = %s" if shipment else ""
+    base_params = [interval] + ([shipment] if shipment else [])
+
+    conn = None
+    try:
+        from services.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT DISTINCT shipment FROM production_metrics "
+            "WHERE time > NOW() - INTERVAL %s AND shipment IS NOT NULL "
+            "ORDER BY shipment LIMIT 100",
+            (interval,),
+        )
+        shipments = sorted(set([r[0] for r in cur.fetchall() if r[0]]) | set(_list_shipment_dirs()))
+
+        # OKC/NGC/encoder/downtime are cumulative — diff consecutive samples, clamp
+        # resets. Speed = encoder delta / bucket seconds. Downtime = downtime delta.
+        cur.execute(
+            f"""
+            WITH ordered AS (
+                SELECT time, is_moving,
+                       ok_counter - LAG(ok_counter) OVER (ORDER BY time) AS d_ok,
+                       ng_counter - LAG(ng_counter) OVER (ORDER BY time) AS d_ng,
+                       encoder_value - LAG(encoder_value) OVER (ORDER BY time) AS d_enc,
+                       downtime_seconds - LAG(downtime_seconds) OVER (ORDER BY time) AS d_dt
+                FROM production_metrics
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+            ),
+            b AS (
+                SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
+                       GREATEST(COALESCE(d_ok, 0), 0) AS d_ok,
+                       GREATEST(COALESCE(d_ng, 0), 0) AS d_ng,
+                       GREATEST(COALESCE(d_enc, 0), 0) AS d_enc,
+                       GREATEST(COALESCE(d_dt, 0), 0) AS d_dt,
+                       CASE WHEN is_moving THEN 1.0 ELSE 0.0 END AS mv
+                FROM ordered
+            )
+            SELECT bkt, SUM(d_ok) AS ok, SUM(d_ng) AS ng, AVG(mv) * 100 AS uptime,
+                   SUM(d_enc) AS enc, SUM(d_dt) AS dt
+            FROM b GROUP BY bkt ORDER BY bkt
+            """,
+            base_params,
+        )
+        rows = cur.fetchall()
+        cur.close()
+
+        # pass 1: per-bucket primitives + peak speed (encoder units/sec) for Performance
+        raw, speed_max = [], 0.0
+        for bkt, ok, ng, uptime, enc, dt in rows:
+            ok = int(ok or 0); ng = int(ng or 0)
+            speed = float(enc or 0) / bucket_seconds if bucket_seconds else 0.0
+            if speed > speed_max:
+                speed_max = speed
+            raw.append((bkt, ok, ng, float(uptime or 0), speed, float(dt or 0)))
+
+        # pass 2: build timeline with per-bucket OEE = Availability × Performance × Quality
+        timeline, t_ok, t_ng, t_dt = [], 0, 0, 0.0
+        speed_sum, speed_n, avail_sum = 0.0, 0, 0.0
+        for bkt, ok, ng, uptime, speed, dt in raw:
+            units = ok + ng
+            t_ok += ok; t_ng += ng; t_dt += dt
+            avail_sum += uptime
+            if speed > 0:
+                speed_sum += speed; speed_n += 1
+            availability = uptime / 100.0
+            quality = (ok / units) if units else 0.0
+            performance = (speed / speed_max) if speed_max else 0.0
+            timeline.append({
+                "t": bkt.strftime("%m-%d %H:%M"),
+                "ok": ok, "ng": ng, "units": units,
+                "reject_rate": round(ng / units * 100, 2) if units else 0.0,
+                "uptime_pct": round(uptime, 1),
+                "speed": round(speed, 2),
+                "downtime_s": round(dt, 1),
+                "oee": round(availability * performance * quality * 100, 1),
+            })
+
+        t_units = t_ok + t_ng
+        n_buckets = len(raw) or 1
+        availability_o = avail_sum / n_buckets / 100.0
+        quality_o = (t_ok / t_units) if t_units else 0.0
+        speed_avg = (speed_sum / speed_n) if speed_n else 0.0
+        performance_o = (speed_avg / speed_max) if speed_max else 0.0
+        return JSONResponse(content={
+            "timeline": timeline,
+            "total_ok": t_ok, "total_ng": t_ng, "total_units": t_units,
+            "reject_rate_overall": round(t_ng / t_units * 100, 2) if t_units else 0.0,
+            "eject_over_total": round(t_ng / t_units * 100, 2) if t_units else 0.0,
+            "availability": round(availability_o * 100, 1),
+            "performance": round(performance_o * 100, 1),
+            "quality": round(quality_o * 100, 1),
+            "oee": round(availability_o * performance_o * quality_o * 100, 1),
+            "downtime_total_s": round(t_dt, 1),
+            "speed_avg": round(speed_avg, 2),
+            "speed_max": round(speed_max, 2),
+            "shipments": shipments, "window": window, "shipment": shipment,
+        })
+    except Exception as e:
+        logger.warning(f"production_stats query failed (returning empty): {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
+@router.get("/api/quality_charts")
+async def quality_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
+    """Defect diagnostics from inference_results (3.18.0).
+
+    Single expansion pass returns:
+      - by_class:   detections per class (drives the Pareto chart)
+      - by_camera:  detections per camera id (which station sees most defects)
+      - heatmap:    bbox-center density binned into a gw×gh grid (normalized by the
+                    max observed x/y) → where on the product defects cluster
+      - latency_over_time: per-bucket avg/max inference_time_ms (model/pipeline health)
+    Capped at recent rows; returns a well-formed empty payload on any error.
+    """
+    _windows = {
+        "1h":  ("1 hour",   "1 minute"),
+        "6h":  ("6 hours",  "5 minutes"),
+        "24h": ("24 hours", "30 minutes"),
+        "7d":  ("7 days",   "6 hours"),
+    }
+    interval, bucket = _windows.get(window, _windows["24h"])
+    GW, GH = 32, 20
+    empty = {"by_class": {}, "by_camera": {},
+             "heatmap": {"gw": GW, "gh": GH, "max": 0, "cells": []},
+             "latency_over_time": [], "window": window, "shipment": shipment}
+    ship_clause = "AND shipment = %s" if shipment else ""
+    base_params = [interval] + ([shipment] if shipment else [])
+
+    conn = None
+    try:
+        from services.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+
+        # by_class / by_camera / heatmap centers (one expansion pass, capped)
+        cur.execute(
+            f"""
+            WITH recent AS (
+                SELECT detections FROM inference_results
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                ORDER BY time DESC LIMIT 20000
+            )
+            SELECT (elem->>'name') AS cls,
+                   COALESCE((elem->>'_cam')::int, 0) AS cam,
+                   ((elem->>'xmin')::float + (elem->>'xmax')::float) / 2.0 AS cx,
+                   ((elem->>'ymin')::float + (elem->>'ymax')::float) / 2.0 AS cy
+            FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+            LIMIT 40000
+            """,
+            base_params,
+        )
+        by_class, by_camera, centers = {}, {}, []
+        max_x, max_y = 1.0, 1.0
+        for cls, cam, cx, cy in cur.fetchall():
+            if cls is not None:
+                by_class[cls] = by_class.get(cls, 0) + 1
+            ck = str(cam if cam is not None else 0)
+            by_camera[ck] = by_camera.get(ck, 0) + 1
+            if cx and cy and cx > 0 and cy > 0:
+                centers.append((cx, cy))
+                if cx > max_x: max_x = cx
+                if cy > max_y: max_y = cy
+
+        grid = {}
+        for cx, cy in centers:
+            gx = min(GW - 1, int(cx / max_x * GW))
+            gy = min(GH - 1, int(cy / max_y * GH))
+            grid[(gx, gy)] = grid.get((gx, gy), 0) + 1
+        max_c = max(grid.values()) if grid else 0
+        cells = [{"x": gx, "y": gy, "c": c} for (gx, gy), c in grid.items()]
+        heatmap = {"gw": GW, "gh": GH, "max": max_c, "cells": cells}
+
+        # inference latency over time (per row, not per detection)
+        cur.execute(
+            f"""SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
+                       AVG(inference_time_ms) AS avg_ms, MAX(inference_time_ms) AS max_ms
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                GROUP BY bkt ORDER BY bkt""",
+            base_params,
+        )
+        latency_over_time = [
+            {"t": bkt.strftime("%m-%d %H:%M"),
+             "avg": round(float(a or 0), 1), "max": round(float(m or 0), 1)}
+            for bkt, a, m in cur.fetchall()
+        ]
+        cur.close()
+        return JSONResponse(content={
+            "by_class": by_class, "by_camera": by_camera, "heatmap": heatmap,
+            "latency_over_time": latency_over_time, "window": window, "shipment": shipment,
+        })
+    except Exception as e:
+        logger.warning(f"quality_charts query failed (returning empty): {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
 @router.post("/api/timeline_clear")
 async def timeline_clear(request: Request):
     """Clear all frames from the timeline buffer."""
     try:
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
         # Clear all timeline keys
         timeline_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
         if timeline_keys:
@@ -643,7 +1288,7 @@ async def update_timeline_config(request: Request):
         save_data_file(file_data)
 
         # Clear timeline buffer so new frames with new quality settings are captured
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
         timeline_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
         if timeline_keys:
             redis_client.delete(*timeline_keys)
@@ -662,6 +1307,160 @@ async def update_timeline_config(request: Request):
             status_code=500,
             content={'success': False, 'error': str(e)}
         )
+
+
+@router.get("/api/recent_detections")
+async def recent_detections(request: Request, window: str = "24h", shipment: str = "",
+                            cls: str = "", limit: int = 24):
+    """Recent stored detections + image paths for the chart click-through gallery (3.21.0).
+
+    Filters by class (JSONB containment), optional shipment, time window. Returns
+    rows from inference_results that contain at least one detection of `cls`, with
+    the annotated image path so the UI can show a thumbnail grid. Capped at `limit`.
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "24 hours")
+    limit = max(1, min(100, int(limit or 24)))
+    empty = {"items": [], "class": cls, "shipment": shipment, "window": window}
+
+    ship_clause = "AND shipment = %s" if shipment else ""
+    cls_clause = "AND detections @> %s::jsonb" if cls else ""
+    params = [interval]
+    if shipment:
+        params.append(shipment)
+    if cls:
+        import json as _json
+        params.append(_json.dumps([{"name": cls}]))
+    params.append(limit)
+
+    conn = None
+    try:
+        from services.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT EXTRACT(EPOCH FROM time) * 1000 AS t,
+                   shipment, image_path, detection_count, detections
+            FROM inference_results
+            WHERE time > NOW() - INTERVAL %s {ship_clause} {cls_clause}
+            ORDER BY time DESC LIMIT %s
+            """,
+            params,
+        )
+        items = []
+        for t, ship, img, dcount, dets in cur.fetchall():
+            # extract a compact summary: the matching class and its confidence
+            best_conf = None
+            classes_in_frame = []
+            try:
+                for d in (dets or []):
+                    if isinstance(d, dict):
+                        nm = d.get("name")
+                        if nm:
+                            classes_in_frame.append(nm)
+                        if (not cls) or nm == cls:
+                            c = float(d.get("confidence") or 0)
+                            if best_conf is None or c > best_conf:
+                                best_conf = c
+            except Exception:
+                pass
+            items.append({
+                "t": int(t),
+                "shipment": ship,
+                "image_path": img,
+                "detection_count": int(dcount or 0),
+                "best_confidence": round(best_conf or 0, 3),
+                "classes": classes_in_frame[:6],
+            })
+        cur.close()
+        return JSONResponse(content={"items": items, "class": cls,
+                                     "shipment": shipment, "window": window})
+    except Exception as e:
+        logger.warning(f"recent_detections query failed (returning empty): {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
+@router.get("/api/export_csv")
+async def export_csv(request: Request, window: str = "24h", shipment: str = ""):
+    """Stream a CSV export of stored detections for a shipment+window (3.21.3).
+
+    One row per detection (inference_results expanded). Honors the Charts tab's
+    window + shipment selectors. Filename: detections_<shipment>_<window>.csv.
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "24 hours")
+    ship_clause = "AND shipment = %s" if shipment else ""
+    params = [interval] + ([shipment] if shipment else [])
+
+    from services.db import get_db_connection, release_db_connection
+    conn = get_db_connection()
+    if conn is None:
+        return Response(content="ERROR: database unavailable\n", status_code=503,
+                        media_type="text/plain")
+
+    import csv as _csv
+    import io as _io
+
+    def gen():
+        try:
+            cur = conn.cursor(name="export_csv_cursor")  # server-side cursor (streaming, low RAM)
+            cur.itersize = 500
+            cur.execute(
+                f"""SELECT time, shipment, encoder_value, image_path,
+                           inference_time_ms, model_used, detections
+                    FROM inference_results
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                    ORDER BY time ASC""",
+                params,
+            )
+            buf = _io.StringIO()
+            writer = _csv.writer(buf)
+            writer.writerow([
+                "time", "shipment", "encoder", "camera", "class", "confidence",
+                "xmin", "ymin", "xmax", "ymax", "image_path",
+                "inference_time_ms", "model_used",
+            ])
+            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+
+            for t, ship, enc, img, infms, model, dets in cur:
+                ts = t.strftime("%Y-%m-%d %H:%M:%S.%f") if t else ""
+                if not dets:
+                    continue
+                for d in dets:
+                    if not isinstance(d, dict):
+                        continue
+                    writer.writerow([
+                        ts, ship or "", enc if enc is not None else "",
+                        d.get("_cam", ""), d.get("name", ""),
+                        d.get("confidence", ""),
+                        d.get("xmin", ""), d.get("ymin", ""),
+                        d.get("xmax", ""), d.get("ymax", ""),
+                        img or "", infms or "", model or "",
+                    ])
+                    yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+            cur.close()
+        except Exception as e:
+            logger.warning(f"export_csv stream failed: {e}")
+            yield f"# ERROR: {e}\n"
+        finally:
+            try: release_db_connection(conn)
+            except Exception: pass
+
+    import re as _re
+    safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", shipment) if shipment else "all"
+    fname = f"detections_{safe_ship}_{window}.csv"
+    return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.get("/api/raw_image/{path:path}")
@@ -697,7 +1496,7 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
         obj_filters = tl_config.get('object_filters', {})
         show_bbox = tl_config.get('show_bounding_boxes', True)
 
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
         redis_key = f"{TIMELINE_REDIS_PREFIX}{cam}"
         frames_raw = redis_client.lrange(redis_key, 0, -1)
         if not frames_raw:
@@ -800,7 +1599,7 @@ async def timeline_meta(request: Request, page: int = 0):
             image_rotation = 0
             procedures = []
 
-        redis_client = Redis("redis", 6379, db=0)
+        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
         if not all_keys:
             return {"type": "timeline_meta", "columns": [], "thumb_width": 0, "thumb_height": 240,

@@ -28,7 +28,7 @@ router = APIRouter()
 def _get_ai_models_from_redis():
     """Load all AI models from Redis. Returns dict: {"models": {...}, "active": "name"}."""
     try:
-        r = Redis("redis", 6379, db=0)
+        r = Redis("redis", 6379, db=config.REDIS_DB)
         raw = r.get("ai_models")
         if raw:
             data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
@@ -159,6 +159,23 @@ def build_current_service_config(app_state):
     # Add pipeline configuration
     if pm:
         svc_config["pipeline_config"] = pm.to_config()
+
+    # --- Preserve persisted-only / user-selected fields (3.19.1) ---
+    # This function rebuilds service_config from runtime state, but several
+    # fields live ONLY in the saved file and have no runtime source here:
+    #   - inference.current_module + module URLs (the literal above hardcodes
+    #     gradio_hf, which would reset the user's active model on every save)
+    #   - store_objects (per-class DB Store flags)
+    #   - audio_settings (per-class Show/Narrate/Beep/min_confidence)
+    # Without this, "Save All Configuration" (and camera saves) silently wiped
+    # the active inference module and every per-class Store/audio flag. Carry
+    # them over from the persisted config instead of clobbering them.
+    existing = load_service_config() or {}
+    if existing.get("inference"):
+        svc_config["inference"] = existing["inference"]
+    for _preserved in ("store_objects", "audio_settings"):
+        if _preserved in existing:
+            svc_config[_preserved] = existing[_preserved]
 
     return svc_config
 
@@ -431,9 +448,9 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
         # Shipment ID
         if "shipment" in config_data:
             shipment_id = str(config_data["shipment"]).strip() or "no_shipment"
-            # Store in Redis db=3 (must match RedisConnection used by watcher)
+            # Store in Redis (db now config.REDIS_DB; single db across MVE — see redis_service.py)
             try:
-                r = Redis("redis", 6379, db=3)
+                r = Redis("redis", 6379, db=config.REDIS_DB)
                 r.set("shipment", shipment_id)
             except Exception as e:
                 logger.warning(f"Failed to set shipment in Redis: {e}")
@@ -593,12 +610,29 @@ async def api_load_service_config(request: Request):
 
 @router.get("/api/export_service_config")
 async def api_export_service_config(request: Request):
-    """Export current service configuration as downloadable JSON file."""
-    try:
-        svc_config = load_service_config() or {}
+    """Export the COMPLETE configuration as a downloadable JSON file.
 
-        # Create JSON response with proper headers for download
-        json_str = json.dumps(svc_config, indent=2)
+    Previously this dumped only `service_config` (via load_service_config), which
+    silently dropped root-level keys — most importantly `timeline_config` (which
+    holds the **ejection procedures** + timeline object filters). A user who
+    exported, wiped, then re-imported would lose all procedures. We now export
+    the ENTIRE data file (`load_data_file()`), so every top-level section round
+    -trips: service_config (cameras, states, pipeline_config, store_objects,
+    audio_settings, …) AND timeline_config (procedures) AND anything else.
+
+    The import handler (`POST /api/cameras/config/upload`) detects this full
+    -bundle shape (presence of a `service_config` key) and restores all of it.
+    """
+    try:
+        from config import load_data_file
+        full = load_data_file() or {}
+        # Defensive: if the file somehow has no service_config wrapper (very old
+        # flat format), fall back to wrapping the service config so the export is
+        # still a valid full-bundle the importer understands.
+        if "service_config" not in full:
+            full = {"service_config": load_service_config() or {}}
+
+        json_str = json.dumps(full, indent=2)
         filename = f"monitaqc_config_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
 
         return Response(
@@ -610,4 +644,127 @@ async def api_export_service_config(request: Request):
         )
     except Exception as e:
         logger.error(f"Error exporting service config: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# =============================================================================
+# Per-object DB-persistence opt-in (`Store` checkbox in Process tab UI)
+# =============================================================================
+# Each class name maps to bool. Detections of classes with True are written to
+# `inference_results`; everything else is dropped at the gate in
+# services/detection.py. Default is False (no storage) — explicit opt-in only.
+# Persisted under service_config["store_objects"] so it survives restarts.
+
+@router.get("/api/store_objects")
+async def api_get_store_objects():
+    """Return the per-class store flags (server-side source of truth)."""
+    try:
+        svc = load_service_config() or {}
+        return JSONResponse(content={"store_objects": svc.get("store_objects", {})})
+    except Exception as e:
+        logger.error(f"Error reading store_objects: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# =============================================================================
+# Per-object audio/display settings (`Show` / `Narrate` / `Beep` / `Min conf`)
+# =============================================================================
+# Mirror of the Store endpoint above. Previously these toggles lived only in
+# browser localStorage (vision_engine/static/js/audio.js → audioSettings),
+# which meant an AI agent or another browser couldn't read/change them. Now
+# they're persisted server-side under service_config["audio_settings"] so the
+# /api/ai_query agentic loop can adjust per-class alarm behavior via REST.
+#
+# Schema: { className: { show: bool, narrate: bool, beep: bool, min_confidence: float } }
+# All four fields optional; missing fields use safe defaults (show=true,
+# narrate=false, beep=false, min_confidence=0.01).
+
+@router.get("/api/audio_settings")
+async def api_get_audio_settings():
+    """Return per-class audio/display settings (server-side source of truth)."""
+    try:
+        svc = load_service_config() or {}
+        return JSONResponse(content={"audio_settings": svc.get("audio_settings", {})})
+    except Exception as e:
+        logger.error(f"Error reading audio_settings: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/api/audio_settings")
+async def api_set_audio_settings(payload: Dict[str, Any]):
+    """Update per-class audio settings. Accepts either:
+       - {"class_name": "DIE_LINE", "show": true, "narrate": false, "beep": true, "min_confidence": 0.5}
+         (single-class partial update — only provided fields are changed)
+       - {"audio_settings": {"DIE_LINE": {...}, "HOLE": {...}, ...}}  (bulk replace)
+    """
+    try:
+        svc = load_service_config() or {}
+        settings = svc.get("audio_settings", {})
+
+        if "audio_settings" in payload and isinstance(payload["audio_settings"], dict):
+            # Bulk replace — caller owns the full mapping
+            new_settings = {}
+            for cls, cfg in payload["audio_settings"].items():
+                if not isinstance(cfg, dict):
+                    continue
+                new_settings[str(cls)] = {
+                    "show": bool(cfg.get("show", True)),
+                    "narrate": bool(cfg.get("narrate", False)),
+                    "beep": bool(cfg.get("beep", False)),
+                    "min_confidence": float(cfg.get("min_confidence", 0.01)),
+                }
+            settings = new_settings
+        elif "class_name" in payload:
+            cls = str(payload["class_name"])
+            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01})
+            for k in ("show", "narrate", "beep"):
+                if k in payload:
+                    entry[k] = bool(payload[k])
+            if "min_confidence" in payload:
+                try:
+                    entry["min_confidence"] = float(payload["min_confidence"])
+                except (TypeError, ValueError):
+                    pass
+            settings[cls] = entry
+        else:
+            return JSONResponse(
+                content={"error": "expected {class_name, show?, narrate?, beep?, min_confidence?} or {audio_settings: {...}}"},
+                status_code=400,
+            )
+
+        svc["audio_settings"] = settings
+        save_service_config(svc)
+        return JSONResponse(content={"success": True, "audio_settings": settings})
+    except Exception as e:
+        logger.error(f"Error writing audio_settings: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/api/store_objects")
+async def api_set_store_objects(payload: Dict[str, Any]):
+    """Toggle/set per-class store flag. Accepts either:
+       - {"class_name": "DIE_LINE", "store": true}  (single-class update)
+       - {"store_objects": {"DIE_LINE": true, "HOLE": false, ...}}  (bulk set)
+    """
+    try:
+        svc = load_service_config() or {}
+        store_map = svc.get("store_objects", {})
+
+        if "store_objects" in payload and isinstance(payload["store_objects"], dict):
+            # Bulk replace
+            store_map = {k: bool(v) for k, v in payload["store_objects"].items()}
+        elif "class_name" in payload:
+            cls = str(payload["class_name"])
+            store_map[cls] = bool(payload.get("store", False))
+        else:
+            return JSONResponse(
+                content={"error": "expected {class_name, store} or {store_objects: {...}}"},
+                status_code=400,
+            )
+
+        svc["store_objects"] = store_map
+        save_service_config(svc)
+        return JSONResponse(content={"success": True, "store_objects": store_map})
+    except Exception as e:
+        logger.error(f"Error writing store_objects: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)

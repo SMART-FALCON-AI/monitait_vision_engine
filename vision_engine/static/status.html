@@ -27,9 +27,9 @@
                 <!-- CENTER: Tab Navigation -->
                 <div class="tab-navigation" style="margin: 0; flex: 1;">
                     <button class="tab-button active" onclick="switchTab('dashboard')">📊 <span data-i18n="tab_dashboard">Dashboard</span></button>
+                    <button class="tab-button" onclick="switchTab('grafana')">📈 <span data-i18n="tab_charts">Charts</span></button>
                     <button class="tab-button" onclick="switchTab('ai')">🤖 <span data-i18n="tab_ai">AI Assistant</span></button>
                     <button class="tab-button" onclick="switchTab('gallery')">🖼️ <span data-i18n="tab_gallery">Gallery</span></button>
-                    <button class="tab-button" onclick="switchTab('grafana')">📈 <span data-i18n="tab_charts">Charts</span></button>
                     <button class="tab-button" onclick="switchTab('hardware')">🔧 <span data-i18n="tab_hardware">Hardware</span></button>
                     <button class="tab-button" onclick="switchTab('cameras')">📷 <span data-i18n="tab_cameras">Cameras</span></button>
                     <button class="tab-button" onclick="switchTab('infrastructure')">🔮 <span data-i18n="tab_inference">Inference</span></button>
@@ -214,18 +214,16 @@
                                 </div>
 
                                 <!-- Navigation Footer -->
+                                <!-- Footer: pagination removed (3.21.1) to avoid RAM leakage from
+                                     paging through old stitched frames. Latest frame only; for
+                                     detail/history use the Charts tab. -->
                                 <div id="timeline-footer" style="display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; background: rgba(0,0,0,0.8); border-top: 1px solid var(--border-color); flex-wrap: wrap;">
-                                    <button id="timeline-first" class="timeline-nav-btn" title="First">&laquo;</button>
-                                    <button id="timeline-prev" class="timeline-nav-btn" title="Previous">&larr;</button>
-                                    <button id="timeline-next" class="timeline-nav-btn" title="Next">&rarr;</button>
-                                    <button id="timeline-last" class="timeline-nav-btn" title="Last">&raquo;</button>
-                                    <span style="width: 1px; height: 20px; background: var(--border-color); margin: 0 4px;"></span>
                                     <button id="timeline-zoom-in" class="timeline-nav-btn" title="Zoom In">+</button>
                                     <button id="timeline-reset-zoom" class="timeline-nav-btn" title="Reset Zoom">Reset</button>
                                     <button id="timeline-zoom-out" class="timeline-nav-btn" title="Zoom Out">–</button>
                                     <span style="width: 1px; height: 20px; background: var(--border-color); margin: 0 4px;"></span>
                                     <button id="timeline-toggle-auto" class="timeline-nav-btn" title="Stop/Resume Auto-Update">Stop</button>
-                                    <span id="timeline-counter" style="font-size: 13px; font-weight: bold; color: #fff; margin-left: 8px;">1 / 1</span>
+                                    <span id="timeline-counter" style="font-size: 13px; font-weight: bold; color: #fff; margin-left: 8px;">live</span>
                                 </div>
                             </div>
                         </div>
@@ -345,6 +343,14 @@
                                     <option value="false">Disabled</option>
                                     <option value="true">Enabled</option>
                                 </select>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Gain <span class="info-tooltip">i<span class="info-tooltip-text">Override camera gain for all cameras in this state on activation. Leave empty = do not change camera gain.</span></span></div>
+                                <input type="number" class="control-input" id="state-gain-input" placeholder="empty = no change">
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Exposure <span class="info-tooltip">i<span class="info-tooltip-text">Override camera exposure for all cameras in this state on activation. Leave empty = do not change camera exposure.</span></span></div>
+                                <input type="number" class="control-input" id="state-exposure-input" placeholder="empty = no change">
                             </div>
                         </div>
 
@@ -802,22 +808,116 @@
 
             <!-- Grafana Tab (iframe created dynamically - no static iframe in DOM) -->
             <div id="tab-grafana" class="tab-content">
-                <div id="grafana-iframe-container" style="width: 100%; height: calc(100vh - 120px); min-height: 400px;">
-                    <!-- iframe injected dynamically by loadIframeForTab() -->
+                <!-- Embedded detection-insight panel — works on every machine, no Grafana needed -->
+                <div id="detection-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                        <h4 style="margin:0; color: var(--text-primary);">📊 Detection Insights</h4>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span style="font-size:12px; color:var(--text-secondary);">Window:</span>
+                            <select id="insight-window" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+                                <option value="1h">Last 1 hour</option>
+                                <option value="6h">Last 6 hours</option>
+                                <option value="24h" selected>Last 24 hours</option>
+                                <option value="7d">Last 7 days</option>
+                            </select>
+                            <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Shipment:</span>
+                            <select id="insight-shipment" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; min-width:140px;">
+                                <option value="">All shipments</option>
+                            </select>
+                            <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Min conf:</span>
+                            <input id="insight-min-conf" type="range" min="0" max="100" step="1" value="0"
+                                   oninput="document.getElementById('insight-min-conf-val').textContent=this.value+'%'"
+                                   onchange="refreshDetectionInsights()"
+                                   style="vertical-align:middle; width:120px;">
+                            <span id="insight-min-conf-val" style="font-size:12px; color:var(--text-primary); min-width:32px; display:inline-block;">0%</span>
+                            <button onclick="exportInsightCSV()" title="Download all detections for the selected shipment + window as CSV" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(34,197,94,0.25); color:#86efac; border:1px solid rgba(34,197,94,0.5); border-radius:4px;">⬇ CSV</button>
+                            <button onclick="refreshDetectionInsights()" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px;">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="insight-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
+                        No stored detections in this window yet. Detections appear here once a class has <b>Store</b> enabled (Process tab → Per-Object Configuration) and the line is running.
+                    </div>
+                    <div id="insight-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                        <div style="min-height:240px;"><canvas id="insight-class-chart"></canvas></div>
+                        <div style="min-height:240px;"><canvas id="insight-class-pie"></canvas></div>
+                        <div style="min-height:240px;"><canvas id="insight-timeline-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="insight-size-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="insight-confidence-chart"></canvas></div>
+                        <div style="min-height:280px;"><canvas id="insight-confidence-class-chart"></canvas></div>
+                        <div style="min-height:300px; grid-column: 1 / -1;"><canvas id="insight-camera-scatter"></canvas></div>
+                        <div style="min-height:300px; grid-column: 1 / -1;"><canvas id="insight-camera-scatter-encoder"></canvas></div>
+                    </div>
+                    <div id="insight-total" style="margin-top:10px; font-size:12px; color:var(--text-secondary);"></div>
                 </div>
-                <div style="margin-top: 15px; padding: 15px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 8px;">
-                    <h4 style="margin: 0 0 10px 0; color: #0c5460;" data-i18n="grafana_dashboard">📊 Grafana Dashboard</h4>
-                    <p style="margin: 0; font-size: 13px; color: #0c5460;">
-                        <strong>Default Credentials:</strong> admin / admin<br>
-                        <strong>TimescaleDB Connection:</strong><br>
-                        • Host: <code>timescaledb:5432</code><br>
-                        • Database: <code>monitaqc</code><br>
-                        • User: <code>monitaqc</code><br>
-                        • Password: <code>monitaqc2024</code>
-                    </p>
+
+                <!-- Ejection Insights — reads ejection_events (per-procedure Store=ON), 3.17.0 -->
+                <div id="ejection-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                        <h4 style="margin:0; color: var(--text-primary);">⏏️ Ejection Insights</h4>
+                        <span id="ejection-total" style="font-size:12px; color:var(--text-secondary);"></span>
+                    </div>
+                    <div id="ejection-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
+                        No ejection events stored in this window yet. Tick <b>Store</b> on a procedure (Process tab → Ejection Procedures) and run the line — each fired procedure with Store on is logged here.
+                    </div>
+                    <div id="ejection-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                        <div style="min-height:240px;"><canvas id="ejection-proc-bar"></canvas></div>
+                        <div style="min-height:240px;"><canvas id="ejection-proc-pie"></canvas></div>
+                        <div style="min-height:240px; grid-column: 1 / -1;"><canvas id="ejection-timeline"></canvas></div>
+                    </div>
                 </div>
+
+                <!-- Production KPIs — from production_metrics (PLC OK/NG, downtime), 3.18.0 -->
+                <div id="production-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                        <h4 style="margin:0; color: var(--text-primary);">🏭 Production KPIs</h4>
+                        <span id="production-total" style="font-size:12px; color:var(--text-secondary);"></span>
+                    </div>
+                    <div id="production-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
+                        No production metrics in this window. These charts read the PLC OK/NG counters, downtime and encoder (serial) — they populate once the line controller is connected and running.
+                    </div>
+                    <div id="production-kpis" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(115px,1fr)); gap:10px; margin-bottom:14px;">
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">OEE</div><div id="kpi-oee" style="font-size:22px; font-weight:700; color:#10b981;">—</div></div>
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Availability</div><div id="kpi-availability" style="font-size:22px; font-weight:700; color:#3b82f6;">—</div></div>
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Performance</div><div id="kpi-performance" style="font-size:22px; font-weight:700; color:#3b82f6;">—</div></div>
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Quality</div><div id="kpi-quality" style="font-size:22px; font-weight:700; color:#3b82f6;">—</div></div>
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Eject / Total</div><div id="kpi-eject" style="font-size:22px; font-weight:700; color:#ef4444;">—</div></div>
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Downtime</div><div id="kpi-downtime" style="font-size:22px; font-weight:700; color:#f59e0b;">—</div></div>
+                        <div style="padding:10px 12px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:11px; color:var(--text-secondary); margin-bottom:4px;">Speed (avg/max)</div><div id="kpi-speed" style="font-size:18px; font-weight:700; color:#8b5cf6;">—</div></div>
+                    </div>
+                    <div id="production-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                        <div style="min-height:260px;"><canvas id="production-reject-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="production-throughput-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="production-uptime-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="production-spc-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="production-oee-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="production-speed-chart"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Defect Diagnostics — from inference_results (Pareto, heatmap, camera, latency), 3.18.0 -->
+                <div id="quality-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+                        <h4 style="margin:0; color: var(--text-primary);">🔬 Defect Diagnostics</h4>
+                        <span id="quality-total" style="font-size:12px; color:var(--text-secondary);"></span>
+                    </div>
+                    <div id="quality-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
+                        No stored detections in this window. Enable <b>Store</b> on a class to populate these diagnostics.
+                    </div>
+                    <div id="quality-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                        <div style="min-height:280px;"><canvas id="quality-pareto-chart"></canvas></div>
+                        <div style="min-height:280px;"><canvas id="quality-camera-chart"></canvas></div>
+                        <div style="min-height:320px; grid-column: 1 / -1;"><canvas id="quality-heatmap-chart"></canvas></div>
+                        <div style="min-height:260px; grid-column: 1 / -1;"><canvas id="quality-latency-chart"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- Future custom Grafana embed hook (text removed per request, 3.16.2).
+                     Invisible until used — drop an iframe into this container when needed. -->
+                <div id="grafana-future-embed" style="display:none;"></div>
             </div>
             <script src="/static/js/iframes.js"></script>
+            <script src="/static/js/chart.umd.min.js"></script>
+            <script src="/static/js/charts.js"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1077,11 +1177,9 @@
                             <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Frames displayed per page</div>
                         </div>
 
-                        <div class="control-item">
-                            <div class="control-label">Total Frames Stored: <strong id="timeline-buffer-value">20</strong></div>
-                            <input type="range" id="timeline-buffer" min="10" max="5000" value="20" step="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
-                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Total frames kept in history (affects pages)</div>
-                        </div>
+                        <!-- "Total Frames Stored" control removed in 3.21.2 — storage is now bound
+                             to "Rows per Page" so the dashboard only keeps the current page in
+                             memory (no pagination, no off-page records, lighter /status page). -->
 
                         <div class="control-item" style="grid-column: span 2;">
                             <button id="timeline-apply-config" class="control-button" style="background: var(--primary-color); color: white; font-weight: 600; padding: 10px 20px;">
@@ -1261,6 +1359,43 @@
 
         <!-- Global tooltip (lives outside all stacking contexts so it's never clipped) -->
         <div id="global-tooltip" style="display:none; position:fixed; z-index:999999; background:#1a2332; color:#e2e8f0; border:1px solid rgba(100,160,255,0.4); border-radius:6px; padding:8px 12px; font-size:11px; line-height:1.4; max-width:260px; pointer-events:none; box-shadow:0 4px 16px rgba(0,0,0,0.4);"></div>
+
+        <!-- Chart hover image preview (scatter etc.) — single instance, follows cursor.
+             Side-by-side raw | annotated thumbnails for instant comparison. -->
+        <div id="chart-image-preview" style="display:none; position:fixed; z-index:999998; background:#0f172a; border:1px solid rgba(100,160,255,0.5); border-radius:6px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,0.5); pointer-events:none;">
+            <div style="display:flex; gap:3px;">
+                <img style="display:block; width:200px; height:140px; object-fit:cover; background:#000; border-radius:3px;">
+                <img style="display:block; width:200px; height:140px; object-fit:cover; background:#000; border-radius:3px;">
+            </div>
+            <div class="cap" style="margin-top:4px; padding:2px 6px; font-size:10px; color:#cbd5e1; text-align:center;"></div>
+        </div>
+
+        <!-- Defect modal (3.21.2): click a chart point → centered modal with ONE
+             big image of THAT frame. Annotated by default; toggle to Raw or
+             Side-by-side. Panzoom inside, click backdrop or ESC to close. -->
+        <div id="defect-drawer" style="display:none; position:fixed; inset:0; z-index:999997; background:rgba(0,0,0,0.85); align-items:center; justify-content:center;" onclick="if(event.target===this) closeDefectDrawer();">
+            <div style="width:96vw; max-width:1600px; height:94vh; background:#0b1220; border:1px solid rgba(100,160,255,0.3); border-radius:8px; box-shadow:0 12px 48px rgba(0,0,0,0.6); display:flex; flex-direction:column; overflow:hidden;">
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); gap:12px; flex-wrap:wrap;">
+                    <div style="display:flex; align-items:center; gap:14px; color:var(--text-primary); font-size:14px; min-width:0;">
+                        <span id="defect-drawer-title" style="font-weight:600;">Defect</span>
+                        <span id="defect-drawer-count" style="font-size:11px; color:var(--text-secondary);"></span>
+                    </div>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <div id="defect-view-toggle" style="display:flex; gap:0; border:1px solid rgba(51,65,85,0.7); border-radius:4px; overflow:hidden;">
+                            <button data-view="ann"  onclick="setDefectView('ann')"  style="background:rgba(59,130,246,0.6); color:#fff; border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Annotated</button>
+                            <button data-view="raw"  onclick="setDefectView('raw')"  style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Raw</button>
+                            <button data-view="both" onclick="setDefectView('both')" style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Both</button>
+                        </div>
+                        <button onclick="closeDefectDrawer()" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; padding:2px 10px; cursor:pointer; font-size:16px;" title="Close (ESC)">✕</button>
+                    </div>
+                </div>
+                <div id="defect-drawer-body" style="flex:1; overflow:hidden; background:#000; position:relative; display:grid; grid-template-columns:1fr; gap:2px;">
+                    <!-- one big image (or two for Both) injected by JS -->
+                </div>
+                <div id="defect-drawer-empty" style="display:none; padding:40px; text-align:center; color:var(--text-secondary); font-size:14px;">No stored images for this selection in the current window.</div>
+                <div id="defect-drawer-meta" style="padding:8px 16px; border-top:1px solid rgba(51,65,85,0.6); font-size:12px; color:#cbd5e1; flex-shrink:0;"></div>
+            </div>
+        </div>
 
         <script src="/static/js/audio.js"></script>
         <script src="/static/js/app-core.js"></script>

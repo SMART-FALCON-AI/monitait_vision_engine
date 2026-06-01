@@ -3,6 +3,7 @@ import logging
 import time
 
 from redis import Redis
+from config import REDIS_DB
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ class RedisConnection:
 
     # Connecting to Radis database
     def connect_to_redis(self):
-        return Redis(self.redis_hostname, self.redis_port, db=3)
+        return Redis(self.redis_hostname, self.redis_port, db=REDIS_DB)
 
     def set_flag(self, list_lenght):
         with self.redis_connection.pipeline() as pipe:

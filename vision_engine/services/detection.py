@@ -35,6 +35,67 @@ _watcher = None           # ArduinoSocket instance
 _pipeline_manager = None  # PipelineManager instance
 _app = None               # FastAPI app instance (for app.state access)
 
+# Per-class DB-persistence opt-in (`Store` checkbox in Process tab UI).
+# Cached briefly to avoid hitting disk on every detection. Default empty dict
+# means nothing is stored (explicit opt-in). Refreshed every _STORE_TTL secs.
+_store_objects_cache = {}
+_store_objects_loaded_at = 0.0
+_STORE_TTL = 5.0  # seconds
+
+def _get_store_objects_map():
+    """Return current per-class store map from service_config; cached for _STORE_TTL."""
+    global _store_objects_cache, _store_objects_loaded_at
+    now = time.time()
+    if now - _store_objects_loaded_at < _STORE_TTL:
+        return _store_objects_cache
+    try:
+        svc = cfg.load_service_config() or {}
+        _store_objects_cache = svc.get("store_objects", {}) or {}
+    except Exception as e:
+        logger.warning(f"Failed to load store_objects from service_config: {e}")
+    _store_objects_loaded_at = now
+    return _store_objects_cache
+
+
+# Per-class audio/display settings cache. Same TTL pattern as store_objects.
+# Shape: { className: { show, narrate, beep, min_confidence } }.
+# min_confidence is the floor below which a detection is suppressed from the
+# DB write, the audio narrate/beep, and (via the browser fetch) the rendered
+# bounding-box. Set per-class via `POST /api/audio_settings` or the UI's
+# Process tab Min-conf input.
+_audio_settings_cache = {}
+_audio_settings_loaded_at = 0.0
+
+def _get_audio_settings_map():
+    """Return current per-class audio settings map; cached for _STORE_TTL."""
+    global _audio_settings_cache, _audio_settings_loaded_at
+    now = time.time()
+    if now - _audio_settings_loaded_at < _STORE_TTL:
+        return _audio_settings_cache
+    try:
+        svc = cfg.load_service_config() or {}
+        _audio_settings_cache = svc.get("audio_settings", {}) or {}
+    except Exception as e:
+        logger.warning(f"Failed to load audio_settings from service_config: {e}")
+    _audio_settings_loaded_at = now
+    return _audio_settings_cache
+
+
+def _min_conf_for(class_name: str, audio_map: dict) -> float:
+    """Lookup the configured min_confidence (0–1) for a class. Returns 0 if unset.
+
+    Stored values are already 0–1 (POST /api/audio_settings normalises to float).
+    Detections with confidence below this floor are filtered out of every
+    downstream consumer (DB store, audio narrate/beep, UI render gate).
+    """
+    cfg_row = audio_map.get(class_name) if class_name else None
+    if not isinstance(cfg_row, dict):
+        return 0.0
+    try:
+        return float(cfg_row.get("min_confidence") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
 # Prepared query data for DataMatrix validation
 prepared_query_data = []
 
@@ -58,7 +119,7 @@ def _get_timeline_redis():
     """Lazy-init a reusable Redis connection for timeline and timing writes."""
     global _timeline_redis
     if _timeline_redis is None:
-        _timeline_redis = Redis("redis", 6379, db=0)
+        _timeline_redis = Redis("redis", 6379, db=cfg.REDIS_DB)
     return _timeline_redis
 
 
@@ -396,16 +457,19 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None, d_p
         return
     try:
         # Get configuration (with defaults)
+        # 3.21.2: dashboard stores ONLY the current page (= num_rows per camera).
+        # The legacy 'buffer_size' field is ignored so the /status page stays
+        # light — no off-page frames in Redis, no pagination history.
         try:
             config = _app.state.timeline_config
-            base_buffer_size = config.get('buffer_size', 100)  # User-configured buffer size
+            rows_per_page = int(config.get('num_rows', 10) or 10)
             quality = config.get('image_quality', 85)
         except Exception as e:
             logger.debug(f"Could not load timeline config, using defaults: {e}")
-            base_buffer_size = 100
+            rows_per_page = 10
             quality = 85
 
-        buffer_size = base_buffer_size
+        buffer_size = max(5, rows_per_page)
 
         # Resize to fixed thumbnail height (preserving aspect ratio)
         # Height is chosen to be readable on a QC monitor: 240px
@@ -989,11 +1053,21 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             _watcher.latest_frame_id = frame_id
 
         # Save annotated image with bounding boxes — single shared helper
+        # 3.21.2: only draw detections whose class has Show=true in audio_settings
+        # (Process tab → Per-Object Configuration). Without this, math channels
+        # (blob_brightness/_darkness, fft_*, band_*, etc.) plaster the image and
+        # bury the actual yolo defects in a wall of overlay text.
         if yolo_res and len(yolo_res) > 0:
             from services.render import draw_detection_on
             annotated_image = image.copy()
             kv_y = 4
+            _audio_map = _get_audio_settings_map()
             for det in yolo_res:
+                _nm = det.get("name") if isinstance(det, dict) else None
+                _settings = _audio_map.get(_nm) if _nm else None
+                # default = show (True) so new/unseen classes still render
+                if _settings is not None and _settings.get("show") is False:
+                    continue
                 kv_y = draw_detection_on(
                     annotated_image, det, kv_y=kv_y, bbox_thickness=3,
                 )
@@ -1019,43 +1093,61 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
                         det['lab_color'] = lab
                 update_color_references(yolo_res)
 
-            # Add audio notification with detected object names
+            # Add audio notification with detected object names.
+            # Per-class `min_confidence` from audio_settings gates which detections
+            # reach the audio event stream (narrate/beep) — below the floor, the
+            # class is silently suppressed even if narrate/beep are ticked. Default
+            # min_confidence is 0 (no gate) so unconfigured classes behave as before.
             try:
                 if yolo_res:
-                    logger.info(f"Processing {len(yolo_res)} detections for audio notification")
-                    # Extract class names from detections (use 'name' if available, fallback to 'Class X')
-                    detected_names = [det.get('name', f"Class {det.get('class', 'Unknown')}") for det in yolo_res]
-                    logger.info(f"Detected names: {detected_names}")
-
-                    # Count occurrences of each class name
-                    from collections import Counter
-                    name_counts = Counter(detected_names)
-
-                    # Create announcement text
-                    objects_text = ", ".join([f"{count} {name}" for name, count in name_counts.items()])
-                    logger.info(f"Audio notification text: {objects_text}")
-
-                    # Format detections with class_name field for frontend
-                    formatted_detections = [
-                        {
-                            "class_name": det.get('name', f"Class {det.get('class', 'Unknown')}"),
-                            "confidence": det.get('confidence', 0),
-                            "bbox": det.get('box', [])
-                        }
-                        for det in yolo_res
+                    audio_map = _get_audio_settings_map()
+                    audible = [
+                        det for det in yolo_res
+                        if float(det.get('confidence') or 0.0)
+                           >= _min_conf_for(det.get('name'), audio_map)
                     ]
+                    logger.info(
+                        f"Processing {len(audible)}/{len(yolo_res)} detections for audio "
+                        f"(others below per-class min_conf)"
+                    )
+                    if audible:
+                        # Extract class names from detections (use 'name' if available, fallback to 'Class X')
+                        detected_names = [det.get('name', f"Class {det.get('class', 'Unknown')}") for det in audible]
+                        logger.info(f"Detected names: {detected_names}")
 
-                    add_detection_event("object", {
-                        "objects": objects_text,
-                        "count": len(yolo_res),
-                        "frame_id": frame_id,
-                        "detections": formatted_detections  # Add formatted detections array
-                    })
-                    logger.info(f"Detection event added successfully with {len(formatted_detections)} detections")
+                        # Count occurrences of each class name
+                        from collections import Counter
+                        name_counts = Counter(detected_names)
+
+                        # Create announcement text
+                        objects_text = ", ".join([f"{count} {name}" for name, count in name_counts.items()])
+                        logger.info(f"Audio notification text: {objects_text}")
+
+                        # Format detections with class_name field for frontend
+                        formatted_detections = [
+                            {
+                                "class_name": det.get('name', f"Class {det.get('class', 'Unknown')}"),
+                                "confidence": det.get('confidence', 0),
+                                "bbox": det.get('box', [])
+                            }
+                            for det in audible
+                        ]
+
+                        add_detection_event("object", {
+                            "objects": objects_text,
+                            "count": len(audible),
+                            "frame_id": frame_id,
+                            "detections": formatted_detections  # Add formatted detections array
+                        })
+                        logger.info(f"Detection event added successfully with {len(formatted_detections)} detections")
             except Exception as e:
                 logger.error(f"Error creating detection event: {e}", exc_info=True)
 
-            # Write inference result to database with model name
+            # Write inference result to database with model name.
+            # Per-class "Store" opt-in (Process tab → Per-Object Configuration):
+            # only persist detections whose class has store_objects[class]=True.
+            # Default is OFF (no storage) — explicit opt-in. If no detections
+            # pass the filter, skip the DB write entirely.
             try:
                 inference_time_ms = int(processing_time * 1000)
                 # Get shipment from Redis (works across processes, unlike watcher object)
@@ -1064,13 +1156,30 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
                     shipment_str = shipment_val.decode('utf-8') if isinstance(shipment_val, bytes) and shipment_val else "no_shipment"
                 except Exception:
                     shipment_str = "no_shipment"
-                write_inference_to_db(
-                    shipment=shipment_str,
-                    image_path=annotated_path,
-                    detections=yolo_res,
-                    inference_time_ms=inference_time_ms,
-                    model_used=model_name_used
-                )
+
+                store_map = _get_store_objects_map()
+                audio_map = _get_audio_settings_map()
+                # Two gates: Store=true (per-class DB opt-in) AND confidence >= min_conf
+                # (per-class floor from audio_settings). Either gate failing skips the row.
+                filtered = []
+                for d in (yolo_res or []):
+                    if not isinstance(d, dict):
+                        continue
+                    cls = d.get("name")
+                    if not store_map.get(cls, False):
+                        continue
+                    if float(d.get("confidence") or 0.0) < _min_conf_for(cls, audio_map):
+                        continue
+                    filtered.append(d)
+                if filtered:
+                    write_inference_to_db(
+                        shipment=shipment_str,
+                        image_path=annotated_path,
+                        detections=filtered,
+                        inference_time_ms=inference_time_ms,
+                        model_used=model_name_used,
+                        encoder_value=encoder  # 3.21.0: roll position per detection
+                    )
             except Exception as e:
                 logger.error(f"Failed to write inference to DB: {e}")
 

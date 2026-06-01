@@ -286,7 +286,11 @@ def _ensure_disk_space(write_dir):
 
     try:
         usage = shutil.disk_usage(write_dir)
-        pct = usage.used * 100 // usage.total
+        # Use (used + free) as denominator to match df's view (excludes ext4's
+        # 5%-reserved-for-root blocks). Using usage.total here understates pct
+        # by ~5–10 points and made DVR cleanup silently never trigger when
+        # df-disk was already at 80% (bug found 2026-05-29 on vteam19).
+        pct = usage.used * 100 // max(1, usage.used + usage.free)
         _last_disk_check_t = now
     except OSError:
         return
@@ -343,14 +347,14 @@ def add_disk_writers(count: int):
         logger.info(f"[DiskWriters] +{count} threads, total now {_disk_writers_count}")
 
 
-# Persistent Redis connection for capture FPS timestamps (db=0, reused across captures)
+# Persistent Redis connection for capture FPS timestamps (db=cfg.REDIS_DB, reused across captures)
 _cap_redis = None
 
 def _get_cap_redis():
     """Get or create persistent Redis connection for capture timestamps."""
     global _cap_redis
     if _cap_redis is None:
-        _cap_redis = DirectRedis("redis", 6379, db=0)
+        _cap_redis = DirectRedis("redis", 6379, db=cfg.REDIS_DB)
     return _cap_redis
 
 
@@ -481,6 +485,7 @@ class ArduinoSocket:
                     saturation=cc.get('saturation', 50),
                     fps=cc.get('fps', 10),
                     roi_config=cc if cc.get('roi_enabled') else None,
+                    auto_exposure=cc.get('auto_exposure', False),
                 )
                 self.cameras[idx] = cam
                 logger.info(f"Camera {idx} initialized: {cam_path} (success={cam.success})")
@@ -1280,7 +1285,7 @@ class ArduinoSocket:
                                     frame = cam.read()
                                     grabbed_frames.append((cam_id, frame))
 
-                                    # Track capture FPS via persistent Redis connection (db=0)
+                                    # Track capture FPS via persistent Redis connection (db=cfg.REDIS_DB)
                                     try:
                                         cr = _get_cap_redis()
                                         cr.lpush("capture_timestamps", str(capture_ts))

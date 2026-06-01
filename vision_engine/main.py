@@ -26,7 +26,7 @@ from services.pipeline import InferenceModel, PipelinePhase, Pipeline, PipelineM
 from services.redis_service import RedisConnection
 from services.db import (
     db_connection_pool, get_db_connection, release_db_connection,
-    write_inference_to_db, write_production_metrics_to_db
+    write_inference_to_db, write_production_metrics_to_db, write_ejection_event_to_db
 )
 from services.camera import (
     CameraBuffer, detect_video_devices, scan_network_for_cameras,
@@ -715,6 +715,25 @@ def _process_frame_batch(frames_data, allow_eject=True):
                     watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
                     watcher.eject_ng_counter += 1
                     logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
+
+                    # Persist ejection events for procedures with Store=ON (3.17.0).
+                    # eject_reasons are "ProcName: details" (or just "ProcName"); map
+                    # each back to its procedure to read the per-procedure store flag.
+                    try:
+                        reason_by_name = {}
+                        for _r in eject_reasons:
+                            _nm = _r.split(':', 1)[0].strip()
+                            reason_by_name.setdefault(_nm, _r)
+                        for _proc in _enabled_procs:
+                            if not _proc.get('store'):
+                                continue
+                            _pn = _proc.get('name', 'Unnamed')
+                            if _pn in reason_by_name:
+                                write_ejection_event_to_db(
+                                    _pn, reason_by_name[_pn], capture_shipment, capture_encoder
+                                )
+                    except Exception as _e:
+                        logger.warning(f"ejection_events write skipped: {_e}")
                 else:
                     watcher.eject_ok_counter += 1
         except Exception as e:
@@ -824,7 +843,7 @@ def _autoscaler():
         WARNING  — queues building up         → double current resources
         CRITICAL — queues overflowing         → quadruple current resources
     """
-    global INFERENCE_WORKERS
+    global INFERENCE_WORKERS, _ok_streak
     import services.watcher as _watcher_mod
     from services.watcher import _disk_queue, add_disk_writers
 

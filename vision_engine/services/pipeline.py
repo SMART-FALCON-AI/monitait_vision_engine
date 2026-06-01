@@ -90,12 +90,16 @@ class PipelinePhase:
     model_id: str  # Reference to a model by ID
     enabled: bool = True
     order: int = 0  # Order in pipeline (lower = first)
+    stride: int = 1  # Run this phase every Nth frame (1 = every frame). Lets a
+                     # heavy secondary model (e.g. math) sample frames while a
+                     # fast primary (yolo) runs every frame for ejection.
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "model_id": self.model_id,
             "enabled": self.enabled,
-            "order": self.order
+            "order": self.order,
+            "stride": self.stride
         }
 
     @classmethod
@@ -103,7 +107,8 @@ class PipelinePhase:
         return cls(
             model_id=data.get("model_id", "default_gradio"),
             enabled=data.get("enabled", True),
-            order=int(data.get("order", 0))
+            order=int(data.get("order", 0)),
+            stride=max(1, int(data.get("stride", 1) or 1))
         )
 
 
@@ -162,6 +167,7 @@ class PipelineManager:
         self.pipelines: Dict[str, Pipeline] = {}
         self.current_pipeline: Optional[Pipeline] = None
         self.pipeline_lock = threading.Lock()
+        self._frame_counter = 0  # advanced once per run_inference, for phase stride
 
         # Gradio client cache (for reuse)
         self._gradio_clients: Dict[str, Any] = {}
@@ -311,9 +317,18 @@ class PipelineManager:
         all_detections = []
         models_used = []
 
+        # Frame counter drives per-phase stride (run phase every Nth frame).
+        self._frame_counter += 1
+        fc = self._frame_counter
+
         # Run through each enabled phase in order
         for phase in sorted(self.current_pipeline.phases, key=lambda p: p.order):
             if not phase.enabled:
+                continue
+
+            # Per-phase stride: skip this phase on frames that aren't its turn.
+            stride = getattr(phase, "stride", 1) or 1
+            if stride > 1 and (fc % stride) != 0:
                 continue
 
             model = self.models.get(phase.model_id)

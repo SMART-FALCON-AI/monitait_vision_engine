@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from config import (
-    REDIS_HOST, REDIS_PORT, load_data_file, save_data_file,
+    REDIS_HOST, REDIS_PORT, REDIS_DB, load_data_file, save_data_file,
     YOLO_INFERENCE_URL, GRADIO_MODEL, GRADIO_CONFIDENCE_THRESHOLD,
     CAPTURE_MODE, EJECTOR_ENABLED, HISTOGRAM_ENABLED,
     CHECK_CLASS_COUNTS_ENABLED, CHECK_CLASS_COUNTS_CLASSES,
@@ -28,7 +28,7 @@ router = APIRouter()
 def _get_ai_models_from_redis():
     """Load all AI models from Redis. Returns dict: {"models": {...}, "active": "name"}."""
     try:
-        r = Redis("redis", 6379, db=0)
+        r = Redis("redis", 6379, db=REDIS_DB)
         raw = r.get("ai_models")
         if raw:
             data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
@@ -52,7 +52,7 @@ def _get_ai_models_from_redis():
 def _save_ai_models_to_redis(data):
     """Save all AI models to Redis."""
     try:
-        r = Redis("redis", 6379, db=0)
+        r = Redis("redis", 6379, db=REDIS_DB)
         r.set("ai_models", json.dumps(data))
         # Also set legacy keys for backward compatibility with ai_query
         active_name = data.get("active")
@@ -174,7 +174,7 @@ async def delete_ai_model(model_name: str):
 def _get_db_profiles_from_redis():
     """Load all DB profiles from Redis. Returns dict: {"profiles": {...}, "active": "name"}."""
     try:
-        r = Redis("redis", 6379, db=0)
+        r = Redis("redis", 6379, db=REDIS_DB)
         raw = r.get("db_profiles")
         if raw:
             data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
@@ -196,7 +196,7 @@ def _get_db_profiles_from_redis():
 def _save_db_profiles_to_redis(data):
     """Save all DB profiles to Redis."""
     try:
-        r = Redis("redis", 6379, db=0)
+        r = Redis("redis", 6379, db=REDIS_DB)
         r.set("db_profiles", json.dumps(data))
         return True
     except Exception as e:
@@ -452,7 +452,7 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
 
         elif tool_name == "get_redis_data":
             # Use direct Redis connection (not broken watcher chain)
-            r = Redis("redis", 6379, db=0)
+            r = Redis("redis", 6379, db=REDIS_DB)
             list_keys = {"inference_times", "frame_intervals", "capture_timestamps", "detection_events"}
             results = {}
             for key in tool_input["keys"]:
@@ -713,7 +713,7 @@ async def query_ai(request: Request, payload: Dict[str, Any]):
         model = active_model["provider"]
         api_key = active_model["api_key"]
 
-        r = Redis("redis", 6379, db=0)
+        r = Redis("redis", 6379, db=REDIS_DB)
 
         # Gather current system context from Redis
         def _r_get(key, default="N/A"):

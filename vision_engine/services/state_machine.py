@@ -90,6 +90,12 @@ class State:
     # Trigger thresholds (kept for backward compatibility, prefer phase-level thresholds)
     steps: int = 1  # Step/encoder count threshold (1 = every step, -1 = infinite loop)
     analog: int = -1  # Analog value threshold (-1 = disabled)
+    # Per-state camera-prop override. None → "don't touch on activation"; an int → applied
+    # to every camera in this state's phases via cv2.CAP_PROP_EXPOSURE / CAP_PROP_GAIN.
+    # On switching to a state where these are None, the StateManager restores each camera
+    # to the value saved in service_config["cameras"][cid].
+    exposure: Optional[int] = None
+    gain: Optional[int] = None
 
     def should_trigger(self, encoder_value: int, analog_value: int) -> bool:
         """Check if state trigger conditions are met.
@@ -123,7 +129,9 @@ class State:
             "phases": [p.to_dict() for p in self.phases],
             "light_status_check": self.light_status_check,
             "steps": self.steps,
-            "analog": self.analog
+            "analog": self.analog,
+            "exposure": self.exposure,
+            "gain": self.gain,
         }
 
     @classmethod
@@ -140,12 +148,23 @@ class State:
                 cameras=data.get('active_cameras', [1, 2, 3, 4])
             )]
 
+        # exposure / gain are optional. Empty string and None both mean "unset".
+        def _opt_int(v):
+            if v is None or v == "":
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
         return cls(
             name=data.get('name', 'default'),
             phases=phases,
             light_status_check=data.get('light_status_check', False),
             steps=int(data.get('steps', 1)),
-            analog=int(data.get('analog', -1))
+            analog=int(data.get('analog', -1)),
+            exposure=_opt_int(data.get('exposure')),
+            gain=_opt_int(data.get('gain')),
         )
 
 
@@ -269,10 +288,67 @@ class StateManager:
                 self.current_state = state
                 self.state_ready.set()
                 logger.info(f"Set current state to: {name}")
+                # Apply per-state camera-prop override (exposure / gain). If the new
+                # state has neither set, restore each affected camera to its own
+                # configured value from service_config["cameras"][cid]. Done outside
+                # the state_lock-critical-section above is intentional — V4L2 prop
+                # writes can block for hundreds of ms per camera; we don't want to
+                # hold the state_lock for that.
+                try:
+                    self._apply_state_camera_overrides(state)
+                except Exception as ce:
+                    logger.warning(f"State '{name}' camera-override apply failed (non-fatal): {ce}")
                 return True
         except Exception as e:
             self._handle_error(f"Error setting state: {e}")
             return False
+
+    def _apply_state_camera_overrides(self, state: 'State') -> None:
+        """Apply or restore per-state camera exposure/gain on state activation.
+
+        Behaviour per spec:
+        - If `state.exposure` is set → push it to every camera in `state.get_all_cameras()`
+          via OpenCV `CAP_PROP_EXPOSURE`. Same for `state.gain` with `CAP_PROP_GAIN`.
+        - If either is None → for each camera the state uses, restore that camera's
+          own configured value from `service_config["cameras"][cid].exposure/gain`
+          (so the previous state's override doesn't linger on the hardware).
+        - Cameras not in this state's phases are untouched.
+        - Cameras with `auto_exposure=true` skip the manual exposure write (still
+          allow gain override).
+        """
+        if self.watcher is None or not getattr(self.watcher, "cameras", None):
+            return
+        try:
+            import cv2  # local import — keep state_machine import surface light
+            from config import load_service_config
+            svc = load_service_config() or {}
+            cam_cfg_root = svc.get("cameras", {}) or {}
+        except Exception as e:
+            logger.debug(f"Skipping state camera override (no service config available): {e}")
+            return
+
+        cam_ids = state.get_all_cameras()
+        for cid in cam_ids:
+            cam = self.watcher.cameras.get(cid) if isinstance(self.watcher.cameras, dict) else None
+            if cam is None or not getattr(cam, "camera", None):
+                continue
+            cam_cfg = cam_cfg_root.get(str(cid), {}) if isinstance(cam_cfg_root, dict) else {}
+            auto_exposure = bool(cam_cfg.get("auto_exposure", False))
+
+            # Decide target exposure
+            target_exp = state.exposure if state.exposure is not None else cam_cfg.get("exposure")
+            target_gain = state.gain if state.gain is not None else cam_cfg.get("gain")
+            try:
+                if target_exp is not None and not auto_exposure:
+                    cam.camera.set(cv2.CAP_PROP_EXPOSURE, float(target_exp))
+                if target_gain is not None:
+                    cam.camera.set(cv2.CAP_PROP_GAIN, float(target_gain))
+                logger.info(
+                    f"State '{state.name}' applied to cam {cid}: "
+                    f"exposure={'auto-skipped' if auto_exposure else target_exp} gain={target_gain}"
+                )
+            except Exception as ce:
+                logger.warning(f"V4L2 prop set on cam {cid} failed: {ce}")
 
     def _handle_light_mode_change(self, new_mode: str) -> None:
         """Handle light mode changes via watcher commands."""
