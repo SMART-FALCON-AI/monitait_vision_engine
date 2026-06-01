@@ -738,7 +738,9 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
 
         # --- recent slice (capped) expanded to per-detection rows ---
         # Pull bucket, bbox dims, confidence, cam per detection.
-        base_params = [interval] + ([shipment] if shipment else [])
+        # min_conf filters at the JSONB-expand step so all downstream stats
+        # (size percentiles, conf percentiles) respect the slider.
+        base_params = [interval] + ([shipment] if shipment else []) + [float(min_conf or 0.0)]
         cur.execute(
             f"""
             WITH recent AS (
@@ -757,6 +759,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                        ((elem->>'xmax')::float - (elem->>'xmin')::float) AS w,
                        ((elem->>'ymax')::float - (elem->>'ymin')::float) AS h
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+                WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
             )
             SELECT
                 bkt,
@@ -803,6 +806,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                    image_path AS img,
                    shipment AS ship
             FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
             ORDER BY time DESC
             LIMIT 1500
             """,
@@ -830,6 +834,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                    image_path AS img,
                    shipment AS ship
             FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
             LIMIT 1500
             """,
             base_params,
@@ -853,6 +858,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                        (elem->>'name') AS cls,
                        (elem->>'confidence')::float AS conf
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+                WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
             )
             SELECT bkt, cls, AVG(conf) AS c_avg
             FROM expanded

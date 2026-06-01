@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.10] - 2026-06-01
+
+### Fixed — ejection_events table never populated (3+ months of missed eject history)
+- `evaluate_eject_from_detections` is called from 4 places (worker thread `_process_frame_batch`, websocket dashboard push, two timeline endpoints), but only the worker-thread path had a DB-write hook — and on this workload the worker thread wasn't being reached. Result: even with procedures correctly configured (`enabled: true, store: true`), the table stayed at 0 rows.
+- Moved the DB-write hook **inside `evaluate_eject_from_detections` itself**. Every caller now persists. Per-(encoder, procedure_name, shipment) dedupe via a Redis key with 60s TTL prevents the dashboard's repeated re-evaluation from inserting duplicates.
+
+### Fixed — Process-tab Show toggle had no effect on dashboard annotations
+- The Process-tab UI saves show/min_conf toggles to `timeline_config.object_filters`, but the drawing code in `detection.py:1064` was reading from `service_config.audio_settings` — two unrelated dicts that were never synced. Result: every class always drew regardless of the user's checkbox state. Re-pointed the drawing filter at `timeline_config.object_filters`. A class now draws only if it has an explicit entry with `show != false`; missing entry hides.
+
+### Fixed — confidence-slider didn't actually filter anything
+- 3.21.9 added the UI slider and threaded `min_conf` as a query param through `/api/detection_charts`, `/api/detection_stats`, `/api/quality_charts`, but most SQL queries inside those endpoints **never applied** the param. Sliding to 98% still showed low-confidence defects because the JSONB-expand step ran without a `WHERE conf >= %s` filter on the size-over-time, confidence-over-time, camera scatter, and camera×encoder scatter queries. Patched all four to include the filter at the expand step.
+
+### Fixed — unchecking Show in Process tab didn't hide annotations
+- The UI's "uncheck + Save All Configs" deletes the per-class entry from `audio_settings`, but the drawing code at `detection.py:1064-1073` defaulted to "draw" when a class had no entry. So a missing entry was treated as visible, and the user's uncheck silently did nothing. Flipped the default: **missing entry = do not draw**. New semantic: a class is drawn only if `audio_settings` has an explicit entry for it with `show != false`.
+
+### Fixed — defect-modal zoom capped at 1x
+- 3.21.9's modal-layout patch added `contain: 'inside'` to the Panzoom config to keep the image within the modal frame. That option silently caps zoom at 1x because at scale > 1 the image becomes larger than its parent, which violates the "inside" rule. Removed the `contain:` option entirely — CSS (`max-width: 100%; object-fit: contain`) handles fit-on-load; flex `1 1 0` keeps the 50/50 panel split; Panzoom now zooms freely up to `maxScale: 10`.
+
 ## [3.21.9] - 2026-06-01
 
 ### Fixed — shipment column always tagged `no_shipment` (cross-store Redis bug)

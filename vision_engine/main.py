@@ -692,52 +692,58 @@ def _process_frame_batch(frames_data, allow_eject=True):
         classes = [d.get('name', '?') for d in detection_info if isinstance(d, dict)]
         logger.info(f"TS:{ts} | DM:{first_dms} | {','.join(classes)} | {timestamp:.2f}s")
 
-    # Evaluate procedure-based eject rules (only for hot path)
-    if allow_eject:
-        try:
-            _tl_cfg = getattr(app.state, 'timeline_config', {})
-            _procedures = _tl_cfg.get('procedures', [])
-            _enabled_procs = [p for p in _procedures if p.get('enabled', True)]
-            if _enabled_procs and cfg_module.EJECTOR_ENABLED:
-                # Collect all detections across all messages
-                all_detections = []
-                for msg in queue_messages:
-                    det_list = msg.get('detection', [])
-                    if isinstance(det_list, list):
-                        all_detections.extend(d for d in det_list if isinstance(d, dict))
+    # 3.21.10: Evaluate procedure-based eject rules on EVERY path (hot + cold).
+    # Storing eject decisions to the DB shouldn't depend on whether the frame
+    # arrived in real-time. Only the PHYSICAL eject signal (pushing to the
+    # ejector_queue) is gated by `allow_eject` — that part must stay hot-only,
+    # because cold frames are already past the ejector and can't be physically
+    # rejected. DB writes (ejection_events) happen on both paths.
+    try:
+        _tl_cfg = getattr(app.state, 'timeline_config', {})
+        _procedures = _tl_cfg.get('procedures', [])
+        _enabled_procs = [p for p in _procedures if p.get('enabled', True)]
+        if _enabled_procs and cfg_module.EJECTOR_ENABLED:
+            # Collect all detections across all messages
+            all_detections = []
+            for msg in queue_messages:
+                det_list = msg.get('detection', [])
+                if isinstance(det_list, list):
+                    all_detections.extend(d for d in det_list if isinstance(d, dict))
 
-                should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _enabled_procs)
-                det_names = [d.get('name', '?') for d in all_detections]
-                logger.info(f"[EJECT_EVAL] {len(_enabled_procs)} procs, {len(all_detections)} dets ({','.join(det_names)}), result={'EJECT' if should_eject else 'OK'}")
+            should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _enabled_procs)
+            det_names = [d.get('name', '?') for d in all_detections]
+            logger.info(f"[EJECT_EVAL] {len(_enabled_procs)} procs, {len(all_detections)} dets ({','.join(det_names)}), result={'EJECT' if should_eject else 'OK'} path={'hot' if allow_eject else 'cold'}")
 
-                if should_eject:
+            if should_eject:
+                if allow_eject:
                     eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
                     watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
                     watcher.eject_ng_counter += 1
                     logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
-
-                    # Persist ejection events for procedures with Store=ON (3.17.0).
-                    # eject_reasons are "ProcName: details" (or just "ProcName"); map
-                    # each back to its procedure to read the per-procedure store flag.
-                    try:
-                        reason_by_name = {}
-                        for _r in eject_reasons:
-                            _nm = _r.split(':', 1)[0].strip()
-                            reason_by_name.setdefault(_nm, _r)
-                        for _proc in _enabled_procs:
-                            if not _proc.get('store'):
-                                continue
-                            _pn = _proc.get('name', 'Unnamed')
-                            if _pn in reason_by_name:
-                                write_ejection_event_to_db(
-                                    _pn, reason_by_name[_pn], capture_shipment, capture_encoder
-                                )
-                    except Exception as _e:
-                        logger.warning(f"ejection_events write skipped: {_e}")
                 else:
-                    watcher.eject_ok_counter += 1
-        except Exception as e:
-            logger.warning(f"Procedure eject evaluation error: {e}")
+                    logger.info(f"EJECT condition met on cold path (no physical eject) | reasons={' '.join(eject_reasons)} | encoder={capture_encoder}")
+
+                # Persist ejection events for procedures with Store=ON.
+                # Runs on both hot AND cold so analytics tables stay complete.
+                try:
+                    reason_by_name = {}
+                    for _r in eject_reasons:
+                        _nm = _r.split(':', 1)[0].strip()
+                        reason_by_name.setdefault(_nm, _r)
+                    for _proc in _enabled_procs:
+                        if not _proc.get('store'):
+                            continue
+                        _pn = _proc.get('name', 'Unnamed')
+                        if _pn in reason_by_name:
+                            write_ejection_event_to_db(
+                                _pn, reason_by_name[_pn], capture_shipment, capture_encoder
+                            )
+                except Exception as _e:
+                    logger.warning(f"ejection_events write skipped: {_e}")
+            elif allow_eject:
+                watcher.eject_ok_counter += 1
+    except Exception as e:
+        logger.warning(f"Procedure eject evaluation error: {e}")
 
     return True
 

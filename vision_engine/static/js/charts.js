@@ -847,9 +847,13 @@ function _imgUrlsFor(pt) {
 function _attachZoom(imgEl) {
     if (!imgEl || imgEl.dataset.zoomReady === '1' || typeof Panzoom !== 'function') return;
     try {
-        // contain:'inside' keeps the image within the modal bounds (vs 'outside'
-        // which is cover-style and lets the image pan past the modal edges).
-        const pz = Panzoom(imgEl, { maxScale: 10, minScale: 1, cursor: 'zoom-in', contain: 'inside', startScale: 1, startX: 0, startY: 0 });
+        // No `contain:` option — `contain:'inside'` silently caps zoom at 1x
+        // because at scale>1 the image becomes larger than parent, which
+        // violates the "stay inside" rule. CSS (max-width:100%, object-fit:
+        // contain) handles the fit-on-load; flex:1 1 0 on the wrap keeps
+        // the panel 50/50. Panzoom handles wheel-zoom unconstrained up to
+        // maxScale.
+        const pz = Panzoom(imgEl, { maxScale: 10, minScale: 1, cursor: 'zoom-in', startScale: 1, startX: 0, startY: 0 });
         pz.reset({ animate: false });
         imgEl.parentElement.addEventListener('wheel', function (e) {
             e.preventDefault();

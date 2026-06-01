@@ -440,6 +440,38 @@ def evaluate_eject_from_detections(detections_list, procedures):
             reason = f"{proc_name}: {', '.join(details)}" if details else proc_name
             eject_reasons.append(reason)
 
+            # 3.21.10 — persist ejection event right here, at the eval point.
+            # This runs on EVERY caller of evaluate_eject_from_detections
+            # (worker thread, websocket push, timeline endpoint, etc.) so
+            # the DB stays in sync with what the dashboard shows as "EJECT".
+            # Dedupe per (encoder, procedure_name, shipment) using a Redis
+            # set with a short TTL — avoids inserting the same eject twice
+            # when the dashboard re-evaluates the same column on refresh.
+            if proc.get('store'):
+                try:
+                    from services.db import write_ejection_event_to_db
+                    rc = _get_timeline_redis()
+                    # Encoder is the most stable per-frame identifier. Fall
+                    # back to a timestamp-bucket if encoder is missing.
+                    _enc = None
+                    for d in proc_dets:
+                        if isinstance(d, dict) and '_encoder' in d:
+                            _enc = d['_encoder']
+                            break
+                    if _enc is None:
+                        _enc = int(time.time())
+                    _shipment = "no_shipment"
+                    try:
+                        sv = rc.get("shipment")
+                        if sv: _shipment = sv.decode("utf-8") if isinstance(sv, bytes) else str(sv)
+                    except Exception:
+                        pass
+                    dedupe_key = f"ejdedupe:{_shipment}:{proc_name}:{_enc}"
+                    if rc.set(dedupe_key, "1", ex=60, nx=True):  # write once per 60s window
+                        write_ejection_event_to_db(proc_name, reason, _shipment, _enc)
+                except Exception as _e:
+                    logger.warning(f"ejection_events write skipped: {_e}")
+
     return should_eject, eject_reasons
 
 
@@ -1061,12 +1093,18 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             from services.render import draw_detection_on
             annotated_image = image.copy()
             kv_y = 4
-            _audio_map = _get_audio_settings_map()
+            # 3.21.10: read user toggles from timeline_config.object_filters
+            # (where the Process tab actually writes), NOT service_config.audio_settings
+            # (legacy dict the user never sees). A class is drawn only if it has
+            # an entry with show=true. show=false (or missing entry) hides.
+            try:
+                _obj_filters = (getattr(_app.state, 'timeline_config', {}) or {}).get('object_filters', {}) if _app else {}
+            except Exception:
+                _obj_filters = {}
             for det in yolo_res:
                 _nm = det.get("name") if isinstance(det, dict) else None
-                _settings = _audio_map.get(_nm) if _nm else None
-                # default = show (True) so new/unseen classes still render
-                if _settings is not None and _settings.get("show") is False:
+                _settings = _obj_filters.get(_nm) if _nm else None
+                if _settings is None or _settings.get("show") is False:
                     continue
                 kv_y = draw_detection_on(
                     annotated_image, det, kv_y=kv_y, bbox_thickness=3,
