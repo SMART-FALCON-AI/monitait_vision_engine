@@ -1191,6 +1191,27 @@
 
                 </div>
 
+                <!-- Storage Path Section (3.21.11) -->
+                <div class="control-section">
+                    <h3>💾 <span data-i18n="storage_config">Raw Image Storage</span></h3>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
+                        Captured frames are saved to <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">&lt;storage_path&gt;/raw_images/&lt;shipment&gt;/...</code>. Default is <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px;">/mnt/SSD-RESERVE</code>. Change requires container restart to take effect.
+                    </div>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label">Storage Path (DATA_ROOT)</div>
+                            <div style="display:flex; gap:8px; align-items:center; margin-top:8px; width:100%;">
+                                <input type="text" class="control-input" id="data-root-input" value="/mnt/SSD-RESERVE" placeholder="/mnt/SSD-RESERVE" style="flex:1 1 auto; min-width:0; width:auto;">
+                                <button class="control-button" onclick="saveDataRoot()" style="flex:0 0 auto; width:auto; max-width:220px; background:var(--primary-color); color:white; white-space:nowrap; padding:6px 16px;">
+                                    Save (requires restart)
+                                </button>
+                            </div>
+                            <div id="data-root-current" style="font-size:11px; color:var(--text-secondary); margin-top:6px;">Current: loading...</div>
+                            <div class="control-response" id="data-root-response"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Redis Configuration Section -->
                 <div class="control-section">
                     <h3>🔴 <span data-i18n="redis_config">Redis Configuration</span></h3>

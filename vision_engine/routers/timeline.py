@@ -636,7 +636,6 @@ async def detection_stats(request: Request, window: str = "1h", min_conf: float 
                 SELECT detections FROM inference_results
                 WHERE time > NOW() - INTERVAL %s
                 ORDER BY time DESC
-                LIMIT 20000
             ) recent,
             LATERAL jsonb_array_elements(recent.detections) AS elem
             WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
@@ -748,7 +747,6 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                 FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
                 ORDER BY time DESC
-                LIMIT 20000
             ),
             expanded AS (
                 SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
@@ -791,24 +789,35 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                 "c_max": round((cmax or 0) * 100, 1),
             })
 
-        # --- camera scatter: up to 1500 points ---
+        # --- camera scatter: stratified per-class so rare classes (spot/warp/stitch)
+        # don't get swamped by dominant ones (weft_up). Up to 750 newest dots PER
+        # CLASS, capped at 6000 total across classes.
         cur.execute(
             f"""
             WITH recent AS (
                 SELECT time, shipment, detections, image_path FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
-                ORDER BY time DESC LIMIT 5000
+                ORDER BY time DESC
+            ),
+            exploded AS (
+                SELECT EXTRACT(EPOCH FROM time) * 1000 AS x_ms,
+                       time AS t,
+                       COALESCE((elem->>'_cam')::int, 0) AS cam,
+                       (elem->>'name') AS cls,
+                       (elem->>'confidence')::float AS conf,
+                       image_path AS img,
+                       shipment AS ship
+                FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+                WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+            ),
+            ranked AS (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY cls ORDER BY t DESC) AS rn
+                FROM exploded
             )
-            SELECT EXTRACT(EPOCH FROM time) * 1000 AS x_ms,
-                   COALESCE((elem->>'_cam')::int, 0) AS cam,
-                   (elem->>'name') AS cls,
-                   (elem->>'confidence')::float AS conf,
-                   image_path AS img,
-                   shipment AS ship
-            FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
-            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
-            ORDER BY time DESC
-            LIMIT 1500
+            SELECT x_ms, cam, cls, conf, img, ship FROM ranked
+            WHERE rn <= 750
+            ORDER BY t DESC
+            LIMIT 6000
             """,
             base_params,
         )
@@ -819,23 +828,34 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
         ]
 
         # --- camera × ENCODER scatter (3.21.0): defect map by roll position ---
+        # Stratified per-class (same as camera-time scatter above) so rare
+        # classes survive next to weft_up's flood.
         cur.execute(
             f"""
             WITH recent AS (
-                SELECT shipment, detections, image_path, encoder_value FROM inference_results
+                SELECT time, shipment, detections, image_path, encoder_value FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
                   AND encoder_value IS NOT NULL
-                ORDER BY time DESC LIMIT 5000
+                ORDER BY time DESC
+            ),
+            exploded AS (
+                SELECT encoder_value AS enc,
+                       time AS t,
+                       COALESCE((elem->>'_cam')::int, 0) AS cam,
+                       (elem->>'name') AS cls,
+                       (elem->>'confidence')::float AS conf,
+                       image_path AS img,
+                       shipment AS ship
+                FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
+                WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+            ),
+            ranked AS (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY cls ORDER BY t DESC) AS rn
+                FROM exploded
             )
-            SELECT encoder_value AS enc,
-                   COALESCE((elem->>'_cam')::int, 0) AS cam,
-                   (elem->>'name') AS cls,
-                   (elem->>'confidence')::float AS conf,
-                   image_path AS img,
-                   shipment AS ship
-            FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
-            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
-            LIMIT 1500
+            SELECT enc, cam, cls, conf, img, ship FROM ranked
+            WHERE rn <= 750
+            LIMIT 6000
             """,
             base_params,
         )
@@ -851,7 +871,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
             WITH recent AS (
                 SELECT time, detections FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
-                ORDER BY time DESC LIMIT 20000
+                ORDER BY time DESC
             ),
             expanded AS (
                 SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
@@ -1166,7 +1186,7 @@ async def quality_charts(request: Request, window: str = "24h", shipment: str = 
             WITH recent AS (
                 SELECT detections FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
-                ORDER BY time DESC LIMIT 20000
+                ORDER BY time DESC
             )
             SELECT (elem->>'name') AS cls,
                    COALESCE((elem->>'_cam')::int, 0) AS cam,
@@ -1397,16 +1417,17 @@ async def recent_detections(request: Request, window: str = "24h", shipment: str
 
 
 @router.get("/api/export_csv")
-async def export_csv(request: Request, window: str = "24h", shipment: str = ""):
+async def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
     """Stream a CSV export of stored detections for a shipment+window (3.21.3).
 
     One row per detection (inference_results expanded). Honors the Charts tab's
-    window + shipment selectors. Filename: detections_<shipment>_<window>.csv.
+    window + shipment + min_conf selectors (3.21.10). Filename: detections_<shipment>_<window>.csv.
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
     ship_clause = "AND shipment = %s" if shipment else ""
     params = [interval] + ([shipment] if shipment else [])
+    min_conf_f = float(min_conf or 0.0)
 
     from services.db import get_db_connection, release_db_connection
     conn = get_db_connection()
@@ -1445,6 +1466,13 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = ""):
                 for d in dets:
                     if not isinstance(d, dict):
                         continue
+                    # 3.21.10: filter rows by min_conf so CSV matches what the
+                    # charts show.
+                    try:
+                        if float(d.get("confidence") or 0.0) < min_conf_f:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
                     writer.writerow([
                         ts, ship or "", enc if enc is not None else "",
                         d.get("_cam", ""), d.get("name", ""),

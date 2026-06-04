@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.11] - 2026-06-02
+
+### Fixed — Charts: per-class scatter so rare classes survive vs weft_up flood
+- `camera × time` and `camera × encoder` scatter queries used `LIMIT 1500` on a `time DESC` order. With weft_up dominating (~27k/24h) the newest 1500 rows were all weft_up and rare classes (spot/warp/stitch) never appeared. Switched to a stratified `ROW_NUMBER() OVER (PARTITION BY cls)` slice — up to 750 newest dots **per class**, capped 6000 total. All classes are now visible regardless of class imbalance.
+
+### Fixed — Window dropdown collapsed to "last few hours" at high detection rate
+- The `recent` CTE in `/api/detection_stats`, `/api/detection_charts`, `/api/quality_charts` had a `LIMIT 20000` cap. At ~25 fps of weft_up the 20k rows represented ~13 minutes of data, so `window=7d` returned the same totals as `window=6h`. Removed the row caps; `WHERE time > NOW() - INTERVAL` already bounds the scan size. 7d now actually returns 7 days.
+
+### Fixed — Spot/Warp ejection_events under-reported (sampled by dashboard refresh)
+- The eject DB-write hook lived inside `evaluate_eject_from_detections` which is also called from the dashboard's WebSocket render loop. That loop sampled the current 24-frame dashboard window, so constant classes (weft_up) fired reliably but rare classes (spot_up, warp_up — ~71 / 579 in 24h) almost never landed in the sampled window. Added a second hook in the **live inference path** (`detection.py` after `write_inference_to_db`). Every captured frame's eject is now evaluated regardless of dashboard state. Same Redis dedupe gate.
+
 ## [3.21.10] - 2026-06-01
 
 ### Fixed — ejection_events table never populated (3+ months of missed eject history)

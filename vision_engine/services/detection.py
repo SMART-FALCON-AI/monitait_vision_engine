@@ -1218,6 +1218,29 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
                         model_used=model_name_used,
                         encoder_value=encoder  # 3.21.0: roll position per detection
                     )
+
+                # 3.21.11: evaluate eject from the LIVE inference path (every captured
+                # frame), not only from the dashboard websocket render loop. Previously
+                # eject_eval was sampled by dashboard updates, so rare classes (spot_up,
+                # warp_up) were missed almost always while constant classes (weft_up)
+                # fired reliably. Hooking here fixes the spot/warp under-reporting.
+                # The DB-write hook lives inside evaluate_eject_from_detections itself
+                # and is dedupe-gated per (shipment, proc_name, encoder).
+                try:
+                    if yolo_res:
+                        # Stamp encoder onto each detection so the dedupe key is stable
+                        # (otherwise the eval falls back to int(time.time()) and the
+                        # dedupe window is just 60s of wall-clock).
+                        for _d in yolo_res:
+                            if isinstance(_d, dict) and "_encoder" not in _d:
+                                _d["_encoder"] = encoder if encoder is not None else 0
+                        _tl_cfg = getattr(_app.state, "timeline_config", {}) if _app else {}
+                        _procs = [p for p in (_tl_cfg.get("procedures") or [])
+                                  if p.get("enabled", True)]
+                        if _procs:
+                            evaluate_eject_from_detections(yolo_res, _procs)
+                except Exception as _e:
+                    logger.debug(f"Inference-path eject eval skipped: {_e}")
             except Exception as e:
                 logger.error(f"Failed to write inference to DB: {e}")
 

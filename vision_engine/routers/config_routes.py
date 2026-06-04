@@ -483,6 +483,120 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
 
 
 # =============================================================================
+# Storage path (DATA_ROOT) endpoints (3.21.11)
+# =============================================================================
+# The raw_images bind-mount is `${DATA_ROOT:-.}/raw_images:/code/raw_images`.
+# This pair of endpoints lets the UI read/write the DATA_ROOT value in the
+# compose .env file. The change only takes effect after the user restarts the
+# MVE container (since bind-mounts are baked in at container creation).
+
+import os as _os
+from pathlib import Path as _Path
+
+# Compose .env lives one level up from /code (vision_engine/) — at the project
+# root. In a container that's /code/../.env. On host it's the bind-mount source.
+def _compose_env_path():
+    # Try common locations
+    candidates = [
+        "/host_compose/.env",                                  # if user adds this bind-mount
+        "/code/../.env",                                       # relative from /code
+        _os.environ.get("COMPOSE_ENV_FILE", "").strip(),       # explicit override
+    ]
+    for c in candidates:
+        if c and _os.path.isfile(c):
+            return c
+    return None
+
+
+def _read_env_var(path, key):
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{key}="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return None
+
+
+def _write_env_var(path, key, value):
+    """Update or append KEY=value in .env. Preserves all other lines."""
+    lines = []
+    found = False
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                if line.strip().startswith(f"{key}="):
+                    lines.append(f"{key}={value}\n")
+                    found = True
+                else:
+                    lines.append(line)
+        if not found:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(f"{key}={value}\n")
+        with open(path, "w") as f:
+            f.writelines(lines)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to write {key} to {path}: {e}")
+        return False
+
+
+@router.get("/api/data_root")
+async def get_data_root():
+    """Read DATA_ROOT from the compose .env file. Default = /mnt/SSD-RESERVE."""
+    env_path = _compose_env_path()
+    current = None
+    if env_path:
+        current = _read_env_var(env_path, "DATA_ROOT")
+    return JSONResponse(content={
+        "data_root":   current or "/mnt/SSD-RESERVE",
+        "env_file":    env_path,
+        "default":     "/mnt/SSD-RESERVE",
+        "note":        "Change requires MVE container restart to take effect.",
+    })
+
+
+@router.post("/api/data_root")
+async def set_data_root(request: Request, body: Dict[str, Any]):
+    """Set DATA_ROOT in the compose .env file. Validates path + writability."""
+    new_path = (body.get("path") or "").strip()
+    if not new_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if not new_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="path must be absolute (start with /)")
+    if any(c in new_path for c in (";", "&", "|", "$", "`", "\n", "\r")):
+        raise HTTPException(status_code=400, detail="path contains invalid characters")
+
+    env_path = _compose_env_path()
+    if not env_path:
+        raise HTTPException(
+            status_code=500,
+            detail="compose .env file not found. Mount host's compose dir to /host_compose or set COMPOSE_ENV_FILE env var.",
+        )
+
+    # Best-effort path-exists check (the container can't verify host paths
+    # accurately, so don't fail on missing — just warn).
+    warning = None
+    target_marker = _Path("/host_data_root") / new_path.lstrip("/")
+    if not target_marker.exists() and not new_path.startswith("/mnt/"):
+        warning = f"Path {new_path} may not exist on host. Verify before restart."
+
+    if not _write_env_var(env_path, "DATA_ROOT", new_path):
+        raise HTTPException(status_code=500, detail="Failed to write to .env file")
+
+    return JSONResponse(content={
+        "status":   "ok",
+        "data_root": new_path,
+        "env_file": env_path,
+        "warning":  warning,
+        "next":     "Run `docker compose -p monitaqc up -d --force-recreate monitait_vision_engine` to apply.",
+    })
+
+
+# =============================================================================
 # Data file endpoints
 # =============================================================================
 

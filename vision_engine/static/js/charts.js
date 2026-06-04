@@ -1096,8 +1096,11 @@ window.closeDefectDrawer = closeDefectDrawer;
 function exportInsightCSV() {
     const win  = document.getElementById('insight-window')?.value   || '24h';
     const ship = document.getElementById('insight-shipment')?.value || '';
+    // 3.21.10: honor the min_conf slider too so the CSV matches what the charts show.
+    const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
     const url = '/api/export_csv?window=' + encodeURIComponent(win) +
-                '&shipment=' + encodeURIComponent(ship);
+                '&shipment=' + encodeURIComponent(ship) +
+                '&min_conf=' + minConf;
     // navigate via hidden anchor so the browser handles the download with the
     // Content-Disposition filename (instead of trying to render in a new tab)
     const a = document.createElement('a');

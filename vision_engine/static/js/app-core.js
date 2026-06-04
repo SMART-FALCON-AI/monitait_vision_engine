@@ -600,6 +600,65 @@ function updateAPITypeFields() {
     }
 }
 
+// 3.21.11: Storage Path (DATA_ROOT) — load current value from compose .env
+// and let the user change it. Change requires container restart to apply.
+async function loadDataRoot() {
+    try {
+        const r = await fetch('/api/data_root');
+        if (!r.ok) return;
+        const d = await r.json();
+        const input = document.getElementById('data-root-input');
+        const current = document.getElementById('data-root-current');
+        if (input && d.data_root) input.value = d.data_root;
+        if (current) current.textContent = `Current: ${d.data_root || '(unset)'} ${d.env_file ? '· ' + d.env_file : ''}`;
+    } catch (e) { /* silent */ }
+}
+
+async function saveDataRoot() {
+    const input = document.getElementById('data-root-input');
+    const responseEl = document.getElementById('data-root-response');
+    const path = (input?.value || '').trim();
+    if (!path) {
+        if (responseEl) { responseEl.textContent = 'Enter a path first.'; responseEl.className = 'control-response error'; }
+        return;
+    }
+    try {
+        const r = await fetch('/api/data_root', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path }),
+        });
+        const d = await r.json();
+        if (r.ok) {
+            if (responseEl) {
+                let msg = `Saved DATA_ROOT=${d.data_root}. ${d.next || ''}`;
+                if (d.warning) msg = `⚠️ ${d.warning} — ` + msg;
+                responseEl.textContent = msg;
+                responseEl.className = 'control-response success';
+            }
+            // refresh current
+            loadDataRoot();
+        } else {
+            if (responseEl) {
+                responseEl.textContent = `Error: ${d.detail || 'failed'}`;
+                responseEl.className = 'control-response error';
+            }
+        }
+    } catch (e) {
+        if (responseEl) { responseEl.textContent = `Error: ${e.message}`; responseEl.className = 'control-response error'; }
+    }
+}
+window.saveDataRoot = saveDataRoot;
+window.loadDataRoot = loadDataRoot;
+// Load on tab switch to advanced
+document.addEventListener('DOMContentLoaded', () => {
+    const adv = document.querySelector('button.tab-button[onclick*="advanced"]');
+    if (adv) adv.addEventListener('click', () => setTimeout(loadDataRoot, 100));
+    // also load on initial page load (in case advanced is the default tab)
+    setTimeout(loadDataRoot, 1000);
+});
+
+
 async function updateConfig(key, value) {
     const responseId = `config-${key}-response`;
     const responseEl = document.getElementById(responseId);
@@ -1918,9 +1977,16 @@ function renderModelsChecklist(models) {
         const model = models[id];
         const label = document.createElement('label');
         label.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: rgba(30, 41, 59, 0.6); border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer; color: var(--text-primary);';
+        // 3.21.10: stride input next to each checkbox. Default 1 = run on every
+        // frame; set to N to run this phase every Nth frame (e.g. 10 = math runs
+        // every 10th frame to save GPU/CPU). Min 1, max 100.
         label.innerHTML = `
             <input type="checkbox" name="pipeline-model" value="${id}">
             <span>${model.name}</span>
+            <span style="font-size:11px; color:var(--text-secondary); margin-left:6px;" title="Run this model every Nth frame (1 = every frame)">stride</span>
+            <input type="number" name="pipeline-stride" data-model-id="${id}" value="1" min="1" max="100" step="1"
+                   style="width:54px; padding:2px 4px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid var(--border-color); border-radius:3px; font-size:12px;"
+                   onclick="event.preventDefault(); event.stopPropagation();">
         `;
         container.appendChild(label);
     });
@@ -1933,11 +1999,17 @@ function loadPipelineForEdit(pipelineName) {
     document.getElementById('pipeline-name-input').value = pipeline.name;
     document.getElementById('pipeline-desc-input').value = pipeline.description || '';
 
-    // Check the models in this pipeline
+    // Check the models in this pipeline + restore each phase's stride (3.21.10).
     const checkboxes = document.querySelectorAll('input[name="pipeline-model"]');
-    const pipelineModelIds = pipeline.phases.map(p => p.model_id);
+    const phaseByModel = {};
+    pipeline.phases.forEach(p => { phaseByModel[p.model_id] = p; });
     checkboxes.forEach(cb => {
-        cb.checked = pipelineModelIds.includes(cb.value);
+        const ph = phaseByModel[cb.value];
+        cb.checked = !!ph;
+        const strideInput = document.querySelector(`input[name="pipeline-stride"][data-model-id="${cb.value}"]`);
+        if (strideInput) {
+            strideInput.value = (ph && ph.stride) ? ph.stride : 1;
+        }
     });
 }
 
@@ -2004,13 +2076,18 @@ async function createOrUpdatePipeline() {
         return;
     }
 
-    // Get selected models
+    // Get selected models + their stride values (3.21.10).
     const checkboxes = document.querySelectorAll('input[name="pipeline-model"]:checked');
-    const phases = Array.from(checkboxes).map((cb, idx) => ({
-        model_id: cb.value,
-        enabled: true,
-        order: idx
-    }));
+    const phases = Array.from(checkboxes).map((cb, idx) => {
+        const strideInput = document.querySelector(`input[name="pipeline-stride"][data-model-id="${cb.value}"]`);
+        const stride = Math.max(1, parseInt(strideInput?.value || '1', 10) || 1);
+        return {
+            model_id: cb.value,
+            enabled: true,
+            order: idx,
+            stride: stride,
+        };
+    });
 
     if (phases.length === 0) {
         responseEl.textContent = 'Please select at least one model for the pipeline';
