@@ -593,6 +593,76 @@ async def timeline_count(request: Request):
         return {"total_frames": 0, "total_pages": 0, "rows_per_page": 10}
 
 
+# 3.21.12 — module-level cache for per-class confidence baselines (p50, p95).
+# Recomputed on demand if older than _BASELINE_TTL_SEC.
+_baseline_cache = {"computed_at": 0.0, "baselines": {}}
+_BASELINE_TTL_SEC = 3600  # 1 hour
+
+
+def _compute_conf_baselines():
+    """Per-class p50/p95/n of confidence over last 7 days of stored detections."""
+    import time as _t
+    if _t.time() - _baseline_cache["computed_at"] < _BASELINE_TTL_SEC and _baseline_cache["baselines"]:
+        return _baseline_cache["baselines"]
+
+    from services.db import get_db_connection, release_db_connection
+    out = {}
+    conn = None
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return _baseline_cache.get("baselines", {})
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT (det->>'name') AS cls,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p95,
+                   COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL '7 days'
+              AND (det->>'confidence') IS NOT NULL
+            GROUP BY (det->>'name')
+            HAVING COUNT(*) >= 5
+            """
+        )
+        for cls, p50, p95, n in cur.fetchall():
+            if cls:
+                out[str(cls)] = {
+                    "p50": round(float(p50 or 0.0), 4),
+                    "p95": round(float(p95 or 0.0), 4),
+                    "n":   int(n or 0),
+                }
+        cur.close()
+    except Exception as e:
+        logger.warning(f"conf_baselines compute failed: {e}")
+    finally:
+        if conn is not None:
+            try:
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+    _baseline_cache["baselines"] = out
+    _baseline_cache["computed_at"] = _t.time()
+    return out
+
+
+@router.get("/api/conf_baselines")
+async def get_conf_baselines():
+    """Per-class confidence baselines (p50, p95, n) from last 7 days of stored
+    detections. Cached for 1 hour. Used by the Process tab to display a
+    read-only badge under each class card showing 'normal range'."""
+    return JSONResponse(content={"baselines": _compute_conf_baselines()})
+
+
+@router.post("/api/conf_baselines/recompute")
+async def recompute_conf_baselines():
+    """Force-invalidate the baseline cache (used by admin/dev tools)."""
+    _baseline_cache["computed_at"] = 0.0
+    return JSONResponse(content={"baselines": _compute_conf_baselines()})
+
+
 @router.get("/api/detection_stats")
 async def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0):
     """Detection-quality insight for the Charts tab embedded panel.
@@ -665,11 +735,40 @@ async def detection_stats(request: Request, window: str = "1h", min_conf: float 
         timeline = [{"t": b.strftime("%m-%d %H:%M"), "count": int(n)} for b, n in cur.fetchall()]
         cur.close()
 
+        # 3.21.12 — impact score per class (severity × confidence, summed per class).
+        # area_factor is currently 1 (no normalisation yet); will be added when we
+        # have a reliable per-class typical-area baseline.
+        from config import load_service_config as _lsc
+        _svc = _lsc() or {}
+        _audio = _svc.get("audio_settings", {}) or {}
+        _severities = {k: (v.get("severity", 0) or 0) / 100.0 for k, v in _audio.items() if isinstance(v, dict)}
+        impact_by_class = {}
+        if any(s > 0 for s in _severities.values()):
+            cur2 = conn.cursor()
+            cur2.execute(
+                """
+                SELECT (det->>'name') AS cls,
+                       SUM((det->>'confidence')::float) AS conf_sum
+                FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                WHERE time > NOW() - INTERVAL %s
+                  AND COALESCE((det->>'confidence')::float, 0) >= %s
+                GROUP BY (det->>'name')
+                """,
+                (interval, float(min_conf or 0.0)),
+            )
+            for cls, conf_sum in cur2.fetchall():
+                if cls and _severities.get(cls, 0) > 0:
+                    impact_by_class[str(cls)] = round(_severities[cls] * float(conf_sum or 0.0), 2)
+            cur2.close()
+        impact_total = round(sum(impact_by_class.values()), 2)
+
         total = sum(by_class.values())
         return JSONResponse(content={
             "by_class": by_class,
             "timeline": timeline,
             "total": total,
+            "impact_by_class": impact_by_class,  # 3.21.12 — defect impact score per class
+            "impact_total": impact_total,        # 3.21.12 — total impact across window
             "window": window,
             "persisted": total > 0 or len(timeline) > 0,
         })
@@ -1440,6 +1539,12 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
 
     def gen():
         try:
+            # 3.21.12 — load per-class severity (0-100) for impact column.
+            from config import load_service_config as _lsc
+            _svc = _lsc() or {}
+            _audio = _svc.get("audio_settings", {}) or {}
+            sev_map = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+
             cur = conn.cursor(name="export_csv_cursor")  # server-side cursor (streaming, low RAM)
             cur.itersize = 500
             cur.execute(
@@ -1454,6 +1559,7 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
             writer = _csv.writer(buf)
             writer.writerow([
                 "time", "shipment", "encoder", "camera", "class", "confidence",
+                "severity", "impact",                                  # 3.21.12
                 "xmin", "ymin", "xmax", "ymax", "image_path",
                 "inference_time_ms", "model_used",
             ])
@@ -1469,14 +1575,19 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
                     # 3.21.10: filter rows by min_conf so CSV matches what the
                     # charts show.
                     try:
-                        if float(d.get("confidence") or 0.0) < min_conf_f:
+                        conf_f = float(d.get("confidence") or 0.0)
+                        if conf_f < min_conf_f:
                             continue
                     except (TypeError, ValueError):
-                        pass
+                        conf_f = 0.0
+                    cls = d.get("name", "")
+                    sev = sev_map.get(cls, 0)
+                    impact = round((sev / 100.0) * conf_f, 3)  # 3.21.12 — defect impact
                     writer.writerow([
                         ts, ship or "", enc if enc is not None else "",
-                        d.get("_cam", ""), d.get("name", ""),
+                        d.get("_cam", ""), cls,
                         d.get("confidence", ""),
+                        sev, impact,
                         d.get("xmin", ""), d.get("ymin", ""),
                         d.get("xmax", ""), d.get("ymax", ""),
                         img or "", infms or "", model or "",

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.12] - 2026-06-05
+
+### Fixed — yolo weights binding: uploads survive container restart
+- Added single-file bind-mount `./volumes/weights/best.pt:/code/best.pt:ro` under the `yolo_inference` service. The Detector still loads from the same `/code/best.pt` path, but that file is now overlaid by the host's `./volumes/weights/best.pt`, which means replacing the file in the clean weights-only directory updates the model on next yolo restart without touching the directory that holds the yolov5 source code.
+- `routers/inference.py`: both `upload_weights` and `activate_weights` endpoints now mirror the chosen file to `/weights/best.pt` as part of their flow. Result: uploads via the Process-tab UI activate immediately AND survive container restarts. Previously the activation was in-memory only and was lost when the container restarted.
+- A misplaced single-file override that earlier ended up under `monitait_vision_engine` instead of `yolo_inference` was removed.
+
+### Added — Phase 1 foundations for paid Analyze tab (free for everyone)
+
+#### Severity per class — Process tab
+- New per-class severity weight (0–100) input in the per-object card, next to Min-conf. Stored in `service_config.audio_settings[class].severity`. Default 0 = cosmetic, no contribution to impact score.
+- Sent in `/api/audio_settings` payload alongside show/store/beep/narrate/min_confidence.
+
+#### Per-class confidence baseline — read-only badge
+- New endpoint `GET /api/conf_baselines` returns auto-computed `{class: {p50, p95, n}}` from the last 7 days of stored detections in `inference_results`. Cached for 1 hour.
+- Process tab renders a badge under each card: "📊 normal conf: 78–94% (p50–p95) · n=27885".
+- Helps operators set `min_confidence` correctly and judge whether a detection is anomalous.
+
+#### Impact score — chart endpoints + CSV
+- `defect_impact = (severity / 100) × confidence` aggregated per class (area_factor postponed until a typical-area baseline is available).
+- `/api/detection_stats` response now includes `impact_by_class` and `impact_total` alongside `by_class` and `total`.
+- CSV export adds two columns: `severity` and `impact`. Operators can sort/filter exported data by per-detection impact.
+
 ## [3.21.11] - 2026-06-02
 
 ### Fixed — Charts: per-class scatter so rare classes survive vs weft_up flood

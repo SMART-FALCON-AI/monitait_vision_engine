@@ -826,17 +826,24 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
                     "narrate": bool(cfg.get("narrate", False)),
                     "beep": bool(cfg.get("beep", False)),
                     "min_confidence": float(cfg.get("min_confidence", 0.01)),
+                    # 3.21.12 — per-class severity weight (0-100). Default 0 = no impact.
+                    "severity": max(0, min(100, int(cfg.get("severity", 0) or 0))),
                 }
             settings = new_settings
         elif "class_name" in payload:
             cls = str(payload["class_name"])
-            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01})
+            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01, "severity": 0})
             for k in ("show", "narrate", "beep"):
                 if k in payload:
                     entry[k] = bool(payload[k])
             if "min_confidence" in payload:
                 try:
                     entry["min_confidence"] = float(payload["min_confidence"])
+                except (TypeError, ValueError):
+                    pass
+            if "severity" in payload:
+                try:
+                    entry["severity"] = max(0, min(100, int(payload["severity"] or 0)))
                 except (TypeError, ValueError):
                     pass
             settings[cls] = entry

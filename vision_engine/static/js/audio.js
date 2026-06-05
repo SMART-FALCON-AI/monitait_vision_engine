@@ -358,6 +358,8 @@ function updateObjectsList() {
         const isNarrate = audioSettings.narrateObjects[objectName] || false;
         const isBeep = audioSettings.enabledObjects[objectName] || false;
         const isStore = audioSettings.storeObjects[objectName] || false;
+        const severity = audioSettings.severityObjects?.[objectName] ?? 0;  // 3.21.12 — per-class severity (0–100, defect impact weight)
+        const baseline = audioSettings.confBaselines?.[objectName];          // 3.21.12 — read-only baseline {p50,p95} (auto-learned)
         const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
         const safeName = objectName.replace(/'/g, "\\'");
 
@@ -370,13 +372,19 @@ function updateObjectsList() {
                 <div style="font-weight: 600; color: var(--text-primary); font-size: 14px; flex: 1;">${objectName}</div>
                 <span class="info-tooltip-sm" style="cursor: help;">i<span class="info-tooltip-text" style="text-align: left; min-width: 280px;">${infoHtml}</span></span>
             </div>
-            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;">
                 <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">Min conf:</span>
                 <input type="number" value="${confidence}" min="0" max="100" step="1"
                     onchange="updateObjectConfidence('${safeName}', this.value)"
                     style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;">
                 <span style="font-size: 12px; color: var(--text-secondary);">%</span>
+                <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; margin-left: 6px;" title="Severity weight 0–100. Used to compute defect impact score (severity × confidence × area). Higher = this class hurts shipment quality more.">Severity:</span>
+                <input type="number" value="${severity}" min="0" max="100" step="1"
+                    onchange="updateObjectSeverity('${safeName}', this.value)"
+                    style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;"
+                    title="Per-class defect impact weight (0=cosmetic, 100=critical)">
             </div>
+            ${baseline ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="Auto-learned from last 7 days of stored detections. Use as guide for setting min_confidence and judging anomalies.">📊 normal conf: ${(baseline.p50*100).toFixed(0)}–${(baseline.p95*100).toFixed(0)}% (p50–p95) · n=${baseline.n||0}</div>` : ''}
             <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 6px;">
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Show bounding box">
                     <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
@@ -419,7 +427,8 @@ async function syncObjectAudioToServer(objectName) {
         show: audioSettings.showObjects[objectName] !== false,
         narrate: !!audioSettings.narrateObjects[objectName],
         beep: !!audioSettings.enabledObjects[objectName],
-        min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100  // UI uses 0-100, server uses 0-1
+        min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100,  // UI uses 0-100, server uses 0-1
+        severity: audioSettings.severityObjects?.[objectName] ?? 0,  // 3.21.12 — 0-100, per-class impact weight
     };
     try {
         await fetch('/api/audio_settings', {
@@ -454,6 +463,16 @@ function updateObjectConfidence(objectName, value) {
     syncObjectAudioToServer(objectName);
 }
 
+// 3.21.12 — Update per-class severity weight (0-100). Used for impact-score
+// computation in chart endpoints and CSV export.
+function updateObjectSeverity(objectName, value) {
+    if (!audioSettings.severityObjects) audioSettings.severityObjects = {};
+    audioSettings.severityObjects[objectName] = Math.max(0, Math.min(100, parseInt(value, 10) || 0));
+    saveAudioSettings();
+    syncObjectAudioToServer(objectName);
+}
+window.updateObjectSeverity = updateObjectSeverity;
+
 // On page load, pull server-side audio_settings so the UI matches what
 // services/* actually uses (localStorage may be stale across browsers).
 async function loadAudioSettingsFromServer() {
@@ -462,18 +481,35 @@ async function loadAudioSettingsFromServer() {
         if (!r.ok) return;
         const data = await r.json();
         const server = data.audio_settings || {};
+        if (!audioSettings.severityObjects) audioSettings.severityObjects = {};
         Object.keys(server).forEach(k => {
             const s = server[k];
             if (s.show !== undefined)    audioSettings.showObjects[k] = !!s.show;
             if (s.narrate !== undefined) audioSettings.narrateObjects[k] = !!s.narrate;
             if (s.beep !== undefined)    audioSettings.enabledObjects[k] = !!s.beep;
             if (s.min_confidence !== undefined) audioSettings.objectConfidence[k] = Math.round(s.min_confidence * 100);
+            if (s.severity !== undefined) audioSettings.severityObjects[k] = parseInt(s.severity, 10) || 0;
         });
         saveAudioSettings();
         if (typeof updateObjectsList === 'function') updateObjectsList();
     } catch (e) { /* not fatal */ }
 }
 document.addEventListener('DOMContentLoaded', loadAudioSettingsFromServer);
+
+// 3.21.12 — Fetch per-class confidence baselines (auto-learned p50/p95 over
+// last 7 days of stored detections). Surfaces in the per-class card as a
+// read-only badge to help operators set min_conf and judge anomalies.
+async function loadConfBaselinesFromServer() {
+    try {
+        const r = await fetch('/api/conf_baselines');
+        if (!r.ok) return;
+        const d = await r.json();
+        audioSettings.confBaselines = d.baselines || {};
+        if (typeof updateObjectsList === 'function') updateObjectsList();
+    } catch (e) { /* not fatal — baseline is optional UI hint */ }
+}
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadConfBaselinesFromServer, 800));
+window.loadConfBaselinesFromServer = loadConfBaselinesFromServer;
 
 // Toggle DB persistence for object. POSTs to server because detection.py reads
 // this server-side to gate writes to inference_results. Default OFF.

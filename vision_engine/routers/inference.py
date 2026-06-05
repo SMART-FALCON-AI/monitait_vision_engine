@@ -492,7 +492,20 @@ async def upload_weights(file: UploadFile = File(...)):
     size_mb = round(total / (1024 * 1024), 1)
     logger.info(f"Uploaded weight file: {safe_name} ({size_mb}MB)")
 
-    # Activate on all YOLO replicas
+    # 3.21.12 — also copy to /weights/best.pt so the single-file bind-mount
+    # (./volumes/weights/best.pt:/code/best.pt:ro) picks this up on next yolo
+    # container restart. Without this, in-memory set-model activation is lost
+    # whenever the container is recreated and Detector re-runs init from /code/best.pt.
+    try:
+        import shutil as _shutil
+        best_dest = WEIGHTS_DIR / "best.pt"
+        if dest.resolve() != best_dest.resolve():
+            _shutil.copyfile(dest, best_dest)
+            logger.info(f"Mirrored {safe_name} -> /weights/best.pt for restart persistence")
+    except Exception as _e:
+        logger.warning(f"Failed to mirror {safe_name} -> /weights/best.pt: {_e}")
+
+    # Activate on all YOLO replicas (use the just-uploaded path)
     model_path = f"/weights/{safe_name}"
     successes, last_error = _call_set_model_all_replicas(model_path)
     if successes == 0:
@@ -527,6 +540,17 @@ async def activate_weights(request: Request):
     dest = WEIGHTS_DIR / safe_name
     if not dest.exists():
         return JSONResponse(content={"error": f"Weight file not found: {safe_name}"}, status_code=404)
+
+    # 3.21.12 — mirror the chosen file to /weights/best.pt so the choice
+    # survives container restarts via the single-file bind-mount.
+    try:
+        import shutil as _shutil
+        best_dest = WEIGHTS_DIR / "best.pt"
+        if dest.resolve() != best_dest.resolve():
+            _shutil.copyfile(dest, best_dest)
+            logger.info(f"Mirrored {safe_name} -> /weights/best.pt for restart persistence")
+    except Exception as _e:
+        logger.warning(f"Failed to mirror {safe_name} -> /weights/best.pt: {_e}")
 
     model_path = f"/weights/{safe_name}"
     successes, last_error = _call_set_model_all_replicas(model_path)
