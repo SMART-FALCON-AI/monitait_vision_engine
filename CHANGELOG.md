@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.17] - 2026-06-05
+
+### Fixed — PDF report layout (3.21.15 follow-up)
+- **Score number overlapped the Thresholds line** because the 36pt font ran on default `leading=14`. Lifted leading to 50pt and switched the score paragraph to a dedicated `ScoreXL` style. No more overlap.
+- **Verdict pill stretched the full column width** (looked like a green bar, not a pill). Pill is now an auto-sized nested table — sized to its content, 7pt vertical padding, darker border in the same hue.
+- **Defects table headers "Count/encoder_unit" and "Impact/encoder_unit" overlapped neighboring columns.** Headers are now wrapped in `Paragraph` cells that break onto two lines (`Count` / `/m`). Column widths bumped from 22/28 to 22/28 with the wider Class column at 44mm.
+- **"encoder_unit" placeholder showed literally** in length / throughput / per-unit rows when the operator hadn't configured a unit. Now falls back to plain `unit` / `units/sec` / `/unit`.
+
+### Added — Encoder value + camera index in the click-through drawer
+- Clicking a dot on the Camera × Encoder scatter now opens the drawer with `encoder N · cam K` in the meta line, so you can read the roll position of the dot you clicked without having to eyeball the X-axis.
+- Math-channel values are now labelled `math metric X` (was just `value X`), so it's obvious that the number is a raw channel reading, not a confidence percentage.
+
+## [3.21.16] - 2026-06-05
+
+### Added — Shipment quality drift / trend chart (Phase 2)
+- New endpoint `GET /api/shipment_quality_score/trend?window=24h&shipment=X&buckets=12`. Splits the window into ~12 time-buckets and computes per-bucket `impact_per_unit` using the same severity map + encoder normalization as the main score endpoint. Returns per-bucket `score`, `impact`, `impact_per_unit`, `encoder_span`, `detections`, `frames`, plus a `slope_label` of `improving` / `stable` / `degrading` based on first-third vs last-third average impact/unit.
+- Frontend: new compact line chart under the Quality Score card showing impact/unit over time, plus a colored slope chip (green=improving, amber=stable, red=degrading) with the percentage delta. Auto-refreshes alongside the rest of the Charts tab.
+- Bucket widths: 5 min for 1h, 30 min for 6h, 2 h for 24h, 14 h for 7d — about 12 buckets per window so the trend is readable but not noisy.
+- This catches *quality drift within a passing shipment* — e.g. average score is still 90 but the last hour has degraded to 72. The chart and chip make it visible before the next shift starts.
+
 ## [3.21.15] - 2026-06-05
 
 ### Added — Shipment Quality Score PDF report (Phase 2)

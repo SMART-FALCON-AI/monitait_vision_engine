@@ -937,6 +937,21 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
     H2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=13, spaceBefore=14, spaceAfter=6)
     Small = ParagraphStyle("small", parent=styles["BodyText"], fontSize=9, textColor=colors.grey)
     Body = styles["BodyText"]
+    # Big-leading style for the score number so the 42pt glyphs don't overflow
+    # into the next paragraph (previous bug: "100.0/100" overlapped the
+    # "Thresholds:" line because default leading=14 was way under the font size).
+    ScoreXL = ParagraphStyle("score_xl", parent=Body, fontSize=42, leading=50)
+    VerdictPill = ParagraphStyle("verdict_pill", parent=Body, fontSize=14, leading=18, alignment=1)
+    HeaderCell = ParagraphStyle(
+        "header_cell", parent=Body, fontSize=9, leading=11, alignment=1,
+        textColor=colors.white, fontName="Helvetica-Bold",
+    )
+    # Show the configured unit when set, otherwise just "unit" (was the literal
+    # placeholder "encoder_unit" which read awkwardly in the report).
+    raw_unit = payload.get("encoder_unit") or "encoder_unit"
+    is_default_unit = (raw_unit == "encoder_unit")
+    unit = "unit" if is_default_unit else raw_unit
+    unit_suffix = f"/{unit}"
     story = []
 
     # --- Header ---
@@ -946,50 +961,65 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
     subtitle.append(f"Window: last {payload.get('window', '24h')}")
     subtitle.append(f"Generated: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     story.append(Paragraph(" &nbsp; · &nbsp; ".join(subtitle), Small))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 10))
 
-    # --- Score block (big number + verdict pill) ---
+    # --- Score block: big score + tight verdict pill on same row ---
     score = payload.get("score")
     verdict = payload.get("verdict", "NO_DATA")
     score_txt = f"{score:.1f}/100" if isinstance(score, (int, float)) else "—"
     vr, vg, vb = _verdict_color(verdict)
+    # Two-column table: left = big score paragraph with leading=50 (no overflow);
+    # right = a small nested table that holds the colored verdict pill so the
+    # pill is auto-sized to its content instead of stretching to fill 80mm.
+    pill_inner = Table([[Paragraph(f'<font color="white"><b>{verdict}</b></font>', VerdictPill)]],
+                       colWidths=[40 * mm])
+    pill_inner.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.Color(vr, vg, vb)),
+        ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 7),
+        ("LEFTPADDING",(0, 0), (-1, -1), 4),
+        ("RIGHTPADDING",(0, 0), (-1, -1), 4),
+        ("BOX",        (0, 0), (-1, -1), 0.4, colors.Color(vr * 0.7, vg * 0.7, vb * 0.7)),
+    ]))
     score_tbl = Table(
-        [[
-            Paragraph(f"<font size=36><b>{score_txt}</b></font>", Body),
-            Paragraph(f"<font size=14 color='white'><b>&nbsp;{verdict}&nbsp;</b></font>", Body),
-        ]],
-        colWidths=[80 * mm, 80 * mm],
+        [[Paragraph(f"<b>{score_txt}</b>", ScoreXL), pill_inner]],
+        colWidths=[90 * mm, 50 * mm],
     )
     score_tbl.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (1, 0), (1, 0), "CENTER"),
-        ("BACKGROUND", (1, 0), (1, 0), colors.Color(vr, vg, vb)),
-        ("BOX", (0, 0), (-1, -1), 0.4, colors.lightgrey),
-        ("TOPPADDING", (0, 0), (-1, -1), 14),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING",(0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
     ]))
     story.append(score_tbl)
     thr = payload.get("thresholds") or {}
+    story.append(Spacer(1, 4))
     story.append(Paragraph(
         f"Thresholds: RELEASE ≥ {thr.get('release','?')} &nbsp;·&nbsp; "
         f"RE-INSPECT ≥ {thr.get('reinspect','?')} &nbsp;·&nbsp; HOLD &lt; {thr.get('reinspect','?')}", Small))
-    story.append(Spacer(1, 12))
+    story.append(Spacer(1, 10))
 
     # --- KPI grid ---
     story.append(Paragraph("Production KPIs", H2))
-    unit = payload.get("encoder_unit") or "encoder_unit"
     span = payload.get("encoder_span") or 0
     upm = payload.get("encoder_units_per_meter")
     length_txt = f"{span:,} {unit}"
     if upm and span:
         length_txt += f"  (≈ {span / upm:,.1f} m)"
+    throughput_label = payload.get("throughput_label", "units/sec")
+    if is_default_unit:
+        throughput_label = "units/sec"
+    impact_per_unit_label = unit_suffix
     kpi_rows = [
         ["Production length", length_txt],
         ["Duration",          _fmt_duration(payload.get("duration_sec", 0))],
-        ["Throughput",        f"{payload.get('throughput', 0):,.2f} {payload.get('throughput_label','units/sec')}"],
+        ["Throughput",        f"{payload.get('throughput', 0):,.2f} {throughput_label}"],
         ["Total detections",  f"{payload.get('total_detections', 0):,}"],
         ["Impact (total)",    f"{payload.get('impact_total', 0):,.2f}"],
-        ["Impact per unit",   f"{payload.get('impact_per_unit', 0):.4f} {payload.get('impact_per_unit_label','/unit')}"],
+        ["Impact per unit",   f"{payload.get('impact_per_unit', 0):.4f} {impact_per_unit_label}"],
         ["Normalized by",     payload.get("normalized_by", "—")],
         ["Frame count",       f"{payload.get('frame_count', 0):,}"],
     ]
@@ -1013,8 +1043,16 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
     if not tops:
         story.append(Paragraph("<i>No defects with severity &gt; 0 in this window.</i>", Body))
     else:
-        header = ["Class", "Severity", "Count", f"Count{payload.get('impact_per_unit_label','/unit')}",
-                  "Impact", f"Impact{payload.get('impact_per_unit_label','/unit')}"]
+        # Headers wrapped in Paragraph so long labels ("Count /encoder_unit")
+        # break onto two lines instead of overflowing into the next column.
+        header = [
+            Paragraph("Class", HeaderCell),
+            Paragraph("Severity", HeaderCell),
+            Paragraph("Count", HeaderCell),
+            Paragraph(f"Count<br/>{unit_suffix}", HeaderCell),
+            Paragraph("Impact", HeaderCell),
+            Paragraph(f"Impact<br/>{unit_suffix}", HeaderCell),
+        ]
         body = [header]
         for d in tops:
             body.append([
@@ -1025,18 +1063,21 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
                 f"{d.get('impact', 0):,.2f}",
                 f"{d.get('impact_per_unit', 0):.4f}",
             ])
-        def_tbl = Table(body, colWidths=[40 * mm, 22 * mm, 22 * mm, 28 * mm, 25 * mm, 28 * mm])
+        # Wider per-unit columns (28mm) so the two-line header has horizontal room
+        def_tbl = Table(body, colWidths=[44 * mm, 20 * mm, 22 * mm, 28 * mm, 26 * mm, 28 * mm])
         def_tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.13, 0.18, 0.27)),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
-            ("ALIGN", (0, 0), (0, -1), "LEFT"),
+            ("VALIGN",     (0, 0), (-1, 0), "MIDDLE"),
+            ("VALIGN",     (0, 1), (-1, -1), "MIDDLE"),
+            ("ALIGN",      (1, 0), (-1, -1), "RIGHT"),
+            ("ALIGN",      (0, 0), (0, -1),  "LEFT"),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.Color(0.96, 0.96, 0.98)]),
-            ("BOX", (0, 0), (-1, -1), 0.4, colors.lightgrey),
-            ("INNERGRID", (0, 0), (-1, -1), 0.2, colors.lightgrey),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("BOX",        (0, 0), (-1, -1), 0.4, colors.lightgrey),
+            ("INNERGRID",  (0, 0), (-1, -1), 0.2, colors.lightgrey),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("LEFTPADDING",(0, 0), (-1, -1), 5),
+            ("RIGHTPADDING",(0, 0), (-1, -1), 5),
         ]))
         story.append(def_tbl)
 
@@ -1065,6 +1106,195 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+
+
+@router.get("/api/shipment_quality_score/trend")
+async def shipment_quality_score_trend(
+    request: Request, shipment: str = "", window: str = "24h", buckets: int = 12,
+):
+    """3.21.16 — Time-bucketed impact-per-unit timeline + drift indicator.
+
+    Splits the window into ~`buckets` equal time-buckets and computes
+    `impact_per_unit` for each bucket (using the same severity map + encoder
+    normalization as `/api/shipment_quality_score`). Adds a simple linear-fit
+    slope so the operator sees *whether quality is drifting* even when the
+    overall score still passes.
+
+    Returns: { buckets:[{t0,t1,score,impact,impact_per_unit,encoder_span,frames,detections}],
+               slope, slope_pct, slope_label, normalized_by, encoder_unit, window_first_ts, window_last_ts }
+
+    Slope label: "improving" / "stable" / "degrading" based on
+    `slope_pct = (last_third_avg - first_third_avg) / max(first_third_avg, eps)`.
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "24 hours")
+    # Bucket width: aim for `buckets` slots across the window.
+    _bucket_for = {
+        "1h":  "5 minutes",
+        "6h":  "30 minutes",
+        "24h": "2 hours",
+        "7d":  "14 hours",
+    }
+    bucket = _bucket_for.get(window, "2 hours")
+
+    ship_clause = "AND shipment = %s" if shipment else ""
+    base_params = [interval] + ([shipment] if shipment else [])
+
+    empty = {
+        "shipment": shipment, "window": window, "buckets": [],
+        "slope": 0.0, "slope_pct": 0.0, "slope_label": "no data",
+        "normalized_by": "none", "encoder_unit": "encoder_unit",
+        "window_first_ts": None, "window_last_ts": None,
+        "persisted": False,
+    }
+
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        from config import load_service_config as _lsc
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+
+        _svc = _lsc() or {}
+        _audio = _svc.get("audio_settings", {}) or {}
+        severities = {k: (int(v.get("severity", 0) or 0)) / 100.0
+                      for k, v in _audio.items() if isinstance(v, dict)}
+        encoder_unit = str(_svc.get("encoder_unit") or "encoder_unit")
+
+        cur = conn.cursor()
+
+        # Per-bucket per-class detection sums (impact = severity * sum(conf))
+        cur.execute(
+            f"""
+            SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
+                   (det->>'name') AS cls,
+                   COUNT(*) AS n,
+                   SUM((det->>'confidence')::float) AS conf_sum
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s {ship_clause}
+              AND (det->>'confidence') IS NOT NULL
+            GROUP BY bkt, (det->>'name')
+            ORDER BY bkt
+            """,
+            base_params,
+        )
+        cls_rows = cur.fetchall()
+
+        # Per-bucket frame count + encoder span
+        cur.execute(
+            f"""
+            SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
+                   COUNT(*) AS frames,
+                   MIN(encoder_value) AS enc_min,
+                   MAX(encoder_value) AS enc_max,
+                   MIN(time) AS t0,
+                   MAX(time) AS t1
+            FROM inference_results
+            WHERE time > NOW() - INTERVAL %s {ship_clause}
+            GROUP BY bkt
+            ORDER BY bkt
+            """,
+            base_params,
+        )
+        frame_rows = cur.fetchall()
+        cur.close()
+
+        if not frame_rows:
+            return JSONResponse(content=empty)
+
+        # Index per-bucket totals (impact + count) from the class rows
+        per_bucket_impact = {}
+        per_bucket_count = {}
+        for bkt, cls, n, conf_sum in cls_rows:
+            cls_s = str(cls) if cls is not None else ""
+            sev = severities.get(cls_s, 0.0)
+            n_i = int(n or 0)
+            cs = float(conf_sum or 0.0)
+            per_bucket_impact[bkt] = per_bucket_impact.get(bkt, 0.0) + sev * cs
+            per_bucket_count[bkt] = per_bucket_count.get(bkt, 0) + n_i
+
+        SCALE = 1.0
+        result = []
+        for bkt, frames, enc_min, enc_max, t0, t1 in frame_rows:
+            impact = per_bucket_impact.get(bkt, 0.0)
+            count = per_bucket_count.get(bkt, 0)
+            enc_span = 0
+            if enc_min is not None and enc_max is not None:
+                enc_span = int(max(0, enc_max - enc_min))
+            if enc_span > 0:
+                denom = float(enc_span)
+                normalized_by = "encoder"
+            elif frames and frames > 0:
+                denom = float(frames)
+                normalized_by = "frame"
+            else:
+                denom = 1.0
+                normalized_by = "none"
+            ipu = impact / denom if denom > 0 else 0.0
+            score = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, ipu * SCALE))))
+            result.append({
+                "t0": t0.isoformat() if t0 else None,
+                "t1": t1.isoformat() if t1 else None,
+                "bucket": bkt.isoformat() if bkt else None,
+                "frames": int(frames or 0),
+                "detections": count,
+                "encoder_span": enc_span,
+                "impact": round(impact, 3),
+                "impact_per_unit": round(ipu, 5),
+                "score": round(score, 1),
+                "normalized_by": normalized_by,
+            })
+
+        # Slope: compare last-third vs first-third of ipu values.
+        # More robust than raw last-vs-first when noise is high.
+        ipus = [r["impact_per_unit"] for r in result]
+        slope_pct = 0.0
+        slope_label = "stable"
+        if len(ipus) >= 3:
+            n = len(ipus)
+            third = max(1, n // 3)
+            first_avg = sum(ipus[:third]) / third
+            last_avg  = sum(ipus[-third:]) / third
+            base = max(first_avg, 1e-9)
+            slope_pct = round(100.0 * (last_avg - first_avg) / base, 1)
+            if first_avg < 1e-6 and last_avg < 1e-6:
+                slope_label = "stable"  # both flat at ~0
+            elif slope_pct > 15:
+                slope_label = "degrading"
+            elif slope_pct < -15:
+                slope_label = "improving"
+            else:
+                slope_label = "stable"
+
+        # Pick a representative normalized_by (whichever applied to most buckets)
+        normalizers = [r["normalized_by"] for r in result]
+        normalized_by = max(set(normalizers), key=normalizers.count) if normalizers else "none"
+
+        return JSONResponse(content={
+            "shipment": shipment, "window": window,
+            "buckets": result,
+            "bucket_size": bucket,
+            "slope": round(slope_pct / 100.0, 4),
+            "slope_pct": slope_pct,
+            "slope_label": slope_label,
+            "normalized_by": normalized_by,
+            "encoder_unit": encoder_unit,
+            "window_first_ts": result[0]["t0"] if result else None,
+            "window_last_ts":  result[-1]["t1"] if result else None,
+            "thresholds": {"release": QUALITY_RELEASE_SCORE, "reinspect": QUALITY_REINSPECT_SCORE},
+            "persisted": True,
+        })
+    except Exception as e:
+        logger.warning(f"shipment_quality_score_trend failed: {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
 
 
 @router.get("/api/detection_stats")

@@ -231,6 +231,107 @@ async function downloadQualityReport() {
 window.downloadQualityReport = downloadQualityReport;
 
 
+// 3.21.16 — Quality drift / trend chart under the score card.
+// Bucketed impact-per-unit timeline with verdict-threshold guide lines.
+let _sqsTrendChart = null;
+async function refreshShipmentQualityTrend() {
+    const win  = document.getElementById('insight-window')?.value || '24h';
+    const ship = document.getElementById('insight-shipment')?.value || '';
+    const chipEl = document.getElementById('sqs-trend-chip');
+    const noteEl = document.getElementById('sqs-trend-note');
+    const canvas = document.getElementById('sqs-trend-chart');
+    if (!canvas) return;
+    let data;
+    try {
+        const params = new URLSearchParams({ window: win, buckets: '12' });
+        if (ship) params.set('shipment', ship);
+        const resp = await fetch(`/api/shipment_quality_score/trend?${params}`);
+        data = await resp.json();
+    } catch (e) { console.warn('trend fetch failed', e); return; }
+
+    const buckets = data.buckets || [];
+    if (!buckets.length) {
+        if (chipEl) {
+            chipEl.textContent = '— no data —';
+            chipEl.style.background = 'rgba(71,85,105,0.5)';
+            chipEl.style.color = 'var(--text-primary)';
+        }
+        if (_sqsTrendChart) { _sqsTrendChart.destroy(); _sqsTrendChart = null; }
+        return;
+    }
+
+    // Slope chip
+    const label = data.slope_label || 'stable';
+    const pct = data.slope_pct || 0;
+    if (chipEl) {
+        let arrow = '→', bg = 'rgba(71,85,105,0.6)', fg = '#e2e8f0';
+        if (label === 'degrading') { arrow = '↗'; bg = 'rgba(220,38,38,0.7)';  fg = '#fff'; }
+        else if (label === 'improving') { arrow = '↘'; bg = 'rgba(16,185,129,0.7)'; fg = '#fff'; }
+        const sign = pct > 0 ? '+' : '';
+        chipEl.textContent = `${arrow} ${label} ${sign}${pct}%`;
+        chipEl.style.background = bg;
+        chipEl.style.color = fg;
+    }
+    if (noteEl) {
+        const norm = data.normalized_by || 'none';
+        const unit = data.encoder_unit || 'unit';
+        const basisLbl = norm === 'encoder' ? `impact/${unit}` : (norm === 'frame' ? 'impact/frame' : 'impact (no normalization)');
+        noteEl.textContent = `${basisLbl} per ${data.bucket_size || 'bucket'} — first-third vs last-third`;
+    }
+
+    // Chart.js line of impact_per_unit per bucket
+    const labels = buckets.map(b => {
+        try { return new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+        catch (_) { return ''; }
+    });
+    const ipus = buckets.map(b => b.impact_per_unit ?? 0);
+
+    if (typeof Chart === 'undefined') return;
+    if (_sqsTrendChart) _sqsTrendChart.destroy();
+    _sqsTrendChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+            labels,
+            datasets: [{
+                label: 'impact/unit',
+                data: ipus,
+                borderColor: '#fbbf24',
+                backgroundColor: 'rgba(251,191,36,0.15)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.35,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+            }],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: (ctx) => {
+                            const b = buckets[ctx.dataIndex] || {};
+                            return [
+                                `impact/unit: ${(b.impact_per_unit ?? 0).toFixed(5)}`,
+                                `score: ${b.score ?? '—'}`,
+                                `dets: ${(b.detections ?? 0).toLocaleString()}`,
+                            ];
+                        },
+                    },
+                },
+            },
+            scales: {
+                x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxTicksLimit: 6 }, grid: { display: false } },
+                y: { beginAtZero: true, ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: 'rgba(148,163,184,0.08)' } },
+            },
+        },
+    });
+}
+window.refreshShipmentQualityTrend = refreshShipmentQualityTrend;
+
+
 async function refreshDetectionInsights() {
     const windowSel = document.getElementById('insight-window');
     const window = windowSel ? windowSel.value : '24h';
@@ -240,6 +341,7 @@ async function refreshDetectionInsights() {
 
     await _loadShownClasses();  // so per-class charts honor the Show toggle
     refreshShipmentQualityScore();  // 3.21.13 — Phase 2 preview: score card
+    refreshShipmentQualityTrend();  // 3.21.16 — Phase 2: drift / trend chart
     refreshEjectionCharts();    // independent of detection data (Store gates separately)
     refreshProductionCharts();  // production_metrics KPIs (own data source)
     refreshQualityCharts();     // inference_results diagnostics (Pareto/heatmap/camera/latency)
@@ -532,9 +634,12 @@ async function refreshAdvancedCharts() {
                         const m = fn.match(/^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/);
                         if (m) t = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
                     } catch (e) {}
+                    // 3.21.17: surface encoder value + camera index in the drawer.
+                    // dp.x = encoder, dp.y = camera index (Y axis labelled "Camera").
                     openDefectDrawerForFrame({
                         image_path: dp.img, shipment: dp.ship, t: t,
                         cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
+                        encoder: dp.x, camera_index: dp.y,
                     });
                 },
                 scales: {
@@ -1175,15 +1280,26 @@ function openDefectDrawerForFrame(item) {
         // 3.21.7: yolo classes have confidence ∈ [0,1] (percentage). Math channels
         // may emit a raw metric value > 1 (channel-specific scale). Format both
         // sensibly: pct for ≤ 1, raw 2-decimal value otherwise.
+        // 3.21.17: clearer label ("math metric") + always surface encoder + camera
+        // index when the dot came from the encoder scatter (user didn't realize the
+        // X-axis was already showing it — now it's in the drawer too).
         const cv = item.best_confidence;
         let conf = '';
         if (cv != null && cv > 0) {
             conf = (cv <= 1)
                 ? '  •  conf ' + Math.round(cv * 100) + '%'
-                : '  •  value ' + (Math.round(cv * 100) / 100);
+                : '  •  math metric ' + (Math.round(cv * 100) / 100);
+        }
+        let enc = '';
+        if (item.encoder != null && Number.isFinite(item.encoder)) {
+            enc = '  •  encoder ' + Math.round(item.encoder).toLocaleString();
+        }
+        let camIdx = '';
+        if (item.camera_index != null && Number.isFinite(item.camera_index)) {
+            camIdx = '  •  cam ' + Math.round(item.camera_index);
         }
         const classes = (item.classes && item.classes.length) ? item.classes.join(', ') : headerCls;
-        meta.innerHTML = '<b>Defects in this frame:</b> ' + classes + conf
+        meta.innerHTML = '<b>Defects in this frame:</b> ' + classes + conf + enc + camIdx
             + '  &nbsp;|&nbsp;  <span style="color:#94a3b8;">scroll to zoom · drag to pan · double-click to reset</span>';
     }
 }

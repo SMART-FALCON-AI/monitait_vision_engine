@@ -870,6 +870,17 @@
                                 <span id="sqs-download-hint" style="font-size:10px; color:var(--text-secondary); font-style:italic;">uses current window + shipment</span>
                             </div>
                         </div>
+                        <!-- 3.21.16 — Quality drift / trend within shipment -->
+                        <div id="sqs-trend-row" style="margin-top:14px; padding-top:12px; border-top:1px dashed rgba(51,65,85,0.6); display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+                            <div style="display:flex; flex-direction:column; gap:4px; min-width:160px;">
+                                <span style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.6px;">Trend over window</span>
+                                <span id="sqs-trend-chip" style="font-size:13px; font-weight:600; padding:4px 10px; border-radius:12px; background:rgba(71,85,105,0.5); color:var(--text-primary); display:inline-block; text-align:center;">— no data —</span>
+                                <span id="sqs-trend-note" style="font-size:10px; color:var(--text-secondary); font-style:italic;">first-third vs last-third impact/unit</span>
+                            </div>
+                            <div style="flex:1; min-width:260px; height:90px;">
+                                <canvas id="sqs-trend-chart" style="max-height:90px;"></canvas>
+                            </div>
+                        </div>
                     </div>
                     <div id="insight-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
                         No stored detections in this window yet. Detections appear here once a class has <b>Store</b> enabled (Process tab → Per-Object Configuration) and the line is running.
