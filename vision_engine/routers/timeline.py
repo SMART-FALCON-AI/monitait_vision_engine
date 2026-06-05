@@ -178,6 +178,87 @@ def generate_detection_stream():
             time.sleep(1)
 
 
+@router.get("/api/live_channels")
+async def live_channels(request: Request, max_age_sec: int = 30):
+    """3.21.18 — Live per-class value strip for the Status page (Dashboard tab).
+
+    Reads the most recent detection events from Redis (no DB) and returns
+    the latest value seen per class — yolo classes get confidence (0..1),
+    math channels get their raw metric value (often > 1). Filtered to
+    classes the operator has marked `show=true` in audio_settings; classes
+    with `show=false` are dropped from the response entirely.
+
+    This is *display-only* and *non-persistent*: nothing in this path
+    touches `inference_results`, so operators can leave Store=OFF on math
+    channels and still see live values on the dashboard.
+    """
+    try:
+        watcher = getattr(request.app.state, "watcher_instance", None)
+        if not watcher or not watcher.redis_connection or not watcher.redis_connection.redis_connection:
+            return {"channels": {}, "max_age_sec": max_age_sec, "now": time.time()}
+        r = watcher.redis_connection.redis_connection
+
+        # Walk the last ~50 events so we have enough history to cover the
+        # slowest math channel's stride. Most lines fire something every
+        # frame, so this is rarely more than a few seconds of history.
+        raw_events = r.lrange(DETECTION_EVENTS_REDIS_KEY, 0, 49) or []
+        now = time.time()
+
+        # Audio settings drives Show gating.
+        from config import load_service_config as _lsc
+        _svc = _lsc() or {}
+        _audio = _svc.get("audio_settings", {}) or {}
+        # Default: shown. Only drop classes the operator explicitly set show=false.
+        hidden = {k for k, v in _audio.items() if isinstance(v, dict) and v.get("show") is False}
+
+        # latest per class: pick the youngest event that mentions the class
+        latest = {}
+        for raw in raw_events:
+            try:
+                ev = json.loads(raw)
+            except Exception:
+                continue
+            ts = float(ev.get("timestamp") or 0)
+            if not ts or (now - ts) > max_age_sec:
+                continue
+            details = ev.get("details") or {}
+            dets = details.get("detections") or []
+            cam = details.get("_cam") or ev.get("_cam") or ""
+            for d in dets:
+                if not isinstance(d, dict):
+                    continue
+                name = d.get("name") or d.get("class") or ""
+                if not name or name in hidden:
+                    continue
+                # Skip if we already have a newer entry
+                prev = latest.get(name)
+                if prev and prev["ts"] >= ts:
+                    continue
+                cv = d.get("confidence")
+                try:
+                    cv_f = float(cv) if cv is not None else None
+                except (TypeError, ValueError):
+                    cv_f = None
+                is_math = (cv_f is not None and cv_f > 1.0)
+                latest[name] = {
+                    "value": cv_f,
+                    "is_math": is_math,
+                    "ts": ts,
+                    "age_sec": round(now - ts, 2),
+                    "camera": cam or (d.get("_cam") or ""),
+                    "severity": int((_audio.get(name, {}) or {}).get("severity", 0) or 0),
+                }
+        return {
+            "channels": latest,
+            "max_age_sec": max_age_sec,
+            "now": now,
+            "shown_count": len(latest),
+        }
+    except Exception as e:
+        logger.warning(f"live_channels failed: {e}")
+        return {"channels": {}, "max_age_sec": max_age_sec, "now": time.time(), "error": str(e)}
+
+
 @router.get("/api/latest_detections")
 async def get_latest_detections(request: Request):
     """Get the most recent detection events for audio notification (polling fallback)."""
@@ -937,11 +1018,14 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
     H2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=13, spaceBefore=14, spaceAfter=6)
     Small = ParagraphStyle("small", parent=styles["BodyText"], fontSize=9, textColor=colors.grey)
     Body = styles["BodyText"]
-    # Big-leading style for the score number so the 42pt glyphs don't overflow
-    # into the next paragraph (previous bug: "100.0/100" overlapped the
-    # "Thresholds:" line because default leading=14 was way under the font size).
-    ScoreXL = ParagraphStyle("score_xl", parent=Body, fontSize=42, leading=50)
-    VerdictPill = ParagraphStyle("verdict_pill", parent=Body, fontSize=14, leading=18, alignment=1)
+    # Score paragraph: leading == fontSize so the bbox is tight to the glyphs.
+    # With leading > fontSize the VALIGN=MIDDLE in the score-row table centers
+    # the bbox, not the visible glyphs, so the number sat ~8pt below the pill's
+    # center. leading=42 with a 42pt font puts the text baseline at the bbox
+    # midline so it lines up exactly with the verdict pill across from it.
+    # alignment=1 (center) horizontally centers the score in its column.
+    ScoreXL = ParagraphStyle("score_xl", parent=Body, fontSize=42, leading=42, alignment=1)
+    VerdictPill = ParagraphStyle("verdict_pill", parent=Body, fontSize=14, leading=16, alignment=1)
     HeaderCell = ParagraphStyle(
         "header_cell", parent=Body, fontSize=9, leading=11, alignment=1,
         textColor=colors.white, fontName="Helvetica-Bold",
@@ -971,6 +1055,8 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
     # Two-column table: left = big score paragraph with leading=50 (no overflow);
     # right = a small nested table that holds the colored verdict pill so the
     # pill is auto-sized to its content instead of stretching to fill 80mm.
+    # Pill is sized to its content (40mm wide), 7pt vertical padding above/below.
+    # Total pill height ≈ 16 (leading) + 14 (padding) = 30pt.
     pill_inner = Table([[Paragraph(f'<font color="white"><b>{verdict}</b></font>', VerdictPill)]],
                        colWidths=[40 * mm])
     pill_inner.setStyle(TableStyle([
@@ -983,16 +1069,20 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
         ("RIGHTPADDING",(0, 0), (-1, -1), 4),
         ("BOX",        (0, 0), (-1, -1), 0.4, colors.Color(vr * 0.7, vg * 0.7, vb * 0.7)),
     ]))
+    # Score row: VALIGN=MIDDLE on the cell + leading=fontSize on the Paragraph
+    # means the score baseline lands at the same vertical center as the pill.
+    # Equal top/bottom padding (12pt) ensures the row height is symmetric.
     score_tbl = Table(
         [[Paragraph(f"<b>{score_txt}</b>", ScoreXL), pill_inner]],
         colWidths=[90 * mm, 50 * mm],
     )
     score_tbl.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("VALIGN",      (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN",       (0, 0), (0, 0),   "CENTER"),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING",(0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING",(0, 0), (-1, -1), 4),
+        ("TOPPADDING",  (0, 0), (-1, -1), 12),
+        ("BOTTOMPADDING",(0, 0), (-1, -1), 12),
     ]))
     story.append(score_tbl)
     thr = payload.get("thresholds") or {}
