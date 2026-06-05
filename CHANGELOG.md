@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.13] - 2026-06-05
+
+### Added — Shipment Quality Score card (Phase 2 preview, free)
+- New `GET /api/shipment_quality_score?shipment=X&window=Y` returns a 0–100 quality score, a `RELEASE` / `RE-INSPECT` / `HOLD` verdict, total impact across the window, and the top 5 defect classes by impact. Score formula: `100 × (1 − impact_total/total_detections)`, clamped 0–100. Verdict thresholds: ≥85 RELEASE, 60–85 RE-INSPECT, <60 HOLD (in-code defaults; will become UI-tunable in a later release).
+- Charts tab now shows a prominent summary card above the existing charts: the score, the verdict (color-coded), impact total, detection count, and the top defects with their per-class impact / count / severity. Updates automatically when the operator changes Window / Shipment.
+- Reuses the severity field added in 3.21.12. Classes with severity 0 contribute nothing to the score, so the card stays meaningful even when only a few classes are weighted.
+
 ## [3.21.12] - 2026-06-05
 
 ### Fixed — yolo weights binding: uploads survive container restart

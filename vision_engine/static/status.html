@@ -834,6 +834,32 @@
                             <button onclick="refreshDetectionInsights()" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px;">Refresh</button>
                         </div>
                     </div>
+                    <!-- 3.21.13 — Shipment Quality Score card (Phase 2 preview).
+                         Updates with the Window / Shipment / Min-conf selectors above. -->
+                    <div id="shipment-quality-card" style="margin-bottom:15px; padding:14px 18px; background:linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4)); border:1px solid rgba(51,65,85,0.7); border-radius:8px;">
+                        <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
+                            <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;">
+                                <div>
+                                    <div style="font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.6px;">Shipment Quality Score</div>
+                                    <div style="display:flex; align-items:baseline; gap:10px; margin-top:2px;">
+                                        <span id="sqs-score" style="font-size:36px; font-weight:700; line-height:1; color:var(--text-primary);">—</span>
+                                        <span style="font-size:13px; color:var(--text-secondary);">/ 100</span>
+                                        <span id="sqs-verdict" style="font-size:13px; font-weight:600; padding:3px 10px; border-radius:4px; background:rgba(51,65,85,0.6); color:var(--text-primary);">NO DATA</span>
+                                    </div>
+                                </div>
+                                <div style="font-size:12px; color:var(--text-secondary); border-left:1px solid rgba(51,65,85,0.6); padding-left:14px;">
+                                    <div>Impact <span id="sqs-impact-total" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                    <div>Detections <span id="sqs-count" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                </div>
+                            </div>
+                            <div id="sqs-top-defects" style="flex:1; min-width:300px; font-size:12px; color:var(--text-secondary);">
+                                <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;">Top defects by impact</div>
+                                <div id="sqs-top-list" style="display:flex; flex-direction:column; gap:3px;">
+                                    <span style="font-style:italic;">— set Severity per class in Process tab to enable scoring —</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <div id="insight-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
                         No stored detections in this window yet. Detections appear here once a class has <b>Store</b> enabled (Process tab → Per-Object Configuration) and the line is running.
                     </div>

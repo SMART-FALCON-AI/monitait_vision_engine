@@ -69,6 +69,69 @@ const _commonScaleOpts = (titleText) => ({
     }
 });
 
+// 3.21.13 — Shipment Quality Score card (Phase 2 preview). Reads
+// /api/shipment_quality_score for the current window + shipment, renders
+// score / verdict / impact / top-defects into the #shipment-quality-card
+// banner. Verdict color matches QUALITY_RELEASE / QUALITY_REINSPECT bands.
+async function refreshShipmentQualityScore() {
+    const win  = document.getElementById('insight-window')?.value   || '24h';
+    const ship = document.getElementById('insight-shipment')?.value || '';
+    const card = document.getElementById('shipment-quality-card');
+    if (!card) return;
+    let data;
+    try {
+        const r = await fetch('/api/shipment_quality_score?window=' + encodeURIComponent(win) +
+                              '&shipment=' + encodeURIComponent(ship));
+        data = await r.json();
+    } catch (e) { console.error('shipment_quality_score fetch failed:', e); return; }
+
+    const scoreEl   = document.getElementById('sqs-score');
+    const verdictEl = document.getElementById('sqs-verdict');
+    const impactEl  = document.getElementById('sqs-impact-total');
+    const countEl   = document.getElementById('sqs-count');
+    const topListEl = document.getElementById('sqs-top-list');
+
+    const score = data.score;
+    const verdict = data.verdict;
+
+    if (score === null || score === undefined) {
+        if (scoreEl)   scoreEl.textContent   = '—';
+        if (verdictEl) { verdictEl.textContent = 'NO DATA'; verdictEl.style.background = 'rgba(51,65,85,0.6)'; verdictEl.style.color = 'var(--text-primary)'; }
+        if (impactEl)  impactEl.textContent  = '—';
+        if (countEl)   countEl.textContent   = '—';
+        if (topListEl) topListEl.innerHTML = '<span style="font-style:italic;">No data in this window yet.</span>';
+        return;
+    }
+
+    if (scoreEl) scoreEl.textContent = score.toFixed(1);
+
+    // Verdict color: green RELEASE / amber RE-INSPECT / red HOLD
+    let bg = 'rgba(51,65,85,0.6)', fg = 'var(--text-primary)';
+    if (verdict === 'RELEASE')      { bg = 'rgba(34,197,94,0.28)';  fg = '#86efac'; }
+    else if (verdict === 'RE-INSPECT') { bg = 'rgba(234,179,8,0.28)'; fg = '#fcd34d'; }
+    else if (verdict === 'HOLD')    { bg = 'rgba(239,68,68,0.30)';  fg = '#fca5a5'; }
+    if (verdictEl) { verdictEl.textContent = verdict; verdictEl.style.background = bg; verdictEl.style.color = fg; }
+
+    if (impactEl) impactEl.textContent = (data.impact_total ?? 0).toFixed(1);
+    if (countEl)  countEl.textContent  = (data.total_detections ?? 0).toLocaleString();
+
+    if (topListEl) {
+        const tops = data.top_defects || [];
+        if (!tops.length) {
+            topListEl.innerHTML = '<span style="font-style:italic;">No class has Severity > 0 yet — set in Process tab.</span>';
+        } else {
+            topListEl.innerHTML = tops.map(t =>
+                `<div style="display:flex; justify-content:space-between; gap:8px;">` +
+                `<span style="color:var(--text-primary);">${t.class}</span>` +
+                `<span><span style="color:#86efac;">impact ${t.impact.toFixed(1)}</span> · ` +
+                `${t.count} det · sev ${t.severity}</span></div>`
+            ).join('');
+        }
+    }
+}
+window.refreshShipmentQualityScore = refreshShipmentQualityScore;
+
+
 async function refreshDetectionInsights() {
     const windowSel = document.getElementById('insight-window');
     const window = windowSel ? windowSel.value : '24h';
@@ -77,6 +140,7 @@ async function refreshDetectionInsights() {
     const totalEl = document.getElementById('insight-total');
 
     await _loadShownClasses();  // so per-class charts honor the Show toggle
+    refreshShipmentQualityScore();  // 3.21.13 — Phase 2 preview: score card
     refreshEjectionCharts();    // independent of detection data (Store gates separately)
     refreshProductionCharts();  // production_metrics KPIs (own data source)
     refreshQualityCharts();     // inference_results diagnostics (Pareto/heatmap/camera/latency)

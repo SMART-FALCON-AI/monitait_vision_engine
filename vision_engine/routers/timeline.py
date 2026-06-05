@@ -599,6 +599,14 @@ _baseline_cache = {"computed_at": 0.0, "baselines": {}}
 _BASELINE_TTL_SEC = 3600  # 1 hour
 
 
+# 3.21.13 — verdict thresholds (configurable later via UI; in-code defaults for now).
+# score >= RELEASE_SCORE: green light, ship.
+# RELEASE_SCORE > score >= REINSPECT_SCORE: yellow, re-inspect before ship.
+# score < REINSPECT_SCORE: red, hold; do not ship without QA sign-off.
+QUALITY_RELEASE_SCORE = 85
+QUALITY_REINSPECT_SCORE = 60
+
+
 def _compute_conf_baselines():
     """Per-class p50/p95/n of confidence over last 7 days of stored detections."""
     import time as _t
@@ -661,6 +669,128 @@ async def recompute_conf_baselines():
     """Force-invalidate the baseline cache (used by admin/dev tools)."""
     _baseline_cache["computed_at"] = 0.0
     return JSONResponse(content={"baselines": _compute_conf_baselines()})
+
+
+@router.get("/api/shipment_quality_score")
+async def shipment_quality_score(request: Request, shipment: str = "", window: str = "24h"):
+    """3.21.13 — first-cut shipment-level Quality Score for the Charts-tab summary card.
+
+    Returns:
+      - score (0–100; higher = better quality)
+      - verdict ('RELEASE' / 'RE-INSPECT' / 'HOLD' — color-coded in UI)
+      - impact_total, total_detections
+      - top_defects: classes sorted by impact descending (the actionable ones)
+      - shipment, window: echoed back
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "24 hours")
+    ship_clause = "AND shipment = %s" if shipment else ""
+    params = [interval] + ([shipment] if shipment else [])
+
+    empty = {
+        "shipment": shipment, "window": window,
+        "score": None, "verdict": "NO_DATA",
+        "impact_total": 0.0, "impact_by_class": {},
+        "total_detections": 0, "top_defects": [],
+        "persisted": False,
+    }
+
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        from config import load_service_config as _lsc
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+
+        # Load per-class severity from audio_settings
+        _svc = _lsc() or {}
+        _audio = _svc.get("audio_settings", {}) or {}
+        severities = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+
+        cur = conn.cursor()
+        # Per-class count + sum(conf) in window (filtered by shipment if given)
+        cur.execute(
+            f"""
+            SELECT (det->>'name') AS cls,
+                   COUNT(*)       AS n,
+                   SUM((det->>'confidence')::float) AS conf_sum
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s {ship_clause}
+              AND (det->>'confidence') IS NOT NULL
+            GROUP BY (det->>'name')
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        cur.close()
+
+        if not rows:
+            return JSONResponse(content=empty)
+
+        impact_by_class = {}
+        count_by_class = {}
+        total_detections = 0
+        for cls, n, conf_sum in rows:
+            cls_s = str(cls) if cls is not None else ""
+            n_i = int(n or 0)
+            conf_sum_f = float(conf_sum or 0.0)
+            total_detections += n_i
+            count_by_class[cls_s] = n_i
+            sev = severities.get(cls_s, 0)
+            if sev > 0:
+                impact_by_class[cls_s] = round((sev / 100.0) * conf_sum_f, 3)
+
+        impact_total = round(sum(impact_by_class.values()), 3)
+
+        # Score: average per-detection impact, inverted to 0..100. Cap at 100.
+        # avg = impact_total / count. score = 100 * (1 - clamp(avg, 0, 1)).
+        # A class with sev=0 contributes 0 impact; if no severities set anywhere,
+        # score collapses to 100 (nothing to deduct against).
+        score = 100.0
+        if total_detections > 0:
+            avg_impact = impact_total / float(total_detections)
+            score = max(0.0, min(100.0, 100.0 * (1.0 - avg_impact)))
+
+        # Verdict
+        if score >= QUALITY_RELEASE_SCORE:
+            verdict = "RELEASE"
+        elif score >= QUALITY_REINSPECT_SCORE:
+            verdict = "RE-INSPECT"
+        else:
+            verdict = "HOLD"
+
+        # Top defects: sort by impact desc, also include count for context
+        top_defects = []
+        for cls, imp in sorted(impact_by_class.items(), key=lambda kv: -kv[1])[:5]:
+            top_defects.append({
+                "class":  cls,
+                "impact": round(imp, 2),
+                "count":  count_by_class.get(cls, 0),
+                "severity": severities.get(cls, 0),
+            })
+
+        return JSONResponse(content={
+            "shipment": shipment, "window": window,
+            "score": round(score, 1),
+            "verdict": verdict,
+            "thresholds": {"release": QUALITY_RELEASE_SCORE, "reinspect": QUALITY_REINSPECT_SCORE},
+            "impact_total": impact_total,
+            "impact_by_class": impact_by_class,
+            "total_detections": total_detections,
+            "top_defects": top_defects,
+            "persisted": True,
+        })
+    except Exception as e:
+        logger.warning(f"shipment_quality_score failed: {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
 
 
 @router.get("/api/detection_stats")
