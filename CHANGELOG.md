@@ -9,11 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.21.18] - 2026-06-05
 
-### Added — Live Channels strip on the Dashboard tab (non-persistent)
-- **Problem:** math channels emit raw scalar values (e.g. `spot_up=9.45`) per frame. They have no bbox so they're invisible on the timeline image, and operators don't want to enable Store on every math channel just to see live values — that pollutes the DB and the long-term storage budget. With Store=OFF the value never reached any UI.
-- **Fix:** new `GET /api/live_channels?max_age_sec=30` reads the most recent detection events from Redis (NOT the DB), groups them by class, picks the youngest sample per class, and filters out classes the operator has set Show=OFF. Returns `{channels:{name:{value, is_math, age_sec, camera, severity, ts}}, now, shown_count}`.
-- **UI:** new "⚡ Live Channels" strip on the Dashboard tab, sitting above the timeline image. Each Show=ON channel gets a colored chip: math values render as raw numbers (amber accent), yolo classes as percentages (blue accent), with an age dot (green < 3s / amber < 10s / red older) and a hover-title showing camera + severity + age. The strip hides itself entirely when no channels are active. Auto-refresh every 1.5s, polling stops when the tab is hidden via the existing visibility-handler.
-- This is **display-only and non-persistent.** Nothing in this path touches `inference_results`. Operators can keep Store=OFF on math channels and still see live values on the dashboard.
+### Fixed — PDF score number alignment
+- The "100.0/100" sat below the RELEASE pill's center because `leading=50` made the score paragraph's bbox 8pt taller than the visible glyphs, and the table's VALIGN centered the bbox not the text. Set `leading == fontSize` (42), `alignment=center`, and matched 12pt top/bottom padding on both cells. Score baseline and pill center now sit on the same horizontal line.
 
 ## [3.21.17] - 2026-06-05
 
