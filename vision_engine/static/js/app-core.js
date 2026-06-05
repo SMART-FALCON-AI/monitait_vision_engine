@@ -600,6 +600,52 @@ function updateAPITypeFields() {
     }
 }
 
+// 3.21.14 — Encoder calibration (encoder_unit + encoder_units_per_meter).
+// Drives Shipment Quality Score normalization.
+async function loadEncoderCalibration() {
+    try {
+        const r = await fetch('/api/encoder_calibration');
+        if (!r.ok) return;
+        const d = await r.json();
+        const u = document.getElementById('encoder-unit-input');
+        const m = document.getElementById('encoder-units-per-meter-input');
+        if (u && d.encoder_unit) u.value = d.encoder_unit;
+        if (m && d.encoder_units_per_meter !== null && d.encoder_units_per_meter !== undefined) {
+            m.value = d.encoder_units_per_meter;
+        }
+    } catch (e) {}
+}
+
+async function saveEncoderCalibration() {
+    const unit = (document.getElementById('encoder-unit-input')?.value || '').trim() || 'encoder_unit';
+    const upmRaw = (document.getElementById('encoder-units-per-meter-input')?.value || '').trim();
+    const resp = document.getElementById('encoder-unit-response');
+    const body = { encoder_unit: unit };
+    if (upmRaw) {
+        const upm = parseFloat(upmRaw);
+        if (Number.isFinite(upm) && upm >= 0) body.encoder_units_per_meter = upm;
+    }
+    try {
+        const r = await fetch('/api/encoder_calibration', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok) {
+            if (resp) { resp.textContent = `Saved. unit=${d.encoder_unit}` + (d.encoder_units_per_meter ? `, ${d.encoder_units_per_meter}/m` : ''); resp.className = 'control-response success'; }
+        } else {
+            if (resp) { resp.textContent = `Error: ${d.detail || 'failed'}`; resp.className = 'control-response error'; }
+        }
+    } catch (e) {
+        if (resp) { resp.textContent = `Error: ${e.message}`; resp.className = 'control-response error'; }
+    }
+}
+window.saveEncoderCalibration = saveEncoderCalibration;
+window.loadEncoderCalibration = loadEncoderCalibration;
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadEncoderCalibration, 1100));
+
+
 // 3.21.11: Storage Path (DATA_ROOT) — load current value from compose .env
 // and let the user change it. Change requires container restart to apply.
 async function loadDataRoot() {

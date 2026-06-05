@@ -673,25 +673,43 @@ async def recompute_conf_baselines():
 
 @router.get("/api/shipment_quality_score")
 async def shipment_quality_score(request: Request, shipment: str = "", window: str = "24h"):
-    """3.21.13 — first-cut shipment-level Quality Score for the Charts-tab summary card.
+    """3.21.14 — Shipment-level Quality Score with encoder-span normalization.
+
+    The score is now length-aware: `impact_per_unit = impact_total / encoder_span`,
+    so a long shipment is not penalized vs. a short one (same defect quality →
+    same score, regardless of duration / throughput).
+
+    Falls back to `impact_total / frame_count` when encoder data is missing
+    (handy for cameras-only deployments without a roll encoder).
+
+    Encoder rollover / reset is handled by computing `MAX - MIN` which is
+    monotonic-encoder-correct; non-monotonic encoders may need
+    `sum(positive deltas)` later — flagged as a known limitation.
 
     Returns:
-      - score (0–100; higher = better quality)
-      - verdict ('RELEASE' / 'RE-INSPECT' / 'HOLD' — color-coded in UI)
-      - impact_total, total_detections
-      - top_defects: classes sorted by impact descending (the actionable ones)
-      - shipment, window: echoed back
+      - score (0–100; higher = better)
+      - verdict ('RELEASE' / 'RE-INSPECT' / 'HOLD')
+      - impact_total, impact_per_unit, impact_per_unit_label
+      - encoder_min, encoder_max, encoder_span, encoder_unit (user-configured label)
+      - first_ts, last_ts, duration_sec, throughput (units/sec)
+      - total_detections, top_defects (each with impact-per-unit and count-per-unit)
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
     ship_clause = "AND shipment = %s" if shipment else ""
-    params = [interval] + ([shipment] if shipment else [])
+    base_params = [interval] + ([shipment] if shipment else [])
 
     empty = {
         "shipment": shipment, "window": window,
         "score": None, "verdict": "NO_DATA",
         "impact_total": 0.0, "impact_by_class": {},
         "total_detections": 0, "top_defects": [],
+        "encoder_min": None, "encoder_max": None, "encoder_span": 0,
+        "encoder_unit": "encoder_unit", "encoder_units_per_meter": None,
+        "impact_per_unit": 0.0, "impact_per_unit_label": "/unit",
+        "first_ts": None, "last_ts": None, "duration_sec": 0,
+        "throughput": 0.0, "throughput_label": "units/sec",
+        "normalized_by": "none",
         "persisted": False,
     }
 
@@ -703,13 +721,19 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         if conn is None:
             return JSONResponse(content=empty)
 
-        # Load per-class severity from audio_settings
+        # Load per-class severity from audio_settings + the operator-set
+        # encoder calibration (units-per-meter and unit label, both optional).
         _svc = _lsc() or {}
         _audio = _svc.get("audio_settings", {}) or {}
         severities = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+        encoder_unit = str(_svc.get("encoder_unit") or "encoder_unit")
+        try:
+            encoder_units_per_meter = float(_svc.get("encoder_units_per_meter") or 0)
+        except (TypeError, ValueError):
+            encoder_units_per_meter = 0.0
 
+        # --- per-class impact + count ---
         cur = conn.cursor()
-        # Per-class count + sum(conf) in window (filtered by shipment if given)
         cur.execute(
             f"""
             SELECT (det->>'name') AS cls,
@@ -720,18 +744,33 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
               AND (det->>'confidence') IS NOT NULL
             GROUP BY (det->>'name')
             """,
-            params,
+            base_params,
         )
-        rows = cur.fetchall()
+        cls_rows = cur.fetchall()
+
+        # --- frame-level stats: encoder span, time range, frame count ---
+        cur.execute(
+            f"""
+            SELECT MIN(encoder_value) AS enc_min,
+                   MAX(encoder_value) AS enc_max,
+                   COUNT(*) AS frames,
+                   MIN(time)::timestamptz AS first_ts,
+                   MAX(time)::timestamptz AS last_ts
+            FROM inference_results
+            WHERE time > NOW() - INTERVAL %s {ship_clause}
+            """,
+            base_params,
+        )
+        enc_min, enc_max, frame_count, first_ts, last_ts = cur.fetchone()
         cur.close()
 
-        if not rows:
+        if not cls_rows and not frame_count:
             return JSONResponse(content=empty)
 
         impact_by_class = {}
         count_by_class = {}
         total_detections = 0
-        for cls, n, conf_sum in rows:
+        for cls, n, conf_sum in cls_rows:
             cls_s = str(cls) if cls is not None else ""
             n_i = int(n or 0)
             conf_sum_f = float(conf_sum or 0.0)
@@ -743,16 +782,32 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
 
         impact_total = round(sum(impact_by_class.values()), 3)
 
-        # Score: average per-detection impact, inverted to 0..100. Cap at 100.
-        # avg = impact_total / count. score = 100 * (1 - clamp(avg, 0, 1)).
-        # A class with sev=0 contributes 0 impact; if no severities set anywhere,
-        # score collapses to 100 (nothing to deduct against).
-        score = 100.0
-        if total_detections > 0:
-            avg_impact = impact_total / float(total_detections)
-            score = max(0.0, min(100.0, 100.0 * (1.0 - avg_impact)))
+        # --- pick normalizer: encoder span if available, else frame count ---
+        encoder_span = 0
+        if enc_min is not None and enc_max is not None:
+            encoder_span = int(max(0, enc_max - enc_min))
 
-        # Verdict
+        if encoder_span > 0:
+            denom = float(encoder_span)
+            normalized_by = "encoder"
+            impact_per_unit_label = f"/{encoder_unit}" if encoder_unit != "encoder_unit" else "/encoder_unit"
+        elif frame_count and frame_count > 0:
+            denom = float(frame_count)
+            normalized_by = "frame"
+            impact_per_unit_label = "/frame"
+        else:
+            denom = 1.0
+            normalized_by = "none"
+            impact_per_unit_label = "/(none)"
+
+        impact_per_unit = impact_total / denom if denom > 0 else 0.0
+
+        # Score: invert impact-per-unit into 0..100. SCALE = 1.0 means
+        # impact_per_unit of 1.0 saturates to score 0. Tunable later via
+        # a per-deployment calibration in Advanced tab.
+        SCALE = 1.0
+        score = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit * SCALE))))
+
         if score >= QUALITY_RELEASE_SCORE:
             verdict = "RELEASE"
         elif score >= QUALITY_REINSPECT_SCORE:
@@ -760,14 +815,26 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         else:
             verdict = "HOLD"
 
-        # Top defects: sort by impact desc, also include count for context
+        # Duration + throughput
+        duration_sec = 0
+        if first_ts and last_ts:
+            try:
+                duration_sec = max(0, int((last_ts - first_ts).total_seconds()))
+            except Exception:
+                duration_sec = 0
+        throughput = (encoder_span / duration_sec) if (encoder_span and duration_sec) else 0.0
+
+        # Top defects with per-unit context
         top_defects = []
         for cls, imp in sorted(impact_by_class.items(), key=lambda kv: -kv[1])[:5]:
+            n = count_by_class.get(cls, 0)
             top_defects.append({
-                "class":  cls,
-                "impact": round(imp, 2),
-                "count":  count_by_class.get(cls, 0),
-                "severity": severities.get(cls, 0),
+                "class":         cls,
+                "impact":        round(imp, 2),
+                "impact_per_unit": round(imp / denom, 4) if denom > 0 else 0.0,
+                "count":         n,
+                "count_per_unit": round(n / denom, 4) if denom > 0 else 0.0,
+                "severity":      severities.get(cls, 0),
             })
 
         return JSONResponse(content={
@@ -777,8 +844,22 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
             "thresholds": {"release": QUALITY_RELEASE_SCORE, "reinspect": QUALITY_REINSPECT_SCORE},
             "impact_total": impact_total,
             "impact_by_class": impact_by_class,
+            "impact_per_unit": round(impact_per_unit, 4),
+            "impact_per_unit_label": impact_per_unit_label,
             "total_detections": total_detections,
             "top_defects": top_defects,
+            "encoder_min": int(enc_min) if enc_min is not None else None,
+            "encoder_max": int(enc_max) if enc_max is not None else None,
+            "encoder_span": encoder_span,
+            "encoder_unit": encoder_unit,
+            "encoder_units_per_meter": encoder_units_per_meter or None,
+            "frame_count": int(frame_count or 0),
+            "first_ts": first_ts.isoformat() if first_ts else None,
+            "last_ts":  last_ts.isoformat()  if last_ts  else None,
+            "duration_sec": duration_sec,
+            "throughput": round(throughput, 3),
+            "throughput_label": (f"{encoder_unit}/sec" if encoder_unit != "encoder_unit" else "encoder_units/sec"),
+            "normalized_by": normalized_by,
             "persisted": True,
         })
     except Exception as e:

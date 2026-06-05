@@ -483,6 +483,51 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
 
 
 # =============================================================================
+# Encoder calibration (3.21.14) — drives Shipment Quality Score normalization
+# =============================================================================
+
+@router.get("/api/encoder_calibration")
+async def get_encoder_calibration():
+    """Return the operator-set encoder unit label and units-per-meter conversion."""
+    try:
+        svc = load_service_config() or {}
+        return JSONResponse(content={
+            "encoder_unit": str(svc.get("encoder_unit") or "encoder_unit"),
+            "encoder_units_per_meter": float(svc.get("encoder_units_per_meter") or 0) or None,
+        })
+    except Exception as e:
+        logger.error(f"get_encoder_calibration error: {e}")
+        return JSONResponse(content={"encoder_unit": "encoder_unit", "encoder_units_per_meter": None})
+
+
+@router.post("/api/encoder_calibration")
+async def set_encoder_calibration(payload: Dict[str, Any]):
+    """Set the encoder calibration (unit label + units-per-meter)."""
+    try:
+        svc = load_service_config() or {}
+        if "encoder_unit" in payload:
+            unit = str(payload["encoder_unit"] or "encoder_unit").strip() or "encoder_unit"
+            # sanitize — keep printable, prevent injection
+            unit = "".join(c for c in unit if c.isalnum() or c in "_-/.")[:24] or "encoder_unit"
+            svc["encoder_unit"] = unit
+        if "encoder_units_per_meter" in payload:
+            try:
+                upm = float(payload["encoder_units_per_meter"] or 0)
+                svc["encoder_units_per_meter"] = max(0.0, upm) if upm > 0 else 0
+            except (TypeError, ValueError):
+                pass
+        save_service_config(svc)
+        return JSONResponse(content={
+            "status": "ok",
+            "encoder_unit": svc.get("encoder_unit", "encoder_unit"),
+            "encoder_units_per_meter": svc.get("encoder_units_per_meter") or None,
+        })
+    except Exception as e:
+        logger.error(f"set_encoder_calibration error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
 # Storage path (DATA_ROOT) endpoints (3.21.11)
 # =============================================================================
 # The raw_images bind-mount is `${DATA_ROOT:-.}/raw_images:/code/raw_images`.

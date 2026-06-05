@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.21.13] - 2026-06-05
+## [3.21.14] - 2026-06-05
+
+### Changed — Shipment Quality Score is now length-aware (encoder-normalized)
+- Previous formula divided by `total_detections`, which was inflated by jean / math-channel rows that have no severity weight. Result: every shipment scored ~99 regardless of defect density.
+- New formula: `impact_per_unit = impact_total / encoder_span`, where `encoder_span = MAX(encoder) − MIN(encoder)` over the window. A 2-hour shipment and a 4-hour shipment with the same defect density now get the same score.
+- Falls back to `frame_count` when encoder data is missing.
+- The card displays the basis: "Normalized by encoder span (4,872 m)" or "Normalized by frame count (18,231 frames) — no encoder data".
+
+### Added — Shipment Quality Score card now shows length / duration / throughput / impact-per-unit
+- New fields surfaced in the card: encoder length (in the operator's chosen unit), duration in `Xh Ym`, throughput in `units/sec`, and `impact / unit`.
+- Top defects panel now shows `impact_per_unit` alongside raw impact, so the actionable metric ("0.6 weft_up / m") is visible at a glance.
+
+### Added — Encoder Calibration section in the Advanced tab
+- New section with two fields: `encoder_unit` (free text label — `m`, `mm`, `pieces`, `ticks`, …) and `encoder_units_per_meter` (optional float for physical-length conversion).
+- Wired through new endpoints `GET / POST /api/encoder_calibration`, stored in `service_config`.
+- The card's "/unit" labels and the encoder length read pick this up immediately.
+
+
 
 ### Added — Shipment Quality Score card (Phase 2 preview, free)
 - New `GET /api/shipment_quality_score?shipment=X&window=Y` returns a 0–100 quality score, a `RELEASE` / `RE-INSPECT` / `HOLD` verdict, total impact across the window, and the top 5 defect classes by impact. Score formula: `100 × (1 − impact_total/total_detections)`, clamped 0–100. Verdict thresholds: ≥85 RELEASE, 60–85 RE-INSPECT, <60 HOLD (in-code defaults; will become UI-tunable in a later release).

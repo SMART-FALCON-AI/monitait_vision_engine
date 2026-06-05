@@ -834,7 +834,7 @@
                             <button onclick="refreshDetectionInsights()" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px;">Refresh</button>
                         </div>
                     </div>
-                    <!-- 3.21.13 — Shipment Quality Score card (Phase 2 preview).
+                    <!-- 3.21.14 — Shipment Quality Score card with encoder-span normalization.
                          Updates with the Window / Shipment / Min-conf selectors above. -->
                     <div id="shipment-quality-card" style="margin-bottom:15px; padding:14px 18px; background:linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4)); border:1px solid rgba(51,65,85,0.7); border-radius:8px;">
                         <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
@@ -846,13 +846,20 @@
                                         <span style="font-size:13px; color:var(--text-secondary);">/ 100</span>
                                         <span id="sqs-verdict" style="font-size:13px; font-weight:600; padding:3px 10px; border-radius:4px; background:rgba(51,65,85,0.6); color:var(--text-primary);">NO DATA</span>
                                     </div>
+                                    <div id="sqs-norm-note" style="font-size:10px; color:var(--text-secondary); margin-top:4px; font-style:italic;">—</div>
                                 </div>
                                 <div style="font-size:12px; color:var(--text-secondary); border-left:1px solid rgba(51,65,85,0.6); padding-left:14px;">
-                                    <div>Impact <span id="sqs-impact-total" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                    <div>Length <span id="sqs-length" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                    <div>Duration <span id="sqs-duration" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                    <div>Throughput <span id="sqs-throughput" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                </div>
+                                <div style="font-size:12px; color:var(--text-secondary); border-left:1px solid rgba(51,65,85,0.6); padding-left:14px;">
+                                    <div>Impact/<span id="sqs-impact-unit-label">unit</span> <span id="sqs-impact-per-unit" style="color:var(--text-primary); font-weight:600;">—</span></div>
+                                    <div>Total impact <span id="sqs-impact-total" style="color:var(--text-primary); font-weight:600;">—</span></div>
                                     <div>Detections <span id="sqs-count" style="color:var(--text-primary); font-weight:600;">—</span></div>
                                 </div>
                             </div>
-                            <div id="sqs-top-defects" style="flex:1; min-width:300px; font-size:12px; color:var(--text-secondary);">
+                            <div id="sqs-top-defects" style="flex:1; min-width:320px; font-size:12px; color:var(--text-secondary);">
                                 <div style="font-size:11px; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:4px;">Top defects by impact</div>
                                 <div id="sqs-top-list" style="display:flex; flex-direction:column; gap:3px;">
                                     <span style="font-style:italic;">— set Severity per class in Process tab to enable scoring —</span>
@@ -1215,6 +1222,31 @@
                         </div>
                     </div>
 
+                </div>
+
+                <!-- 3.21.14 — Encoder Calibration (drives Shipment Quality Score normalization).
+                     The score normalizes impact by encoder span; this section lets you tell the
+                     system what unit the encoder counts (encoder pulses / mm / ticks / pieces / etc.)
+                     so the UI labels reflect your line. encoder_units_per_meter is optional but lets
+                     us convert to a physical length when needed. -->
+                <div class="control-section">
+                    <h3>📏 <span data-i18n="encoder_calibration">Encoder Calibration</span></h3>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
+                        Used by the Shipment Quality Score. <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">encoder_unit</code> is the label shown in the UI (e.g. <code>m</code>, <code>mm</code>, <code>pieces</code>). <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px;">encoder_units_per_meter</code> is optional and lets us convert to meters when reporting.
+                    </div>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">Encoder unit label</div>
+                            <input type="text" class="control-input" id="encoder-unit-input" value="encoder_unit" placeholder="m, mm, pieces, ticks, …">
+                            <button class="control-button" onclick="saveEncoderCalibration()" style="background:var(--primary-color); color:white;">Save</button>
+                            <div id="encoder-unit-response" class="control-response"></div>
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Encoder units per meter (optional)</div>
+                            <input type="number" class="control-input" id="encoder-units-per-meter-input" min="0" step="0.001" placeholder="0 = unknown">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Leave 0 if you don't want physical-length conversion.</div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Storage Path Section (3.21.11) -->

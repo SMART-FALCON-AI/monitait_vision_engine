@@ -73,6 +73,22 @@ const _commonScaleOpts = (titleText) => ({
 // /api/shipment_quality_score for the current window + shipment, renders
 // score / verdict / impact / top-defects into the #shipment-quality-card
 // banner. Verdict color matches QUALITY_RELEASE / QUALITY_REINSPECT bands.
+// 3.21.14 — utility: format a number of seconds into "Xh Ym" / "Ym Zs"
+function _fmtDuration(sec) {
+    sec = Math.max(0, Math.round(sec || 0));
+    if (sec >= 3600) {
+        const h = Math.floor(sec / 3600);
+        const m = Math.round((sec % 3600) / 60);
+        return `${h}h ${m}m`;
+    }
+    if (sec >= 60) {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${m}m ${s}s`;
+    }
+    return `${sec}s`;
+}
+
 async function refreshShipmentQualityScore() {
     const win  = document.getElementById('insight-window')?.value   || '24h';
     const ship = document.getElementById('insight-shipment')?.value || '';
@@ -87,6 +103,12 @@ async function refreshShipmentQualityScore() {
 
     const scoreEl   = document.getElementById('sqs-score');
     const verdictEl = document.getElementById('sqs-verdict');
+    const normNoteEl= document.getElementById('sqs-norm-note');
+    const lengthEl  = document.getElementById('sqs-length');
+    const durEl     = document.getElementById('sqs-duration');
+    const throughEl = document.getElementById('sqs-throughput');
+    const impactPerUnitEl = document.getElementById('sqs-impact-per-unit');
+    const impactUnitLabelEl = document.getElementById('sqs-impact-unit-label');
     const impactEl  = document.getElementById('sqs-impact-total');
     const countEl   = document.getElementById('sqs-count');
     const topListEl = document.getElementById('sqs-top-list');
@@ -97,6 +119,11 @@ async function refreshShipmentQualityScore() {
     if (score === null || score === undefined) {
         if (scoreEl)   scoreEl.textContent   = '—';
         if (verdictEl) { verdictEl.textContent = 'NO DATA'; verdictEl.style.background = 'rgba(51,65,85,0.6)'; verdictEl.style.color = 'var(--text-primary)'; }
+        if (normNoteEl) normNoteEl.textContent = '—';
+        if (lengthEl)  lengthEl.textContent  = '—';
+        if (durEl)     durEl.textContent     = '—';
+        if (throughEl) throughEl.textContent = '—';
+        if (impactPerUnitEl) impactPerUnitEl.textContent = '—';
         if (impactEl)  impactEl.textContent  = '—';
         if (countEl)   countEl.textContent   = '—';
         if (topListEl) topListEl.innerHTML = '<span style="font-style:italic;">No data in this window yet.</span>';
@@ -112,6 +139,26 @@ async function refreshShipmentQualityScore() {
     else if (verdict === 'HOLD')    { bg = 'rgba(239,68,68,0.30)';  fg = '#fca5a5'; }
     if (verdictEl) { verdictEl.textContent = verdict; verdictEl.style.background = bg; verdictEl.style.color = fg; }
 
+    // Normalization note (so operator knows the score basis)
+    if (normNoteEl) {
+        const by = data.normalized_by;
+        if (by === 'encoder') {
+            normNoteEl.textContent = `Normalized by encoder span (${(data.encoder_span || 0).toLocaleString()} ${data.encoder_unit || 'units'})`;
+        } else if (by === 'frame') {
+            normNoteEl.textContent = `Normalized by frame count (${(data.frame_count || 0).toLocaleString()} frames) — no encoder data`;
+        } else {
+            normNoteEl.textContent = 'No length data available — score may not be meaningful';
+        }
+    }
+
+    if (lengthEl) lengthEl.textContent  = (data.encoder_span ?? 0).toLocaleString() + ' ' + (data.encoder_unit || 'units');
+    if (durEl)    durEl.textContent     = _fmtDuration(data.duration_sec);
+    if (throughEl) {
+        const t = data.throughput ?? 0;
+        throughEl.textContent = t > 0 ? (t.toFixed(2) + ' ' + (data.throughput_label || 'units/sec')) : '—';
+    }
+    if (impactPerUnitEl) impactPerUnitEl.textContent = (data.impact_per_unit ?? 0).toFixed(3);
+    if (impactUnitLabelEl) impactUnitLabelEl.textContent = (data.impact_per_unit_label || '/unit').replace(/^\//, '');
     if (impactEl) impactEl.textContent = (data.impact_total ?? 0).toFixed(1);
     if (countEl)  countEl.textContent  = (data.total_detections ?? 0).toLocaleString();
 
@@ -120,11 +167,13 @@ async function refreshShipmentQualityScore() {
         if (!tops.length) {
             topListEl.innerHTML = '<span style="font-style:italic;">No class has Severity > 0 yet — set in Process tab.</span>';
         } else {
+            const unitLbl = (data.impact_per_unit_label || '/unit').replace(/^\//, '');
             topListEl.innerHTML = tops.map(t =>
                 `<div style="display:flex; justify-content:space-between; gap:8px;">` +
                 `<span style="color:var(--text-primary);">${t.class}</span>` +
                 `<span><span style="color:#86efac;">impact ${t.impact.toFixed(1)}</span> · ` +
-                `${t.count} det · sev ${t.severity}</span></div>`
+                `<span style="color:#fcd34d;">${(t.impact_per_unit ?? 0).toFixed(3)}/${unitLbl}</span> · ` +
+                `${t.count.toLocaleString()} det · sev ${t.severity}</span></div>`
             ).join('');
         }
     }
