@@ -181,6 +181,56 @@ async function refreshShipmentQualityScore() {
 window.refreshShipmentQualityScore = refreshShipmentQualityScore;
 
 
+// 3.21.15 — server-rendered PDF download of the score card payload.
+// Builds the URL with the same window + shipment the card is showing, opens
+// the endpoint via a hidden anchor so the browser handles Content-Disposition
+// (works in IFrames, doesn't trigger pop-up blockers).
+async function downloadQualityReport() {
+    const btn = document.getElementById('sqs-download-pdf');
+    const hint = document.getElementById('sqs-download-hint');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+    try {
+        const win  = document.getElementById('insight-window')?.value || '24h';
+        const ship = document.getElementById('insight-shipment')?.value || '';
+        const params = new URLSearchParams({ window: win });
+        if (ship) params.set('shipment', ship);
+        const url = `/api/shipment_quality_score/report.pdf?${params}`;
+
+        // Probe first so we can surface a 503 (reportlab missing) inline
+        // instead of showing the user a raw error PDF.
+        const head = await fetch(url, { method: 'GET' });
+        if (!head.ok) {
+            const detail = await head.json().catch(() => ({}));
+            const msg = detail.hint
+                ? `PDF lib missing — run on server:\n${detail.hint}`
+                : `Report failed: HTTP ${head.status}`;
+            alert(msg);
+            return;
+        }
+        const blob = await head.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        // Browser also honors server Content-Disposition; setting download
+        // gives a sensible fallback name if the server omits it.
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+        a.download = `quality_${ship || 'all'}_${win}_${stamp}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
+        if (hint) hint.textContent = 'downloaded ✓';
+        setTimeout(() => { if (hint) hint.textContent = 'uses current window + shipment'; }, 3000);
+    } catch (e) {
+        console.error('downloadQualityReport failed:', e);
+        alert('Report generation failed: ' + (e.message || e));
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '📄 Download PDF'; }
+    }
+}
+window.downloadQualityReport = downloadQualityReport;
+
+
 async function refreshDetectionInsights() {
     const windowSel = document.getElementById('insight-window');
     const window = windowSel ? windowSel.value : '24h';

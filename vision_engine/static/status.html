@@ -865,6 +865,10 @@
                                     <span style="font-style:italic;">— set Severity per class in Process tab to enable scoring —</span>
                                 </div>
                             </div>
+                            <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
+                                <button id="sqs-download-pdf" type="button" onclick="downloadQualityReport()" style="padding:8px 14px; background:linear-gradient(135deg,#10b981,#059669); color:white; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.2);">📄 Download PDF</button>
+                                <span id="sqs-download-hint" style="font-size:10px; color:var(--text-secondary); font-style:italic;">uses current window + shipment</span>
+                            </div>
                         </div>
                     </div>
                     <div id="insight-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">

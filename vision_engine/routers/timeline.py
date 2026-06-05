@@ -671,28 +671,12 @@ async def recompute_conf_baselines():
     return JSONResponse(content={"baselines": _compute_conf_baselines()})
 
 
-@router.get("/api/shipment_quality_score")
-async def shipment_quality_score(request: Request, shipment: str = "", window: str = "24h"):
-    """3.21.14 — Shipment-level Quality Score with encoder-span normalization.
+def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
+    """Shared computation for the score endpoint and PDF report.
 
-    The score is now length-aware: `impact_per_unit = impact_total / encoder_span`,
-    so a long shipment is not penalized vs. a short one (same defect quality →
-    same score, regardless of duration / throughput).
-
-    Falls back to `impact_total / frame_count` when encoder data is missing
-    (handy for cameras-only deployments without a roll encoder).
-
-    Encoder rollover / reset is handled by computing `MAX - MIN` which is
-    monotonic-encoder-correct; non-monotonic encoders may need
-    `sum(positive deltas)` later — flagged as a known limitation.
-
-    Returns:
-      - score (0–100; higher = better)
-      - verdict ('RELEASE' / 'RE-INSPECT' / 'HOLD')
-      - impact_total, impact_per_unit, impact_per_unit_label
-      - encoder_min, encoder_max, encoder_span, encoder_unit (user-configured label)
-      - first_ts, last_ts, duration_sec, throughput (units/sec)
-      - total_detections, top_defects (each with impact-per-unit and count-per-unit)
+    Returns the full payload dict (same shape the /api/shipment_quality_score
+    endpoint serializes). Returns the `empty` payload if the DB is unreachable
+    or has no rows for the requested window/shipment.
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
@@ -719,10 +703,8 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         from config import load_service_config as _lsc
         conn = get_db_connection()
         if conn is None:
-            return JSONResponse(content=empty)
+            return empty
 
-        # Load per-class severity from audio_settings + the operator-set
-        # encoder calibration (units-per-meter and unit label, both optional).
         _svc = _lsc() or {}
         _audio = _svc.get("audio_settings", {}) or {}
         severities = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
@@ -732,7 +714,6 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         except (TypeError, ValueError):
             encoder_units_per_meter = 0.0
 
-        # --- per-class impact + count ---
         cur = conn.cursor()
         cur.execute(
             f"""
@@ -748,7 +729,6 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         )
         cls_rows = cur.fetchall()
 
-        # --- frame-level stats: encoder span, time range, frame count ---
         cur.execute(
             f"""
             SELECT MIN(encoder_value) AS enc_min,
@@ -765,7 +745,7 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         cur.close()
 
         if not cls_rows and not frame_count:
-            return JSONResponse(content=empty)
+            return empty
 
         impact_by_class = {}
         count_by_class = {}
@@ -782,7 +762,6 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
 
         impact_total = round(sum(impact_by_class.values()), 3)
 
-        # --- pick normalizer: encoder span if available, else frame count ---
         encoder_span = 0
         if enc_min is not None and enc_max is not None:
             encoder_span = int(max(0, enc_max - enc_min))
@@ -802,9 +781,6 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
 
         impact_per_unit = impact_total / denom if denom > 0 else 0.0
 
-        # Score: invert impact-per-unit into 0..100. SCALE = 1.0 means
-        # impact_per_unit of 1.0 saturates to score 0. Tunable later via
-        # a per-deployment calibration in Advanced tab.
         SCALE = 1.0
         score = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit * SCALE))))
 
@@ -815,7 +791,6 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
         else:
             verdict = "HOLD"
 
-        # Duration + throughput
         duration_sec = 0
         if first_ts and last_ts:
             try:
@@ -824,7 +799,6 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
                 duration_sec = 0
         throughput = (encoder_span / duration_sec) if (encoder_span and duration_sec) else 0.0
 
-        # Top defects with per-unit context
         top_defects = []
         for cls, imp in sorted(impact_by_class.items(), key=lambda kv: -kv[1])[:5]:
             n = count_by_class.get(cls, 0)
@@ -837,7 +811,7 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
                 "severity":      severities.get(cls, 0),
             })
 
-        return JSONResponse(content={
+        return {
             "shipment": shipment, "window": window,
             "score": round(score, 1),
             "verdict": verdict,
@@ -861,10 +835,10 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
             "throughput_label": (f"{encoder_unit}/sec" if encoder_unit != "encoder_unit" else "encoder_units/sec"),
             "normalized_by": normalized_by,
             "persisted": True,
-        })
+        }
     except Exception as e:
-        logger.warning(f"shipment_quality_score failed: {e}")
-        return JSONResponse(content=empty)
+        logger.warning(f"_compute_quality_payload failed: {e}")
+        return empty
     finally:
         if conn is not None:
             try:
@@ -872,6 +846,225 @@ async def shipment_quality_score(request: Request, shipment: str = "", window: s
                 release_db_connection(conn)
             except Exception:
                 pass
+
+
+@router.get("/api/shipment_quality_score")
+async def shipment_quality_score(request: Request, shipment: str = "", window: str = "24h"):
+    """3.21.14 — Shipment-level Quality Score with encoder-span normalization.
+
+    The score is now length-aware: `impact_per_unit = impact_total / encoder_span`,
+    so a long shipment is not penalized vs. a short one (same defect quality →
+    same score, regardless of duration / throughput).
+
+    Falls back to `impact_total / frame_count` when encoder data is missing
+    (handy for cameras-only deployments without a roll encoder).
+
+    Encoder rollover / reset is handled by computing `MAX - MIN` which is
+    monotonic-encoder-correct; non-monotonic encoders may need
+    `sum(positive deltas)` later — flagged as a known limitation.
+
+    Returns:
+      - score (0–100; higher = better)
+      - verdict ('RELEASE' / 'RE-INSPECT' / 'HOLD')
+      - impact_total, impact_per_unit, impact_per_unit_label
+      - encoder_min, encoder_max, encoder_span, encoder_unit (user-configured label)
+      - first_ts, last_ts, duration_sec, throughput (units/sec)
+      - total_detections, top_defects (each with impact-per-unit and count-per-unit)
+    """
+    return JSONResponse(content=_compute_quality_payload(shipment, window))
+
+
+def _fmt_duration(sec: int) -> str:
+    sec = int(sec or 0)
+    if sec <= 0:
+        return "0s"
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _verdict_color(verdict: str):
+    """RGB tuple in 0..1 for the verdict pill background."""
+    if verdict == "RELEASE":
+        return (0.20, 0.65, 0.32)  # green
+    if verdict == "RE-INSPECT":
+        return (0.95, 0.62, 0.07)  # amber
+    if verdict == "HOLD":
+        return (0.86, 0.21, 0.27)  # red
+    return (0.55, 0.55, 0.55)      # grey for NO_DATA
+
+
+@router.get("/api/shipment_quality_score/report.pdf")
+async def shipment_quality_score_report(request: Request, shipment: str = "", window: str = "24h"):
+    """Render the same quality-score payload as a printable PDF.
+
+    Streams `application/pdf` straight from ReportLab — no temp files.
+    The endpoint imports reportlab lazily so the rest of the app keeps
+    working even if the dependency hasn't been installed yet (operators
+    get a 503 with a clear install hint instead of a server crash).
+    """
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import mm
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak,
+        )
+    except ImportError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "reportlab not installed",
+                     "hint": "docker exec monitait_vision_engine pip install reportlab"},
+        )
+
+    import io, datetime as _dt
+    payload = _compute_quality_payload(shipment, window)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=16 * mm, rightMargin=16 * mm,
+        topMargin=18 * mm, bottomMargin=18 * mm,
+        title="Shipment Quality Report",
+    )
+    styles = getSampleStyleSheet()
+    H1 = ParagraphStyle("h1", parent=styles["Title"], fontSize=22, spaceAfter=4)
+    H2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=13, spaceBefore=14, spaceAfter=6)
+    Small = ParagraphStyle("small", parent=styles["BodyText"], fontSize=9, textColor=colors.grey)
+    Body = styles["BodyText"]
+    story = []
+
+    # --- Header ---
+    story.append(Paragraph("Shipment Quality Report", H1))
+    subtitle = []
+    subtitle.append(f"Shipment: <b>{payload.get('shipment') or 'ALL SHIPMENTS'}</b>")
+    subtitle.append(f"Window: last {payload.get('window', '24h')}")
+    subtitle.append(f"Generated: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    story.append(Paragraph(" &nbsp; · &nbsp; ".join(subtitle), Small))
+    story.append(Spacer(1, 8))
+
+    # --- Score block (big number + verdict pill) ---
+    score = payload.get("score")
+    verdict = payload.get("verdict", "NO_DATA")
+    score_txt = f"{score:.1f}/100" if isinstance(score, (int, float)) else "—"
+    vr, vg, vb = _verdict_color(verdict)
+    score_tbl = Table(
+        [[
+            Paragraph(f"<font size=36><b>{score_txt}</b></font>", Body),
+            Paragraph(f"<font size=14 color='white'><b>&nbsp;{verdict}&nbsp;</b></font>", Body),
+        ]],
+        colWidths=[80 * mm, 80 * mm],
+    )
+    score_tbl.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (1, 0), (1, 0), "CENTER"),
+        ("BACKGROUND", (1, 0), (1, 0), colors.Color(vr, vg, vb)),
+        ("BOX", (0, 0), (-1, -1), 0.4, colors.lightgrey),
+        ("TOPPADDING", (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+    story.append(score_tbl)
+    thr = payload.get("thresholds") or {}
+    story.append(Paragraph(
+        f"Thresholds: RELEASE ≥ {thr.get('release','?')} &nbsp;·&nbsp; "
+        f"RE-INSPECT ≥ {thr.get('reinspect','?')} &nbsp;·&nbsp; HOLD &lt; {thr.get('reinspect','?')}", Small))
+    story.append(Spacer(1, 12))
+
+    # --- KPI grid ---
+    story.append(Paragraph("Production KPIs", H2))
+    unit = payload.get("encoder_unit") or "encoder_unit"
+    span = payload.get("encoder_span") or 0
+    upm = payload.get("encoder_units_per_meter")
+    length_txt = f"{span:,} {unit}"
+    if upm and span:
+        length_txt += f"  (≈ {span / upm:,.1f} m)"
+    kpi_rows = [
+        ["Production length", length_txt],
+        ["Duration",          _fmt_duration(payload.get("duration_sec", 0))],
+        ["Throughput",        f"{payload.get('throughput', 0):,.2f} {payload.get('throughput_label','units/sec')}"],
+        ["Total detections",  f"{payload.get('total_detections', 0):,}"],
+        ["Impact (total)",    f"{payload.get('impact_total', 0):,.2f}"],
+        ["Impact per unit",   f"{payload.get('impact_per_unit', 0):.4f} {payload.get('impact_per_unit_label','/unit')}"],
+        ["Normalized by",     payload.get("normalized_by", "—")],
+        ["Frame count",       f"{payload.get('frame_count', 0):,}"],
+    ]
+    kpi_tbl = Table(kpi_rows, colWidths=[55 * mm, 110 * mm])
+    kpi_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+        ("ALIGN", (0, 0), (0, -1), "RIGHT"),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (1, 0), (-1, -1), [colors.white, colors.Color(0.97, 0.97, 0.97)]),
+        ("BOX", (0, 0), (-1, -1), 0.4, colors.lightgrey),
+        ("INNERGRID", (0, 0), (-1, -1), 0.2, colors.lightgrey),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(kpi_tbl)
+
+    # --- Top defects ---
+    story.append(Paragraph("Top Defects", H2))
+    tops = payload.get("top_defects") or []
+    if not tops:
+        story.append(Paragraph("<i>No defects with severity &gt; 0 in this window.</i>", Body))
+    else:
+        header = ["Class", "Severity", "Count", f"Count{payload.get('impact_per_unit_label','/unit')}",
+                  "Impact", f"Impact{payload.get('impact_per_unit_label','/unit')}"]
+        body = [header]
+        for d in tops:
+            body.append([
+                str(d.get("class", "")),
+                str(d.get("severity", 0)),
+                f"{d.get('count', 0):,}",
+                f"{d.get('count_per_unit', 0):.4f}",
+                f"{d.get('impact', 0):,.2f}",
+                f"{d.get('impact_per_unit', 0):.4f}",
+            ])
+        def_tbl = Table(body, colWidths=[40 * mm, 22 * mm, 22 * mm, 28 * mm, 25 * mm, 28 * mm])
+        def_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.Color(0.13, 0.18, 0.27)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("ALIGN", (0, 0), (0, -1), "LEFT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.Color(0.96, 0.96, 0.98)]),
+            ("BOX", (0, 0), (-1, -1), 0.4, colors.lightgrey),
+            ("INNERGRID", (0, 0), (-1, -1), 0.2, colors.lightgrey),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        story.append(def_tbl)
+
+    # --- Footer ---
+    story.append(Spacer(1, 18))
+    try:
+        ver = (pathlib.Path("/code/VERSION").read_text().strip()
+               if pathlib.Path("/code/VERSION").exists()
+               else pathlib.Path(__file__).resolve().parent.parent.parent.joinpath("VERSION").read_text().strip())
+    except Exception:
+        ver = "?"
+    first = payload.get("first_ts") or "—"
+    last  = payload.get("last_ts")  or "—"
+    story.append(Paragraph(
+        f"Window: <b>{first}</b> &nbsp;→&nbsp; <b>{last}</b><br/>"
+        f"Generated by Monitait Vision Engine v{ver}", Small))
+
+    doc.build(story)
+    pdf_bytes = buf.getvalue()
+    buf.close()
+
+    safe_ship = (payload.get("shipment") or "all").replace("/", "_").replace(" ", "_")[:48]
+    fname = f"quality_{safe_ship}_{payload.get('window','24h')}_{_dt.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.get("/api/detection_stats")

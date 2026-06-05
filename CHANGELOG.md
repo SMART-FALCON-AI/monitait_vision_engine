@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.15] - 2026-06-05
+
+### Added — Shipment Quality Score PDF report (Phase 2)
+- New endpoint `GET /api/shipment_quality_score/report.pdf?shipment=X&window=Y` streams an `application/pdf` document built with ReportLab. Same payload as the JSON endpoint, just rendered for print / email / regulatory filing.
+- Layout: score-and-verdict block (color-coded green/amber/red), production KPI grid (length / duration / throughput / total impact / impact-per-unit / normalized-by / frame count), top-defects table with `count`, `count/unit`, `severity`, `impact`, `impact/unit`. Footer shows window first→last and the MVE version that generated it.
+- Frontend: "📄 Download PDF" button on the Quality Score card → uses the currently-selected window and shipment → streams the file via Blob so the browser triggers the native download dialog.
+- Refactor: extracted `_compute_quality_payload(shipment, window)` helper in `timeline.py` so both the JSON and PDF endpoints share one source of truth.
+- New dep: `reportlab>=4.0.0,<5.0.0` in `vision_engine/requirements.txt`. On running deployments, install once with `docker exec monitait_vision_engine pip install reportlab` (rides into the next image bake automatically). Endpoint returns a 503 with the install hint if reportlab is missing — operators get a clear message instead of a server crash.
+
 ## [3.21.14] - 2026-06-05
 
 ### Changed — Shipment Quality Score is now length-aware (encoder-normalized)
