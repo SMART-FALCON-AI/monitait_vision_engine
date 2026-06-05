@@ -8,8 +8,8 @@ services:
     image: monitait/mve:latest
     command: "python3 main.py"
     volumes:
-      - ./vision_engine:/code  # local source shadows image (matches Dockerfile dev comment)
       - ./VERSION:/code/VERSION:ro
+      - ./vision_engine:/code  # 3.21.9 — bind-mount source so scp -> live update (no rebuild)
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
       - ./volumes/weights:/weights
       - /dev:/dev  # Linux: serial (/dev/ttyUSB*), cameras (/dev/video*), barcode scanner (/dev/input/*)
@@ -104,7 +104,6 @@ services:
       - MATH_BANDS=${MATH_BANDS:-8}
       - MATH_FFT_TOP_K=${MATH_FFT_TOP_K:-3}
       - MATH_FLAT_FIELD_ENABLE=${MATH_FLAT_FIELD_ENABLE:-false}
-      - MATH_DEVICE=${MATH_DEVICE:-auto}
     networks:
       - main_network
     logging:
@@ -147,10 +146,30 @@ services:
         max-file: "3"
     restart: "always"
 
-  # Grafana removed in 3.16.0 — the Charts tab now uses embedded Chart.js
-  # analytics (detection insights, size/confidence over time, camera scatter)
-  # served by MVE itself. A placeholder remains in the UI for a future custom
-  # Grafana embed; re-add a grafana service here if/when that's wired.
+  # Grafana Visualization
+  grafana:
+    container_name: "monitait_grafana"
+    image: grafana/grafana:latest
+    user: "0"
+    expose:
+      - 3000
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ${DATA_ROOT:-.}/volumes/grafana:/var/lib/grafana
+    networks:
+      - main_network
+    depends_on:
+      - timescaledb
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: "always"
 
   # PiGallery2 Image Gallery
   pigallery2:
