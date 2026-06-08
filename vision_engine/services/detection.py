@@ -1084,27 +1084,46 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
         if _watcher:
             _watcher.latest_frame_id = frame_id
 
-        # Save annotated image with bounding boxes — single shared helper
-        # 3.21.2: only draw detections whose class has Show=true in audio_settings
-        # (Process tab → Per-Object Configuration). Without this, math channels
-        # (blob_brightness/_darkness, fft_*, band_*, etc.) plaster the image and
-        # bury the actual yolo defects in a wall of overlay text.
+        # Save annotated image with bounding boxes — single shared helper.
+        #
+        # 3.21.19 — Show is read from BOTH dicts now:
+        #   - `timeline_config.object_filters[name].show`  (the Advanced tab's
+        #     "Apply Timeline Configuration" writes here; old code path)
+        #   - `audio_settings[name].show`                  (the Process tab's
+        #     per-object Show toggle writes here)
+        #
+        # Why two dicts: history. `audio_settings` predates the timeline
+        # rendering and originally carried only audio-alert prefs (beep /
+        # narrate / min_conf); over time `show`/`store`/`severity` were tacked
+        # onto it. `object_filters` was added later (~3.18) for the timeline
+        # composite. 3.21.10 switched the annotator to read `object_filters`
+        # exclusively, on the theory that the Process tab "actually writes
+        # there" — which turned out to be wrong (Process writes audio_settings),
+        # so any class missing from object_filters was silently skipped despite
+        # Show=true in the Process tab. That's why fabriqc-kc's `agh` and
+        # `tooli_up` had no bboxes drawn even though they were stored.
+        #
+        # New rule: skip drawing ONLY when at least one dict has an explicit
+        # show=False. A missing/absent entry now means "draw it" (matching the
+        # Process tab's natural UX — operators expect to tick Show and see
+        # the bbox).
         if yolo_res and len(yolo_res) > 0:
             from services.render import draw_detection_on
             annotated_image = image.copy()
             kv_y = 4
-            # 3.21.10: read user toggles from timeline_config.object_filters
-            # (where the Process tab actually writes), NOT service_config.audio_settings
-            # (legacy dict the user never sees). A class is drawn only if it has
-            # an entry with show=true. show=false (or missing entry) hides.
             try:
                 _obj_filters = (getattr(_app.state, 'timeline_config', {}) or {}).get('object_filters', {}) if _app else {}
             except Exception:
                 _obj_filters = {}
+            _audio_map = _get_audio_settings_map()
             for det in yolo_res:
                 _nm = det.get("name") if isinstance(det, dict) else None
-                _settings = _obj_filters.get(_nm) if _nm else None
-                if _settings is None or _settings.get("show") is False:
+                if not _nm:
+                    continue
+                _of = _obj_filters.get(_nm) or {}
+                _au = _audio_map.get(_nm) or {}
+                # Either dict's explicit show=False hides; missing entries fall through.
+                if _of.get("show") is False or _au.get("show") is False:
                     continue
                 kv_y = draw_detection_on(
                     annotated_image, det, kv_y=kv_y, bbox_thickness=3,

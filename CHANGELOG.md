@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.19] - 2026-06-08
+
+### Fixed — Process tab "Show" toggle now actually shows bboxes (two-dict sync bug)
+- **Symptom (observed on fabriqc-kc):** a class is detected, a row lands in `inference_results`, the chart's click-through drawer can find the frame — but the `_DETECTED.jpg` on disk has no green rectangle, even though the operator ticked **Show** on that class in the Process tab. Affected `agh` and `tooli_up` specifically because those classes existed in `audio_settings` (Show=True) but had no entry in the older `timeline_config.object_filters` dict.
+- **Root cause:** `services/detection.py:1107` (3.21.10) read `timeline_config.object_filters` exclusively and treated a *missing entry* as "hide". But the Process tab Show toggle writes to `service_config.audio_settings.<class>.show`, not to `object_filters`. The Advanced tab's "Apply Timeline Configuration" button is the only thing that ever writes `object_filters`, and on fabriqc-kc that dict was last edited before `agh` / `tooli_up` were added to the model. So the annotator silently skipped them while the DB write further down (which uses `audio_settings.store`) happily persisted them — visible everywhere except the annotated jpg.
+- **Fix:** the annotator now reads both dicts. A class is skipped only when *either* dict has an explicit `show: false`. A missing entry now means "draw" (matching the Process tab's natural UX). The Advanced tab's per-class filter list still works for operators who want to mute a class without un-Storing it.
+- Files: `services/detection.py:1087-1124`. No new dep, no schema change.
+
 ## [3.21.18] - 2026-06-05
 
 ### Fixed — PDF score number alignment
