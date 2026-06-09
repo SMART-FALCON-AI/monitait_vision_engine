@@ -921,6 +921,13 @@ def decode_objects(frame_name, frame, nested_object, iterator=0, query_data=None
 
         try:
             for obj in query_data:
+                # 3.21.20 — Defensive: skip non-dict / missing-chars entries so we
+                # don't blow up the DataMatrix decode path when query_data contains
+                # a stray string (seen on PVB after upstream code changes upstream
+                # serialization). The error was harmless (logged in a try/except,
+                # didn't kill inference) but spammed the log thousands of lines/min.
+                if not isinstance(obj, dict) or "chars" not in obj:
+                    continue
                 # Always include parent name in matching (including _root)
                 labels_to_match = [nested_object['name']] + [child['name'] for child in nested_object['children']]
                 confidences_to_avg = [nested_object['confidence']] + [child['confidence'] for child in nested_object['children']]
@@ -1086,29 +1093,16 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
 
         # Save annotated image with bounding boxes — single shared helper.
         #
-        # 3.21.19 — Show is read from BOTH dicts now:
-        #   - `timeline_config.object_filters[name].show`  (the Advanced tab's
-        #     "Apply Timeline Configuration" writes here; old code path)
-        #   - `audio_settings[name].show`                  (the Process tab's
-        #     per-object Show toggle writes here)
-        #
-        # Why two dicts: history. `audio_settings` predates the timeline
-        # rendering and originally carried only audio-alert prefs (beep /
-        # narrate / min_conf); over time `show`/`store`/`severity` were tacked
-        # onto it. `object_filters` was added later (~3.18) for the timeline
-        # composite. 3.21.10 switched the annotator to read `object_filters`
-        # exclusively, on the theory that the Process tab "actually writes
-        # there" — which turned out to be wrong (Process writes audio_settings),
-        # so any class missing from object_filters was silently skipped despite
-        # Show=true in the Process tab. That's why fabriqc-kc's `agh` and
-        # `tooli_up` had no bboxes drawn even though they were stored.
-        #
-        # New rule: skip drawing ONLY when at least one dict has an explicit
-        # show=False. A missing/absent entry now means "draw it" (matching the
-        # Process tab's natural UX — operators expect to tick Show and see
-        # the bbox).
+        # 3.21.21: the "should we draw this?" decision lives in one place now,
+        # `services.draw_filters.should_draw_class`. It reads audio_settings
+        # as the canonical source (Process tab writes here) and falls back to
+        # object_filters (legacy Advanced tab). See draw_filters.py for the
+        # full rule. Prior versions duplicated the logic across three files
+        # (annotator, draw_detection_on, watcher composite) and the dicts
+        # could drift apart.
         if yolo_res and len(yolo_res) > 0:
             from services.render import draw_detection_on
+            from services.draw_filters import should_draw_class
             annotated_image = image.copy()
             kv_y = 4
             try:
@@ -1118,15 +1112,11 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             _audio_map = _get_audio_settings_map()
             for det in yolo_res:
                 _nm = det.get("name") if isinstance(det, dict) else None
-                if not _nm:
-                    continue
-                _of = _obj_filters.get(_nm) or {}
-                _au = _audio_map.get(_nm) or {}
-                # Either dict's explicit show=False hides; missing entries fall through.
-                if _of.get("show") is False or _au.get("show") is False:
+                if not should_draw_class(_nm, _audio_map, _obj_filters):
                     continue
                 kv_y = draw_detection_on(
                     annotated_image, det, kv_y=kv_y, bbox_thickness=3,
+                    obj_filters=_obj_filters, audio_settings=_audio_map,
                 )
 
             # Save annotated image with _DETECTED suffix

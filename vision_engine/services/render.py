@@ -43,6 +43,7 @@ def draw_detection_on(
     label_thickness: int = 2,
     font_scale: Optional[float] = None,
     obj_filters: Optional[Dict[str, Dict[str, Any]]] = None,
+    audio_settings: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> int:
     """Draw one detection on `img` (mutates in place). Returns the next
     available y for the kv-overlay column so the caller can chain.
@@ -60,9 +61,13 @@ def draw_detection_on(
                      on full-res, 2 on thumbnails).
     label_thickness : putText stroke. 2 is readable on JPEG.
     font_scale : override; if None, auto-size by image height.
-    obj_filters : timeline_config.object_filters mapping. Hides any det whose
-                  filter has show:false or whose confidence is below the
-                  per-filter min_confidence (default 0.01).
+    obj_filters : timeline_config.object_filters mapping (legacy show /
+                  min_confidence overrides from the Advanced tab).
+    audio_settings : service_config.audio_settings mapping (canonical show /
+                     min_confidence from the Process tab). 3.21.21+.
+
+    Show / min_confidence are looked up via `services.draw_filters` —
+    audio_settings is canonical, obj_filters is legacy fallback.
 
     Returns
     -------
@@ -71,10 +76,11 @@ def draw_detection_on(
     try:
         name = det.get('name', '')
         confidence = float(det.get('confidence', 0) or 0)
-        of = (obj_filters or {}).get(name, {})
-        if of.get('show') is False:
+        # 3.21.21: unified show / min_confidence rule (see services/draw_filters.py)
+        from services.draw_filters import should_draw_class, min_confidence_for
+        if not should_draw_class(name, audio_settings, obj_filters):
             return kv_y
-        if confidence < of.get('min_confidence', 0.01):
+        if confidence < min_confidence_for(name, audio_settings, obj_filters):
             return kv_y
         x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
         y1 = int(det.get('ymin', det.get('y1', 0)) * sy)

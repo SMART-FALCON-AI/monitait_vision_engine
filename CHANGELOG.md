@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.21] - 2026-06-09
+
+### Changed — unified show / min_confidence rule (one helper across three draw paths)
+- Prior to 3.21.21 the "should we draw this detection?" decision was duplicated in three files (`services/detection.py` annotator save, `services/render.py` `draw_detection_on` helper, `services/watcher.py` timeline composite). Each read a different mix of `audio_settings.show` and `object_filters.show`. The dicts drifted apart and produced surprising behavior — that's what caused the fabriqc-kc agh/tooli_up missing-bbox bug (3.21.18 and earlier), then the PVB math-flood regression (3.21.19, my fix made it worse).
+- New: `services/draw_filters.py` holds the single canonical rule:
+  1. `audio_settings` is the source of truth (Process tab writes here). If the class has an entry, its `show` wins.
+  2. `object_filters` is the legacy fallback (Advanced tab → Apply Timeline Configuration writes here). Consulted only when `audio_settings` has no entry.
+  3. No entry in either dict → not drawn. Protects against math channels (which emit hundreds of names with no operator config) flooding the annotated image.
+- `draw_detection_on()` now accepts both `obj_filters` and `audio_settings` parameters. All three call sites pass both and route the decision through `should_draw_class()` / `min_confidence_for()`.
+- Tested first on vteam12 (test env). Math channels skipped, yolo classes drawn — no regressions in either direction.
+
+## [3.21.20] - 2026-06-08
+
+### Fixed — silence `decode_objects` log spam (DataMatrix decoder defensive guard)
+- On PVB the DataMatrix decoder was logging `Error in decode_objects: string indices must be integers` thousands of times per minute. Inference and ejection were unaffected (the error sat inside a try/except, annotated images still saved with correct detection counts), but it filled `docker logs` and made real errors hard to spot.
+- Root cause: `query_data` occasionally contains a non-dict entry (a stray string from upstream serialisation), and `obj["chars"]` then raises `TypeError`. Added a defensive `isinstance(obj, dict) and "chars" in obj` guard at `detection.py:923` so the loop just skips bad entries.
+- One-line change. No behavioural impact on sites where the error was already absent.
+
 ## [3.21.19] - 2026-06-08
 
 ### Fixed — Process tab "Show" toggle now actually shows bboxes (two-dict sync bug)
