@@ -81,6 +81,54 @@ def _get_audio_settings_map():
     return _audio_settings_cache
 
 
+def _auto_register_classes(yolo_res):
+    """3.21.25 — first time a class is detected, give it a stub entry in
+    audio_settings with show=False so it shows up as an unticked card in
+    the Process tab. The operator opts in explicitly by ticking Show.
+
+    This is what lets us use a strict "show=True only" draw rule
+    (services/draw_filters.py) without classes silently disappearing —
+    every detected class becomes visible IN THE UI (just unticked), so
+    the operator can find and enable it.
+    """
+    if not yolo_res:
+        return
+    try:
+        svc = cfg.load_service_config() or {}
+        aud = svc.get("audio_settings", {}) or {}
+        new_names = set()
+        for det in yolo_res:
+            if not isinstance(det, dict):
+                continue
+            nm = det.get("name")
+            if not nm or nm in aud:
+                continue
+            new_names.add(nm)
+        if not new_names:
+            return
+        for nm in new_names:
+            aud[str(nm)] = {
+                "show": False,            # off by default — operator opts in
+                "narrate": False,
+                "beep": False,
+                "min_confidence": 0.01,
+                "severity": 0,
+            }
+        svc["audio_settings"] = aud
+        cfg.save_service_config(svc)
+        # Bust both caches: the local one in detection.py and draw_filters'
+        global _audio_settings_loaded_at
+        _audio_settings_loaded_at = 0.0
+        try:
+            from services.draw_filters import invalidate_cache as _df_inv
+            _df_inv()
+        except Exception:
+            pass
+        logger.info(f"auto-registered {len(new_names)} new class(es) in audio_settings: {sorted(new_names)[:8]}")
+    except Exception as e:
+        logger.warning(f"auto-register classes failed: {e}")
+
+
 def _min_conf_for(class_name: str, audio_map: dict) -> float:
     """Lookup the configured min_confidence (0–1) for a class. Returns 0 if unset.
 
@@ -1061,6 +1109,13 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             yolo_res = json.loads(req_predict(img_bytes))
             model_name_used = "legacy"
 
+        # 3.21.25 — auto-register newly-seen classes in audio_settings so they
+        # appear as unticked cards in the Process tab. Combined with the strict
+        # "show=True only" draw rule in services/draw_filters.py, this gives
+        # operators a single Show toggle per class with no silent classes and
+        # no unwanted defaults.
+        _auto_register_classes(yolo_res)
+
         processing_time = time.time() - start_time
         elapsed_ms = processing_time * 1000
 
@@ -1091,33 +1146,20 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
         if _watcher:
             _watcher.latest_frame_id = frame_id
 
-        # Save annotated image with bounding boxes — single shared helper.
-        #
-        # 3.21.21: the "should we draw this?" decision lives in one place now,
-        # `services.draw_filters.should_draw_class`. It reads audio_settings
-        # as the canonical source (Process tab writes here) and falls back to
-        # object_filters (legacy Advanced tab). See draw_filters.py for the
-        # full rule. Prior versions duplicated the logic across three files
-        # (annotator, draw_detection_on, watcher composite) and the dicts
-        # could drift apart.
+        # Save annotated image with bounding boxes.
+        # 3.21.26 — draw_filters owns the audio_settings read. Just ask
+        # `should_draw_class(name)` — no params, no caller-side config to
+        # forget. One source of truth.
         if yolo_res and len(yolo_res) > 0:
             from services.render import draw_detection_on
             from services.draw_filters import should_draw_class
             annotated_image = image.copy()
             kv_y = 4
-            try:
-                _obj_filters = (getattr(_app.state, 'timeline_config', {}) or {}).get('object_filters', {}) if _app else {}
-            except Exception:
-                _obj_filters = {}
-            _audio_map = _get_audio_settings_map()
             for det in yolo_res:
                 _nm = det.get("name") if isinstance(det, dict) else None
-                if not should_draw_class(_nm, _audio_map, _obj_filters):
+                if not should_draw_class(_nm):
                     continue
-                kv_y = draw_detection_on(
-                    annotated_image, det, kv_y=kv_y, bbox_thickness=3,
-                    obj_filters=_obj_filters, audio_settings=_audio_map,
-                )
+                kv_y = draw_detection_on(annotated_image, det, kv_y=kv_y, bbox_thickness=3)
 
             # Save annotated image with _DETECTED suffix
             annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")

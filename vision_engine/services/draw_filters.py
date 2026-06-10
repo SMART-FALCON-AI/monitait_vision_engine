@@ -1,68 +1,85 @@
-"""Single source of truth for the "should we draw this detection?" decision.
+"""Single source of truth for "should we draw this detection?".
 
-3.21.21 introduced this helper to consolidate the rule that used to be
-duplicated in three files (detection.py annotator, render.py
-draw_detection_on, watcher.py timeline composite). At that point the
-helper read both `audio_settings` and a legacy `object_filters` dict,
-with audio_settings preferred and object_filters as a fallback for
-classes that had no audio_settings entry.
+3.21.26 architecture: this module owns the audio_settings read. Callers
+just ask `should_draw_class(name)` — they never pass audio_settings,
+object_filters, or any other config. ONE place reads service_config;
+ONE place caches it; ONE place gets cache-busted when config changes.
 
-3.21.22 simplifies the rule further: audio_settings is the ONLY source
-of truth. The UI no longer writes to object_filters (see audio.js +
-routers/timeline.py for the matching changes), and we run a one-time
-startup migration (services/migrations.py::migrate_object_filters_into_audio_settings)
-that copies any remaining object_filters entries into audio_settings
-before the annotator runs.
+Before this refactor the rule lived in `should_draw_class(name, audio_settings, obj_filters)`
+and four different callers had to remember to pass `audio_settings`. The
+recurring bug: one of them forgot and the rule defaulted to "skip" silently.
 
-Rule:
-- audio_settings[name].show == True   → draw
-- audio_settings[name].show == False  → skip
-- audio_settings has no entry for the class → skip
-  (conservative default — protects against model classes that aren't
-   yet configured from spamming the annotated image)
+Rule (3.21.25+, unchanged): `audio_settings.<class>.show == True` → draw.
+Anything else (False, None, missing entry) → skip.
 
-The `obj_filters` keyword argument is kept for signature compatibility
-with the three call sites and any external callers, but its value is
-ignored. Remove the argument entirely once 3.21.22 has burned in.
+Companion: `services/detection.py::_auto_register_classes()` writes a
+`show=False` stub the first time a class is detected, so the Process tab
+shows every class as an unticked card. Operators opt in with one click.
+
+Cache: invalidated on every POST to `/api/audio_settings`,
+`/api/store_objects`, the bulk save endpoint, and any explicit
+`/api/draw_filters/invalidate` call. Also self-invalidates after
+`_TTL_SEC` as a backstop.
 """
 
+import time
+import logging
 from typing import Optional, Dict, Any
 
+logger = logging.getLogger(__name__)
 
-def should_draw_class(
-    name: str,
-    audio_settings: Optional[Dict[str, Dict[str, Any]]] = None,
-    obj_filters: Optional[Dict[str, Dict[str, Any]]] = None,  # ignored; see module docstring
-) -> bool:
-    """Return True if `name` should be drawn on the annotated image."""
+# In-memory cache of audio_settings. Refreshed on demand.
+_cache: Dict[str, Dict[str, Any]] = {}
+_cache_loaded_at: float = 0.0
+_TTL_SEC: float = 5.0   # backstop refresh — cache-bust calls handle the hot path
+
+
+def invalidate_cache() -> None:
+    """Drop the audio_settings cache. Called by any endpoint that mutates
+    service_config so the next draw decision picks up the new value
+    immediately (no waiting for the TTL backstop)."""
+    global _cache_loaded_at
+    _cache_loaded_at = 0.0
+
+
+def _load_audio_settings() -> Dict[str, Dict[str, Any]]:
+    """Return a fresh-or-cached copy of service_config.audio_settings."""
+    global _cache, _cache_loaded_at
+    now = time.time()
+    if _cache and now - _cache_loaded_at < _TTL_SEC:
+        return _cache
+    try:
+        import config as cfg
+        svc = cfg.load_service_config() or {}
+        _cache = svc.get("audio_settings", {}) or {}
+    except Exception as e:
+        logger.warning(f"draw_filters could not load audio_settings: {e}")
+        _cache = _cache or {}
+    _cache_loaded_at = now
+    return _cache
+
+
+def should_draw_class(name: str) -> bool:
+    """Return True if the named class should be drawn on annotated frames.
+
+    Rule: `audio_settings[name].show == True` → True. Everything else
+    (no entry, show=False, show=None, malformed entry) → False.
+    """
     if not name:
         return False
-    audio_settings = audio_settings or {}
-
-    au = audio_settings.get(name)
-    if isinstance(au, dict) and "show" in au:
-        return bool(au["show"])
-
-    # No entry → don't draw (conservative default).
-    return False
+    au = _load_audio_settings().get(name)
+    return isinstance(au, dict) and au.get("show") is True
 
 
-def min_confidence_for(
-    name: str,
-    audio_settings: Optional[Dict[str, Dict[str, Any]]] = None,
-    obj_filters: Optional[Dict[str, Dict[str, Any]]] = None,  # ignored; see module docstring
-    default: float = 0.01,
-) -> float:
-    """Return the per-class min_confidence threshold from audio_settings."""
+def min_confidence_for(name: str, default: float = 0.01) -> float:
+    """Per-class min_confidence threshold from audio_settings; defaults
+    to 0.01 if unset (matches the historical render.py default)."""
     if not name:
         return default
-    audio_settings = audio_settings or {}
-
-    au = audio_settings.get(name)
+    au = _load_audio_settings().get(name)
     if isinstance(au, dict) and "min_confidence" in au:
         try:
             return float(au["min_confidence"])
         except (TypeError, ValueError):
             pass
-
     return default

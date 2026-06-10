@@ -1378,26 +1378,18 @@ class ArduinoSocket:
                         frame_histogram_data = []
                         stream_path = os.path.join("raw_images", f"{stream_frame[0]}.jpg")
                         stream_frame[1] = cv2.imread(stream_path)
-                        # Annotate frame_data[1] with bounding boxes + labels.
-                        # 3.21.21: show / min_confidence routed through the unified
-                        # `services.draw_filters` helper (audio_settings canonical,
-                        # object_filters legacy fallback).
+                        # 3.21.26 — single source of truth: draw_filters owns
+                        # the audio_settings read. Just ask `should_draw_class(name)`.
                         _tl_cfg = getattr(_app.state, 'timeline_config', {})
-                        _obj_filters = _tl_cfg.get('object_filters', {})
                         _skip_bbox = not _tl_cfg.get('show_bounding_boxes', True)
-                        try:
-                            from services.detection import _get_audio_settings_map
-                            _audio_map = _get_audio_settings_map()
-                        except Exception:
-                            _audio_map = {}
                         from services.draw_filters import should_draw_class, min_confidence_for
                         for idx, res in enumerate(stream_frame[2]):
                             if _skip_bbox:
                                 break
                             _nm = res.get('name', '')
-                            if not should_draw_class(_nm, _audio_map, _obj_filters):
+                            if not should_draw_class(_nm):
                                 continue
-                            if res.get('confidence', 0) < min_confidence_for(_nm, _audio_map, _obj_filters):
+                            if res.get('confidence', 0) < min_confidence_for(_nm):
                                 continue
                             cv2.rectangle(stream_frame[1], (int(res['xmin']), int(res['ymin'])),(int(res['xmax']), int(res['ymax'])), (100, 150, 250), 4)
                             text = f"{res['name']} {res['confidence']:.2f}"

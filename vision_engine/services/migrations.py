@@ -6,9 +6,68 @@ every startup; design them to be no-ops when the migration has already
 been applied.
 """
 
+import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+
+def migrate_data_file_into_db() -> bool:
+    """3.22.0 — bootstrap the `mve_config_kv` table from the legacy
+    `.env.prepared_query_data` file on first run after upgrade.
+
+    Idempotent: if the table already has rows, this is a no-op. If
+    Postgres is unreachable, we skip silently and the file remains the
+    source of truth until the DB is back.
+
+    Returns True if we actually copied data in (so the caller can log).
+    """
+    try:
+        from services.config_db import is_db_empty, save_all
+    except Exception as e:
+        logger.debug(f"config_db not importable; skipping DB migration: {e}")
+        return False
+
+    empty = is_db_empty()
+    if empty is None:
+        # DB unreachable — try again next startup.
+        logger.debug("3.22 migration: DB unreachable, leaving file as source of truth")
+        return False
+    if not empty:
+        # Table already populated — nothing to do.
+        return False
+
+    # Read the legacy file directly. NOTE: we don't call load_data_file()
+    # because it would route back through the DB (which we know is empty).
+    try:
+        from config import DATA_FILE
+    except Exception:
+        DATA_FILE = ".env.prepared_query_data"
+
+    if not os.path.exists(DATA_FILE):
+        logger.info("3.22 migration: DB empty AND no file — clean install, nothing to migrate")
+        return False
+
+    try:
+        with open(DATA_FILE, "r") as f:
+            file_data = json.load(f)
+    except Exception as e:
+        logger.warning(f"3.22 migration: could not read {DATA_FILE}: {e}")
+        return False
+
+    if not isinstance(file_data, dict) or not file_data:
+        logger.info("3.22 migration: file empty or non-dict; nothing to migrate")
+        return False
+
+    if save_all(file_data, updated_by="migration:3.22.0"):
+        logger.info(
+            f"3.22 migration: copied {len(file_data)} top-level key(s) from "
+            f"{DATA_FILE} into mve_config_kv: {sorted(file_data.keys())}"
+        )
+        return True
+    logger.warning("3.22 migration: save_all to DB failed; will retry next startup")
+    return False
 
 
 def migrate_object_filters_into_audio_settings(svc: dict, data: dict) -> bool:

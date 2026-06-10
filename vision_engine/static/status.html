@@ -1092,6 +1092,27 @@
                             <button onclick="fetchModelClasses()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: var(--secondary-color);">Fetch Classes</button>
                         </div>
 
+                        <!-- 3.21.24 — Filter bar: search box + "show only active" toggle + count.
+                             Active classes (≥1 detection in the selected window) float to the
+                             top of the grid automatically; the toggle hides the idle ones. -->
+                        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; padding:8px 10px; background:rgba(15,23,42,0.4); border:1px solid rgba(51,65,85,0.5); border-radius:6px;">
+                            <input type="text" id="per-object-search" placeholder="🔍 search class name…" oninput="updateObjectsList()"
+                                style="flex:1 1 180px; min-width:120px; padding:5px 8px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); cursor:pointer;" title="Hide classes that haven't fired in the chosen window">
+                                <input type="checkbox" id="per-object-active-only" onchange="updateObjectsList()" style="width:14px; height:14px; cursor:pointer;">
+                                Show only active
+                            </label>
+                            <select id="per-object-active-window" onchange="loadActiveClasses(); updateObjectsList()"
+                                style="padding:4px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+                                <option value="15m">last 15 min</option>
+                                <option value="1h" selected>last 1 h</option>
+                                <option value="6h">last 6 h</option>
+                                <option value="24h">last 24 h</option>
+                                <option value="7d">last 7 d</option>
+                            </select>
+                            <span id="per-object-count" style="font-size:11px; color:var(--text-secondary);">—</span>
+                        </div>
+
                         <!-- Per-Object Cards (dynamically populated) -->
                         <div id="audio-objects-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;">
                             <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
@@ -1383,6 +1404,19 @@
                             <div class="control-item">
                                 <div class="control-label" id="api-key-label" data-i18n="api_key">API Key</div>
                                 <input type="password" id="ai-api-key" class="control-input" placeholder="sk-ant-...">
+                            </div>
+                            <!-- 3.21.23 — Base URL + Model ID overrides for OpenAI-compatible relays
+                                 (rucode.rdemos.com, ai-trainer.monitait.com, Ollama, vLLM, LiteLLM, etc).
+                                 Both optional. Leave blank to use the provider SDK's default. -->
+                            <div class="control-item">
+                                <div class="control-label">Base URL (optional)</div>
+                                <input type="text" id="ai-base-url" class="control-input" placeholder="e.g. https://rucode.rdemos.com/v1">
+                                <div style="font-size:10px; color:var(--text-secondary); margin-top:3px;">For OpenAI-compatible relays. Empty = use the provider's default endpoint.</div>
+                            </div>
+                            <div class="control-item">
+                                <div class="control-label">Model ID (optional)</div>
+                                <input type="text" id="ai-model-id" class="control-input" placeholder="e.g. kimi-k2.6, gpt-4o, llama3:8b">
+                                <div style="font-size:10px; color:var(--text-secondary); margin-top:3px;">Overrides the SDK's hard-coded model. Empty = use default (gpt-4o for ChatGPT, claude-3-5-sonnet for Claude).</div>
                             </div>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">

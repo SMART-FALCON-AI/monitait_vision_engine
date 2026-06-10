@@ -351,9 +351,39 @@ function updateObjectsList() {
         return;
     }
 
-    const sortedObjects = Array.from(detectedObjectClasses).sort();
+    // 3.21.24 — busy-first sort + optional active/search filter
+    const activeCounts = audioSettings._activeCounts || {};
+    const activeOnlyEl = document.getElementById('per-object-active-only');
+    const searchEl     = document.getElementById('per-object-search');
+    const countChip    = document.getElementById('per-object-count');
+    const activeOnly = activeOnlyEl ? activeOnlyEl.checked : false;
+    const searchQ    = (searchEl ? searchEl.value.trim().toLowerCase() : '');
+
+    let sortedObjects = Array.from(detectedObjectClasses);
+    // Sort: classes with detections in the active-window first (by count desc), then idle alphabetically
+    sortedObjects.sort((a, b) => {
+        const ca = activeCounts[a] || 0;
+        const cb = activeCounts[b] || 0;
+        if (ca !== cb) return cb - ca;
+        return a.localeCompare(b);
+    });
+    if (activeOnly) {
+        sortedObjects = sortedObjects.filter(n => (activeCounts[n] || 0) > 0);
+    }
+    if (searchQ) {
+        sortedObjects = sortedObjects.filter(n => n.toLowerCase().includes(searchQ));
+    }
+    if (countChip) {
+        const totalClasses = detectedObjectClasses.size;
+        const activeCount = Object.keys(activeCounts).length;
+        const win = audioSettings._activeWindow || '1h';
+        countChip.textContent = `Showing ${sortedObjects.length} of ${totalClasses} · ${activeCount} active in last ${win}`;
+    }
+
     sortedObjects.forEach(objectName => {
-        const isShown = audioSettings.showObjects[objectName] !== false;
+        // 3.21.25 — explicit opt-in: only True renders as checked.
+        // Matches the strict draw rule in services/draw_filters.py.
+        const isShown = audioSettings.showObjects[objectName] === true;
         const confidence = audioSettings.objectConfidence[objectName] !== undefined ? audioSettings.objectConfidence[objectName] : 1;
         const isNarrate = audioSettings.narrateObjects[objectName] || false;
         const isBeep = audioSettings.enabledObjects[objectName] || false;
@@ -384,7 +414,13 @@ function updateObjectsList() {
                     style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;"
                     title="Per-class defect impact weight (0=cosmetic, 100=critical)">
             </div>
-            ${baseline ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="Auto-learned from last 7 days of stored detections. Use as guide for setting min_confidence and judging anomalies.">📊 normal conf: ${(baseline.p50*100).toFixed(0)}–${(baseline.p95*100).toFixed(0)}% (p50–p95) · n=${baseline.n||0}</div>` : ''}
+            ${baseline ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="Auto-learned from last 7 days of stored detections. p5 is the noise floor, p50 the typical confidence, p95 the high end. Use as guide for Min-Conf and anomaly judgement.">
+                📊 normal conf: ${baseline.p5 !== undefined ? `${(baseline.p5*100).toFixed(0)} · <b>${(baseline.p50*100).toFixed(0)}</b> · ${(baseline.p95*100).toFixed(0)}% (p5–p50–p95)` : `${(baseline.p50*100).toFixed(0)}–${(baseline.p95*100).toFixed(0)}% (p50–p95)`} · n=${baseline.n||0}
+                <button onclick="suggestMinConfFromBaseline('${safeName}')" title="Set Min conf to overall p5" style="margin-left:6px; padding:0 5px; background:rgba(59,130,246,0.4); color:#fff; border:none; border-radius:3px; cursor:pointer; font-size:11px;">🪄 auto p5</button>
+            </div>
+            ${baseline.by_camera && Object.keys(baseline.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera percentiles. p5 · p50 · p95. Click 🪄 to set Min-Conf to that camera's p5 — captures everything historically real on that camera, drops the noise floor.">
+                ${Object.entries(baseline.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${(c.p5*100).toFixed(0)} · <b>${(c.p50*100).toFixed(0)}</b> · ${(c.p95*100).toFixed(0)}% n=${c.n>=1000 ? (c.n/1000).toFixed(1)+'k' : c.n} <button onclick="suggestMinConfFromBaseline('${safeName}', '${cam}')" title="Set Min conf to cam ${cam}'s p5 (${(c.p5*100).toFixed(0)}%)" style="padding:0 4px; background:rgba(139,92,246,0.4); color:#fff; border:none; border-radius:3px; cursor:pointer; font-size:10px; margin-left:2px;">🪄</button></span>`).join('')}
+            </div>` : ''}` : ''}
             <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 6px;">
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Show bounding box">
                     <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
@@ -510,6 +546,48 @@ async function loadConfBaselinesFromServer() {
 }
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadConfBaselinesFromServer, 800));
 window.loadConfBaselinesFromServer = loadConfBaselinesFromServer;
+
+
+// 3.21.24 — Active-class lookup. Drives the Process tab filter bar's
+// "Show only active" toggle + busy-first sort. The selected window
+// comes from the #per-object-active-window dropdown.
+async function loadActiveClasses() {
+    try {
+        const winEl = document.getElementById('per-object-active-window');
+        const win = winEl ? winEl.value : '1h';
+        const r = await fetch('/api/active_classes?window=' + encodeURIComponent(win));
+        if (!r.ok) return;
+        const d = await r.json();
+        audioSettings._activeCounts = d.counts || {};
+        audioSettings._activeNames  = d.names  || [];   // sorted by total count desc
+        audioSettings._activeWindow = d.window || win;
+        if (typeof updateObjectsList === 'function') updateObjectsList();
+    } catch (e) { /* not fatal */ }
+}
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadActiveClasses, 900));
+window.loadActiveClasses = loadActiveClasses;
+
+
+// 3.21.24 — Set the per-class Min-Conf slider to that camera's p5 baseline
+// (or the overall p5 when no camera is specified). One-click "calibrate
+// against historical noise floor — anything above this is real".
+function suggestMinConfFromBaseline(objectName, camera) {
+    const b = audioSettings.confBaselines?.[objectName];
+    if (!b) return;
+    let p5;
+    if (camera != null && b.by_camera && b.by_camera[String(camera)]) {
+        p5 = b.by_camera[String(camera)].p5;
+    } else {
+        p5 = b.p5;
+    }
+    if (typeof p5 !== 'number') return;
+    const ui = Math.max(0, Math.min(100, Math.round(p5 * 100)));
+    audioSettings.objectConfidence[objectName] = ui;
+    saveAudioSettings();
+    updateObjectsList();
+    syncObjectAudioToServer(objectName);
+}
+window.suggestMinConfFromBaseline = suggestMinConfFromBaseline;
 
 // Toggle DB persistence for object. POSTs to server because detection.py reads
 // this server-side to gate writes to inference_results. Default OFF.
@@ -1737,6 +1815,9 @@ async function saveAIModel() {
     const name = document.getElementById('ai-model-name').value.trim();
     const provider = document.getElementById('ai-model-provider').value;
     const apiKey = document.getElementById('ai-api-key').value.trim();
+    // 3.21.23 — optional overrides
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    const modelId = (document.getElementById('ai-model-id')?.value || '').trim();
 
     if (!name) { alert('Please enter a model name'); return; }
     if (!apiKey) { alert('Please enter an API key or endpoint'); return; }
@@ -1745,7 +1826,7 @@ async function saveAIModel() {
         const response = await fetch('/api/ai_config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, provider, api_key: apiKey })
+            body: JSON.stringify({ name, provider, api_key: apiKey, base_url: baseUrl, model_id: modelId })
         });
         const data = await response.json();
         if (response.ok) {
@@ -1784,6 +1865,8 @@ function clearAIModelForm() {
     document.getElementById('ai-model-name').value = '';
     document.getElementById('ai-api-key').value = '';
     document.getElementById('ai-model-provider').selectedIndex = 0;
+    const bu = document.getElementById('ai-base-url'); if (bu) bu.value = '';
+    const mi = document.getElementById('ai-model-id'); if (mi) mi.value = '';
     updateAIModelFields();
 }
 

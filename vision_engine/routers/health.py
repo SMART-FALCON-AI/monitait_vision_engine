@@ -49,6 +49,35 @@ _session = requests.Session()
 # ---------------------------------------------------------------------------
 # GET /health
 # ---------------------------------------------------------------------------
+@router.get("/api/config/db_status")
+async def config_db_status():
+    """3.22.0 — show which storage backend is currently authoritative.
+
+    Returns:
+      backend: "db" if mve_config_kv has rows, "file" otherwise
+      db_reachable: True if we can talk to Postgres at all
+      key_count: number of top-level keys in DB (None if unreachable)
+      file_exists: True if the legacy .env.prepared_query_data file is on disk
+    """
+    out = {"backend": "file", "db_reachable": False, "key_count": None, "file_exists": False}
+    try:
+        from services.config_db import history_count
+        cnt = history_count()
+        if cnt is not None:
+            out["db_reachable"] = True
+            out["key_count"] = cnt
+            if cnt > 0:
+                out["backend"] = "db"
+    except Exception:
+        pass
+    try:
+        from config import DATA_FILE
+        out["file_exists"] = os.path.exists(DATA_FILE)
+    except Exception:
+        pass
+    return JSONResponse(content=out)
+
+
 @router.get("/health")
 async def health_check(request: Request):
     """Health check endpoint."""

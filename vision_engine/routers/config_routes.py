@@ -900,6 +900,13 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
 
         svc["audio_settings"] = settings
         save_service_config(svc)
+        # 3.21.26 — kick the draw_filters cache so the new show/min_conf takes
+        # effect on the very next captured frame instead of waiting for TTL.
+        try:
+            from services.draw_filters import invalidate_cache as _df_inv
+            _df_inv()
+        except Exception:
+            pass
         return JSONResponse(content={"success": True, "audio_settings": settings})
     except Exception as e:
         logger.error(f"Error writing audio_settings: {e}")

@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.22.0] - 2026-06-10
+
+### Added — service_config moves to Postgres (with backward compat)
+- New table `mve_config_kv (key TEXT PK, value JSONB, updated_at, updated_by)` becomes the source of truth for the MVE configuration that used to live entirely in `.env.prepared_query_data`. Each top-level field (`service_config`, `timeline_config`, `models`, `pipelines`, `current_pipeline`, …) becomes one row keyed by name.
+- **Backward compatibility is preserved everywhere:**
+  - **Read** (`config.load_data_file`) tries DB first, falls back to the JSON file if DB is unreachable or table is empty. So even if Postgres is down at boot, MVE still comes up using the file.
+  - **Write** (`config.save_data_file`) dual-writes: persists to DB AND dumps the same JSON to `.env.prepared_query_data` on every save. Legacy tooling that reads the file directly (Advanced tab Data File Editor, `cat | jq`, pre-3.22 builds at remote sites) keeps working without code changes.
+  - **Migration** is idempotent and one-shot: `services/migrations.py::migrate_data_file_into_db()` runs at MVE startup. If the DB table is empty AND the legacy file has content, it loads the file and bootstraps the DB with one transaction. After that, the file is a downstream snapshot only.
+- **Why this matters:**
+  - Atomic per-key writes (no more whole 50 KB file rewrites on a single toggle).
+  - Audit trail (`updated_at` + `updated_by` columns answer "who turned off Store for arzi yesterday?").
+  - Cross-site config management becomes possible (write once to a central DB, sites pull on next read).
+  - The "MVE owns the file in memory and clobbers your edits" race goes away — DB is the truth, file is downstream.
+- **What didn't change:**
+  - The Advanced tab Data File Editor UI still shows the same JSON view and import/export endpoints — the data just comes from DB now.
+  - No new dependencies (existing `psycopg2` connection pool in `services/db.py` is reused).
+  - No operator action required after upgrade — sites self-migrate on first boot.
+- **New endpoint:** `GET /api/config/db_status` returns `{backend, db_reachable, key_count, file_exists}` so the Fleet Dashboard (Tier 1 roadmap) can show config-source health per site.
+
+### Changed — draw_filters is now self-sufficient (real single source of truth)
+- `services/draw_filters.py` now owns the audio_settings read. It loads from `service_config` itself, caches with a 5 s TTL backstop, and exposes a `invalidate_cache()` hook. Callers just call `should_draw_class(name)` and `min_confidence_for(name)` — no parameters except the class name.
+- Before this refactor four different files had to remember to pass `audio_settings` into `draw_filters` helpers; each time a caller forgot, the rule silently defaulted to "skip". This is what made the dashboard timeline composite blank in 3.21.25 — `routers/websocket.py` had its own annotation path that called `draw_detection_on(... obj_filters=...)` without audio_settings, so every class hit the default-skip branch.
+- Updated callers (now parameter-free): `services/detection.py` annotator, `services/render.py::draw_detection_on`, `services/watcher.py` timeline composite, `routers/websocket.py::_build_timeline_composite`.
+- Cache-bust hooks added to `POST /api/audio_settings` and the auto-register write path, so a Show-toggle change takes effect on the very next captured frame instead of waiting up to 5 s.
+- From now on this is the pattern for any future per-class draw decision: it lives ONLY in `services/draw_filters.py`. Everything else just asks.
+
+## [3.21.26] - 2026-06-10
+
+### Changed — draw_filters is now self-sufficient (real single source of truth)
+- `services/draw_filters.py` now owns the audio_settings read. It loads from `service_config` itself, caches with a 5 s TTL backstop, and exposes a cache-bust hook. Callers just call `should_draw_class(name)` and `min_confidence_for(name)` — no parameters except the class name.
+- Before this refactor four different files had to remember to pass `audio_settings` into `draw_filters` helpers, and each time a caller forgot, the rule silently defaulted to "skip". This is what made the dashboard timeline composite blank in 3.21.25 — `routers/websocket.py` had its own annotation path that called `draw_detection_on(... obj_filters=...)` without audio_settings, so every class hit the strict rule's default-skip branch.
+- Updated callers (now parameter-free): `services/detection.py` annotator, `services/render.py::draw_detection_on`, `services/watcher.py` timeline composite, `routers/websocket.py::_build_timeline_composite`.
+- Cache-bust hooks added to `POST /api/audio_settings` and the auto-register write path, so a Show-toggle change takes effect on the very next captured frame instead of waiting up to 5 s.
+- This is the architectural pattern from now on: any future per-class draw decision lives ONLY in `services/draw_filters.py`. Everything else just asks.
+
+## [3.21.25] - 2026-06-10
+
+### Changed — Show is now explicit opt-in (final answer)
+- The "should we draw this class?" rule is now strict: `audio_settings.<class>.show == True` draws, **anything else (False, None, missing entry) skips**. This matches the Process tab's single Show checkbox: tick = draw, untick or missing = skip.
+- Previous attempts: 3.21.22 was strict (broke yolo classes the operator hadn't explicitly Show-ticked → silent on restart). 3.21.23 flipped to default-on (math channels with no entry started flooding the annotated jpgs). Neither matched operator expectations. This is the right rule.
+- Companion change: **auto-register newly-seen classes**. `services/detection.py::_auto_register_classes()` runs after every inference call — any class that appears in `yolo_res` but isn't in `audio_settings` gets a stub entry with `show=False`. So nothing silently disappears (every detected class shows up as a card in the Process tab, just unticked), and nothing draws unless the operator explicitly ticks it.
+- UI: the Show checkbox now renders as **unchecked** when there's no saved value (was checked-by-default before). This matches the new backend rule so what you see in the UI is what the annotator does.
+- Also adds the `p50` value to the per-class confidence baseline display: `📊 normal conf: 6 · 9 · 14% (p5–p50–p95) · n=15111` plus same format on each per-camera line.
+
+## [3.21.24] - 2026-06-10
+
+### Added — Process tab filter & busy-first sort
+- New filter bar above the per-object grid: 🔍 search box, "Show only active" toggle, time-window picker (15m / 1h / 6h / 24h / 7d), and a counter chip ("Showing 12 of 134 · 8 active in last 1h").
+- Classes with detections in the chosen window now float to the top of the grid automatically — even with the toggle off, the busy classes are first. Tail of idle classes stays alphabetical.
+- New backend endpoint `GET /api/active_classes?window=1h` (cheap SQL group-by; returns class names, counts, and per-camera lists).
+
+### Added — Per-camera confidence baselines + auto-suggest Min-Conf
+- `/api/conf_baselines` now also returns `p5` and `by_camera` percentiles (p5/p50/p95/n per camera). Operators can finally tune `Min-Conf` per camera against the noise floor of THAT camera.
+- Per-class card now shows a second line below the existing badge: `cam 1: 14–31% n=6.2k · cam 2: 6–12% n=8.3k`.
+- 🪄 buttons next to each row set Min-Conf to that camera's p5 in one click — "set the threshold to capture everything that's historically real on this camera, drop nothing".
+
+### Fixed (config, no code change to mainline) — math stride bias on 2-camera lines
+- On the test box (vteam12) flipped the `math_v1` phase stride from `10` to `9`. With the global frame counter and 2 cameras alternating, an even stride means math only ever lands on cam 2; an odd stride alternates evenly. Future-proof per-camera-counter refactor queued for next release.
+
+## [3.21.23] - 2026-06-10
+
+### Fixed — bbox drawing for yolo classes that aren't explicitly in audio_settings
+- 3.21.22's "no entry → don't draw" default was too strict. After every restart, yolo classes that the operator hadn't explicitly Show=true'd in the Process tab went silent. Reverted to "no entry → DRAW" (default-on for unknown classes).
+- Behavior now: explicit `audio_settings.<class>.show == False` always wins; explicit `True` always wins; missing entry → draws (the original pre-3.21.10 behavior).
+- The math-flood concern from earlier — where PVB had ~300 math detections per frame all drawing as kv-text labels — stays addressable by ticking Show=off on those specific classes once. Their show=False is then persistent.
+- Also fixed the `timeline.py:2071` crash that surfaced when the operator hit "Apply Timeline Configuration" — leftover `len(object_filters)` reference from the 3.21.22 cleanup. Replaced with the preserved value.
+
 ## [3.21.22] - 2026-06-10
 
 ### Removed — stream:5000 log spam (dead service)

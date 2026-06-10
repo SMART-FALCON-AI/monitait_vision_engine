@@ -506,11 +506,14 @@ try:
 except Exception as e:
     logger.warning(f"Could not pre-load camera config: {e}")
 
-# 3.21.22 — startup migrations. Idempotent; each migration self-detects
-# whether it has already run. Persists changes back to disk if anything
-# moved.
+# 3.21.22 + 3.22.0 — startup migrations. Idempotent; each migration self-
+# detects whether it has already run. Persists changes through both DB +
+# file via the standard save_* helpers.
 try:
-    from services.migrations import migrate_object_filters_into_audio_settings
+    from services.migrations import (
+        migrate_object_filters_into_audio_settings,
+        migrate_data_file_into_db,
+    )
     _svc = load_service_config() or {}
     _data = load_data_file() or {}
     _changed = migrate_object_filters_into_audio_settings(_svc, _data)
@@ -518,6 +521,10 @@ try:
         save_service_config(_svc)
         save_data_file(_data)
         logger.info("startup migrations: persisted")
+
+    # 3.22.0 — bootstrap the DB from the file if this is the first boot after
+    # upgrade. Safe no-op when DB already has rows or DB is unreachable.
+    migrate_data_file_into_db()
 except Exception as e:
     logger.warning(f"startup migrations failed: {e}")
 

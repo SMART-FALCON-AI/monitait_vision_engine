@@ -158,7 +158,24 @@ COMMANDS_WITH_VALUE = [
 # =============================================================================
 
 def load_data_file():
-    """Load entire data file. Returns dict with 'data' key for list content, or the dict itself."""
+    """Load the MVE configuration. DB-first (3.22.0), file fallback.
+
+    Order:
+      1. mve_config_kv table in Postgres (new source of truth)
+      2. .env.prepared_query_data on disk (legacy / DB unreachable fallback)
+
+    Returns a dict (possibly empty if both sources fail).
+    """
+    # 3.22.0 — DB first
+    try:
+        from services.config_db import load_all as _db_load
+        db_data = _db_load()
+        if db_data:  # non-empty dict (None when DB unreachable, {} when table empty)
+            return db_data
+    except Exception as e:
+        logger.debug(f"DB load skipped, using file: {e}")
+
+    # File fallback (legacy path — also the bootstrap source for the first DB save)
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r') as f:
@@ -171,7 +188,27 @@ def load_data_file():
     return {}
 
 def save_data_file(data):
-    """Save entire data file with backup."""
+    """Persist the MVE configuration.
+
+    3.22.0 — dual-write:
+      1. Write to mve_config_kv table (the new source of truth)
+      2. ALWAYS dump file snapshot so legacy tooling that reads the JSON
+         directly (`cat | jq`, Advanced tab Data File Editor, pre-3.22
+         builds at remote sites) keeps working.
+
+    File write happens regardless of DB outcome — that keeps backward
+    compat solid. Returns True if at least one write succeeded.
+    """
+    # 1) DB write (best-effort; debug-logs if unreachable)
+    db_ok = False
+    try:
+        from services.config_db import save_all as _db_save
+        db_ok = _db_save(data, updated_by="mve")
+    except Exception as e:
+        logger.debug(f"DB save skipped: {e}")
+
+    # 2) File snapshot (always)
+    file_ok = False
     try:
         if os.path.exists(DATA_FILE):
             backup_file = f"{DATA_FILE}.backup"
@@ -182,11 +219,15 @@ def save_data_file(data):
 
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f, indent=2)
-        logger.info(f"Data file saved to {DATA_FILE}")
-        return True
+        file_ok = True
+        if db_ok:
+            logger.info(f"Data saved (DB + file snapshot at {DATA_FILE})")
+        else:
+            logger.info(f"Data saved (file only at {DATA_FILE} — DB unreachable)")
     except Exception as e:
         logger.error(f"Error saving data file: {e}")
-        return False
+
+    return db_ok or file_ok
 
 def load_service_config():
     """Load service configuration from data file (under 'service_config' key)."""

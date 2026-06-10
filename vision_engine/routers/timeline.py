@@ -608,7 +608,23 @@ QUALITY_REINSPECT_SCORE = 60
 
 
 def _compute_conf_baselines():
-    """Per-class p50/p95/n of confidence over last 7 days of stored detections."""
+    """Per-class confidence baselines over last 7 days of stored detections.
+
+    3.21.24 — now returns per-class AND per-camera percentiles plus a p5 so
+    operators can drive per-camera min_confidence sliders off real-world data.
+
+    Shape:
+      {
+        "TB": {
+          "p5": 0.08, "p50": 0.12, "p95": 0.14, "n": 14524,           # overall
+          "by_camera": {
+            "1": {"p5": 0.14, "p50": 0.22, "p95": 0.31, "n": 6203},
+            "2": {"p5": 0.06, "p50": 0.09, "p95": 0.12, "n": 8321}
+          }
+        },
+        ...
+      }
+    """
     import time as _t
     if _t.time() - _baseline_cache["computed_at"] < _BASELINE_TTL_SEC and _baseline_cache["baselines"]:
         return _baseline_cache["baselines"]
@@ -621,9 +637,11 @@ def _compute_conf_baselines():
         if conn is None:
             return _baseline_cache.get("baselines", {})
         cur = conn.cursor()
+        # Overall (no camera grouping)
         cur.execute(
             """
             SELECT (det->>'name') AS cls,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p5,
                    percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p50,
                    percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p95,
                    COUNT(*) AS n
@@ -634,13 +652,46 @@ def _compute_conf_baselines():
             HAVING COUNT(*) >= 5
             """
         )
-        for cls, p50, p95, n in cur.fetchall():
+        for cls, p5, p50, p95, n in cur.fetchall():
             if cls:
                 out[str(cls)] = {
+                    "p5":  round(float(p5  or 0.0), 4),
                     "p50": round(float(p50 or 0.0), 4),
                     "p95": round(float(p95 or 0.0), 4),
                     "n":   int(n or 0),
+                    "by_camera": {},
                 }
+        # Per-camera breakdown
+        cur.execute(
+            """
+            SELECT (det->>'name') AS cls,
+                   (det->>'_cam') AS cam,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->>'confidence')::float) AS p95,
+                   COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL '7 days'
+              AND (det->>'confidence') IS NOT NULL
+              AND (det->>'_cam') IS NOT NULL
+            GROUP BY (det->>'name'), (det->>'_cam')
+            HAVING COUNT(*) >= 5
+            """
+        )
+        for cls, cam, p5, p50, p95, n in cur.fetchall():
+            if not cls or cam is None:
+                continue
+            cls_s = str(cls)
+            # If this class wasn't in the overall pass (rare — e.g. only one cam
+            # so the per-class HAVING failed), seed it.
+            if cls_s not in out:
+                out[cls_s] = {"p5": 0.0, "p50": 0.0, "p95": 0.0, "n": 0, "by_camera": {}}
+            out[cls_s]["by_camera"][str(cam)] = {
+                "p5":  round(float(p5  or 0.0), 4),
+                "p50": round(float(p50 or 0.0), 4),
+                "p95": round(float(p95 or 0.0), 4),
+                "n":   int(n or 0),
+            }
         cur.close()
     except Exception as e:
         logger.warning(f"conf_baselines compute failed: {e}")
@@ -669,6 +720,65 @@ async def recompute_conf_baselines():
     """Force-invalidate the baseline cache (used by admin/dev tools)."""
     _baseline_cache["computed_at"] = 0.0
     return JSONResponse(content={"baselines": _compute_conf_baselines()})
+
+
+@router.get("/api/active_classes")
+async def get_active_classes(window: str = "1h"):
+    """Classes with at least one detection in the recent window — used by the
+    Process tab "Show only active" filter (3.21.24).
+
+    Returns:
+      {
+        "window": "1h",
+        "names": ["TB", "mean_L", ...],      # de-duplicated, sorted by total count desc
+        "by_camera": {"1": ["TB"], "2": ["TB", "mean_L"], ...},
+        "counts":   {"TB": 14524, "mean_L": 312, ...},
+      }
+    """
+    _windows = {"15m": "15 minutes", "1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "1 hour")
+    out = {"window": window, "names": [], "by_camera": {}, "counts": {}}
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=out)
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT (det->>'name') AS cls, (det->>'_cam') AS cam, COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s
+              AND (det->>'name') IS NOT NULL
+            GROUP BY (det->>'name'), (det->>'_cam')
+            """,
+            (interval,),
+        )
+        for cls, cam, n in cur.fetchall():
+            cls_s = str(cls)
+            cnt = int(n or 0)
+            out["counts"][cls_s] = out["counts"].get(cls_s, 0) + cnt
+            if cam is not None:
+                out["by_camera"].setdefault(str(cam), []).append(cls_s)
+        cur.close()
+        # Sort de-duplicated names by total count desc (busiest first)
+        out["names"] = sorted(out["counts"].keys(), key=lambda k: -out["counts"][k])
+        # De-dup the by_camera lists, preserve order
+        for k, names in out["by_camera"].items():
+            seen, uniq = set(), []
+            for n in names:
+                if n not in seen:
+                    seen.add(n)
+                    uniq.append(n)
+            out["by_camera"][k] = uniq
+    except Exception as e:
+        logger.warning(f"active_classes query failed: {e}")
+    finally:
+        try:
+            release_db_connection(conn)
+        except Exception:
+            pass
+    return JSONResponse(content=out)
 
 
 def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
@@ -2068,7 +2178,7 @@ async def update_timeline_config(request: Request):
             redis_client.delete(*timeline_keys)
             logger.info(f"Cleared {len(timeline_keys)} timeline buffers to apply new settings")
 
-        logger.info(f"Timeline config saved: order={camera_order}, quality={image_quality}, rows={num_rows}, buffer={buffer_size}, object_filters={len(object_filters)} objects")
+        logger.info(f"Timeline config saved: order={camera_order}, quality={image_quality}, rows={num_rows}, buffer={buffer_size}, object_filters={len(preserved_object_filters)} preserved (deprecated)")
 
         return {
             'success': True,

@@ -111,6 +111,7 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
             show_bbox = True
             obj_filters = {}
             procedures = []
+        # 3.21.26 — draw_filters loads audio_settings itself; nothing for us to do here.
 
         # Get current encoder for ejector marker
         try:
@@ -226,8 +227,7 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
                         kv_y = 4
                         for det in detections:
                             kv_y = draw_detection_on(
-                                thumb, det, sx=sx, sy=sy, kv_y=kv_y,
-                                bbox_thickness=2, obj_filters=obj_filters,
+                                thumb, det, sx=sx, sy=sy, kv_y=kv_y, bbox_thickness=2,
                             )
                     if image_rotation == 90:
                         thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)

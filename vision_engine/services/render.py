@@ -76,11 +76,13 @@ def draw_detection_on(
     try:
         name = det.get('name', '')
         confidence = float(det.get('confidence', 0) or 0)
-        # 3.21.21: unified show / min_confidence rule (see services/draw_filters.py)
+        # 3.21.26 — draw_filters owns the audio_settings read. We no longer
+        # pass it through here; obj_filters / audio_settings args are
+        # accepted for back-compat but ignored. One source of truth.
         from services.draw_filters import should_draw_class, min_confidence_for
-        if not should_draw_class(name, audio_settings, obj_filters):
+        if not should_draw_class(name):
             return kv_y
-        if confidence < min_confidence_for(name, audio_settings, obj_filters):
+        if confidence < min_confidence_for(name):
             return kv_y
         x1 = int(det.get('xmin', det.get('x1', 0)) * sx)
         y1 = int(det.get('ymin', det.get('y1', 0)) * sy)
