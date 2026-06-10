@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.22.1] - 2026-06-10
+
+### Removed — 🪄 auto-suggest buttons on the per-class baseline lines
+- Both the overall "🪄 auto p5" button and the small per-camera 🪄 buttons next to each percentile have been removed from the Process tab cards. They didn't fit visually in the existing layout. The percentile text (p5 · p50 · p95 + n) stays — the operator can read the noise floor and type Min-Conf manually. The `suggestMinConfFromBaseline()` JS helper is kept around in case we re-introduce it in a different location later.
+
 ## [3.22.0] - 2026-06-10
 
 ### Added — service_config moves to Postgres (with backward compat)
