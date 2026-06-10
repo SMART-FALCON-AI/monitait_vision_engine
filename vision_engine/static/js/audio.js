@@ -1404,6 +1404,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 };
             });
 
+            // 3.21.22 — object_filters is no longer written from the UI.
+            // The Process tab toggle alone is the canonical Show source
+            // (audio_settings.<class>.show). Sending object_filters here
+            // would just re-create the drift that we ripped out server-side.
+            // Backend tolerates the field's absence — it was already optional.
             const response = await fetch('/api/timeline_config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1415,7 +1420,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     num_rows: parseInt(rows),
                     buffer_size: parseInt(buffer),
                     image_rotation: rotation,
-                    object_filters: objectFilters
                 })
             });
 

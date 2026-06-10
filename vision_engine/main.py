@@ -428,6 +428,7 @@ from routers.inference import router as inference_router
 from routers.states import router as states_router
 from routers.config_routes import router as config_router
 from routers.ai import router as ai_router
+from routers.ai_trainer import router as ai_trainer_router
 from routers.commands import router as commands_router
 from routers.websocket import router as ws_router
 
@@ -439,6 +440,7 @@ app.include_router(inference_router)
 app.include_router(states_router)
 app.include_router(config_router)
 app.include_router(ai_router)
+app.include_router(ai_trainer_router)  # 3.21.22 — AI Trainer integration
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 
@@ -503,6 +505,21 @@ try:
         logger.info(f"Pre-loaded camera configs for {len(_startup_cam_configs)} camera(s)")
 except Exception as e:
     logger.warning(f"Could not pre-load camera config: {e}")
+
+# 3.21.22 — startup migrations. Idempotent; each migration self-detects
+# whether it has already run. Persists changes back to disk if anything
+# moved.
+try:
+    from services.migrations import migrate_object_filters_into_audio_settings
+    _svc = load_service_config() or {}
+    _data = load_data_file() or {}
+    _changed = migrate_object_filters_into_audio_settings(_svc, _data)
+    if _changed:
+        save_service_config(_svc)
+        save_data_file(_data)
+        logger.info("startup migrations: persisted")
+except Exception as e:
+    logger.warning(f"startup migrations failed: {e}")
 
 watcher = ArduinoSocket(
     camera_paths=DETECTED_CAMERAS if DETECTED_CAMERAS else None,

@@ -1534,10 +1534,14 @@ class ArduinoSocket:
 
                         stream_image = np.concatenate((stream_image, stream_frame[1]), axis=1) if stream_image is not None else stream_frame[1]
 
-                    cv2.imwrite("output.jpg", stream_image)
-                    requests.post(f"http://stream:5000/send_frame_from_file/{1}", files={"file": open(f"output.jpg", "rb")})   
+                    # 3.21.22 — removed the `output.jpg` write + `http://stream:5000`
+                    # POST. The `stream` service was removed from docker-compose long
+                    # ago, but the unconditional call here was still spamming the log
+                    # ~once per frame with "Temporary failure in name resolution".
+                    # The intermediate `stream_image` mosaic is no longer consumed
+                    # by anything, so the concat above could also be deleted later.
 
-                
+
                 try:
                     self.raw_mismatch_queue = self.get_queue_messages(stream_name="dms_mismatch")
                     if self.raw_mismatch_queue:

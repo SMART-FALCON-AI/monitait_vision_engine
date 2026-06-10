@@ -646,6 +646,68 @@ window.loadEncoderCalibration = loadEncoderCalibration;
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadEncoderCalibration, 1100));
 
 
+// 3.21.22 — AI Trainer config (Advanced tab). Same pattern as Encoder
+// Calibration: load on page open, save on button click. The api_key
+// field is write-only — the server never returns it; a saved key is
+// only signalled via has_api_key.
+async function loadAiTrainerConfig() {
+    try {
+        const r = await fetch('/api/ai_trainer/config');
+        if (!r.ok) return;
+        const d = await r.json();
+        const u = document.getElementById('ai-trainer-url-input');
+        const t = document.getElementById('ai-trainer-task-id-input');
+        const k = document.getElementById('ai-trainer-api-key-input');
+        if (u && d.url) u.value = d.url;
+        if (t && d.task_id) t.value = d.task_id;
+        if (k) k.placeholder = d.has_api_key
+            ? '(a key is saved; leave blank to keep it)'
+            : 'paste an API key if your trainer needs one';
+    } catch (e) {}
+}
+
+async function saveAiTrainerConfig() {
+    const u = (document.getElementById('ai-trainer-url-input')?.value || '').trim();
+    const t = (document.getElementById('ai-trainer-task-id-input')?.value || '').trim();
+    const k = document.getElementById('ai-trainer-api-key-input')?.value || '';
+    const resp = document.getElementById('ai-trainer-response');
+    const body = { url: u, task_id: t };
+    // Only send api_key when the operator actually typed something.
+    // Blank means "keep existing" because the GET hides the saved value.
+    if (k.length > 0) body.api_key = k;
+    try {
+        const r = await fetch('/api/ai_trainer/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            if (resp) {
+                resp.textContent = `✓ Saved. task_id=${d.task_id || '(none)'}` + (d.has_api_key ? ' · API key on file' : '');
+                resp.className = 'control-response success';
+            }
+            const k2 = document.getElementById('ai-trainer-api-key-input');
+            if (k2) k2.value = '';
+            loadAiTrainerConfig();
+        } else {
+            if (resp) {
+                resp.textContent = `Error: ${d.error || 'failed'}`;
+                resp.className = 'control-response error';
+            }
+        }
+    } catch (e) {
+        if (resp) {
+            resp.textContent = `Error: ${e.message}`;
+            resp.className = 'control-response error';
+        }
+    }
+}
+window.saveAiTrainerConfig = saveAiTrainerConfig;
+window.loadAiTrainerConfig = loadAiTrainerConfig;
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadAiTrainerConfig, 1200));
+
+
 // 3.21.11: Storage Path (DATA_ROOT) — load current value from compose .env
 // and let the user change it. Change requires container restart to apply.
 async function loadDataRoot() {

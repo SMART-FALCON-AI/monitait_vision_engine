@@ -1304,6 +1304,55 @@ function openDefectDrawerForFrame(item) {
     }
 }
 
+// 3.21.22 — upload the currently-shown raw frame to ai-trainer.monitait.com.
+// Posts {image_path, class_name, shipment, camera} to /api/ai_trainer/upload
+// which strips the _DETECTED suffix, validates the path, and forwards the
+// bytes to the configured trainer URL.
+async function uploadCurrentDefectToAiTrainer() {
+    const btn = document.getElementById('defect-upload-trainer');
+    const meta = document.getElementById('defect-drawer-meta');
+    const item = _currentDefectItem;
+    if (!item || !item.image_path) {
+        if (meta) meta.innerHTML = '<span style="color:#f87171;">No frame loaded — click a chart dot first.</span>';
+        return;
+    }
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Uploading…'; }
+    try {
+        const body = {
+            image_path: item.image_path,
+            class_name: item.cls || (item.classes && item.classes[0]) || '',
+            shipment: item.shipment || '',
+            camera: item.camera_index != null ? String(item.camera_index) : '',
+        };
+        const r = await fetch('/api/ai_trainer/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            if (btn) btn.textContent = '✓ Sent';
+            if (meta) {
+                const tid = d.task_id ? ` (task_id=${d.task_id})` : '';
+                meta.innerHTML = `<span style="color:#86efac;">📤 Raw image uploaded to AI Trainer${tid}.</span>`;
+            }
+        } else {
+            if (btn) btn.textContent = '⚠️ Failed';
+            const errMsg = (d && d.error) ? d.error : `HTTP ${r.status}`;
+            if (meta) meta.innerHTML = `<span style="color:#f87171;">📤 Upload failed: ${errMsg}</span>`;
+        }
+    } catch (e) {
+        if (btn) btn.textContent = '⚠️ Failed';
+        if (meta) meta.innerHTML = `<span style="color:#f87171;">📤 Upload error: ${e.message || e}</span>`;
+    } finally {
+        // Restore button label after 3 s so the operator can upload again.
+        setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = origText || '📤 Upload to AI Trainer'; } }, 3000);
+    }
+}
+window.uploadCurrentDefectToAiTrainer = uploadCurrentDefectToAiTrainer;
+
+
 function setDefectView(kind) {
     if (!['ann', 'raw', 'both'].includes(kind)) return;
     _currentDefectView = kind;

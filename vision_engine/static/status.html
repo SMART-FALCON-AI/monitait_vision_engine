@@ -1264,6 +1264,36 @@
                     </div>
                 </div>
 
+                <!-- 3.21.22 — AI Trainer integration. The "📤 Upload to AI Trainer"
+                     button on the defect-drawer POSTs the RAW image bytes to the
+                     URL below. `{task_id}` in the URL gets substituted at upload
+                     time; otherwise it goes as a form field. API key is optional. -->
+                <div class="control-section">
+                    <h3>🧠 <span data-i18n="ai_trainer">AI Trainer</span></h3>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
+                        When you click a defect dot in the Charts tab, a 📤 Upload to AI Trainer button appears in the drawer. It POSTs the <b>raw</b> (unannotated) frame to the URL below. Use <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">{task_id}</code> as a placeholder; otherwise task_id is sent as a form field. API key is optional (sent as <code>Authorization: Bearer …</code> when set).
+                    </div>
+                    <div class="control-grid">
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label">Trainer URL</div>
+                            <input type="text" class="control-input" id="ai-trainer-url-input" value="https://ai-trainer.monitait.com/api/tasks/{task_id}/upload" placeholder="https://ai-trainer.monitait.com/api/tasks/{task_id}/upload">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Task ID</div>
+                            <input type="text" class="control-input" id="ai-trainer-task-id-input" placeholder="e.g. shoga-2026-q2">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">API key (optional)</div>
+                            <input type="password" class="control-input" id="ai-trainer-api-key-input" placeholder="leave blank if not used; previously-saved key is preserved">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Stored server-side; not returned. Send an explicit empty value to clear.</div>
+                        </div>
+                        <div class="control-item" style="grid-column: span 2;">
+                            <button class="control-button" onclick="saveAiTrainerConfig()" style="background:var(--primary-color); color:white;">Save AI Trainer Config</button>
+                            <div id="ai-trainer-response" class="control-response"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Storage Path Section (3.21.11) -->
                 <div class="control-section">
                     <h3>💾 <span data-i18n="storage_config">Raw Image Storage</span></h3>
@@ -1475,6 +1505,9 @@
                         <span id="defect-drawer-count" style="font-size:11px; color:var(--text-secondary);"></span>
                     </div>
                     <div style="display:flex; gap:8px; align-items:center;">
+                        <!-- 3.21.22 — Upload the RAW image of the current frame to ai-trainer.monitait.com.
+                             Config (URL + task_id) lives in Advanced → AI Trainer. -->
+                        <button id="defect-upload-trainer" onclick="uploadCurrentDefectToAiTrainer()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Send the raw image of this frame to the AI trainer for retraining">📤 Upload to AI Trainer</button>
                         <div id="defect-view-toggle" style="display:flex; gap:0; border:1px solid rgba(51,65,85,0.7); border-radius:4px; overflow:hidden;">
                             <button data-view="ann"  onclick="setDefectView('ann')"  style="background:rgba(59,130,246,0.6); color:#fff; border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Annotated</button>
                             <button data-view="raw"  onclick="setDefectView('raw')"  style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Raw</button>

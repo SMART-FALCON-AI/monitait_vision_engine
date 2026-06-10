@@ -2029,13 +2029,19 @@ async def update_timeline_config(request: Request):
         num_rows = data.get('num_rows', 10)
         buffer_size = data.get('buffer_size', 20)  # Total frames to store
         image_rotation = data.get('image_rotation', 0)  # 0, 90, 180, 270
-        object_filters = data.get('object_filters', {})  # {name: {show: bool, min_confidence: float}}
         procedures = data.get('procedures', getattr(request.app.state, 'timeline_config', {}).get('procedures', []))
 
-        # Strip legacy eject fields from object_filters (handled by procedures now)
-        for obj_cfg in object_filters.values():
-            obj_cfg.pop('eject', None)
-            obj_cfg.pop('eject_condition', None)
+        # 3.21.22 — object_filters is deprecated. The Process tab's
+        # audio_settings.<class>.show is the canonical source of truth for the
+        # annotator (see services/draw_filters.py). We preserve any existing
+        # object_filters dict on the in-memory state for backwards compatibility
+        # with any reader I haven't migrated yet, but we no longer ACCEPT
+        # writes to it from the timeline_config POST. If a legacy client still
+        # sends `object_filters`, we silently ignore it.
+        _prev_tc = getattr(request.app.state, 'timeline_config', {}) or {}
+        preserved_object_filters = _prev_tc.get('object_filters', {})
+        if 'object_filters' in data:
+            logger.info("update_timeline_config: ignoring deprecated `object_filters` field in payload (use POST /api/audio_settings instead)")
 
         # Store configuration in app state
         request.app.state.timeline_config = {
@@ -2046,7 +2052,7 @@ async def update_timeline_config(request: Request):
             'num_rows': num_rows,
             'buffer_size': buffer_size,
             'image_rotation': image_rotation,
-            'object_filters': object_filters,
+            'object_filters': preserved_object_filters,
             'procedures': procedures
         }
 

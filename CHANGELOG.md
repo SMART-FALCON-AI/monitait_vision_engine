@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.21.22] - 2026-06-10
+
+### Removed — stream:5000 log spam (dead service)
+- `services/watcher.py:1537` was writing `output.jpg` and POSTing it to `http://stream:5000/send_frame_from_file/1` every loop iteration. The `stream` service was removed from `docker-compose.yml` long ago, so every site has been logging "Temporary failure in name resolution" once per frame ever since. Deleted the two lines.
+
+### Changed — audio_settings is now the only canonical Show / min_confidence source
+- The legacy `timeline_config.object_filters` dict is no longer written by the UI (`audio.js:1418`) and no longer accepted by the backend (`POST /api/timeline_config` now ignores the field with a log warning). The Process tab "Show" toggle is the canonical source.
+- `services/draw_filters.py` simplified to read only `audio_settings`. The `obj_filters` kwarg is kept for signature compatibility but ignored.
+- One-time startup migration `services/migrations.py::migrate_object_filters_into_audio_settings` folds any pre-3.21.22 `object_filters` entries into `audio_settings` so no class is silently dropped. Idempotent — safe to re-run.
+
+### Added — AI Trainer upload from the defect drawer
+- New "📤 Upload to AI Trainer" button in the defect-drawer header. One click POSTs the *raw* (un-annotated) frame for the currently-shown dot to a configured ai-trainer URL together with `task_id` + class + shipment + camera. Used to feed mislabelled / surprising detections into the model retraining pipeline at `ai-trainer.monitait.com`.
+- New `routers/ai_trainer.py` with three endpoints:
+  - `GET  /api/ai_trainer/config` — current url / task_id / has_api_key flag (key itself never returned)
+  - `POST /api/ai_trainer/config` — set url / task_id / api_key
+  - `POST /api/ai_trainer/upload` — body `{image_path, task_id?, class_name?, shipment?, camera?}` — strips `_DETECTED.jpg` to get the raw, validates the path is under `raw_images/`, forwards to the trainer URL with optional `Authorization: Bearer …` header.
+- New Advanced tab → 🧠 AI Trainer section (URL + Task ID + API key + Save).
+- URL template supports `{task_id}` substitution; otherwise task_id goes as a form field. Default URL: `https://ai-trainer.monitait.com/api/tasks/{task_id}/upload`.
+
 ## [3.21.21] - 2026-06-09
 
 ### Changed — unified show / min_confidence rule (one helper across three draw paths)
