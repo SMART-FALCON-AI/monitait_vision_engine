@@ -4,6 +4,8 @@
 **Last Updated:** 2026-06-11
 **Application URL:** `http://localhost` (port 80, or whichever port your install uses)
 
+> **Note on screenshots:** The images embedded in this manual were captured against MVE v3.21.18. They predate the Process tab filter bar (3.21.24), ColorE/Area/E controls (3.22.2–3.22.5), the (i) info tooltips, and the reordered card layout (3.22.4). The text reflects 3.22.5. Refreshed screenshots will land in a follow-up release.
+
 ---
 
 ## Table of Contents

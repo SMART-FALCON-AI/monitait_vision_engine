@@ -103,3 +103,4 @@ htmlcov/
 dmypy.json
 3D/
 .backups/
+USER_MANUAL_*.pdf
