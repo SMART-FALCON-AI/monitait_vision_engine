@@ -75,12 +75,18 @@ async def get_ai_config():
     """Get all configured AI models and active model."""
     try:
         data = _get_ai_models_from_redis()
-        # Strip API keys for display (show only last 4 chars)
+        # Strip API keys for display (show only last 4 chars). Surface the
+        # 3.21.23 base_url and model_id fields so the UI can pre-fill them.
         safe_models = {}
         for name, cfg in data.get("models", {}).items():
             key = cfg.get("api_key", "")
             masked = f"***{key[-4:]}" if len(key) > 4 else "***"
-            safe_models[name] = {"provider": cfg["provider"], "api_key_masked": masked}
+            safe_models[name] = {
+                "provider": cfg.get("provider", ""),
+                "api_key_masked": masked,
+                "base_url": cfg.get("base_url", ""),
+                "model_id": cfg.get("model_id", ""),
+            }
         return JSONResponse(content={"models": safe_models, "active": data.get("active")})
     except Exception as e:
         logger.error(f"Error getting AI config: {e}")
@@ -89,11 +95,23 @@ async def get_ai_config():
 
 @router.post("/api/ai_config")
 async def save_ai_config(config: Dict[str, Any]):
-    """Save/update an AI model configuration."""
+    """Save/update an AI model configuration.
+
+    3.21.23 — new optional fields:
+      - base_url: override the SDK's default endpoint (lets you point at
+                  any OpenAI-compatible relay, e.g. rucode.rdemos.com/v1,
+                  ollama, etc).
+      - model_id: override the hard-coded model name in the chat call
+                  (e.g. "kimi-k2.6", "claude-3-5-sonnet-20241022", "llama3:8b").
+
+    Both fields default to empty (sdk defaults preserved).
+    """
     try:
         name = config.get("name", "").strip()
         provider = config.get("provider", "")
         api_key = config.get("api_key", "")
+        base_url = (config.get("base_url") or "").strip()
+        model_id = (config.get("model_id") or "").strip()
 
         if not name:
             return JSONResponse(content={"error": "Model name is required"}, status_code=400)
@@ -103,7 +121,12 @@ async def save_ai_config(config: Dict[str, Any]):
             return JSONResponse(content={"error": "API key is required"}, status_code=400)
 
         data = _get_ai_models_from_redis()
-        data["models"][name] = {"provider": provider, "api_key": api_key}
+        data["models"][name] = {
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": base_url,  # empty = sdk default
+            "model_id": model_id,  # empty = sdk default
+        }
 
         # Auto-activate if it's the first model
         if not data.get("active") or len(data["models"]) == 1:
@@ -550,7 +573,7 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
 # AI QUERY ENDPOINT
 # =============================================================================
 
-async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str, watcher_instance=None) -> str:
+async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str, watcher_instance=None, base_url: str = "", model_id: str = "") -> str:
     """Call the appropriate AI model API with tool support."""
     try:
         if model == "claude":
@@ -605,9 +628,15 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             return "Maximum iterations reached. Please simplify your query."
 
         elif model == "chatgpt":
-            # OpenAI ChatGPT API with function calling
+            # OpenAI ChatGPT API with function calling.
+            # 3.21.23 — if a base_url was configured (for an OpenAI-compatible
+            # relay like ai-trainer.monitait.com / rucode.rdemos.com / Ollama /
+            # vLLM / LiteLLM), use it. Otherwise the SDK hits openai.com.
             import openai
-            client = openai.OpenAI(api_key=api_key)
+            _openai_kwargs = {"api_key": api_key}
+            if base_url:
+                _openai_kwargs["base_url"] = base_url
+            client = openai.OpenAI(**_openai_kwargs)
 
             # Convert tools to OpenAI format
             functions = []
@@ -627,7 +656,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             max_iterations = 5
             for iteration in range(max_iterations):
                 response = client.chat.completions.create(
-                    model="gpt-4o",  # Use gpt-4o for 128K context
+                    model=(model_id or "gpt-4o"),  # 3.21.23 — operator-configurable model id
                     messages=messages,
                     functions=functions,
                     max_tokens=4096
@@ -693,6 +722,163 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
         return f"AI request failed: {str(e)}"
 
 
+@router.post("/api/why")
+async def why_for_dot(request: Request, payload: Dict[str, Any]):
+    """3.23.0 — Explain a single chart dot.
+
+    Operator clicks a dot on the Charts tab → drawer opens → 🤔 Why? button
+    posts {metric, value, timestamp, camera, encoder, shipment, image_path,
+    window_seconds} here. We gather a focused context (surrounding detection
+    counts + class breakdown over ±window_seconds, capture/inference health,
+    state + pipeline name) and ask the active AI model for a 2-sentence
+    diagnosis. Response is small + fast — the goal is a quick "huh, that's
+    why" not a full RCA.
+    """
+    try:
+        metric = str(payload.get("metric") or "defect")
+        value  = payload.get("value")
+        ts_in  = payload.get("timestamp")
+        camera = payload.get("camera")
+        encoder = payload.get("encoder")
+        shipment = payload.get("shipment") or "no_shipment"
+        win_s   = int(payload.get("window_seconds") or 300)
+
+        # ----- active AI model -----
+        ai_data = _get_ai_models_from_redis()
+        active_name = ai_data.get("active")
+        if not active_name or active_name not in ai_data.get("models", {}):
+            return JSONResponse(
+                content={"error": "AI not configured. Add and activate a model in AI Configuration."},
+                status_code=400,
+            )
+        active_model = ai_data["models"][active_name]
+        provider = active_model["provider"]
+        api_key  = active_model["api_key"]
+        base_url = (active_model.get("base_url") or "").strip()
+        model_id = (active_model.get("model_id") or "").strip()
+
+        # ----- gather surrounding context from inference_results -----
+        from services.db import get_db_connection, release_db_connection
+        ctx_lines = []
+        conn = None
+        try:
+            conn = get_db_connection()
+            if conn is not None and ts_in:
+                cur = conn.cursor()
+                # 1. detection-count timeline for THIS class around the dot
+                cur.execute(
+                    """
+                    SELECT date_trunc('minute', time) AS m, COUNT(*)
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                    WHERE time BETWEEN to_timestamp(%s/1000.0) - make_interval(secs => %s)
+                                   AND to_timestamp(%s/1000.0) + make_interval(secs => %s)
+                      AND (det->>'name') = %s
+                    GROUP BY 1 ORDER BY 1
+                    """,
+                    (ts_in, win_s, ts_in, win_s, metric),
+                )
+                rows = cur.fetchall()
+                if rows:
+                    ctx_lines.append(
+                        f"Counts of '{metric}' (per-minute, ±{win_s}s window):\n"
+                        + "\n".join(f"  {r[0].strftime('%H:%M')}  {r[1]}" for r in rows[:30])
+                    )
+                # 2. top-3 other classes firing in the same window
+                cur.execute(
+                    """
+                    SELECT (det->>'name') AS cls, COUNT(*) AS n
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                    WHERE time BETWEEN to_timestamp(%s/1000.0) - make_interval(secs => %s)
+                                   AND to_timestamp(%s/1000.0) + make_interval(secs => %s)
+                      AND (det->>'name') IS NOT NULL
+                      AND (det->>'name') <> %s
+                    GROUP BY 1 ORDER BY n DESC LIMIT 5
+                    """,
+                    (ts_in, win_s, ts_in, win_s, metric),
+                )
+                co = [(r[0], int(r[1])) for r in cur.fetchall()]
+                if co:
+                    ctx_lines.append(
+                        "Other classes firing in the same window: "
+                        + ", ".join(f"{c}={n}" for c, n in co)
+                    )
+                cur.close()
+        except Exception as _db_err:
+            logger.debug(f"why ctx db lookup failed: {_db_err}")
+        finally:
+            if conn is not None:
+                try:
+                    release_db_connection(conn)
+                except Exception:
+                    pass
+
+        # ----- real-time system snapshot from Redis -----
+        try:
+            r = Redis("redis", 6379, db=REDIS_DB)
+            def _g(k, d="?"):
+                v = r.get(k)
+                return v.decode() if v else d
+            sys_state = (
+                f"encoder={_g('encoder','0')}  "
+                f"moving={_g('is_moving','?')}  "
+                f"ok={_g('ok_counter','0')}  ng={_g('ng_counter','0')}  "
+                f"downtime={_g('downtime_seconds','0')}s"
+            )
+        except Exception:
+            sys_state = "(redis unavailable)"
+
+        # ----- active capture state + pipeline -----
+        try:
+            from config import load_service_config as _load_svc
+            svc = _load_svc() or {}
+            current_state = svc.get("current_state_name") or "?"
+            current_pipeline = (svc.get("pipeline_config") or {}).get("current_pipeline") or "?"
+        except Exception:
+            current_state = current_pipeline = "?"
+
+        # ----- compact prompt — we want a 2-sentence answer, not a treatise -----
+        from datetime import datetime as _dt
+        when_str = _dt.fromtimestamp((ts_in or 0) / 1000.0).strftime("%Y-%m-%d %H:%M:%S") if ts_in else "?"
+        cam_str = f"cam {camera}" if camera is not None else "(unknown camera)"
+        enc_str = f"encoder {int(encoder):,}" if encoder is not None else ""
+        val_str = ""
+        if value is not None:
+            try:
+                v = float(value)
+                val_str = f"value={v:.2f}" if v <= 1 else f"metric={v:.1f}"
+            except (TypeError, ValueError):
+                pass
+
+        system_prompt = (
+            "You are an industrial QC assistant explaining a specific dot on a quality chart. "
+            "Be CONCISE: at most 2 sentences. Lead with the most likely cause. If the data is "
+            "ambiguous, say so plainly. Do not invent details that aren't in the context."
+        )
+        user_query = (
+            f"At {when_str}, on {cam_str}, the class '{metric}' fired ({val_str}).\n"
+            f"{enc_str}\n"
+            f"Shipment: {shipment}.\n"
+            f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
+            f"System: {sys_state}.\n\n"
+            + ("\n\n".join(ctx_lines) if ctx_lines else "(no surrounding context available)")
+            + "\n\nWhy did this happen? (2 sentences max.)"
+        )
+
+        watcher_instance = request.app.state.watcher_instance
+        answer = await call_ai_model(
+            provider, api_key, system_prompt, user_query, watcher_instance,
+            base_url=base_url, model_id=model_id,
+        )
+        return JSONResponse(content={
+            "answer": (answer or "").strip() or "(no answer)",
+            "model":  active_name,
+            "usage":  f"window=±{win_s}s · ctx_blocks={len(ctx_lines)}",
+        })
+    except Exception as e:
+        logger.error(f"/api/why failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.post("/api/ai_query")
 async def query_ai(request: Request, payload: Dict[str, Any]):
     """Query AI with production data from TimescaleDB and real-time metrics."""
@@ -712,6 +898,9 @@ async def query_ai(request: Request, payload: Dict[str, Any]):
         active_model = ai_data["models"][active_name]
         model = active_model["provider"]
         api_key = active_model["api_key"]
+        # 3.21.23 — optional overrides for OpenAI-compatible relays / custom model IDs
+        base_url = (active_model.get("base_url") or "").strip()
+        model_id = (active_model.get("model_id") or "").strip()
 
         r = Redis("redis", 6379, db=REDIS_DB)
 
@@ -798,7 +987,7 @@ encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds, inferenc
 - Keep responses concise but complete."""
 
         # Call AI API based on model
-        ai_response = await call_ai_model(model, api_key, system_prompt, user_query, watcher_instance=watcher)
+        ai_response = await call_ai_model(model, api_key, system_prompt, user_query, watcher_instance=watcher, base_url=base_url, model_id=model_id)
 
         return JSONResponse(content={"response": ai_response, "model": model})
 

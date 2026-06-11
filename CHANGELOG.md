@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.23.0] - 2026-06-11
+
+### Added — 🤔 Why? chip on chart dots (operator-delight tier)
+- Every chart-dot drawer now has a **🤔 Why?** button next to the AI Trainer upload. Click → the active AI model gets called with a focused, context-rich prompt about that specific dot and returns a **2-sentence diagnosis** rendered inline in a new green panel under the drawer body. No tab-switching.
+- Pre-loaded context in the prompt (so the operator never types a precise question): metric/class name, value, timestamp, camera, encoder, shipment, current capture state + active pipeline name, real-time system snapshot from Redis (encoder, moving, OK/NG counters, downtime), surrounding chart context from `inference_results` (per-minute counts of THIS class over ±5 min, top-5 other classes firing in the same window).
+- New endpoint `POST /api/why` with payload `{metric, value, timestamp, camera, encoder, shipment, image_path, window_seconds}`. Returns `{answer, model, usage}`. Reuses the existing active-AI-model routing (provider + base_url + model_id) introduced in 3.21.23, so any OpenAI-compatible endpoint plugs in unchanged.
+- UI: the Why panel auto-clears when a new dot is opened, shows a "🤔 thinking…" placeholder while in flight, and gracefully handles error responses with red-tinted inline text.
+- Why this matters: turns the AI Assistant tab from "novelty" to "indispensable." The biggest single operator-delight feature in the roadmap, shipped on its own as a minor version.
+
 ## [3.22.5] - 2026-06-11
 
 ### Added — Absolute E (color magnitude), per-detection, usable for ejection

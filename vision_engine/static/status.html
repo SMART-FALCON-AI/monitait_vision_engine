@@ -1542,6 +1542,9 @@
                         <!-- 3.21.22 — Upload the RAW image of the current frame to ai-trainer.monitait.com.
                              Config (URL + task_id) lives in Advanced → AI Trainer. -->
                         <button id="defect-upload-trainer" onclick="uploadCurrentDefectToAiTrainer()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Send the raw image of this frame to the AI trainer for retraining">📤 Upload to AI Trainer</button>
+                        <!-- 3.23.0 — Ask the active AI model "why did this happen?" with the dot's
+                             metric/value/time + surrounding chart context pre-loaded. -->
+                        <button id="defect-why-btn" onclick="askWhyForCurrentDefect()" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Ask the active AI model to explain this dot — uses the surrounding chart context">🤔 Why?</button>
                         <div id="defect-view-toggle" style="display:flex; gap:0; border:1px solid rgba(51,65,85,0.7); border-radius:4px; overflow:hidden;">
                             <button data-view="ann"  onclick="setDefectView('ann')"  style="background:rgba(59,130,246,0.6); color:#fff; border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Annotated</button>
                             <button data-view="raw"  onclick="setDefectView('raw')"  style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Raw</button>
@@ -1554,6 +1557,8 @@
                     <!-- one big image (or two for Both) injected by JS -->
                 </div>
                 <div id="defect-drawer-empty" style="display:none; padding:40px; text-align:center; color:var(--text-secondary); font-size:14px;">No stored images for this selection in the current window.</div>
+                <!-- 3.23.0 — Why? result lands here (hidden until the user clicks the chip). -->
+                <div id="defect-drawer-why" style="display:none; padding:10px 16px; border-top:1px solid rgba(16,185,129,0.4); background:rgba(16,185,129,0.05); font-size:13px; color:#d1fae5; line-height:1.5; flex-shrink:0; max-height:180px; overflow-y:auto;"></div>
                 <div id="defect-drawer-meta" style="padding:8px 16px; border-top:1px solid rgba(51,65,85,0.6); font-size:12px; color:#cbd5e1; flex-shrink:0;"></div>
             </div>
         </div>

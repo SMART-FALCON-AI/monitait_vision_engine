@@ -1245,8 +1245,10 @@ function openDefectDrawerForFrame(item) {
     const title  = document.getElementById('defect-drawer-title');
     const cnt    = document.getElementById('defect-drawer-count');
     const meta   = document.getElementById('defect-drawer-meta');
+    const whyP   = document.getElementById('defect-drawer-why'); // 3.23.0
     if (!drawer || !item) return;
     body.innerHTML = '';
+    if (whyP) { whyP.style.display = 'none'; whyP.innerHTML = ''; }
     if (empty) empty.style.display = 'none';
     drawer.style.display = 'flex';
 
@@ -1303,6 +1305,59 @@ function openDefectDrawerForFrame(item) {
             + '  &nbsp;|&nbsp;  <span style="color:#94a3b8;">scroll to zoom · drag to pan · double-click to reset</span>';
     }
 }
+
+// 3.23.0 — "🤔 Why?" chip: ask the active AI model to explain the currently
+// open chart-dot. The backend gathers surrounding context (last 5 min of
+// detections on this class/camera, recent inference latency, capture FPS,
+// active pipeline, current state) so the model has enough to diagnose
+// without us forcing the operator to ask a precise question.
+async function askWhyForCurrentDefect() {
+    const btn  = document.getElementById('defect-why-btn');
+    const panel = document.getElementById('defect-drawer-why');
+    const item = _currentDefectItem;
+    if (!item) return;
+    if (!btn || !panel) return;
+
+    panel.style.display = 'block';
+    panel.innerHTML = '<span style="opacity:0.7;">🤔 thinking…</span>';
+    btn.disabled = true; btn.style.opacity = '0.6';
+
+    try {
+        const payload = {
+            metric: item.cls || (item.classes && item.classes[0]) || 'defect',
+            value:  item.best_confidence ?? null,
+            timestamp: item.t || null,
+            camera: item.camera_index ?? null,
+            encoder: item.encoder ?? null,
+            shipment: item.shipment || null,
+            image_path: item.image_path || null,
+            window_seconds: 300,  // 5 min before + after the dot
+        };
+        const r = await fetch('/api/why', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            panel.innerHTML = '<span style="color:#fca5a5;">' +
+                (data.error || ('Request failed (' + r.status + ')')) + '</span>';
+            return;
+        }
+        const ans = (data.answer || '').trim();
+        const model = data.model || '';
+        const usage = data.usage ? '<span style="opacity:0.5; font-size:11px;"> · ' + data.usage + '</span>' : '';
+        panel.innerHTML = '<div style="color:#a7f3d0; font-size:11px; margin-bottom:4px;">🤔 Why? — via <b>' +
+            (model || 'AI') + '</b>' + usage + '</div>' +
+            '<div>' + ans.replace(/\n/g, '<br>') + '</div>';
+    } catch (e) {
+        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + (e.message || e) + '</span>';
+    } finally {
+        btn.disabled = false; btn.style.opacity = '1';
+    }
+}
+window.askWhyForCurrentDefect = askWhyForCurrentDefect;
+
 
 // 3.21.22 — upload the currently-shown raw frame to ai-trainer.monitait.com.
 // Posts {image_path, class_name, shipment, camera} to /api/ai_trainer/upload
