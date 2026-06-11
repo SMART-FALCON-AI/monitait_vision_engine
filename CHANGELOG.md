@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.9] - 2026-06-11
+
+### Fixed — AI Trainer upload: send `status=" "` + list-of-tuples multipart + auth-path retries
+- The trainer's `TaskImage.status` DB column is NOT NULL (model default = `" "` literal space — `TaskImageStatus.NULL` in their `choices_fields.py`). Their view does `status=request.POST.get("status")` which returns Python `None` when we don't send it, overriding the model default and triggering an `IntegrityError: null value in column "status" of relation "api_taskimage" violates not-null constraint`. That surfaced to MVE as `400 "No files were processed successfully"` because the view's per-file `except` catches the DB error, logs it, and the empty `upload_locations` list at the end returns the generic 400.
+- We now send `status=" "` (matching the model default) in the multipart form data so the row inserts cleanly. Other valid values per their enum: `OK`, `NG`, `NA`, `MU`.
+- The multipart payload for `files` is now built as a list-of-tuples (`[("files", (name, bytes, mime))]`) instead of a dict (`{"files": (...)}`) — the list form is the canonical multi-file shape Django's `request.FILES.getlist("files")` expects.
+- `_trainer_login` and `_trainer_refresh` (the JWT auth helpers) now use the same 3-attempt retry-with-backoff as the upload, so the transient docker-bridge stalls that bit the upload also don't bite the login path.
+
 ## [3.24.8] - 2026-06-11
 
 ### Added — AI Trainer JWT auth + transient-DNS retry

@@ -90,15 +90,29 @@ def _save_tokens(access: str, refresh: str) -> None:
     save_service_config(svc)
 
 
+def _post_with_retry(url: str, *, json_body: dict, timeout: int = 20, attempts: int = 3):
+    """POST with N attempts and brief backoff. Returns the final Response object
+    or raises the last RequestException. Same pattern as the upload retry —
+    transient ConnectTimeout / DNS hiccups in the docker bridge network are
+    common against external hosts; one retry usually clears it."""
+    import time as _t
+    last_err = None
+    for i in range(attempts):
+        try:
+            return requests.post(url, json=json_body, timeout=timeout)
+        except requests.RequestException as e:
+            last_err = e
+            logger.warning(f"trainer auth POST attempt {i+1}/{attempts} failed: {e}")
+            if i < attempts - 1:
+                _t.sleep(0.5 * (i + 1))
+    raise last_err
+
+
 def _trainer_login(email: str, password: str, origin: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """POST /api/token/ to obtain a fresh (access, refresh) pair.
     Returns (access, refresh, None) on success or (None, None, error_text)."""
     try:
-        r = requests.post(
-            f"{origin}/api/token/",
-            json={"email": email, "password": password},
-            timeout=15,
-        )
+        r = _post_with_retry(f"{origin}/api/token/", json_body={"email": email, "password": password})
         if r.status_code == 200:
             d = r.json()
             return d.get("access"), d.get("refresh"), None
@@ -111,11 +125,7 @@ def _trainer_refresh(refresh: str, origin: str) -> tuple[Optional[str], Optional
     """POST /api/token/refresh/ to swap a refresh token for a new access.
     Returns (access, None) on success or (None, error_text)."""
     try:
-        r = requests.post(
-            f"{origin}/api/token/refresh/",
-            json={"refresh": refresh},
-            timeout=15,
-        )
+        r = _post_with_retry(f"{origin}/api/token/refresh/", json_body={"refresh": refresh})
         if r.status_code == 200:
             return r.json().get("access"), None
         return None, f"HTTP {r.status_code}: {r.text[:200]}"
@@ -309,8 +319,17 @@ async def upload_to_ai_trainer(request: Request):
     # (plural — it supports multiple uploads per request) per its OpenAPI.
     # The actual `files` dict is rebuilt inside the retry loop below using
     # the cached bytes (line ~198) so retries don't need to re-open the file.
+    #
+    # 3.24.9 — the trainer's TaskImage.status column is NOT NULL in the DB
+    # (default = " " literal space), but its create-view does
+    # `status=request.POST.get("status")` which returns None when we don't
+    # send it → IntegrityError. We send the model's own default value
+    # explicitly so the row inserts cleanly. Choices: OK / NG / NA / MU / " "
+    # (the last is the "unlabeled" default — perfect for fresh uploads
+    # from MVE that haven't been operator-classified yet).
     data = {
         **form_extra,
+        "status": " ",
         "source_shipment": str(body.get("shipment") or ""),
         "source_camera": str(body.get("camera") or ""),
         "class_name": str(body.get("class_name") or ""),
@@ -344,10 +363,13 @@ async def upload_to_ai_trainer(request: Request):
     last_err = None
     file_bytes = raw_path.read_bytes()  # read once so we can retry without re-opening
     for attempt in range(3):
-        # Re-build files dict each attempt — requests consumes the stream.
-        files = {"files": (raw_path.name, file_bytes, "image/jpeg")}
+        # 3.24.9 — use the list-of-tuples form so the multipart field name
+        # "files" is encoded correctly for Django's `request.FILES.getlist("files")`.
+        # The dict form `{"files": (...)}` works for simple servers but trips PIL
+        # on the trainer side (it ended up unable to identify the bytes).
+        files_payload = [("files", (raw_path.name, file_bytes, "image/jpeg"))]
         try:
-            r = requests.post(target_url, files=files, data=data, headers=headers, timeout=20)
+            r = requests.post(target_url, files=files_payload, data=data, headers=headers, timeout=20)
             ok = (200 <= r.status_code < 300)
             return JSONResponse(content={
                 "success": ok,
