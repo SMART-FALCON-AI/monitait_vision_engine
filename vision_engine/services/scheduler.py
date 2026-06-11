@@ -88,21 +88,29 @@ def cron_matches(cron: str, now: datetime) -> bool:
 
 async def _fetch_shipment_report_pdf(app, shipment: str) -> Optional[bytes]:
     """Generate the shipment-quality PDF in-process by calling the existing
-    /api/shipment_quality_score/report.pdf handler. We dispatch via the FastAPI
-    test client so we don't need to know the local port."""
+    handler. We pass a minimal Request shim — the handler reads
+    `request.app.state` (3.21.18+).
+    """
     try:
-        # Reuse the function directly to avoid an HTTP round-trip.
-        from routers.timeline import shipment_quality_report_pdf  # 3.21.18+
-        # The handler signature varies a bit across versions; call defensively.
-        try:
-            resp = await shipment_quality_report_pdf(shipment=shipment, window="24h")
-        except TypeError:
-            resp = await shipment_quality_report_pdf(shipment, "24h")
-        # FastAPI response — extract bytes.
+        # The actual exported name is `shipment_quality_score_report` (3.21.18).
+        from routers.timeline import shipment_quality_score_report
+        # FastAPI handlers take a Request; pass a shim that exposes `app`
+        # because that's all the handler reads.
+        class _FakeReq:
+            def __init__(self, _app):
+                self.app = _app
+                self.headers = {}
+        resp = await shipment_quality_score_report(_FakeReq(app), shipment=shipment, window="24h")
+        # The handler returns a StreamingResponse for the PDF — iterate the body.
+        if hasattr(resp, "body_iterator"):
+            chunks = []
+            async for chunk in resp.body_iterator:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                chunks.append(chunk)
+            return b"".join(chunks)
         if hasattr(resp, "body"):
             return bytes(resp.body)
-        if hasattr(resp, "media") and isinstance(resp.media, (bytes, bytearray)):
-            return bytes(resp.media)
     except Exception as e:
         logger.warning(f"shift report PDF generation failed: {e}")
     return None

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.5] - 2026-06-11
+
+### Fixed — shift-report scheduler couldn't generate the PDF
+- `services/scheduler.py::_fetch_shipment_report_pdf` was calling a function name + signature that didn't exist on this branch. Replaced with the real handler (`routers/timeline.py::shipment_quality_score_report`), passing a minimal Request shim (the handler only reads `request.app`).
+- The PDF endpoint returns a `StreamingResponse`, not a buffered one — switched to iterating `body_iterator` to collect the bytes properly.
+- After this fix, **Send now** in Advanced → Notifications generates and delivers the quality PDF to the configured chat in real time. Verified end-to-end against a Bale chat: `message_id: 7, status: ok`.
+
 ## [3.24.4] - 2026-06-11
 
 ### Changed — Notifications: Bale removed, single Telegram channel with configurable base URL
