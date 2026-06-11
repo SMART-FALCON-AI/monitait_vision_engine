@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.7] - 2026-06-11
+
+### Fixed — AI Trainer upload was hitting a 404 URL
+- The default upload URL was `https://ai-trainer.monitait.com/api/tasks/{task_id}/upload` — that path never existed on the actual trainer (confirmed by reading the trainer's Django source on prod: routes are registered via DRF's `router.register("images", TaskImageViewSet)`, so the real endpoint is `POST /api/images/`).
+- Default URL is now `https://ai-trainer.monitait.com/api/images/`.
+- Field names corrected to match the trainer's `swagger_auto_schema` declaration:
+  - **`task_id`** (form field) → **`task`** (integer)
+  - **`file`** (single file) → **`files`** (multi-file capable)
+- After this fix the trainer responds with a clear `401 "Authentication credentials were not provided."` for unauthenticated requests — operators paste an API key into Advanced → AI Trainer and uploads go through as `201 Created`.
+- The original `502` the operator saw was MVE's `requests` library mapping the trainer's `404 Not Found` (wrong URL) into a generic gateway error.
+
 ## [3.24.6] - 2026-06-11
 
 ### Added — Schedule trigger types + multi-shipment support

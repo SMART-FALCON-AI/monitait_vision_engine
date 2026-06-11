@@ -37,7 +37,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
-_DEFAULT_URL = "https://ai-trainer.monitait.com/api/tasks/{task_id}/upload"
+_DEFAULT_URL = "https://ai-trainer.monitait.com/api/images/"
+# 3.24.7 — the trainer's real endpoint is `POST /api/images/` with multipart
+# form fields `task=<int>` + `files=@<file>` (one or many). The historical
+# `tasks/{task_id}/upload` shape never existed on this trainer (returned 404).
 
 
 def _ai_trainer_cfg() -> dict:
@@ -159,17 +162,22 @@ async def upload_to_ai_trainer(request: Request):
             status_code=400,
         )
 
-    # Resolve the URL — substitute {task_id} or fall back to a form field.
+    # Resolve the URL — substitute {task_id} placeholder (legacy support) or
+    # send the task as a form field (current trainer contract).
     url_tpl = cfg["url"] or _DEFAULT_URL
     if "{task_id}" in url_tpl:
         target_url = url_tpl.replace("{task_id}", task_id)
         form_extra = {}
     else:
         target_url = url_tpl
-        form_extra = {"task_id": task_id}
+        # 3.24.7 — trainer's view expects field name "task" (int) per the
+        # OpenAPI spec on ai-trainer.monitait.com. We send the task_id value
+        # verbatim — operator typed it, we trust them.
+        form_extra = {"task": task_id}
 
-    # Build the multipart payload.
-    files = {"file": (raw_path.name, open(str(raw_path), "rb"), "image/jpeg")}
+    # Build the multipart payload. The trainer accepts the "files" field
+    # (plural — it supports multiple uploads per request) per its OpenAPI.
+    files = {"files": (raw_path.name, open(str(raw_path), "rb"), "image/jpeg")}
     data = {
         **form_extra,
         "source_shipment": str(body.get("shipment") or ""),
