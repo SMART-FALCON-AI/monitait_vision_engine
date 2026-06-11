@@ -428,7 +428,7 @@ def evaluate_eject_from_detections(detections_list, procedures):
                     return area < threshold
                 elif cond == 'area_equals':
                     return area == threshold
-            # Color Delta E
+            # Color Delta E (relative to a reference)
             elif cond == 'color_delta':
                 max_de = rule.get('max_delta_e', 5.0)
                 ref_mode = rule.get('reference_mode', 'previous')
@@ -447,6 +447,30 @@ def evaluate_eject_from_detections(detections_list, procedures):
                 de = math.sqrt((cur[0]-ref[0])**2 + (cur[1]-ref[1])**2 + (cur[2]-ref[2])**2)
                 best_det['_delta_e'] = round(de, 2)
                 return de > max_de
+            # 3.22.5 — Absolute E (|LAB| magnitude, no baseline)
+            # E = sqrt(L² + a² + b²). A single scalar per detection, baseline-free.
+            # Lets operators set a hard threshold: "eject when E > 100 or E < 30".
+            elif cond in ('E_greater', 'E_less', 'E_between'):
+                # Find the highest-confidence detection that has E stored
+                best_det = None
+                best_conf = -1
+                for det in obj_dets:
+                    if 'E' in det and det.get('confidence', 0) > best_conf:
+                        best_det = det
+                        best_conf = det.get('confidence', 0)
+                if best_det is None:
+                    return False
+                try:
+                    e_val = float(best_det['E'])
+                except (TypeError, ValueError):
+                    return False
+                best_det['_E'] = round(e_val, 2)
+                if cond == 'E_greater':
+                    return e_val > float(rule.get('E', 100.0))
+                if cond == 'E_less':
+                    return e_val < float(rule.get('E', 30.0))
+                if cond == 'E_between':
+                    return float(rule.get('E_min', 30.0)) <= e_val <= float(rule.get('E_max', 100.0))
             return False
 
         def _rule_detail(rule, triggered):
@@ -468,6 +492,18 @@ def evaluate_eject_from_detections(detections_list, procedures):
                         op = {'area_greater': '>', 'area_less': '<', 'area_equals': '='}[cond]
                         return f"'{obj}' area {det['_area']}px {op} {rule.get('area', 10000)}"
                 return f"'{obj}' area out of range"
+
+            # 3.22.5 — E (absolute color magnitude) rule detail
+            if cond in ('E_greater', 'E_less', 'E_between'):
+                for det in proc_dets:
+                    if isinstance(det, dict) and det.get('name') == obj and '_E' in det:
+                        if cond == 'E_greater':
+                            return f"'{obj}' E {det['_E']} > {rule.get('E', 100.0)}"
+                        if cond == 'E_less':
+                            return f"'{obj}' E {det['_E']} < {rule.get('E', 30.0)}"
+                        if cond == 'E_between':
+                            return f"'{obj}' E {det['_E']} in [{rule.get('E_min', 30.0)}, {rule.get('E_max', 100.0)}]"
+                return f"'{obj}' E out of range"
 
             expected = rule.get('count', 1)
             min_conf = rule.get('min_confidence', 0) / 100.0
@@ -1195,6 +1231,17 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
                     lab = extract_lab_color(image, det)
                     if lab is not None:
                         det['lab_color'] = lab
+                        # 3.22.5 — absolute color magnitude:
+                        #   E = √(L² + a² + b²)
+                        # A single scalar per detection that doesn't depend on
+                        # a moving baseline. Use in ejection procedures as a
+                        # hard threshold ("eject when E < 30 or E > 100"), and
+                        # show p5/p50/p95 of it on the Process tab card.
+                        try:
+                            L, a, b = float(lab[0]), float(lab[1]), float(lab[2])
+                            det['E'] = round((L*L + a*a + b*b) ** 0.5, 2)
+                        except (TypeError, ValueError, IndexError):
+                            pass
                         _any_lab = True
                 if _any_lab:
                     update_color_references(yolo_res)

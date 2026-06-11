@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.22.5] - 2026-06-11
+
+### Added — Absolute E (color magnitude), per-detection, usable for ejection
+- New scalar **E** stored on every detection that has `lab_color`. Computed at detection time as `E = √(L² + a² + b²)` — the Euclidean magnitude of the CIELAB vector. Single number, no moving baseline, comparable across shifts.
+- New ejection-procedure conditions in `services/detection.py`:
+  - **`E_greater`** with field `E` — eject when measured E exceeds threshold
+  - **`E_less`** with field `E` — eject when measured E is below threshold
+  - **`E_between`** with fields `E_min` and `E_max` — keep detections inside the band, eject outside
+- Rule-detail formatter handles the new conditions so the ejection log line reads `'TB' E 112.3 > 100.0` instead of just "rule triggered".
+- New row on the Process tab per-class card: **`✴ E (abs): 51.4 · 54.7 · 58.9 (p5–p50–p95)`** with an (i) tooltip explaining the formula and how to wire it into a procedure. Pair the displayed p5/p95 with the ejection threshold and you get a one-click "catch both ends of color drift" rule.
+- `/api/color_drift` response now includes an `E: {p5, p50, p95}` block per class (and per camera), in addition to the existing L/a/b breakdown. SQL uses `COALESCE(det.E, √(L²+a²+b²))` so old detections without the stored `E` field still contribute by computing from `lab_color`.
+
 ## [3.22.4] - 2026-06-11
 
 ### Changed — Absolute CIELAB instead of ΔE; (i) tooltips with formulas

@@ -765,6 +765,21 @@ async def get_color_drift(window: str = "7d"):
                    percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p5,
                    percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p50,
                    percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p95,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY COALESCE((det->>'E')::float, |/(
+                       POWER((det->'lab_color'->>0)::float, 2) +
+                       POWER((det->'lab_color'->>1)::float, 2) +
+                       POWER((det->'lab_color'->>2)::float, 2)
+                   ))) AS E_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY COALESCE((det->>'E')::float, |/(
+                       POWER((det->'lab_color'->>0)::float, 2) +
+                       POWER((det->'lab_color'->>1)::float, 2) +
+                       POWER((det->'lab_color'->>2)::float, 2)
+                   ))) AS E_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY COALESCE((det->>'E')::float, |/(
+                       POWER((det->'lab_color'->>0)::float, 2) +
+                       POWER((det->'lab_color'->>1)::float, 2) +
+                       POWER((det->'lab_color'->>2)::float, 2)
+                   ))) AS E_p95,
                    COUNT(*) AS n
             FROM inference_results, LATERAL jsonb_array_elements(detections) det
             WHERE time > NOW() - INTERVAL %s
@@ -776,7 +791,7 @@ async def get_color_drift(window: str = "7d"):
             (interval,),
         )
         for row in cur.fetchall():
-            cls, Lp5, Lp50, Lp95, ap5, ap50, ap95, bp5, bp50, bp95, n = row
+            cls, Lp5, Lp50, Lp95, ap5, ap50, ap95, bp5, bp50, bp95, Ep5, Ep50, Ep95, n = row
             if not cls:
                 continue
             out[str(cls)] = {
@@ -790,6 +805,9 @@ async def get_color_drift(window: str = "7d"):
                 "b": {"p5": round(float(bp5  or 0), 2),
                       "p50": round(float(bp50 or 0), 2),
                       "p95": round(float(bp95 or 0), 2)},
+                "E": {"p5": round(float(Ep5  or 0), 2),
+                      "p50": round(float(Ep50 or 0), 2),
+                      "p95": round(float(Ep95 or 0), 2)},
                 "by_camera": {},
             }
         # Per-camera
@@ -806,6 +824,21 @@ async def get_color_drift(window: str = "7d"):
                    percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p5,
                    percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p50,
                    percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p95,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY COALESCE((det->>'E')::float, |/(
+                       POWER((det->'lab_color'->>0)::float, 2) +
+                       POWER((det->'lab_color'->>1)::float, 2) +
+                       POWER((det->'lab_color'->>2)::float, 2)
+                   ))) AS E_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY COALESCE((det->>'E')::float, |/(
+                       POWER((det->'lab_color'->>0)::float, 2) +
+                       POWER((det->'lab_color'->>1)::float, 2) +
+                       POWER((det->'lab_color'->>2)::float, 2)
+                   ))) AS E_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY COALESCE((det->>'E')::float, |/(
+                       POWER((det->'lab_color'->>0)::float, 2) +
+                       POWER((det->'lab_color'->>1)::float, 2) +
+                       POWER((det->'lab_color'->>2)::float, 2)
+                   ))) AS E_p95,
                    COUNT(*) AS n
             FROM inference_results, LATERAL jsonb_array_elements(detections) det
             WHERE time > NOW() - INTERVAL %s
@@ -818,7 +851,7 @@ async def get_color_drift(window: str = "7d"):
             (interval,),
         )
         for row in cur.fetchall():
-            cls, cam, Lp5, Lp50, Lp95, ap5, ap50, ap95, bp5, bp50, bp95, n = row
+            cls, cam, Lp5, Lp50, Lp95, ap5, ap50, ap95, bp5, bp50, bp95, Ep5, Ep50, Ep95, n = row
             cls_s = str(cls)
             if cls_s not in out:
                 continue
@@ -833,6 +866,9 @@ async def get_color_drift(window: str = "7d"):
                 "b": {"p5": round(float(bp5  or 0), 2),
                       "p50": round(float(bp50 or 0), 2),
                       "p95": round(float(bp95 or 0), 2)},
+                "E": {"p5": round(float(Ep5  or 0), 2),
+                      "p50": round(float(Ep50 or 0), 2),
+                      "p95": round(float(Ep95 or 0), 2)},
             }
         cur.close()
     except Exception as e:
