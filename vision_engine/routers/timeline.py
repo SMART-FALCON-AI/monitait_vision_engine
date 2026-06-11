@@ -724,24 +724,26 @@ async def recompute_conf_baselines():
 
 @router.get("/api/color_drift")
 async def get_color_drift(window: str = "7d"):
-    """3.22.2 — Per-class CIELAB ΔE drift over the requested window.
+    """3.22.4 — Per-class CIELAB color stats (absolute L*, a*, b* percentiles).
+
+    Replaces the ΔE drift readout that 3.22.2 originally shipped. Absolute
+    LAB values are more diagnostic: an operator looking at `L: 50 · 54 · 58`
+    can tell at a glance both what the typical color IS and how wide its
+    spread is — a single ΔE number couldn't do that. And when something
+    drifts, the operator can see WHICH channel moved (L = exposure/dye fade,
+    a = green↔red, b = blue↔yellow).
 
     For each class with stored detections carrying `lab_color`, returns:
-      - reference_lab: mean L*a*b* across all detections in the window
-                       (the "what counts as normal color")
-      - p5_de / p50_de / p95_de: percentiles of the CIE76 ΔE between each
-                                  detection's lab_color and the reference
+      - L / a / b: {p5, p50, p95} of each CIELAB component over the window
       - n: count of detections with a stored lab_color
       - by_camera: same metrics broken out per camera
 
     The operator opts a class in via the ColorE checkbox on the Process
     tab. The annotator then extracts `lab_color` for that class only,
-    so this endpoint's window only sees data once color_e=True has been
-    on long enough to accumulate.
+    so this endpoint only sees samples for classes color_e was on for.
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "7 days")
-
     out: dict = {}
     conn = None
     try:
@@ -749,94 +751,89 @@ async def get_color_drift(window: str = "7d"):
         conn = get_db_connection()
         if conn is None:
             return JSONResponse(content={"window": window, "classes": {}})
-
         cur = conn.cursor()
-        # Pass 1: reference LAB = mean across the window, per class
+        # Overall (no camera grouping): one row per class, with p5/p50/p95 for L, a, b
         cur.execute(
             """
             SELECT (det->>'name') AS cls,
-                   AVG((det->'lab_color'->>0)::float) AS ref_L,
-                   AVG((det->'lab_color'->>1)::float) AS ref_a,
-                   AVG((det->'lab_color'->>2)::float) AS ref_b,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>0)::float) AS L_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>0)::float) AS L_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>0)::float) AS L_p95,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>1)::float) AS a_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>1)::float) AS a_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>1)::float) AS a_p95,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p95,
                    COUNT(*) AS n
             FROM inference_results, LATERAL jsonb_array_elements(detections) det
             WHERE time > NOW() - INTERVAL %s
               AND (det ? 'lab_color')
+              AND (det->>'name') IS NOT NULL
             GROUP BY (det->>'name')
             HAVING COUNT(*) >= 5
             """,
             (interval,),
         )
-        for cls, refL, refa, refb, n in cur.fetchall():
+        for row in cur.fetchall():
+            cls, Lp5, Lp50, Lp95, ap5, ap50, ap95, bp5, bp50, bp95, n = row
             if not cls:
                 continue
             out[str(cls)] = {
                 "n": int(n or 0),
-                "reference_lab": [round(float(refL or 0), 2),
-                                  round(float(refa or 0), 2),
-                                  round(float(refb or 0), 2)],
+                "L": {"p5": round(float(Lp5  or 0), 2),
+                      "p50": round(float(Lp50 or 0), 2),
+                      "p95": round(float(Lp95 or 0), 2)},
+                "a": {"p5": round(float(ap5  or 0), 2),
+                      "p50": round(float(ap50 or 0), 2),
+                      "p95": round(float(ap95 or 0), 2)},
+                "b": {"p5": round(float(bp5  or 0), 2),
+                      "p50": round(float(bp50 or 0), 2),
+                      "p95": round(float(bp95 or 0), 2)},
                 "by_camera": {},
             }
-
-        # Pass 2: ΔE percentiles per class (overall + per-camera)
-        for cls in list(out.keys()):
-            rL, ra, rb = out[cls]["reference_lab"]
-            cur.execute(
-                """
-                SELECT
-                  percentile_cont(0.05) WITHIN GROUP (ORDER BY de) AS p5,
-                  percentile_cont(0.50) WITHIN GROUP (ORDER BY de) AS p50,
-                  percentile_cont(0.95) WITHIN GROUP (ORDER BY de) AS p95
-                FROM (
-                  SELECT |/(
-                    POWER((det->'lab_color'->>0)::float - %s, 2) +
-                    POWER((det->'lab_color'->>1)::float - %s, 2) +
-                    POWER((det->'lab_color'->>2)::float - %s, 2)
-                  ) AS de
-                  FROM inference_results, LATERAL jsonb_array_elements(detections) det
-                  WHERE time > NOW() - INTERVAL %s
-                    AND (det->>'name') = %s
-                    AND (det ? 'lab_color')
-                ) d
-                """,
-                (rL, ra, rb, interval, cls),
-            )
-            p5, p50, p95 = cur.fetchone()
-            out[cls]["p5_de"] = round(float(p5 or 0), 2)
-            out[cls]["p50_de"] = round(float(p50 or 0), 2)
-            out[cls]["p95_de"] = round(float(p95 or 0), 2)
-
-            cur.execute(
-                """
-                SELECT cam,
-                       COUNT(*) AS n,
-                       percentile_cont(0.05) WITHIN GROUP (ORDER BY de) AS p5,
-                       percentile_cont(0.50) WITHIN GROUP (ORDER BY de) AS p50,
-                       percentile_cont(0.95) WITHIN GROUP (ORDER BY de) AS p95
-                FROM (
-                  SELECT (det->>'_cam') AS cam,
-                         |/(
-                           POWER((det->'lab_color'->>0)::float - %s, 2) +
-                           POWER((det->'lab_color'->>1)::float - %s, 2) +
-                           POWER((det->'lab_color'->>2)::float - %s, 2)
-                         ) AS de
-                  FROM inference_results, LATERAL jsonb_array_elements(detections) det
-                  WHERE time > NOW() - INTERVAL %s
-                    AND (det->>'name') = %s
-                    AND (det ? 'lab_color')
-                    AND (det->>'_cam') IS NOT NULL
-                ) d
-                GROUP BY cam
-                """,
-                (rL, ra, rb, interval, cls),
-            )
-            for cam, n, p5, p50, p95 in cur.fetchall():
-                out[cls]["by_camera"][str(cam)] = {
-                    "n": int(n or 0),
-                    "p5_de":  round(float(p5  or 0), 2),
-                    "p50_de": round(float(p50 or 0), 2),
-                    "p95_de": round(float(p95 or 0), 2),
-                }
+        # Per-camera
+        cur.execute(
+            """
+            SELECT (det->>'name') AS cls,
+                   (det->>'_cam') AS cam,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>0)::float) AS L_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>0)::float) AS L_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>0)::float) AS L_p95,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>1)::float) AS a_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>1)::float) AS a_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>1)::float) AS a_p95,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY (det->'lab_color'->>2)::float) AS b_p95,
+                   COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s
+              AND (det ? 'lab_color')
+              AND (det->>'name') IS NOT NULL
+              AND (det->>'_cam') IS NOT NULL
+            GROUP BY (det->>'name'), (det->>'_cam')
+            HAVING COUNT(*) >= 5
+            """,
+            (interval,),
+        )
+        for row in cur.fetchall():
+            cls, cam, Lp5, Lp50, Lp95, ap5, ap50, ap95, bp5, bp50, bp95, n = row
+            cls_s = str(cls)
+            if cls_s not in out:
+                continue
+            out[cls_s]["by_camera"][str(cam)] = {
+                "n": int(n or 0),
+                "L": {"p5": round(float(Lp5  or 0), 2),
+                      "p50": round(float(Lp50 or 0), 2),
+                      "p95": round(float(Lp95 or 0), 2)},
+                "a": {"p5": round(float(ap5  or 0), 2),
+                      "p50": round(float(ap50 or 0), 2),
+                      "p95": round(float(ap95 or 0), 2)},
+                "b": {"p5": round(float(bp5  or 0), 2),
+                      "p50": round(float(bp50 or 0), 2),
+                      "p95": round(float(bp95 or 0), 2)},
+            }
         cur.close()
     except Exception as e:
         logger.warning(f"color_drift compute failed: {e}")

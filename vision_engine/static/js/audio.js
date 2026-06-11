@@ -406,6 +406,32 @@ function updateObjectsList() {
                 <div style="font-weight: 600; color: var(--text-primary); font-size: 14px; flex: 1;">${objectName}</div>
                 <span class="info-tooltip-sm" style="cursor: help;">i<span class="info-tooltip-text" style="text-align: left; min-width: 280px;">${infoHtml}</span></span>
             </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px;">
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Show bounding box">
+                    <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Show
+                </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Voice narration">
+                    <input type="checkbox" ${isNarrate ? 'checked' : ''} onchange="toggleObjectNarrate('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Narrate
+                </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Beep alert">
+                    <input type="checkbox" ${isBeep ? 'checked' : ''} onchange="toggleObjectBeep('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Beep
+                </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Persist this class's detections to the database (off = drop, on = write to inference_results)">
+                    <input type="checkbox" ${isStore ? 'checked' : ''} onchange="toggleObjectStore('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Store
+                </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="ColorE — extract CIELAB color from this class's bbox on every detection. Drives the 🎨 line below.">
+                    <input type="checkbox" ${isColorE ? 'checked' : ''} onchange="toggleObjectColorE('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    ColorE
+                </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Area — store bbox area on detection + show p5/p50/p95 below.">
+                    <input type="checkbox" ${isArea ? 'checked' : ''} onchange="toggleObjectArea('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Area
+                </label>
+            </div>
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;">
                 <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">Min conf:</span>
                 <input type="number" value="${confidence}" min="0" max="100" step="1"
@@ -418,48 +444,24 @@ function updateObjectsList() {
                     style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;"
                     title="Per-class defect impact weight (0=cosmetic, 100=critical)">
             </div>
-            ${baseline ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="Auto-learned from last 7 days of stored detections. p5 is the noise floor, p50 the typical confidence, p95 the high end.">
-                📊 normal conf: ${baseline.p5 !== undefined ? `${(baseline.p5*100).toFixed(0)} · <b>${(baseline.p50*100).toFixed(0)}</b> · ${(baseline.p95*100).toFixed(0)}% (p5–p50–p95)` : `${(baseline.p50*100).toFixed(0)}–${(baseline.p95*100).toFixed(0)}% (p50–p95)`} · n=${baseline.n||0}
+            ${baseline ? `<div style="display:flex; align-items:center; gap:4px; font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;">
+                <span style="flex:1;">📊 normal conf: ${baseline.p5 !== undefined ? `${(baseline.p5*100).toFixed(0)} · <b>${(baseline.p50*100).toFixed(0)}</b> · ${(baseline.p95*100).toFixed(0)}% (p5–p50–p95)` : `${(baseline.p50*100).toFixed(0)}–${(baseline.p95*100).toFixed(0)}% (p50–p95)`} · n=${baseline.n||0}</span>
+                <span class="info-tooltip-sm" style="cursor:help;">i<span class="info-tooltip-text" style="text-align:left; min-width:300px;"><b>Normal confidence</b><br>YOLO returns a score 0.0–1.0 for each detection — how sure the model is it found this class.<br><br><b>Formula:</b> percentile_cont over confidence values, last 7 days, this class.<br><br><b>p5</b> = the noise floor (only 5% of detections are below this).<br><b>p50</b> = median; this is what's "typical".<br><b>p95</b> = the strong-detection band.<br><br><b>Tune Min conf above p5</b> to filter noise, but well below p50 so you keep real detections.</span></span>
             </div>
             ${baseline.by_camera && Object.keys(baseline.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera percentiles. p5 · p50 · p95.">
                 ${Object.entries(baseline.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${(c.p5*100).toFixed(0)} · <b>${(c.p50*100).toFixed(0)}</b> · ${(c.p95*100).toFixed(0)}% n=${c.n>=1000 ? (c.n/1000).toFixed(1)+'k' : c.n}</span>`).join('')}
             </div>` : ''}` : ''}
-            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 6px;">
-                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Show bounding box">
-                    <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
-                    Show
-                </label>
-                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Voice narration">
-                    <input type="checkbox" ${isNarrate ? 'checked' : ''} onchange="toggleObjectNarrate('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
-                    Narrate
-                </label>
-                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Beep alert">
-                    <input type="checkbox" ${isBeep ? 'checked' : ''} onchange="toggleObjectBeep('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
-                    Beep
-                </label>
-                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Persist this class's detections to the database (off = drop, on = write to inference_results)">
-                    <input type="checkbox" ${isStore ? 'checked' : ''} onchange="toggleObjectStore('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
-                    Store
-                </label>
-                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="ColorE — extract CIELAB color from this class's bbox on every detection. Drives the 🎨 ΔE drift line below + the /api/color_drift analytics endpoint.">
-                    <input type="checkbox" ${isColorE ? 'checked' : ''} onchange="toggleObjectColorE('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
-                    ColorE
-                </label>
-                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Area — show bbox-area percentiles (p5/p50/p95) for this class. Useful for spotting false positives (much smaller than typical) or yarn issues (much larger).">
-                    <input type="checkbox" ${isArea ? 'checked' : ''} onchange="toggleObjectArea('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
-                    Area
-                </label>
+            ${isColorE && drift && drift.L ? `<div style="display:flex; align-items:center; gap:4px; font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;">
+                <span style="flex:1;">🎨 color &nbsp; L: ${drift.L.p5.toFixed(0)} · <b>${drift.L.p50.toFixed(0)}</b> · ${drift.L.p95.toFixed(0)} &nbsp; a: ${drift.a.p5.toFixed(0)} · <b>${drift.a.p50.toFixed(0)}</b> · ${drift.a.p95.toFixed(0)} &nbsp; b: ${drift.b.p5.toFixed(0)} · <b>${drift.b.p50.toFixed(0)}</b> · ${drift.b.p95.toFixed(0)} &nbsp; (p5–p50–p95) · n=${drift.n>=1000?(drift.n/1000).toFixed(1)+'k':drift.n}</span>
+                <span class="info-tooltip-sm" style="cursor:help;">i<span class="info-tooltip-text" style="text-align:left; min-width:360px;"><b>CIELAB color (L*a*b*)</b> — absolute color coordinates, sampled from the center 50% of each detection's bbox to skip edge artifacts.<br><br><b>L* (lightness):</b> 0 = pure black, 100 = pure white.<br><b>a*:</b> negative = green, positive = red.<br><b>b*:</b> negative = blue, positive = yellow.<br><br><b>Formula:</b> mean BGR → cv2.cvtColor(BGR_to_LAB) → normalize to CIE scale → percentile_cont per channel.<br><br><b>Drift diagnosis:</b><br>• L moving = exposure change, dye fade, lighting brightness<br>• a moving = green/red dye shift<br>• b moving = blue/yellow dye, lighting color temperature<br><br><b>Bonus:</b> ΔE between two LAB points = √((ΔL)² + (Δa)² + (Δb)²) — the CIE76 perceptual distance. The wider your p5↔p95 spread, the more variable the color.</span></span>
             </div>
-            ${isColorE && drift ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="CIELAB ΔE drift over the last 7 days. p5 / p50 / p95 of CIE76 ΔE distances vs the window's mean color. Lower = more consistent color, higher = drifting.">
-                🎨 ΔE drift: ${drift.p5_de.toFixed(1)} · <b>${drift.p50_de.toFixed(1)}</b> · ${drift.p95_de.toFixed(1)} (p5–p50–p95) · n=${drift.n>=1000?(drift.n/1000).toFixed(1)+'k':drift.n}
-                ${drift.reference_lab ? `<span style="margin-left:6px; font-size:10px; opacity:0.7;">ref L=${drift.reference_lab[0].toFixed(0)} a=${drift.reference_lab[1].toFixed(0)} b=${drift.reference_lab[2].toFixed(0)}</span>` : ''}
-            </div>
-            ${drift.by_camera && Object.keys(drift.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera ΔE drift. Useful when one camera's lighting changes more than another's.">
-                ${Object.entries(drift.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${c.p5_de.toFixed(1)} · <b>${c.p50_de.toFixed(1)}</b> · ${c.p95_de.toFixed(1)} n=${c.n>=1000?(c.n/1000).toFixed(1)+'k':c.n}</span>`).join('')}
+            ${drift.by_camera && Object.keys(drift.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera CIELAB. Compare same channel across cameras to spot per-camera lighting / lens / dye-batch issues.">
+                ${Object.entries(drift.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<div>cam ${cam}: L ${c.L.p5.toFixed(0)}·<b>${c.L.p50.toFixed(0)}</b>·${c.L.p95.toFixed(0)} · a ${c.a.p5.toFixed(0)}·<b>${c.a.p50.toFixed(0)}</b>·${c.a.p95.toFixed(0)} · b ${c.b.p5.toFixed(0)}·<b>${c.b.p50.toFixed(0)}</b>·${c.b.p95.toFixed(0)} · n=${c.n>=1000?(c.n/1000).toFixed(1)+'k':c.n}</div>`).join('')}
             </div>` : ''}
-            ` : (isColorE ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; font-style: italic;">🎨 ColorE on — gathering ΔE samples (5+ detections needed). Stats appear here once data flows.</div>` : '')}
-            ${isArea && areaSt ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="Bounding-box area (pixel²) over the last 7 days. p5 = smallest typical, p50 = median, p95 = largest typical. Detections far below p5 are likely false positives; far above p95 may be merged objects or yarn issues.">
-                📐 area: ${_fmtArea(areaSt.p5)} · <b>${_fmtArea(areaSt.p50)}</b> · ${_fmtArea(areaSt.p95)} px² (p5–p50–p95) · n=${areaSt.n>=1000?(areaSt.n/1000).toFixed(1)+'k':areaSt.n}
+            ` : (isColorE ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; font-style: italic;">🎨 ColorE on — gathering CIELAB samples (5+ detections needed). Stats appear here once data flows.</div>` : '')}
+            ${isArea && areaSt ? `<div style="display:flex; align-items:center; gap:4px; font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;">
+                <span style="flex:1;">📐 area: ${_fmtArea(areaSt.p5)} · <b>${_fmtArea(areaSt.p50)}</b> · ${_fmtArea(areaSt.p95)} px² (p5–p50–p95) · n=${areaSt.n>=1000?(areaSt.n/1000).toFixed(1)+'k':areaSt.n}</span>
+                <span class="info-tooltip-sm" style="cursor:help;">i<span class="info-tooltip-text" style="text-align:left; min-width:300px;"><b>Bounding-box area</b> in pixels² (px²).<br><br><b>Formula:</b> area = (xmax − xmin) × (ymax − ymin).<br>Stored on the detection at inference time when ColorE/Area is on for this class (otherwise computed on-the-fly from the bbox).<br><br><b>p5</b> = smallest "typical" detection.<br><b>p50</b> = median size.<br><b>p95</b> = largest "typical" detection.<br><br><b>Outlier reading:</b><br>• Far below p5 → likely false positive (model fired on noise — raise Min conf)<br>• Far above p95 → two objects merged into one bbox, or yarn/material issue worth inspecting</span></span>
             </div>
             ${areaSt.by_camera && Object.keys(areaSt.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera bbox area p5/p50/p95. Use when one camera frames objects differently (closer / farther / cropped).">
                 ${Object.entries(areaSt.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${_fmtArea(c.p5)} · <b>${_fmtArea(c.p50)}</b> · ${_fmtArea(c.p95)} n=${c.n>=1000?(c.n/1000).toFixed(1)+'k':c.n}</span>`).join('')}

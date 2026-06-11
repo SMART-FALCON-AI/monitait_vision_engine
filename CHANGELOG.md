@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.22.4] - 2026-06-11
+
+### Changed — Absolute CIELAB instead of ΔE; (i) tooltips with formulas
+- The 🎨 color card row now shows **absolute L\*a\*b\* percentiles** instead of a single ΔE drift number. A single ΔE collapsed all three color dimensions into one scalar — you couldn't tell whether the color shift was L (exposure / dye fade), a (green↔red), or b (blue↔yellow). Three rows of p5/p50/p95 — one per channel — keep the diagnosis legible.
+- Display: `🎨 color L: 50 · 54 · 58   a: -2 · 1 · 3   b: -8 · -5 · -2   (p5–p50–p95)   n=1.7k` plus a per-camera version below.
+- `/api/color_drift` response shape changed accordingly: each class now has `L`, `a`, `b` keys each with `{p5, p50, p95}` (and the same shape inside each `by_camera` entry). Removed `reference_lab`, `p5_de`, `p50_de`, `p95_de` (ΔE can still be computed client-side as √((ΔL)² + (Δa)² + (Δb)²) — documented in the tooltip).
+- Added an **(i) tooltip on each percentile badge** (normal conf / color / area) explaining what the metric is, the formula, and how to read it. Operators can hover instead of guessing.
+- Card section order is now: header → toggles row → Min conf + Severity inputs → 📊 normal conf → 🎨 color → 📐 area → beep sound select. Actions on top, numbers below.
+
 ## [3.22.3] - 2026-06-11
 
 ### Added — Area per-class toggle + bbox-area p5/p50/p95 analytics
