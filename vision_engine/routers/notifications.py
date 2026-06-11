@@ -130,13 +130,17 @@ async def post_notifications_config(payload: Dict[str, Any]):
                 continue
             # 3.24.4 — schedules don't pick channels anymore (only telegram exists).
             # Strip any incoming legacy values and write the canonical single-channel form.
+            tt = str(s.get("trigger_type") or "cron").lower()
+            if tt not in ("cron", "shipment_change"):
+                tt = "cron"
             clean.append({
                 "name": str(s.get("name") or ""),
+                "trigger_type": tt,                                # 3.24.6
                 "cron": str(s.get("cron") or ""),
                 "channels": ["telegram"],
                 "chat_ids": [str(x) for x in (s.get("chat_ids") or []) if str(x).strip()],
                 "include_why": bool(s.get("include_why", True)),
-                "shipment_filter": str(s.get("shipment_filter") or ""),
+                "shipment_filter": str(s.get("shipment_filter") or ""),  # glob: "" / "*" / "shoga-*" / exact
                 "enabled": bool(s.get("enabled", True)),
                 "last_run": s.get("last_run"),
                 "last_status": s.get("last_status"),

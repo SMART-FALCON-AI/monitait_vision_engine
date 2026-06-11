@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.6] - 2026-06-11
+
+### Added — Schedule trigger types + multi-shipment support
+- Schedules now have a **`trigger_type`** picker — two flavours:
+  - **⏰ `cron`** (default) — fire on a 5-field crontab expression, e.g. `0 8 * * *` for 08:00 daily. Unchanged behaviour.
+  - **📦 `shipment_change`** — fire automatically when the Redis `shipment` key changes (a shipment closing). The report is generated for the PREVIOUS shipment, the one that just ended. Pair with a `shipment_filter` glob to scope which closures trigger a notification.
+- Both trigger types can run in parallel on the same site. Typical setup: one `cron` schedule at end of each fixed shift PLUS one `shipment_change` schedule that catches any out-of-shift shipment closes.
+- **`shipment_filter`** is now a glob pattern, not just a literal name:
+  - `""` or `"*"` — matches every shipment (any closing fires the schedule)
+  - `"shoga-*"` — matches all SHOGA shipments
+  - `"shoga-2026-q2"` — exact name only
+  - Multi-line factories can run several `shipment_change` schedules each filtered to one line (`line-a-*`, `line-b-*`, …) routing to different chat IDs.
+- Same multi-shipment logic on the cron path: when a cron-triggered schedule has a `shipment_filter` glob, the matching shipment is picked at fire time (currently: filter is treated as a literal at fire time; multi-shipment expansion is a follow-up).
+
+### Notes
+- The scheduler tracks `_last_seen_shipment` in memory only (initialised on first tick). A reboot mid-shipment doesn't re-fire on first wake-up because we initialise `last_seen` from the current value before checking for change.
+
 ## [3.24.5] - 2026-06-11
 
 ### Fixed — shift-report scheduler couldn't generate the PDF

@@ -4,16 +4,26 @@ Runs as a background asyncio task spawned at app startup. Wakes up once per
 minute, checks each enabled `notifications.schedules[*]` entry against the
 current local time, fires due jobs.
 
-We support a tiny subset of cron expressions sufficient for shift schedules:
-  - `*` wildcard
-  - lists: `0,15,30,45`
-  - simple ranges: `8-17`
-  - step: `*/15`
+Each schedule entry has a `trigger_type`:
 
-Format: `MINUTE HOUR DOM MONTH DOW`. Five fields, space-separated. Same as
-classic crontab. If your shift fires at 08:00, the cron is `0 8 * * *`.
+  - `cron` (default) — fires on a 5-field crontab expression. We support
+    the useful subset:
+      - `*` wildcard
+      - lists: `0,15,30,45`
+      - simple ranges: `8-17`
+      - step: `*/15`
+    Format: `MINUTE HOUR DOM MONTH DOW`. Same as classic crontab. If your
+    shift fires at 08:00 every day, the cron is `0 8 * * *`.
 
-Each schedule entry records `last_run` (UTC ISO timestamp) after a successful
+  - `shipment_change` (3.24.6) — fires when the current Redis `shipment`
+    key changes from X to Y. The report is generated for the PREVIOUS
+    shipment (X), the one that just closed. Pair with `shipment_filter`
+    to scope: empty / `*` matches every change, `shoga-*` matches only
+    SHOGA shipments, an exact name matches only that one. Multi-shipment
+    sites can run several `shipment_change` schedules in parallel with
+    different filters + different chat IDs to route per-line / per-product.
+
+Each schedule entry records `last_run` (ISO timestamp) after a successful
 fire, so we don't re-fire if the loop wakes twice in the same minute.
 """
 
@@ -221,11 +231,44 @@ _scheduler_task: Optional[asyncio.Task] = None
 _stop_event: Optional[asyncio.Event] = None
 
 
+def _shipment_filter_matches(pattern: str, shipment: str) -> bool:
+    """3.24.6 — tiny glob: '' / '*' match anything, otherwise fnmatch."""
+    import fnmatch
+    p = (pattern or "").strip()
+    if not p or p == "*":
+        return True
+    return fnmatch.fnmatchcase(shipment or "", p)
+
+
+def _read_current_shipment() -> str:
+    """Read the live shipment label from Redis. Empty string if unreachable
+    or the key is unset."""
+    try:
+        from redis import Redis
+        from config import REDIS_DB
+        r = Redis("redis", 6379, db=REDIS_DB)
+        v = r.get("shipment")
+        if not v:
+            return ""
+        s = v.decode() if isinstance(v, bytes) else v
+        return s or ""
+    except Exception:
+        return ""
+
+
 async def _scheduler_loop(app):
-    """Wake every minute, check each enabled schedule, fire matching ones."""
+    """Wake every minute, check each enabled schedule, fire matching ones.
+
+    Two trigger types:
+      - cron — fire when the cron expression matches THIS minute
+      - shipment_change — fire when the Redis `shipment` key changes from
+        last tick's value to this tick's value, with shipment_filter
+        applied to the PREVIOUS shipment (the one that just closed).
+    """
     global _stop_event
     _stop_event = asyncio.Event()
     logger.info("notifications scheduler started")
+    last_seen_shipment = ""  # initialised on first tick
     while not _stop_event.is_set():
         try:
             from config import load_service_config
@@ -233,25 +276,58 @@ async def _scheduler_loop(app):
             cfg = svc.get("notifications") or {}
             schedules = cfg.get("schedules") or []
             now = datetime.now()  # local time
+
+            current_shipment = _read_current_shipment()
+            shipment_changed = (
+                last_seen_shipment != "" and current_shipment != last_seen_shipment
+            )
+            closed_shipment = last_seen_shipment if shipment_changed else ""
+
             for sched in schedules:
                 if not sched.get("enabled"):
                     continue
-                cron_s = sched.get("cron") or ""
-                if not cron_matches(cron_s, now):
+                trigger_type = (sched.get("trigger_type") or "cron").lower()
+
+                # --- cron trigger ---
+                if trigger_type == "cron":
+                    cron_s = sched.get("cron") or ""
+                    if not cron_matches(cron_s, now):
+                        continue
+                    last_run = sched.get("last_run")
+                    this_minute = now.strftime("%Y-%m-%dT%H:%M")
+                    if last_run and last_run.startswith(this_minute):
+                        continue  # already fired this minute
+                    logger.info(f"notifications: firing {sched.get('name')!r} (cron={cron_s})")
+                    fire_for_shipment = sched.get("shipment_filter") or current_shipment or "no_shipment"
+
+                # --- shipment_change trigger ---
+                elif trigger_type == "shipment_change":
+                    if not shipment_changed:
+                        continue
+                    if not _shipment_filter_matches(sched.get("shipment_filter") or "", closed_shipment):
+                        continue
+                    logger.info(
+                        f"notifications: firing {sched.get('name')!r} "
+                        f"(shipment change: {closed_shipment!r} -> {current_shipment!r})"
+                    )
+                    fire_for_shipment = closed_shipment  # the one that just closed
+
+                else:
                     continue
-                last_run = sched.get("last_run")
-                this_minute = now.strftime("%Y-%m-%dT%H:%M")
-                if last_run and last_run.startswith(this_minute):
-                    continue  # already fired this minute
-                logger.info(f"notifications: firing {sched.get('name')!r} (cron={cron_s})")
+
                 try:
-                    ok, info = await run_one_schedule(sched, cfg, app, source="cron")
+                    # The run_one_schedule helper reads shipment_filter from
+                    # the dict — patch in the resolved shipment before calling.
+                    sched_for_run = dict(sched)
+                    sched_for_run["shipment_filter"] = fire_for_shipment
+                    ok, info = await run_one_schedule(sched_for_run, cfg, app, source=trigger_type)
                     sched["last_run"] = now.strftime("%Y-%m-%dT%H:%M:%S")
                     sched["last_status"] = "ok" if ok else "error"
                 except Exception as e:
                     logger.warning(f"schedule {sched.get('name')!r} fire failed: {e}")
                     sched["last_run"] = now.strftime("%Y-%m-%dT%H:%M:%S")
                     sched["last_status"] = "error"
+
             # Persist any last_run updates back to the config so reboots don't replay.
             if schedules:
                 from config import save_service_config
@@ -260,6 +336,17 @@ async def _scheduler_loop(app):
                     save_service_config(svc)
                 except Exception as _e:
                     logger.debug(f"save_service_config after scheduler tick failed: {_e}")
+
+            # Always update last_seen at the end of the tick so we detect the
+            # NEXT change. Skip if Redis returned empty (don't accidentally
+            # treat a Redis hiccup as "shipment cleared").
+            if current_shipment:
+                last_seen_shipment = current_shipment
+            elif last_seen_shipment == "":
+                # First tick on a fresh boot — initialise so we don't fire
+                # immediately the second a shipment appears.
+                last_seen_shipment = current_shipment
+
         except Exception as e:
             logger.warning(f"scheduler tick error: {e}")
         try:

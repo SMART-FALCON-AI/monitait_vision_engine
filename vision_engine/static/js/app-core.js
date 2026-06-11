@@ -807,12 +807,18 @@ function _renderNotifSchedules(schedules) {
         const row = document.createElement('div');
         row.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:6px; background:rgba(15,23,42,0.4); border:1px solid rgba(51,65,85,0.5); border-radius:4px;';
         const chatIds = (s.chat_ids || []).join(',');
+        const triggerType = (s.trigger_type || 'cron').toLowerCase();
         const lastBits = s.last_run ? ` · last: ${s.last_run} (${s.last_status || '?'})` : '';
+        const ship = (s.shipment_filter || '').replace(/"/g, '&quot;');
         row.innerHTML = `
             <input type="text" data-k="name" value="${(s.name || '').replace(/"/g,'&quot;')}" placeholder="name" style="flex:1 1 140px; min-width:120px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
-            <input type="text" data-k="cron" value="${(s.cron || '').replace(/"/g,'&quot;')}" placeholder="cron 0 8 * * *" style="flex:1 1 140px; min-width:120px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px; font-family:monospace;">
+            <select data-k="trigger_type" onchange="this.closest('div').dataset.tt=this.value" style="flex:0 0 160px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;" title="cron = clock-based · shipment_change = fire when shipment closes">
+                <option value="cron"            ${triggerType === 'cron' ? 'selected' : ''}>⏰ cron (clock)</option>
+                <option value="shipment_change" ${triggerType === 'shipment_change' ? 'selected' : ''}>📦 on shipment change</option>
+            </select>
+            <input type="text" data-k="cron" value="${(s.cron || '').replace(/"/g,'&quot;')}" placeholder="cron 0 8 * * *  (only used when trigger=cron)" style="flex:1 1 180px; min-width:140px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px; font-family:monospace;">
             <input type="text" data-k="chat_ids" value="${chatIds}" placeholder="chat ids (csv, blank=defaults)" style="flex:2 1 180px; min-width:140px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
-            <input type="text" data-k="shipment_filter" value="${(s.shipment_filter || '').replace(/"/g,'&quot;')}" placeholder="shipment (blank=current)" style="flex:1 1 130px; min-width:120px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
+            <input type="text" data-k="shipment_filter" value="${ship}" placeholder="shipment filter (blank/* = all, e.g. shoga-*)" style="flex:1 1 160px; min-width:140px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
             <label style="display:flex; align-items:center; gap:4px; font-size:11px; white-space:nowrap;"><input type="checkbox" data-k="include_why" ${s.include_why ? 'checked' : ''} style="cursor:pointer;"> Why?</label>
             <label style="display:flex; align-items:center; gap:4px; font-size:11px; white-space:nowrap;"><input type="checkbox" data-k="enabled" ${s.enabled !== false ? 'checked' : ''} style="cursor:pointer;"> enabled</label>
             <button onclick="this.parentElement.remove()" style="background:rgba(239,68,68,0.6); color:white; border:none; padding:3px 8px; cursor:pointer; font-size:11px; border-radius:3px;" title="Remove">✕</button>
@@ -827,7 +833,7 @@ function addNotifSchedule() {
     if (!wrap) return;
     const current = _collectNotifSchedules();
     current.push({
-        name: 'New shift', cron: '0 8 * * *',
+        name: 'New shift', trigger_type: 'cron', cron: '0 8 * * *',
         channels: ['telegram'], chat_ids: [],
         include_why: true, shipment_filter: '', enabled: true,
     });
@@ -849,11 +855,12 @@ function _collectNotifSchedules() {
             const el = row.querySelector('[data-k="' + k + '"]');
             return el ? (el.type === 'checkbox' ? el.checked : el.value) : null;
         };
-        if (!get('name') && !get('cron')) return;  // skip empty placeholder
+        if (!get('name') && !get('cron') && !get('shipment_filter')) return;  // skip empty placeholder
         out.push({
             name: String(get('name') || '').trim(),
+            trigger_type: String(get('trigger_type') || 'cron').trim(),  // 3.24.6
             cron: String(get('cron') || '').trim(),
-            channels: ['telegram'],  // 3.24.4 — only one channel
+            channels: ['telegram'],
             chat_ids: String(get('chat_ids') || '').split(',').map(s => s.trim()).filter(Boolean),
             shipment_filter: String(get('shipment_filter') || '').trim(),
             include_why: !!get('include_why'),
