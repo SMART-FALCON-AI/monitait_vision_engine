@@ -573,15 +573,25 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
 # AI QUERY ENDPOINT
 # =============================================================================
 
-async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str, watcher_instance=None, base_url: str = "", model_id: str = "") -> str:
-    """Call the appropriate AI model API with tool support."""
+async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str, watcher_instance=None, base_url: str = "", model_id: str = "", tools_enabled: bool = True) -> str:
+    """Call the appropriate AI model API.
+
+    3.24.3 — `tools_enabled` (default True for backward-compat with the chat
+    endpoint /api/ai_query). When set False, we skip the agentic loop entirely:
+    one direct completion, no function calling. /api/why uses this — it
+    pre-loads all the context the AI needs, so letting Kimi call tools was
+    only adding latency and blocking the event loop on every sync
+    `execute_tool(...)` call. With tools off, a Why? request is one
+    `client.chat.completions.create(...)` round-trip — much faster, and the
+    event loop stays free for other endpoints while we wait on the API.
+    """
     try:
         if model == "claude":
-            # Anthropic Claude API with tool use
+            # Anthropic Claude API
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
 
-            tools = get_ai_tools()
+            tools = get_ai_tools() if tools_enabled else []
             messages = [{"role": "user", "content": user_query}]
 
             # Agentic loop - allow multiple tool calls
@@ -591,16 +601,17 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             # Why? while the first call is in flight). Hand off to a worker
             # thread so the FastAPI loop stays responsive.
             import asyncio as _asyncio
-            max_iterations = 5
+            max_iterations = 5 if tools_enabled else 1
             for iteration in range(max_iterations):
-                response = await _asyncio.to_thread(
-                    client.messages.create,
-                    model="claude-sonnet-4-5-20250929",
-                    max_tokens=4096,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                )
+                _create_kwargs = {
+                    "model": "claude-sonnet-4-5-20250929",
+                    "max_tokens": 4096,
+                    "system": system_prompt,
+                    "messages": messages,
+                }
+                if tools_enabled and tools:
+                    _create_kwargs["tools"] = tools
+                response = await _asyncio.to_thread(client.messages.create, **_create_kwargs)
 
                 # Check if Claude wants to use tools
                 if response.stop_reason == "end_turn":
@@ -647,12 +658,13 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
 
             # Convert tools to OpenAI format
             functions = []
-            for tool in get_ai_tools():
-                functions.append({
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["input_schema"]
-                })
+            if tools_enabled:
+                for tool in get_ai_tools():
+                    functions.append({
+                        "name": tool["name"],
+                        "description": tool["description"],
+                        "parameters": tool["input_schema"]
+                    })
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -663,16 +675,20 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             # 3.24.1 — same reasoning as the Claude branch: the openai SDK's
             # `.create()` is sync, hand off to a thread so concurrent /api/why
             # callers don't queue behind each other.
+            # 3.24.3 — when tools_enabled=False (the /api/why path) we skip
+            # the agentic loop and do exactly one round trip. No function
+            # calling, no execute_tool() blocking, no retry.
             import asyncio as _asyncio
-            max_iterations = 5
+            max_iterations = 5 if tools_enabled else 1
             for iteration in range(max_iterations):
-                response = await _asyncio.to_thread(
-                    client.chat.completions.create,
-                    model=(model_id or "gpt-4o"),  # 3.21.23 — operator-configurable model id
-                    messages=messages,
-                    functions=functions,
-                    max_tokens=4096,
-                )
+                _create_kwargs = {
+                    "model": (model_id or "gpt-4o"),  # 3.21.23 — operator-configurable model id
+                    "messages": messages,
+                    "max_tokens": 4096,
+                }
+                if tools_enabled and functions:
+                    _create_kwargs["functions"] = functions
+                response = await _asyncio.to_thread(client.chat.completions.create, **_create_kwargs)
 
                 message = response.choices[0].message
 
@@ -1052,9 +1068,16 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
         _err = None
         answer = ""
         try:
+            # 3.24.3 — Tools OFF for /api/why: we pre-load all the context
+            # (DB queries, conf baselines, color/area stats, quality payload)
+            # before calling the AI. Letting the model also invoke tools added
+            # round-trips that blocked the event loop via the sync execute_tool()
+            # chain, which is what made other endpoints feel frozen during a
+            # Why? call.
             answer = await call_ai_model(
                 provider, api_key, system_prompt, user_query, watcher_instance,
                 base_url=base_url, model_id=model_id,
+                tools_enabled=False,
             )
         except Exception as _e:
             _status = "error"

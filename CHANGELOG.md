@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.3] - 2026-06-11
+
+### Fixed — Why? no longer freezes other endpoints
+- `call_ai_model(...)` now takes a `tools_enabled` flag (defaults `True` for backward-compat with the chat endpoint `/api/ai_query`). `/api/why` passes `False`, which: (a) skips the function-calling setup entirely, (b) collapses the 5-iteration agentic loop to a single round-trip, (c) prevents the sync `execute_tool(...)` chain that was running on the event loop and blocking concurrent requests (dashboard SSE, timeline composite, charts queries) while a Why? call was in flight.
+- We pre-load all the context the AI needs in `/api/why` already (per-class baselines, color drift, area stats, quality-score payload, per-minute count timeline, top co-occurring classes, Redis sys-state). Letting the model also chase its own tools just added latency without improving the answer.
+- Net effect: clicking 🤔 Why? is now ~3× faster and the rest of the app keeps moving.
+
 ## [3.24.2] - 2026-06-11
 
 ### Fixed — Why? on per-class card had ZERO context (lying about "no recent samples")
