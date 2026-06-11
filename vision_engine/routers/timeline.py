@@ -850,6 +850,118 @@ async def get_color_drift(window: str = "7d"):
     return JSONResponse(content={"window": window, "classes": out})
 
 
+@router.get("/api/area_stats")
+async def get_area_stats(window: str = "7d"):
+    """3.22.3 — Per-class bbox-area percentiles over the requested window.
+
+    Computed straight from the stored xmin/xmax/ymin/ymax — no per-class
+    extraction toggle is needed because the data is already there. The
+    Area checkbox on each card is a pure display preference.
+
+    Returns p5 / p50 / p95 of bbox area (pixel²) for each class with
+    enough detections in the window, with a per-camera breakdown.
+    Operators use it to tune: "TB normally covers 12k–35k px²; the ones
+    coming in at 2k px² are probably false positives, raise min_conf".
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    interval = _windows.get(window, "7 days")
+    out: dict = {}
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content={"window": window, "classes": {}})
+        cur = conn.cursor()
+        # Overall percentiles
+        cur.execute(
+            """
+            SELECT (det->>'name') AS cls,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY COALESCE(
+                       (det->>'area')::float,
+                       ((det->>'xmax')::float - (det->>'xmin')::float) *
+                       ((det->>'ymax')::float - (det->>'ymin')::float))) AS p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY COALESCE(
+                       (det->>'area')::float,
+                       ((det->>'xmax')::float - (det->>'xmin')::float) *
+                       ((det->>'ymax')::float - (det->>'ymin')::float))) AS p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY COALESCE(
+                       (det->>'area')::float,
+                       ((det->>'xmax')::float - (det->>'xmin')::float) *
+                       ((det->>'ymax')::float - (det->>'ymin')::float))) AS p95,
+                   COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s
+              AND (det ? 'xmin') AND (det ? 'xmax')
+              AND (det ? 'ymin') AND (det ? 'ymax')
+              AND (det->>'name') IS NOT NULL
+            GROUP BY (det->>'name')
+            HAVING COUNT(*) >= 5
+            """,
+            (interval,),
+        )
+        for cls, p5, p50, p95, n in cur.fetchall():
+            if not cls:
+                continue
+            out[str(cls)] = {
+                "p5":  int(round(float(p5  or 0))),
+                "p50": int(round(float(p50 or 0))),
+                "p95": int(round(float(p95 or 0))),
+                "n":   int(n or 0),
+                "by_camera": {},
+            }
+        # Per-camera breakdown
+        cur.execute(
+            """
+            SELECT (det->>'name') AS cls,
+                   (det->>'_cam') AS cam,
+                   percentile_cont(0.05) WITHIN GROUP (ORDER BY COALESCE(
+                       (det->>'area')::float,
+                       ((det->>'xmax')::float - (det->>'xmin')::float) *
+                       ((det->>'ymax')::float - (det->>'ymin')::float))) AS p5,
+                   percentile_cont(0.50) WITHIN GROUP (ORDER BY COALESCE(
+                       (det->>'area')::float,
+                       ((det->>'xmax')::float - (det->>'xmin')::float) *
+                       ((det->>'ymax')::float - (det->>'ymin')::float))) AS p50,
+                   percentile_cont(0.95) WITHIN GROUP (ORDER BY COALESCE(
+                       (det->>'area')::float,
+                       ((det->>'xmax')::float - (det->>'xmin')::float) *
+                       ((det->>'ymax')::float - (det->>'ymin')::float))) AS p95,
+                   COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s
+              AND (det ? 'xmin') AND (det ? 'xmax')
+              AND (det ? 'ymin') AND (det ? 'ymax')
+              AND (det->>'name') IS NOT NULL
+              AND (det->>'_cam') IS NOT NULL
+            GROUP BY (det->>'name'), (det->>'_cam')
+            HAVING COUNT(*) >= 5
+            """,
+            (interval,),
+        )
+        for cls, cam, p5, p50, p95, n in cur.fetchall():
+            cls_s = str(cls)
+            if cls_s not in out:
+                continue
+            out[cls_s]["by_camera"][str(cam)] = {
+                "p5":  int(round(float(p5  or 0))),
+                "p50": int(round(float(p50 or 0))),
+                "p95": int(round(float(p95 or 0))),
+                "n":   int(n or 0),
+            }
+        cur.close()
+    except Exception as e:
+        logger.warning(f"area_stats compute failed: {e}")
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+    return JSONResponse(content={"window": window, "classes": out})
+
+
 @router.get("/api/active_classes")
 async def get_active_classes(window: str = "1h"):
     """Classes with at least one detection in the recent window — used by the

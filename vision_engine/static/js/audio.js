@@ -389,9 +389,11 @@ function updateObjectsList() {
         const isBeep = audioSettings.enabledObjects[objectName] || false;
         const isStore = audioSettings.storeObjects[objectName] || false;
         const isColorE = !!audioSettings.colorEObjects?.[objectName];          // 3.22.2 — track CIELAB ΔE drift over time
+        const isArea   = !!audioSettings.areaObjects?.[objectName];            // 3.22.3 — show bbox-area percentiles
         const severity = audioSettings.severityObjects?.[objectName] ?? 0;  // 3.21.12 — per-class severity (0–100, defect impact weight)
         const baseline = audioSettings.confBaselines?.[objectName];          // 3.21.12 — read-only baseline {p50,p95} (auto-learned)
         const drift    = audioSettings.colorDrift?.[objectName];             // 3.22.2 — read-only ΔE drift {p5_de, p50_de, p95_de, by_camera}
+        const areaSt   = audioSettings.areaStats?.[objectName];              // 3.22.3 — read-only bbox area stats {p5, p50, p95, by_camera}
         const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
         const safeName = objectName.replace(/'/g, "\\'");
 
@@ -443,6 +445,10 @@ function updateObjectsList() {
                     <input type="checkbox" ${isColorE ? 'checked' : ''} onchange="toggleObjectColorE('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
                     ColorE
                 </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="Area — show bbox-area percentiles (p5/p50/p95) for this class. Useful for spotting false positives (much smaller than typical) or yarn issues (much larger).">
+                    <input type="checkbox" ${isArea ? 'checked' : ''} onchange="toggleObjectArea('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    Area
+                </label>
             </div>
             ${isColorE && drift ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="CIELAB ΔE drift over the last 7 days. p5 / p50 / p95 of CIE76 ΔE distances vs the window's mean color. Lower = more consistent color, higher = drifting.">
                 🎨 ΔE drift: ${drift.p5_de.toFixed(1)} · <b>${drift.p50_de.toFixed(1)}</b> · ${drift.p95_de.toFixed(1)} (p5–p50–p95) · n=${drift.n>=1000?(drift.n/1000).toFixed(1)+'k':drift.n}
@@ -452,6 +458,13 @@ function updateObjectsList() {
                 ${Object.entries(drift.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${c.p5_de.toFixed(1)} · <b>${c.p50_de.toFixed(1)}</b> · ${c.p95_de.toFixed(1)} n=${c.n>=1000?(c.n/1000).toFixed(1)+'k':c.n}</span>`).join('')}
             </div>` : ''}
             ` : (isColorE ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; font-style: italic;">🎨 ColorE on — gathering ΔE samples (5+ detections needed). Stats appear here once data flows.</div>` : '')}
+            ${isArea && areaSt ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="Bounding-box area (pixel²) over the last 7 days. p5 = smallest typical, p50 = median, p95 = largest typical. Detections far below p5 are likely false positives; far above p95 may be merged objects or yarn issues.">
+                📐 area: ${_fmtArea(areaSt.p5)} · <b>${_fmtArea(areaSt.p50)}</b> · ${_fmtArea(areaSt.p95)} px² (p5–p50–p95) · n=${areaSt.n>=1000?(areaSt.n/1000).toFixed(1)+'k':areaSt.n}
+            </div>
+            ${areaSt.by_camera && Object.keys(areaSt.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera bbox area p5/p50/p95. Use when one camera frames objects differently (closer / farther / cropped).">
+                ${Object.entries(areaSt.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${_fmtArea(c.p5)} · <b>${_fmtArea(c.p50)}</b> · ${_fmtArea(c.p95)} n=${c.n>=1000?(c.n/1000).toFixed(1)+'k':c.n}</span>`).join('')}
+            </div>` : ''}
+            ` : (isArea ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; font-style: italic;">📐 Area on — gathering samples (5+ detections needed). Stats appear here once data flows.</div>` : '')}
             <div style="display: flex; gap: 6px; align-items: center;">
                 <select onchange="updateObjectBeepSound('${safeName}', this.value)" style="flex: 1; padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                     <option value="sine" ${beepSound === 'sine' ? 'selected' : ''}>🔔 Sine</option>
@@ -479,6 +492,7 @@ async function syncObjectAudioToServer(objectName) {
         min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100,  // UI uses 0-100, server uses 0-1
         severity: audioSettings.severityObjects?.[objectName] ?? 0,  // 3.21.12 — 0-100, per-class impact weight
         color_e: !!audioSettings.colorEObjects?.[objectName],         // 3.22.2 — track CIELAB ΔE drift over time
+        area:    !!audioSettings.areaObjects?.[objectName],           // 3.22.3 — show bbox-area percentiles on the card
     };
     try {
         await fetch('/api/audio_settings', {
@@ -544,6 +558,11 @@ async function loadAudioSettingsFromServer() {
                 if (!audioSettings.colorEObjects) audioSettings.colorEObjects = {};
                 audioSettings.colorEObjects[k] = s.color_e === true;
             }
+            // 3.22.3 — per-class Area (bbox-area percentiles) display toggle
+            if (s.area !== undefined) {
+                if (!audioSettings.areaObjects) audioSettings.areaObjects = {};
+                audioSettings.areaObjects[k] = s.area === true;
+            }
         });
         saveAudioSettings();
         if (typeof updateObjectsList === 'function') updateObjectsList();
@@ -579,6 +598,45 @@ function toggleObjectColorE(objectName) {
     setTimeout(loadColorDriftFromServer, 200);
 }
 window.toggleObjectColorE = toggleObjectColorE;
+
+
+// 3.22.3 — Per-class bbox-area percentiles. Reads /api/area_stats and stores by class.
+// Always loaded (cheap; no server-side gating) — the per-class card decides whether
+// to display based on the Area checkbox.
+async function loadAreaStatsFromServer() {
+    try {
+        const r = await fetch('/api/area_stats?window=7d');
+        if (!r.ok) return;
+        const d = await r.json();
+        audioSettings.areaStats = d.classes || {};
+        if (typeof updateObjectsList === 'function') updateObjectsList();
+    } catch (e) { /* not fatal */ }
+}
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadAreaStatsFromServer, 1700));
+window.loadAreaStatsFromServer = loadAreaStatsFromServer;
+
+
+// 3.22.3 — Toggle per-class Area display. Pure display preference: stats are already
+// derivable from stored xmin/xmax/ymin/ymax, no extraction needed.
+function toggleObjectArea(objectName) {
+    if (!audioSettings.areaObjects) audioSettings.areaObjects = {};
+    audioSettings.areaObjects[objectName] = !audioSettings.areaObjects[objectName];
+    saveAudioSettings();
+    updateObjectsList();
+    syncObjectAudioToServer(objectName);
+}
+window.toggleObjectArea = toggleObjectArea;
+
+
+// 3.22.3 — Compact pixel-area formatter. Operators read "12k" faster than "12,450".
+function _fmtArea(px2) {
+    const n = Number(px2) || 0;
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+    if (n >= 10_000)    return (n / 1000).toFixed(0) + 'k';
+    if (n >= 1000)      return (n / 1000).toFixed(1) + 'k';
+    return String(Math.round(n));
+}
+window._fmtArea = _fmtArea;
 
 // 3.21.12 — Fetch per-class confidence baselines (auto-learned p50/p95 over
 // last 7 days of stored detections). Surfaces in the per-class card as a

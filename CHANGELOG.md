@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.22.3] - 2026-06-11
+
+### Added — Area per-class toggle + bbox-area p5/p50/p95 analytics
+- New **Area** checkbox on every per-class card in the Process tab, next to ColorE. When ticked, the card shows a **📐 area** line with p5 · p50 · p95 of the bounding-box area (pixel²) over the last 7 days, plus a per-camera breakdown.
+- New endpoint `GET /api/area_stats?window=7d` returns per-class bbox-area percentiles + per-camera breakdown.
+- **YOLO inference output doesn't include `area` natively** (just xyxy bbox) — same with the math channels. So when a class is opted-in via the Area checkbox, `services/detection.py` now writes `det.area = (xmax-xmin)*(ymax-ymin)` once at detection time, right next to where `_cam` and `lab_color` are already attached. Stored once, read by everything downstream — `/api/area_stats`, future ejection procedures (`when area > N`), defect-size trending, etc. Backward-compat: the area_stats SQL uses `COALESCE(det.area, bbox computation)` so old detections without `area` still contribute their bbox-computed value.
+- Display formatting: areas are abbreviated for readability (`12.4k px²` instead of `12,450 px²`, `1.23M px²` instead of `1,234,567`). Operators read patterns faster.
+- **Use case:** spot false positives ("TB normally covers 12k–35k px²; today's coming in at 2k px² are probably FP — raise min_conf") and yarn/merge issues ("the p95 just jumped from 35k to 120k, two objects are getting merged"). Pairs cleanly with the existing confidence percentiles + ΔE drift to give a full statistical picture per class.
+- Persistence: `audio_settings.<class>.area` is the new field. Backwards compat: absent = off, just like ColorE.
+
 ## [3.22.2] - 2026-06-11
 
 ### Added — ColorE per-class toggle + ΔE drift analytics

@@ -1199,6 +1199,31 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
                 if _any_lab:
                     update_color_references(yolo_res)
 
+            # 3.22.3 — Bbox area for classes with audio_settings.<name>.area == True.
+            # YOLO's inference output doesn't include `area` natively (just xyxy
+            # bbox), so without this we'd have problems any time a feature needs
+            # area: ejection rules can't fire on it, math channels without bbox
+            # have no fallback, the /api/area_stats SQL is verbose. Storing it
+            # once at detection time means everything downstream just reads
+            # `det.area`. Opt-in per class (same shape as ColorE) so storage
+            # doesn't grow on classes nobody's tracking.
+            _aud_for_area = _get_audio_settings_map()
+            _classes_for_area = {
+                name for name, v in _aud_for_area.items()
+                if isinstance(v, dict) and v.get('area') is True
+            }
+            if _classes_for_area:
+                for det in yolo_res:
+                    if det.get('name') not in _classes_for_area:
+                        continue
+                    try:
+                        w = float(det.get('xmax', 0)) - float(det.get('xmin', 0))
+                        h = float(det.get('ymax', 0)) - float(det.get('ymin', 0))
+                        if w > 0 and h > 0:
+                            det['area'] = int(round(w * h))
+                    except (TypeError, ValueError):
+                        pass
+
             # Add audio notification with detected object names.
             # Per-class `min_confidence` from audio_settings gates which detections
             # reach the audio event stream (narrate/beep) — below the floor, the
