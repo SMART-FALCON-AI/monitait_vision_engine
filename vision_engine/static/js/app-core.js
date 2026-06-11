@@ -727,17 +727,14 @@ async function loadNotifConfig() {
         const d = await r.json();
         _notifConfigCache = d;
         const tel = (d.channels && d.channels.telegram) || {};
-        const bal = (d.channels && d.channels.bale)     || {};
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
         const setCb = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
         // Tokens are masked — leave the password field empty so the operator
         // knows they're typing a NEW value, not viewing the existing one.
-        set('notif-telegram-token', '');
-        set('notif-telegram-chat',  tel.default_chat_id);
+        set('notif-telegram-token',   '');
+        set('notif-telegram-chat',    tel.default_chat_id);
+        set('notif-telegram-baseurl', tel.base_url);                    // 3.24.4
         setCb('notif-telegram-enabled', tel.enabled);
-        set('notif-bale-token', '');
-        set('notif-bale-chat',  bal.default_chat_id);
-        setCb('notif-bale-enabled', bal.enabled);
         _renderNotifSchedules(d.schedules || []);
     } catch (e) {
         _notifResp('Load failed: ' + e.message, false);
@@ -745,12 +742,16 @@ async function loadNotifConfig() {
 }
 
 async function saveNotifChannel(channel) {
-    const tokenEl = document.getElementById('notif-' + channel + '-token');
-    const chatEl  = document.getElementById('notif-' + channel + '-chat');
-    const enEl    = document.getElementById('notif-' + channel + '-enabled');
+    // 3.24.4 — only telegram exists; channel arg kept for back-compat.
+    channel = 'telegram';
+    const tokenEl   = document.getElementById('notif-telegram-token');
+    const chatEl    = document.getElementById('notif-telegram-chat');
+    const baseUrlEl = document.getElementById('notif-telegram-baseurl');
+    const enEl      = document.getElementById('notif-telegram-enabled');
     const payload = {
         channel: channel,
         default_chat_id: chatEl ? chatEl.value : '',
+        base_url: baseUrlEl ? baseUrlEl.value : '',
         enabled: enEl ? !!enEl.checked : false,
     };
     // Only send a bot_token if the operator actually typed one — otherwise
@@ -763,7 +764,7 @@ async function saveNotifChannel(channel) {
         });
         const d = await r.json();
         if (r.ok) {
-            _notifResp(channel + ' saved.', true);
+            _notifResp('Saved.', true);
             if (tokenEl) tokenEl.value = '';
             loadNotifConfig();
         } else {
@@ -775,18 +776,19 @@ async function saveNotifChannel(channel) {
 }
 
 async function testNotifChannel(channel) {
-    const chatEl = document.getElementById('notif-' + channel + '-chat');
+    // 3.24.4 — only telegram. Arg kept for back-compat.
+    const chatEl = document.getElementById('notif-telegram-chat');
     const chat_id = chatEl ? chatEl.value : '';
     try {
         const r = await fetch('/api/notifications/test_send', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ channel: channel, chat_id: chat_id }),
+            body: JSON.stringify({ channel: 'telegram', chat_id: chat_id }),
         });
         const d = await r.json();
         if (r.ok && d.success) {
-            _notifResp(channel + ' test sent ✓', true);
+            _notifResp('Test sent ✓', true);
         } else {
-            _notifResp(channel + ' test failed: ' + (d.info?.error || d.error || 'unknown'), false);
+            _notifResp('Test failed: ' + (d.info?.error || d.error || 'unknown'), false);
         }
     } catch (e) {
         _notifResp('Test failed: ' + e.message, false);
@@ -804,13 +806,11 @@ function _renderNotifSchedules(schedules) {
     schedules.forEach((s, idx) => {
         const row = document.createElement('div');
         row.style.cssText = 'display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:6px; background:rgba(15,23,42,0.4); border:1px solid rgba(51,65,85,0.5); border-radius:4px;';
-        const chs = (s.channels || []).join(',') || 'telegram';
         const chatIds = (s.chat_ids || []).join(',');
         const lastBits = s.last_run ? ` · last: ${s.last_run} (${s.last_status || '?'})` : '';
         row.innerHTML = `
             <input type="text" data-k="name" value="${(s.name || '').replace(/"/g,'&quot;')}" placeholder="name" style="flex:1 1 140px; min-width:120px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
             <input type="text" data-k="cron" value="${(s.cron || '').replace(/"/g,'&quot;')}" placeholder="cron 0 8 * * *" style="flex:1 1 140px; min-width:120px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px; font-family:monospace;">
-            <input type="text" data-k="channels" value="${chs}" placeholder="telegram,bale" style="flex:1 1 110px; min-width:100px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
             <input type="text" data-k="chat_ids" value="${chatIds}" placeholder="chat ids (csv, blank=defaults)" style="flex:2 1 180px; min-width:140px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
             <input type="text" data-k="shipment_filter" value="${(s.shipment_filter || '').replace(/"/g,'&quot;')}" placeholder="shipment (blank=current)" style="flex:1 1 130px; min-width:120px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; font-size:12px;">
             <label style="display:flex; align-items:center; gap:4px; font-size:11px; white-space:nowrap;"><input type="checkbox" data-k="include_why" ${s.include_why ? 'checked' : ''} style="cursor:pointer;"> Why?</label>
@@ -834,6 +834,10 @@ function addNotifSchedule() {
     _renderNotifSchedules(current);
 }
 
+// 3.24.4 — schedules don't pick channels anymore (only telegram exists), so
+// the schedule editor row no longer has a "channels" input. Strip it from the
+// renderer to free up the column.
+
 function _collectNotifSchedules() {
     const wrap = document.getElementById('notif-schedules');
     if (!wrap) return [];
@@ -849,7 +853,7 @@ function _collectNotifSchedules() {
         out.push({
             name: String(get('name') || '').trim(),
             cron: String(get('cron') || '').trim(),
-            channels: String(get('channels') || '').split(',').map(s => s.trim()).filter(Boolean),
+            channels: ['telegram'],  // 3.24.4 — only one channel
             chat_ids: String(get('chat_ids') || '').split(',').map(s => s.trim()).filter(Boolean),
             shipment_filter: String(get('shipment_filter') || '').trim(),
             include_why: !!get('include_why'),

@@ -171,36 +171,39 @@ async def run_one_schedule(schedule: Dict[str, Any], cfg: Dict[str, Any],
 
     overall_ok = False
     sends = []
-    for ch in channels:
-        ch_cfg = (cfg.get("channels") or {}).get(ch, {})
-        token = ch_cfg.get("bot_token") or ""
-        target_chat_ids = chat_ids or [ch_cfg.get("default_chat_id") or ""]
-        for chat_id in target_chat_ids:
-            if not (token and chat_id):
-                log_notification(
-                    channel=ch, chat_id=chat_id or None,
-                    kind="shift_report", caption=name, status="error",
-                    error="missing token or chat_id",
-                    schedule_name=name, schedule_cron=cron_s,
-                )
-                continue
-            import time as _t
-            t0 = _t.time()
-            ok, info = send_document(
-                channel=ch, token=token, chat_id=chat_id,
-                file_bytes=pdf_bytes,
-                filename=f"shift_{name.replace(' ','_')}_{datetime.now().strftime('%Y-%m-%d_%H%M')}.pdf",
-                caption=caption,
-            )
-            overall_ok = overall_ok or ok
-            sends.append({"channel": ch, "chat_id": chat_id, "ok": ok, "info": info})
+    # 3.24.4 — only the "telegram" channel exists. Treat any incoming channel
+    # name as telegram to stay backward-compatible with stored configs.
+    ch = "telegram"
+    ch_cfg = (cfg.get("channels") or {}).get(ch, {})
+    token = ch_cfg.get("bot_token") or ""
+    base_url = ch_cfg.get("base_url") or ""
+    target_chat_ids = chat_ids or [ch_cfg.get("default_chat_id") or ""]
+    for chat_id in target_chat_ids:
+        if not (token and chat_id):
             log_notification(
-                channel=ch, chat_id=chat_id, kind="shift_report",
-                caption=caption, status=("ok" if ok else "error"),
-                error=(None if ok else str(info.get("error"))),
-                latency_ms=int((_t.time() - t0) * 1000),
+                channel=ch, chat_id=chat_id or None,
+                kind="shift_report", caption=name, status="error",
+                error="missing token or chat_id",
                 schedule_name=name, schedule_cron=cron_s,
             )
+            continue
+        import time as _t
+        t0 = _t.time()
+        ok, info = send_document(
+            token=token, chat_id=chat_id, base_url=base_url,
+            file_bytes=pdf_bytes,
+            filename=f"shift_{name.replace(' ','_')}_{datetime.now().strftime('%Y-%m-%d_%H%M')}.pdf",
+            caption=caption,
+        )
+        overall_ok = overall_ok or ok
+        sends.append({"channel": ch, "chat_id": chat_id, "ok": ok, "info": info})
+        log_notification(
+            channel=ch, chat_id=chat_id, kind="shift_report",
+            caption=caption, status=("ok" if ok else "error"),
+            error=(None if ok else str(info.get("error"))),
+            latency_ms=int((_t.time() - t0) * 1000),
+            schedule_name=name, schedule_cron=cron_s,
+        )
     return overall_ok, {"source": source, "sends": sends}
 
 

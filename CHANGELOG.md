@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.4] - 2026-06-11
+
+### Changed — Notifications: Bale removed, single Telegram channel with configurable base URL
+- The "Bale" channel is removed from the app entirely. There's now a **single Telegram channel** with a configurable **Base URL** field — leave it blank to use the standard Telegram API (`https://api.telegram.org/`), or point it at any Telegram-compatible bot service (Bale, self-hosted gateway, custom relay, …) without code changes. The wire format is the same; only the host differs.
+- `services/messaging.py::send_document(...)` / `send_text(...)` now take an optional `base_url` instead of a `channel` arg. Default = Telegram. The `channel` kwarg is kept as ignored for back-compat so older callers (custom integrations) don't break.
+- `routers/notifications.py` only accepts `channel="telegram"`. Any legacy `bale` entry in storage is silently dropped on the next read/save — operators don't see it again.
+- `services/scheduler.py` only sends through the telegram channel; it reads `base_url` from the channel config and passes it to `send_document`.
+- UI: Advanced → Notifications collapses to a 4-field grid (Bot token / Default chat id / Base URL / Enable). The schedule rows lose the "channels" column since there's only one channel — that frees space for a slightly wider chat-id column.
+
 ## [3.24.3] - 2026-06-11
 
 ### Fixed — Why? no longer freezes other endpoints

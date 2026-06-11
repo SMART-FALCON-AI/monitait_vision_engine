@@ -1,19 +1,20 @@
-"""Telegram + Bale bot delivery for shift reports (3.24.0).
+"""Telegram bot delivery for shift reports (3.24.0; 3.24.4 — Bale removed).
 
-Bale's bot API is deliberately Telegram-compatible at the request/response
-level, so the same payload shape works for both — we just swap the base URL.
-That means: one wrapper, two channels, almost the same code.
+The channel is always called "telegram" but accepts a configurable
+`base_url` so any Telegram-compatible bot service (Bale, a self-hosted
+gateway, a custom relay, …) plugs in by pointing at a different host.
+Default `base_url` is `https://api.telegram.org/bot{token}/`.
 
 Usage:
     from services.messaging import send_document
 
     ok, info = send_document(
-        channel="telegram",  # or "bale"
         token="...",
         chat_id="123456789",
         file_bytes=pdf_bytes,
         filename="shift_morning_2026-06-11.pdf",
         caption="Morning shift · Score 92.4 / 100 · RELEASE\\nReason: ...",
+        base_url="https://api.telegram.org/bot{token}/",  # optional override
     )
     if not ok:
         logger.error(f"send failed: {info.get('error')}")
@@ -30,29 +31,28 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-# Channel → base URL. Both implement /sendDocument with identical shape.
-_BASE_URLS = {
-    "telegram": "https://api.telegram.org/bot{token}/",
-    "bale":     "https://tapi.bale.ai/bot{token}/",
-}
+DEFAULT_BASE_URL = "https://api.telegram.org/bot{token}/"
 
 
-def _base(channel: str, token: str) -> str:
-    template = _BASE_URLS.get(channel.lower())
-    if not template:
-        raise ValueError(f"unknown channel: {channel!r} (expected 'telegram' or 'bale')")
+def _base(token: str, base_url: Optional[str] = None) -> str:
+    template = (base_url or "").strip() or DEFAULT_BASE_URL
+    if "{token}" not in template:
+        # Operator entered a host without the token placeholder — append it.
+        sep = "" if template.endswith("/") else "/"
+        template = template + sep + "bot{token}/"
     return template.format(token=token)
 
 
 def send_document(
     *,
-    channel: str,
     token: str,
     chat_id: str,
     file_bytes: bytes,
     filename: str = "report.pdf",
     caption: Optional[str] = None,
+    base_url: Optional[str] = None,
     timeout: int = 60,
+    channel: Optional[str] = None,   # back-compat: ignored, kept so old callers don't crash
 ) -> Tuple[bool, Dict[str, Any]]:
     """Send a single PDF (or any bytes) to a Telegram/Bale chat.
 
@@ -61,10 +61,10 @@ def send_document(
     """
     if not token or not chat_id:
         return False, {"error": "token and chat_id are required"}
-    url = _base(channel, token) + "sendDocument"
+    url = _base(token, base_url) + "sendDocument"
     data = {"chat_id": str(chat_id)}
     if caption:
-        # Telegram + Bale both cap caption at ~1024 chars; truncate with an ellipsis
+        # Telegram caps caption at ~1024 chars; truncate with an ellipsis
         # so we never lose the whole message just because the AI got verbose.
         if len(caption) > 1024:
             caption = caption[:1020] + "…"
@@ -81,13 +81,13 @@ def send_document(
     if r.status_code == 200 and isinstance(body, dict) and body.get("ok") is True:
         result = body.get("result") or {}
         return True, {
-            "channel": channel,
+            "channel": "telegram",
             "message_id": result.get("message_id"),
             "chat_id": result.get("chat", {}).get("id") or chat_id,
             "sent_at": time.time(),
         }
     return False, {
-        "channel": channel,
+        "channel": "telegram",
         "error": (body.get("description") if isinstance(body, dict) else None)
                  or f"HTTP {r.status_code}",
         "status_code": r.status_code,
@@ -97,16 +97,17 @@ def send_document(
 
 def send_text(
     *,
-    channel: str,
     token: str,
     chat_id: str,
     text: str,
+    base_url: Optional[str] = None,
     timeout: int = 30,
+    channel: Optional[str] = None,  # back-compat: ignored
 ) -> Tuple[bool, Dict[str, Any]]:
     """Send a plain text message — used for quick health-check / test messages."""
     if not token or not chat_id:
         return False, {"error": "token and chat_id are required"}
-    url = _base(channel, token) + "sendMessage"
+    url = _base(token, base_url) + "sendMessage"
     # Telegram limits to 4096 chars / Bale similar — truncate to be safe.
     if len(text) > 4000:
         text = text[:3990] + "…"
@@ -121,13 +122,13 @@ def send_text(
     if r.status_code == 200 and isinstance(body, dict) and body.get("ok") is True:
         result = body.get("result") or {}
         return True, {
-            "channel": channel,
+            "channel": "telegram",
             "message_id": result.get("message_id"),
             "chat_id": result.get("chat", {}).get("id") or chat_id,
             "sent_at": time.time(),
         }
     return False, {
-        "channel": channel,
+        "channel": "telegram",
         "error": (body.get("description") if isinstance(body, dict) else None)
                  or f"HTTP {r.status_code}",
         "status_code": r.status_code,
