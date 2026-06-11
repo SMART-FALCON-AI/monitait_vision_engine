@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.8] - 2026-06-11
+
+### Added — AI Trainer JWT auth + transient-DNS retry
+- The trainer (Django + DRF + `rest_framework_simplejwt`) uses JWT auth, not a static API key. Tokens have a 6h access / 1d refresh lifetime — too short for a long-running production site to use a manually-pasted token. MVE now handles the full login flow:
+  - **`POST /api/ai_trainer/config`** accepts a new `email` and `password` (in addition to the legacy `api_key`).
+  - On every upload, `_ensure_access_token(cfg)` checks the cached access token; if expired or missing, refreshes (via stored refresh token) or re-logs-in with `email`+`password`. The fresh tokens are persisted so subsequent uploads reuse them. Operator never sees a token.
+  - **`POST /api/ai_trainer/login_test`** runs a credentials check without uploading — used by the new **Test login** button.
+- Auth precedence: explicit `api_key` (legacy override) wins over JWT. Both clear and documented in the Advanced → AI Trainer panel.
+- New UI fields in Advanced → AI Trainer: `Trainer email` and `Trainer password` (write-only). Saving a new password invalidates the cached tokens so the next upload picks the new ones up.
+- Default URL placeholder updated to the corrected `https://ai-trainer.monitait.com/api/images/` (was the now-incorrect `/api/tasks/{task_id}/upload`).
+
+### Fixed — transient DNS failures on upload
+- The MVE container's embedded Docker DNS resolver occasionally fails to look up external hosts ("Errno -5: No address associated with hostname") even when the host's resolver is fine. The upload code now retries 3 times with brief backoff (0.5s, 1.0s) — empirically eliminates the intermittent 502s that the operator was hitting.
+- The file is read into bytes once and reused across attempts so retries don't re-open or re-stream the source jpg.
+
 ## [3.24.7] - 2026-06-11
 
 ### Fixed — AI Trainer upload was hitting a 404 URL

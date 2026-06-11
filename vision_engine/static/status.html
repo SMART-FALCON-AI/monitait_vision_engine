@@ -1300,19 +1300,32 @@
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label">Trainer URL</div>
-                            <input type="text" class="control-input" id="ai-trainer-url-input" value="https://ai-trainer.monitait.com/api/tasks/{task_id}/upload" placeholder="https://ai-trainer.monitait.com/api/tasks/{task_id}/upload">
+                            <input type="text" class="control-input" id="ai-trainer-url-input" placeholder="https://ai-trainer.monitait.com/api/images/">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Default: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px; color:#86efac;">https://ai-trainer.monitait.com/api/images/</code> — the trainer's real upload endpoint (3.24.7).</div>
                         </div>
                         <div class="control-item">
                             <div class="control-label">Task ID</div>
-                            <input type="text" class="control-input" id="ai-trainer-task-id-input" placeholder="e.g. shoga-2026-q2">
+                            <input type="number" class="control-input" id="ai-trainer-task-id-input" placeholder="e.g. 322">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Integer task ID from the trainer.</div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">API key (optional)</div>
-                            <input type="password" class="control-input" id="ai-trainer-api-key-input" placeholder="leave blank if not used; previously-saved key is preserved">
-                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Stored server-side; not returned. Send an explicit empty value to clear.</div>
+                            <div class="control-label">API key (legacy / optional)</div>
+                            <input type="password" class="control-input" id="ai-trainer-api-key-input" placeholder="leave blank to use email + password auth below">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">If set, used as <code>Authorization: Bearer …</code>. Otherwise MVE logs in with email + password to fetch a JWT.</div>
+                        </div>
+                        <!-- 3.24.8 — JWT login flow. MVE stores email+password, fetches an access token,
+                             auto-refreshes every 6h. The password is write-only (we don't echo it back). -->
+                        <div class="control-item">
+                            <div class="control-label">Trainer email</div>
+                            <input type="email" class="control-input" id="ai-trainer-email-input" placeholder="you@example.com">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Trainer password <small style="opacity:0.6;">(write-only)</small></div>
+                            <input type="password" class="control-input" id="ai-trainer-password-input" placeholder="leave blank to keep existing">
                         </div>
                         <div class="control-item" style="grid-column: span 2;">
                             <button class="control-button" onclick="saveAiTrainerConfig()" style="background:var(--primary-color); color:white;">Save AI Trainer Config</button>
+                            <button class="control-button" onclick="testAiTrainerLogin()" style="background:rgba(16,185,129,0.6); color:white;">Test login</button>
                             <div id="ai-trainer-response" class="control-response"></div>
                         </div>
                     </div>

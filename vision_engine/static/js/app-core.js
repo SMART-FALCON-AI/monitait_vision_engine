@@ -658,11 +658,17 @@ async function loadAiTrainerConfig() {
         const u = document.getElementById('ai-trainer-url-input');
         const t = document.getElementById('ai-trainer-task-id-input');
         const k = document.getElementById('ai-trainer-api-key-input');
+        const e = document.getElementById('ai-trainer-email-input');      // 3.24.8
+        const p = document.getElementById('ai-trainer-password-input');   // 3.24.8
         if (u && d.url) u.value = d.url;
         if (t && d.task_id) t.value = d.task_id;
+        if (e && d.email) e.value = d.email;
         if (k) k.placeholder = d.has_api_key
             ? '(a key is saved; leave blank to keep it)'
-            : 'paste an API key if your trainer needs one';
+            : 'leave blank to use email + password auth below';
+        if (p) p.placeholder = d.has_password
+            ? '(a password is saved; leave blank to keep it)'
+            : 'leave blank to keep existing';
     } catch (e) {}
 }
 
@@ -670,11 +676,14 @@ async function saveAiTrainerConfig() {
     const u = (document.getElementById('ai-trainer-url-input')?.value || '').trim();
     const t = (document.getElementById('ai-trainer-task-id-input')?.value || '').trim();
     const k = document.getElementById('ai-trainer-api-key-input')?.value || '';
+    const e = (document.getElementById('ai-trainer-email-input')?.value || '').trim();   // 3.24.8
+    const p = document.getElementById('ai-trainer-password-input')?.value || '';          // 3.24.8
     const resp = document.getElementById('ai-trainer-response');
-    const body = { url: u, task_id: t };
-    // Only send api_key when the operator actually typed something.
+    const body = { url: u, task_id: t, email: e };
+    // Only send api_key/password when the operator actually typed something.
     // Blank means "keep existing" because the GET hides the saved value.
     if (k.length > 0) body.api_key = k;
+    if (p.length > 0) body.password = p;
     try {
         const r = await fetch('/api/ai_trainer/config', {
             method: 'POST',
@@ -706,6 +715,38 @@ async function saveAiTrainerConfig() {
 window.saveAiTrainerConfig = saveAiTrainerConfig;
 window.loadAiTrainerConfig = loadAiTrainerConfig;
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadAiTrainerConfig, 1200));
+
+
+// 3.24.8 — try a fresh login against the trainer with the saved email+password
+async function testAiTrainerLogin() {
+    const resp = document.getElementById('ai-trainer-response');
+    if (resp) {
+        resp.textContent = '🔑 testing login…';
+        resp.className = 'control-response';
+    }
+    try {
+        const r = await fetch('/api/ai_trainer/login_test', { method: 'POST' });
+        const d = await r.json();
+        if (r.ok && d.success) {
+            if (resp) {
+                resp.textContent = `✓ Login OK · access token good for ${d.access_lifetime_hours}h, refresh for ${d.refresh_lifetime_hours}h`;
+                resp.className = 'control-response success';
+            }
+            loadAiTrainerConfig();
+        } else {
+            if (resp) {
+                resp.textContent = `Login failed: ${d.error || 'unknown'}`;
+                resp.className = 'control-response error';
+            }
+        }
+    } catch (e) {
+        if (resp) {
+            resp.textContent = `Network error: ${e.message}`;
+            resp.className = 'control-response error';
+        }
+    }
+}
+window.testAiTrainerLogin = testAiTrainerLogin;
 
 
 // =====================================================================
