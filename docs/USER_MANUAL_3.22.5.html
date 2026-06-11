@@ -1,0 +1,682 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8"><title>Monitait Vision Engine User Manual v3.22.5</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;max-width:900px;margin:2rem auto;padding:0 1.5rem;line-height:1.55;color:#111;background:#fff}
+h1,h2,h3{color:#0b3d91}h1{border-bottom:2px solid #ccc;padding-bottom:.3rem}
+code,pre{background:#f4f4f4;border-radius:4px;padding:.1em .3em;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:.93em}
+pre{padding:.8em 1em;overflow-x:auto;line-height:1.4}
+table{border-collapse:collapse;margin:1em 0;width:100%}th,td{border:1px solid #ccc;padding:.4em .7em;text-align:left}
+th{background:#f0f4fa}blockquote{border-left:4px solid #0b3d91;padding-left:1em;color:#444;margin:1em 0}
+hr{border:0;border-top:1px solid #ccc;margin:2em 0}img{max-width:100%;height:auto}
+@media print{body{max-width:none;margin:.5cm;font-size:10pt}h2{page-break-before:always}h2:first-of-type{page-break-before:auto}}
+</style></head><body>
+<h1 id="monitait-vision-engine-user-manual">Monitait Vision Engine — User Manual</h1>
+<p><strong>Version:</strong> 3.22.5
+<strong>Last Updated:</strong> 2026-06-11
+<strong>Application URL:</strong> <code>http://localhost</code> (port 80, or whichever port your install uses)</p>
+<hr />
+<h2 id="table-of-contents">Table of Contents</h2>
+<ol>
+<li><a href="#1-introduction">Introduction</a></li>
+<li><a href="#2-system-requirements">System Requirements</a></li>
+<li><a href="#3-installation--first-boot">Installation &amp; First Boot</a></li>
+<li><a href="#4-quick-start--5-minute-first-run">Quick Start — 5-Minute First Run</a></li>
+<li><a href="#5-the-tab-layout">The Tab Layout</a></li>
+<li><a href="#6-dashboard">Dashboard</a></li>
+<li><a href="#7-charts">Charts</a></li>
+<li><a href="#8-ai-assistant">AI Assistant</a></li>
+<li><a href="#9-gallery--defects">Gallery &amp; Defects</a></li>
+<li><a href="#10-hardware">Hardware</a></li>
+<li><a href="#11-cameras">Cameras</a></li>
+<li><a href="#12-inference-models--pipelines">Inference (Models + Pipelines)</a></li>
+<li><a href="#13-process-tab--per-class-cards--analytics">Process Tab — Per-Class Cards &amp; Analytics</a></li>
+<li><a href="#14-advanced--procedures-timeline-data-file">Advanced — Procedures, Timeline, Data File</a></li>
+<li><a href="#15-configuration-storage-db--file">Configuration Storage (DB + File)</a></li>
+<li><a href="#16-ai-trainer-integration">AI Trainer Integration</a></li>
+<li><a href="#17-ejection-procedures-reference">Ejection Procedures Reference</a></li>
+<li><a href="#18-troubleshooting">Troubleshooting</a></li>
+<li><a href="#19-best-practices">Best Practices</a></li>
+<li><a href="#20-faq">FAQ</a></li>
+</ol>
+<hr />
+<h2 id="1-introduction">1. Introduction</h2>
+<h3 id="what-is-monitait-vision-engine-mve">What is Monitait Vision Engine (MVE)?</h3>
+<p>MVE is an industrial-grade quality-control platform that uses computer vision (YOLO + a math channels module) to inspect products in real time, save annotated frames + per-frame detections to a database, and trigger ejection of bad units.</p>
+<p>It runs as a web application — operators control it from a browser. No client install needed.</p>
+<h3 id="headline-features-as-of-3225">Headline features as of 3.22.5</h3>
+<ul>
+<li><strong>Detection pipelines</strong> — chain a YOLO model with the Math channels module (FFT, blob, gradient, color, etc.); per-phase enable + per-phase stride.</li>
+<li><strong>Per-class controls</strong> — for every class the model detects, the operator gets a card with: Show / Narrate / Beep / Store / ColorE / Area toggles, Min conf / Severity inputs, and read-only analytics (confidence p5/p50/p95, absolute CIELAB color, scalar E, bbox area).</li>
+<li><strong>Ejection procedures</strong> — rule-based product rejection with conditions on count, area, color ΔE (relative to a reference), and <strong>absolute E</strong> (color magnitude, no baseline, 3.22.5).</li>
+<li><strong>DB-backed configuration</strong> — <code>mve_config_kv</code> table in TimescaleDB is the source of truth; <code>.env.prepared_query_data</code> is kept as a downstream snapshot for backward compatibility (3.22.0).</li>
+<li><strong>AI Assistant</strong> — a chat interface against your line's recent state; OpenAI-compatible (3.21.23 added custom <code>base_url</code> + <code>model_id</code> so any compatible endpoint works — Anthropic-via-proxy, local Ollama, custom enterprise inferences).</li>
+<li><strong>AI Trainer</strong> — one-click upload of a defect frame to the central training service from the defect drawer (3.21.22).</li>
+<li><strong>Multi-camera</strong> — every metric has a per-camera breakdown so you can compare cam 1 vs cam 2 vs … without juggling pages.</li>
+<li><strong>Shipment quality scoring</strong> — a server-rendered PDF report per shipment, configurable cron, threshold-graded RELEASE / RE-INSPECT / HOLD.</li>
+</ul>
+<h3 id="audience">Audience</h3>
+<p>Two main personas:
+- <strong>Operator</strong> (on the floor) — uses Dashboard, Gallery, defect drawer; rarely touches Advanced.
+- <strong>Inspector / Engineer</strong> — configures cameras, models, ejection procedures, per-class thresholds via Cameras / Inference / Process / Advanced.</p>
+<p>The manual is written for both. Operator-only sections are tagged 👷. Engineer-only sections are tagged 🔧.</p>
+<hr />
+<h2 id="2-system-requirements">2. System Requirements</h2>
+<h3 id="recommended-hardware-per-inspection-line">Recommended hardware (per inspection line)</h3>
+<ul>
+<li><strong>CPU:</strong> 8+ cores (12+ if running 2+ cameras at 1 fps)</li>
+<li><strong>RAM:</strong> 16 GB minimum, 32 GB if also running the math module</li>
+<li><strong>GPU:</strong> NVIDIA with CUDA support (8 GB VRAM or more for <code>yolov5s</code>)</li>
+<li><strong>Disk:</strong> SSD, 500 GB minimum (raw frames + annotated images add up fast — see §15 for retention)</li>
+<li><strong>Network:</strong> 1 Gbps LAN to the inspection station, internet optional (for AI Assistant + AI Trainer)</li>
+<li><strong>Encoder/ejector hardware:</strong> Arduino or PLC over USB serial — optional but recommended for closed-loop ejection</li>
+</ul>
+<h3 id="software">Software</h3>
+<ul>
+<li>Ubuntu 22.04 LTS or 24.04 LTS (some sites also run Windows + Docker Desktop)</li>
+<li>Docker 24.x + Docker Compose v2</li>
+<li>NVIDIA driver matching the CUDA version baked into the YOLO image</li>
+<li>For Windows hosts: WSL2 backend, GPU pass-through enabled</li>
+</ul>
+<h3 id="supported-browsers">Supported browsers</h3>
+<p>Chromium-based browsers (Chrome / Edge / Brave / Opera) and recent Firefox. The UI uses Server-Sent Events for the live dashboard — that works in all modern browsers.</p>
+<hr />
+<h2 id="3-installation-first-boot">3. Installation &amp; First Boot</h2>
+<h3 id="one-time-setup">One-time setup</h3>
+<ol>
+<li>SSH into the host. Clone the repo:
+   <code>bash
+   git clone https://github.com/SMART-FALCON-AI/monitait_vision_engine.git
+   cd monitait_vision_engine</code></li>
+<li>Pull the MVE image (proprietary models — YOLO and math — get loaded separately):
+   <code>bash
+   docker pull registry.monitait.com/monitait/mve:3.22.5</code></li>
+<li>Load the YOLO and Math images from the disk transfer you received from Monitait support:
+   <code>bash
+   docker load &lt; yolo_inference.tar
+   docker load &lt; math_inference.tar</code></li>
+<li>Bring everything up:
+   <code>bash
+   docker compose up -d</code></li>
+<li>Open <code>http://localhost</code> in your browser.</li>
+</ol>
+<p>On first boot, MVE migrates the legacy <code>.env.prepared_query_data</code> file (if present) into the <code>mve_config_kv</code> Postgres table (see §15). It logs <code>3.22 migration: copied N top-level key(s) into mve_config_kv</code> — that's a one-time event.</p>
+<h3 id="configuring-cameras">Configuring cameras</h3>
+<p>After first boot, MVE has no cameras configured. Go to the <strong>Cameras</strong> tab to add them (§11).</p>
+<h3 id="default-endpoints">Default endpoints</h3>
+<ul>
+<li><strong>Web UI:</strong> <code>http://localhost</code></li>
+<li><strong>DB:</strong> <code>monitait_timescaledb:5432</code> (Postgres + Timescale extension)</li>
+<li><strong>Redis:</strong> <code>monitait_redis:6379</code></li>
+<li><strong>YOLO inference:</strong> <code>http://yolo_inference:4442</code></li>
+<li><strong>Math inference:</strong> <code>http://math_inference:4443</code></li>
+</ul>
+<hr />
+<h2 id="4-quick-start-5-minute-first-run">4. Quick Start — 5-Minute First Run</h2>
+<ol>
+<li><strong>Open the UI.</strong> Browser → <code>http://localhost</code>. You land on the Dashboard.</li>
+<li><strong>Add a camera.</strong> Go to <strong>Cameras</strong> tab → Add Camera → pick USB or RTSP → save. The card appears.</li>
+<li><strong>Enable ROI</strong> on the card and adjust <code>roi_xmax / roi_ymax</code> to roughly match the area you want inspected. (This matters — see §11; many "no detection" complaints come from ROI mismatch.)</li>
+<li><strong>Start capture.</strong> On the Dashboard, click <strong>▶ Start</strong>. The capture loop begins; frames flow into the timeline composite.</li>
+<li><strong>Watch detections.</strong> The dashboard timeline composite shows recent frames per camera. If your YOLO model is loaded, you should see bounding boxes immediately.</li>
+<li><strong>Tune per-class behavior.</strong> Go to <strong>Process</strong> tab. For each class you care about, tick <strong>Show</strong> (draw bbox), set <strong>Min conf</strong> above the noise floor (see §13), and optionally <strong>Store</strong> to write detections to DB.</li>
+<li><strong>Optional: add ejection rules.</strong> Go to <strong>Advanced</strong> → Procedures → Add Procedure to route specific detection patterns to your ejector hardware. See §17.</li>
+</ol>
+<p>You're now inspecting.</p>
+<hr />
+<h2 id="5-the-tab-layout">5. The Tab Layout</h2>
+<p>Top of the UI: a row of tabs.</p>
+<table>
+<thead>
+<tr>
+<th>Tab</th>
+<th>Audience</th>
+<th>What's there</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>📋 Dashboard</td>
+<td>👷</td>
+<td>Live timeline composite, counters, capture/inference status.</td>
+</tr>
+<tr>
+<td>📊 Charts</td>
+<td>🔧</td>
+<td>Time-series analytics. Click any dot → see the frame + nearby detections.</td>
+</tr>
+<tr>
+<td>🤖 AI Assistant</td>
+<td>both</td>
+<td>Chat with an OpenAI-compatible model against your line's recent state.</td>
+</tr>
+<tr>
+<td>🖼️ Gallery</td>
+<td>👷</td>
+<td>Browse stored annotated frames. Click for a drawer with the raw image + detections + AI Trainer upload.</td>
+</tr>
+<tr>
+<td>🔌 Hardware</td>
+<td>🔧</td>
+<td>Encoder / ejector / serial port wiring + tests.</td>
+</tr>
+<tr>
+<td>📷 Cameras</td>
+<td>🔧</td>
+<td>Per-camera config — source, ROI, exposure, gain, white balance.</td>
+</tr>
+<tr>
+<td>🧠 Inference</td>
+<td>🔧</td>
+<td>Model registry + pipeline editor.</td>
+</tr>
+<tr>
+<td>⚙️ Process</td>
+<td>🔧</td>
+<td>Per-class card grid: Show / Narrate / Beep / Store / ColorE / Area + analytics.</td>
+</tr>
+<tr>
+<td>🛠️ Advanced</td>
+<td>🔧</td>
+<td>Procedures, timeline config, raw <code>mve_config_kv</code> JSON editor, system controls.</td>
+</tr>
+</tbody>
+</table>
+<p>Top-right corner: language picker, save-all-configuration button, current shipment label.</p>
+<hr />
+<h2 id="6-dashboard">6. Dashboard</h2>
+<p>The operator's main view.</p>
+<p><img alt="Dashboard" src="images/dashboard.png" /></p>
+<h3 id="left-panel-live-metrics">Left panel — live metrics</h3>
+<p>A column of mini-cards showing:</p>
+<ul>
+<li><strong>Encoder</strong> — current absolute encoder count from the ejector hardware (if wired).</li>
+<li><strong>Speed</strong> — derived linear speed (units depend on encoder pulses-per-meter calibration).</li>
+<li><strong>Pulses/s, Movement</strong> — raw encoder pulses per second + whether movement is detected.</li>
+<li><strong>Ej Queue / Ej Active / Ej Enable / Ej Offset / Ej OK / Ej NG</strong> — ejection queue depth, active flag, software enable toggle, configured frame offset between detection and ejection, and lifetime OK/NG counters.</li>
+<li><strong>OK / NG</strong> — current shipment OK and NG counts (Phase 2 of the quality system, see §17).</li>
+<li><strong>Downtime, Analog, Power</strong> — secondary metrics (lower priority).</li>
+<li><strong>Capture: <state></strong> — name of the active capture state.</li>
+<li><strong>Inference: <pipeline></strong> — name of the active pipeline.</li>
+<li><strong>Latency / Inf FPS / Cap FPS</strong> — three numbers: average inference latency in ms, inference frames per second, capture frames per second.</li>
+<li><strong>OK pill</strong> — green when inference is keeping up with capture, amber when the inference queue is backing up.</li>
+</ul>
+<h3 id="center-panel-timeline-composite">Center panel — timeline composite</h3>
+<p>A live image showing the most recent N frames per camera, stitched into a grid (cameras as rows, frames as columns left → right oldest → newest).</p>
+<p>If a frame had detections, bounding boxes are drawn directly on the thumbnail.</p>
+<p><strong>If you see no bounding boxes</strong> but you know detections are happening:
+- Check the <strong>Process</strong> tab — has <strong>Show</strong> been ticked for the relevant class? (The 3.21.25 strict opt-in rule means classes without <code>show=True</code> don't draw.)
+- Check that the class has an entry in <code>audio_settings</code> — auto-register fires on first detection per class, but classes detected before the upgrade may need re-touching.</p>
+<p>If the entire timeline is empty:
+- <strong>Inference</strong> → check that the active pipeline has at least one enabled phase, the model is reachable.
+- <strong>Cameras</strong> → check that the active capture state lists the right cameras under its phases.</p>
+<h3 id="bottom-right-system-stats">Bottom-right — system stats</h3>
+<p>CPU, RAM, Disk. Watch the Disk % during a long shift — see §18 for cleanup options.</p>
+<hr />
+<h2 id="7-charts">7. Charts</h2>
+<p><img alt="Charts" src="images/chart1.png" /></p>
+<p>Charts are time-series widgets driven by <code>inference_results</code> rows.</p>
+<h3 id="available-cards">Available cards</h3>
+<ul>
+<li><strong>Detection counts</strong> by class over time.</li>
+<li><strong>Inference latency</strong> and <strong>capture FPS</strong> trends.</li>
+<li><strong>Per-class confidence</strong> (live distribution).</li>
+<li><strong>Shipment quality score</strong> card (3.21.13) + trend chart (3.21.16).</li>
+</ul>
+<h3 id="click-a-dot-to-see-the-frame">Click a dot to see the frame</h3>
+<p>Every dot on the time series is clickable. Clicking opens the same detail drawer as the Gallery — raw frame, detections list, AI Trainer upload button.</p>
+<p>This is the fastest way to ask "what triggered that spike?".</p>
+<h3 id="time-window-controls">Time-window controls</h3>
+<p>Top of each chart: a window selector (last 5 min / 1 h / 6 h / 24 h / 7 d). Wider windows aggregate.</p>
+<hr />
+<h2 id="8-ai-assistant">8. AI Assistant</h2>
+<p>A chat interface backed by an OpenAI-compatible model.</p>
+<p><img alt="AI Assistant" src="images/ai-asssstant.png" /></p>
+<h3 id="setting-up-the-model">Setting up the model</h3>
+<ol>
+<li>Open the AI Assistant tab.</li>
+<li>Click <strong>AI Configuration</strong> (gear icon at the top of the chat).</li>
+<li>Fill in:</li>
+<li><strong>Name</strong> — any friendly label (e.g. <code>kimi-k2.6</code>, <code>gpt-4o</code>, <code>claude-haiku</code>).</li>
+<li><strong>Provider</strong> — <code>chatgpt</code> (works for any OpenAI-compatible endpoint), <code>claude</code>, <code>gemini</code>, <code>local</code>.</li>
+<li><strong>API key</strong> — your key.</li>
+<li><strong>Base URL (optional)</strong> — for non-OpenAI endpoints. E.g. <code>https://rucode.rdemos.com/v1</code>. Leave empty to use the provider's default.</li>
+<li><strong>Model ID (optional)</strong> — overrides the default model name. E.g. <code>kimi-k2.6</code>, <code>gpt-4o</code>, <code>llama3:8b</code>.</li>
+<li>Save. The new model becomes active.</li>
+</ol>
+<p>This was extended in 3.21.23 to let you bring any OpenAI-compatible inference (Anthropic via proxy, local Ollama, custom enterprise endpoints) without code changes.</p>
+<h3 id="built-in-context">Built-in context</h3>
+<p>The Assistant has a pre-loaded tool that hits read-only <code>/api/*</code> endpoints (cameras, inference, system metrics, timeline counts, latest detections). Ask it questions like:</p>
+<ul>
+<li>"What's the current latency?"</li>
+<li>"How many TB defects in the last hour?"</li>
+<li>"Which camera produced the most detections today?"</li>
+<li>"Summarize the last shipment's quality."</li>
+</ul>
+<hr />
+<h2 id="9-gallery-defects">9. Gallery &amp; Defects</h2>
+<p>A browsable grid of stored annotated frames.</p>
+<p>Tile = one detection event. Click any tile → drawer with:</p>
+<ul>
+<li>The raw image (no bbox)</li>
+<li>The annotated image (with bboxes)</li>
+<li>A table of detections (name, confidence, bbox coords, LAB color if ColorE was on, area if Area was on)</li>
+<li>Buttons:</li>
+<li><strong>📤 Upload to AI Trainer</strong> (3.21.22) — posts the raw image to <code>https://ai-trainer.monitait.com/{task_id}/upload</code> for human re-labeling. The <code>{task_id}</code> is configured under Advanced → AI Trainer Integration.</li>
+<li><strong>🔍 Open in Charts</strong> — pivots to the Charts tab around that timestamp.</li>
+</ul>
+<p>Use filters at the top to narrow by class, camera, shipment, time window.</p>
+<hr />
+<h2 id="10-hardware">10. Hardware</h2>
+<p>Wiring and tests for the encoder + ejector + serial peripherals.</p>
+<p><img alt="Hardware" src="images/hardware1.png" /></p>
+<ul>
+<li><strong>Serial port</strong> — pick the Arduino/PLC device path (<code>/dev/ttyUSB0</code>, etc.).</li>
+<li><strong>Encoder</strong> — pulses-per-meter calibration, software enable toggle.</li>
+<li><strong>Ejector</strong> — frame offset (how many frames between detection and physical ejection), enable, test buttons.</li>
+<li><strong>Test ejection</strong> — fires the ejector once. Use this to confirm wiring before a shift.</li>
+</ul>
+<p>If your line has no ejector, you can run with the ejector software-disabled; everything else still works.</p>
+<hr />
+<h2 id="11-cameras">11. Cameras</h2>
+<p><img alt="Cameras" src="images/camera1.png" /></p>
+<p>Per-camera config card. The fields below explain themselves but a few are worth highlighting:</p>
+<h3 id="roi-region-of-interest">ROI (Region of Interest)</h3>
+<p><strong>Most-common gotcha</strong> — if a camera was producing zero bboxes after install, the cause was almost always ROI:
+- <strong><code>roi_enabled</code></strong> must be ticked.
+- <strong><code>roi_xmax / ymax</code></strong> must match (or be reasonably close to) the resolution the YOLO model was trained on. A standard YOLO weights file expects ~640×640 or ~900×600; a 1280×720 full-sensor frame is at a different scale and the model returns <code>[]</code>.</p>
+<p>If you flip the box and detections start firing, that confirms the issue.</p>
+<h3 id="exposure-gain-brightness-contrast-saturation">Exposure / Gain / Brightness / Contrast / Saturation</h3>
+<p>Standard V4L2 / DirectShow controls. Most cameras like <code>auto_exposure=false</code> with a fixed value for inspection — auto exposure causes brightness drift across a shift.</p>
+<h3 id="source">Source</h3>
+<ul>
+<li>USB: <code>/dev/video0</code>, <code>/dev/video2</code>, …</li>
+<li>IP: <code>rtsp://user:pass@ip/stream</code></li>
+</ul>
+<h3 id="discover-rescan">Discover / Rescan</h3>
+<p>Top-right of the tab — auto-detects new USB cameras.</p>
+<hr />
+<h2 id="12-inference-models-pipelines">12. Inference (Models + Pipelines)</h2>
+<p><img alt="Inference" src="images/inference1.png" /></p>
+<h3 id="models">Models</h3>
+<p>Top section. Each registered model has:
+- <strong>Name</strong> (label)
+- <strong>Model type</strong> — <code>yolo</code>, <code>math</code>, <code>gradio</code>, <code>legacy</code>
+- <strong>Inference URL</strong> — HTTP endpoint inside the docker network
+- <strong>Model name</strong> — what to pass through to the inference container
+- <strong>Confidence threshold</strong> — server-side floor (rarely useful; the per-class Min conf in Process tab is the real control)</p>
+<h3 id="pipelines">Pipelines</h3>
+<p>Bottom section. A pipeline is a list of <strong>phases</strong>; each phase has:
+- <code>model_id</code> (which registered model)
+- <code>enabled</code> (true/false)
+- <code>order</code> (phase order; lower = first)
+- <code>stride</code> (run every Nth frame; useful for math-only phases)</p>
+<p>The active pipeline runs on every captured frame. The phases run in <code>order</code>, gated by <code>stride</code>.</p>
+<h3 id="math-stride-pitfall-workaround-odd-stride">⚠️ Math stride pitfall (workaround: odd stride)</h3>
+<p>With a global frame counter and N cameras alternating, an <strong>even stride means math only ever fires on one specific camera</strong>. Use an odd stride (<code>9</code>, <code>11</code>, etc.) so math hits each camera in rotation. (A per-camera counter refactor is queued for a future release.)</p>
+<hr />
+<h2 id="13-process-tab-per-class-cards-analytics">13. Process Tab — Per-Class Cards &amp; Analytics</h2>
+<p>🔧 — <strong>The single biggest tab.</strong> Where operators tune per-class behavior.</p>
+<p><img alt="Process" src="images/process1.png" /></p>
+<h3 id="filter-bar-32124">Filter bar (3.21.24)</h3>
+<p>Top of the grid. Three controls:
+- <strong>🔍 Search box</strong> — live filter by class-name substring.
+- <strong>☑ Show only active (last 1 h)</strong> — hide classes that haven't fired in the window.
+- <strong>Window selector</strong> — <code>15m / 1h / 6h / 24h / 7d</code>. Drives both the toggle's filter and the busy-first sort.
+- <strong>Counter chip</strong> — <code>Showing X of Y · Z active in last 1h</code>.</p>
+<p>Even with the toggle off, <strong>active classes float to the top of the grid</strong> (busy-first sort), so the ones you care about are always at the top.</p>
+<h3 id="per-class-card-layout-3224">Per-class card layout (3.22.4)</h3>
+<p>Top to bottom on every card:</p>
+<ol>
+<li><strong>Header</strong> — class name + (i) info tooltip.</li>
+<li><strong>Toggles row</strong> (6 checkboxes, wraps to 2 lines on narrow cards):</li>
+<li><strong>☑ Show</strong> — draw bounding box on annotated frames. Strict opt-in (3.21.25): only <code>show=true</code> draws. Missing entries don't draw.</li>
+<li><strong>☑ Narrate</strong> — TTS speak the class name when detected.</li>
+<li><strong>☑ Beep</strong> — play the beep sound (configurable below) when detected.</li>
+<li><strong>☑ Store</strong> — persist this class's detections to <code>inference_results</code>. Off = silently dropped. Default off for new classes.</li>
+<li><strong>☑ ColorE</strong> (3.22.2) — extract CIELAB color from this class's bbox on every detection. Drives the 🎨 color row + ✴ E row.</li>
+<li><strong>☑ Area</strong> (3.22.3) — store bbox area on the detection (<code>det.area</code>) so it shows up in the 📐 area row and is available to ejection procedures.</li>
+<li><strong>Min conf + Severity inputs</strong>:</li>
+<li><strong>Min conf %</strong> — per-class confidence floor. Detections below this never reach Store / Narrate / Beep / ejection.</li>
+<li><strong>Severity</strong> (0–100) — weight used in the shipment quality score. 0 = cosmetic, 100 = critical.</li>
+<li><strong>📊 normal conf</strong> (3.21.12, extended 3.21.24):</li>
+<li>Overall: <code>p5 · p50 · p95 % (p5–p50–p95) · n=…</code></li>
+<li>Per-camera: <code>cam 1: … · cam 2: …</code></li>
+<li><strong>(i) tooltip:</strong> YOLO confidence percentiles over last 7 days. Tune <strong>Min conf</strong> above p5 (filters noise) but well below p50 (keeps real detections).</li>
+<li><strong>🎨 color</strong> (3.22.2, refactored 3.22.4) — only visible when ColorE is on AND there are ≥5 LAB samples:</li>
+<li>Overall: <code>L: p5·p50·p95   a: p5·p50·p95   b: p5·p50·p95   (p5–p50–p95)   n=…</code></li>
+<li>Per-camera below.</li>
+<li><strong>L*</strong> lightness 0–100 · <strong>a*</strong> green↔red · <strong>b*</strong> blue↔yellow.</li>
+<li><strong>(i) tooltip:</strong> the full formula and drift-diagnosis tips (L moving = exposure / fade, a moving = green/red dye, b moving = blue/yellow / lighting color temperature).</li>
+<li><strong>✴ E (abs)</strong> (3.22.5) — single-scalar color magnitude when ColorE is on:</li>
+<li>Formula: <strong>E = √(L² + a² + b²)</strong>.</li>
+<li>Stored on the detection (<code>det.E</code>) at extraction time so ejection procedures can use it directly.</li>
+<li>Display: <code>p5 · p50 · p95 (p5–p50–p95)</code>.</li>
+<li><strong>(i) tooltip:</strong> the formula plus three usable ejection conditions (<code>E_greater</code>, <code>E_less</code>, <code>E_between</code>) — see §17.</li>
+<li><strong>📐 area</strong> (3.22.3) — only visible when Area is on:</li>
+<li>Overall: <code>p5 · p50 · p95 px² (p5–p50–p95) · n=…</code></li>
+<li>Per-camera below.</li>
+<li>Formatted as <code>k</code> / <code>M</code> for readability (e.g. <code>12.4k</code> instead of <code>12,450</code>).</li>
+<li><strong>(i) tooltip:</strong> spotting false positives (way below p5) and merged objects / yarn issues (way above p95).</li>
+<li><strong>Beep sound</strong> — dropdown (sine / square / sawtooth / triangle) + test button.</li>
+</ol>
+<h3 id="strict-showtrue-32125">Strict show=true (3.21.25)</h3>
+<p>Before 3.21.25, the draw rule was inconsistent across the codebase, leading to either silent yolo classes (3.21.22) or math floods (3.21.23). The current rule is uniform:</p>
+<blockquote>
+<p><strong>DRAW IFF <code>audio_settings[name].show == True</code>.</strong></p>
+</blockquote>
+<p>Anything else (False, missing, malformed) → skip. Combined with <strong>auto-register</strong> (3.21.25), every detected class gets a <code>show=false</code> stub the first time it's seen, so it appears in the Process tab as an unticked card. Operators opt in explicitly. No silent classes, no surprise draws.</p>
+<p>Backed by a single source of truth: <code>services/draw_filters.py</code> (3.21.26) loads <code>audio_settings</code> itself with a 5 s cache, and every caller just asks <code>should_draw_class(name)</code> — no parameters.</p>
+<hr />
+<h2 id="14-advanced-procedures-timeline-data-file">14. Advanced — Procedures, Timeline, Data File</h2>
+<p>🔧 — engineer-only.</p>
+<p><img alt="Advanced" src="images/advanced1.png" /></p>
+<h3 id="procedures-ejection-rules">Procedures (ejection rules)</h3>
+<p>A procedure = a named ruleset that triggers ejection when its rules fire on a frame. Each procedure has:
+- <strong>Name</strong>
+- <strong>Logic</strong> — <code>all</code> (every rule must trigger) or <code>any</code> (any one)
+- <strong>Rules</strong> — see §17 for the full list of conditions</p>
+<h3 id="timeline-configuration">Timeline Configuration</h3>
+<ul>
+<li><strong>Image quality</strong> (JPEG quality, 0-100)</li>
+<li><strong>Number of rows</strong> (frames per page in the composite)</li>
+<li><strong>Image rotation</strong> (per-camera output rotation applied at composite time)</li>
+<li><strong>Show bounding boxes</strong> (display toggle for the live composite)</li>
+<li><strong>Camera order</strong> (<code>normal</code>, <code>reverse</code>, or <code>custom</code> with a comma-separated cam-id list)</li>
+<li><strong>Procedures</strong> — the list referenced above</li>
+<li><strong>Object filters</strong> — legacy per-class control; preserved for back-compat but <strong>auto-migrated into <code>audio_settings</code></strong> on first run of 3.21.22+. The Process tab is now the single place to manage it.</li>
+</ul>
+<h3 id="data-file-editor">Data File Editor</h3>
+<p>A JSON editor for <code>service_config</code>. As of 3.22.0, the source of truth is the <code>mve_config_kv</code> Postgres table; the JSON editor reads from DB and writes through to DB + the <code>.env.prepared_query_data</code> file snapshot. See §15.</p>
+<h3 id="system">System</h3>
+<ul>
+<li><strong>Restart MVE</strong></li>
+<li><strong>Save All Configuration</strong> (forces a write-through)</li>
+<li><strong>Export Config / Import Config</strong> — round-trips the entire JSON; works across sites.</li>
+</ul>
+<hr />
+<h2 id="15-configuration-storage-db-file">15. Configuration Storage (DB + File)</h2>
+<p>🔧 — engineer-only.</p>
+<h3 id="what-changed-in-3220">What changed in 3.22.0</h3>
+<p>Before 3.22.0, the file <code>.env.prepared_query_data</code> (a single ~50 KB JSON) was the source of truth. Every config change rewrote the whole file. Concurrent writers could clobber each other. There was no audit trail.</p>
+<p>3.22.0 moves the truth into a Postgres table:</p>
+<pre><code class="language-sql">mve_config_kv (
+    key         TEXT PRIMARY KEY,         -- &quot;service_config&quot;, &quot;timeline_config&quot;, ...
+    value       JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_by  TEXT                       -- &quot;mve&quot; / &quot;migration:3.22.0&quot; / &quot;operator:...&quot;
+)
+</code></pre>
+<h3 id="read-path">Read path</h3>
+<ol>
+<li>Try Postgres (<code>mve_config_kv</code>)</li>
+<li>If unreachable or table empty, fall back to <code>.env.prepared_query_data</code> on disk</li>
+</ol>
+<h3 id="write-path">Write path</h3>
+<p>Dual-write, always:
+1. Persist to Postgres
+2. Dump file snapshot — so legacy tooling (<code>cat | jq</code>, the Advanced Data File Editor, pre-3.22 builds at other sites) keeps working</p>
+<h3 id="one-time-migration">One-time migration</h3>
+<p>On MVE startup, <code>services/migrations.py::migrate_data_file_into_db()</code> runs. If the DB table is empty AND the file has content, it ingests the file. Idempotent; safe on every reboot.</p>
+<h3 id="apiconfigdb_status"><code>/api/config/db_status</code></h3>
+<p>Quick health check:</p>
+<pre><code class="language-bash">curl http://localhost/api/config/db_status
+# {&quot;backend&quot;:&quot;db&quot;,&quot;db_reachable&quot;:true,&quot;key_count&quot;:2,&quot;file_exists&quot;:true}
+</code></pre>
+<p><code>backend: "db"</code> is the post-migration state. <code>backend: "file"</code> means MVE is in the fallback path (DB unreachable or empty).</p>
+<h3 id="why-it-matters">Why it matters</h3>
+<ul>
+<li>Atomic per-key writes</li>
+<li>Audit trail via <code>updated_at</code> + <code>updated_by</code> columns (the seed for an audit-log feature)</li>
+<li>Cross-site config push becomes possible (a central console writes to multiple sites' DBs)</li>
+<li>The "MVE owns the file and clobbers your edits" race goes away</li>
+</ul>
+<hr />
+<h2 id="16-ai-trainer-integration">16. AI Trainer Integration</h2>
+<p>🔧 to set up, 👷 to use.</p>
+<h3 id="configuration">Configuration</h3>
+<ol>
+<li><strong>Advanced</strong> → AI Trainer Integration.</li>
+<li>Set the <strong>task id</strong> — the trainer-side identifier the uploads land under.</li>
+<li>(Optional) override the <strong>base URL</strong> if your trainer isn't <code>ai-trainer.monitait.com</code>.</li>
+</ol>
+<h3 id="usage-operator">Usage (operator)</h3>
+<ol>
+<li>Open a defect drawer (Gallery → click a tile, or Charts → click a dot).</li>
+<li>Click <strong>📤 Upload to AI Trainer</strong>.</li>
+<li>The raw image POSTs to <code>${base_url}/${task_id}/upload</code>. No bbox annotations are sent — the trainer's job is to re-label.</li>
+</ol>
+<h3 id="why-this-exists">Why this exists</h3>
+<p>Closes the loop. False positives + true positives + missed defects all funnel back to a labelled dataset that drives the next model retraining.</p>
+<hr />
+<h2 id="17-ejection-procedures-reference">17. Ejection Procedures Reference</h2>
+<p>🔧</p>
+<h3 id="rule-structure">Rule structure</h3>
+<p>A rule has:
+- <strong><code>object</code></strong> — class name to evaluate
+- <strong><code>condition</code></strong> — see below
+- <strong><code>min_confidence</code></strong> — gate (per-class min applied first, then this one)
+- (varies per condition) — <code>count</code>, <code>area</code>, <code>max_delta_e</code>, <code>E</code>, etc.</p>
+<h3 id="available-conditions">Available conditions</h3>
+<h4 id="count-based">Count-based</h4>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Triggers when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>present</code></td>
+<td>Any detection of this class with confidence ≥ floor</td>
+</tr>
+<tr>
+<td><code>not_present</code></td>
+<td>No detection of this class</td>
+</tr>
+<tr>
+<td><code>count_equals</code></td>
+<td>Detection count == <code>count</code></td>
+</tr>
+<tr>
+<td><code>count_greater</code></td>
+<td>Detection count &gt; <code>count</code></td>
+</tr>
+<tr>
+<td><code>count_less</code></td>
+<td>Detection count &lt; <code>count</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="area-based">Area-based</h4>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Triggers when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>area_greater</code></td>
+<td>Best-conf detection's bbox area &gt; <code>area</code></td>
+</tr>
+<tr>
+<td><code>area_less</code></td>
+<td>Best-conf detection's bbox area &lt; <code>area</code></td>
+</tr>
+<tr>
+<td><code>area_equals</code></td>
+<td>Best-conf detection's bbox area == <code>area</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="color-relative-needs-a-reference">Color (relative — needs a reference)</h4>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Triggers when</th>
+<th>Fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>color_delta</code></td>
+<td>CIE76 ΔE between current LAB and reference &gt; threshold</td>
+<td><code>max_delta_e</code>, <code>reference_mode</code> (<code>fixed</code> / <code>previous</code> / <code>running_avg</code>)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="color-absolute-single-threshold-3225">Color (absolute — single threshold, 3.22.5)</h4>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Triggers when</th>
+<th>Fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>E_greater</code></td>
+<td><code>det.E &gt; E</code></td>
+<td><code>E</code></td>
+</tr>
+<tr>
+<td><code>E_less</code></td>
+<td><code>det.E &lt; E</code></td>
+<td><code>E</code></td>
+</tr>
+<tr>
+<td><code>E_between</code></td>
+<td><code>E_min ≤ det.E ≤ E_max</code></td>
+<td><code>E_min</code>, <code>E_max</code></td>
+</tr>
+</tbody>
+</table>
+<p>Where <code>E = √(L² + a² + b²)</code>, stored on the detection at extraction time when ColorE is on for the class. Reference-free — set a fixed threshold and it holds across shifts, dye batches, operator changes.</p>
+<p><strong>Tip:</strong> look at the <strong>✴ E (abs)</strong> badge on the class's Process tab card. Set <code>E_less</code> ≈ p5 and <code>E_greater</code> ≈ p95 — that single procedure catches both ends of color drift.</p>
+<h3 id="logic-all-vs-any">Logic — <code>all</code> vs <code>any</code></h3>
+<p>A procedure with multiple rules can require <strong>all</strong> to trigger (typical) or <strong>any</strong> (catch-anything-bad rule, fewer false positives).</p>
+<h3 id="example-procedure-color-drift-on-tb">Example procedure (color drift on TB)</h3>
+<pre><code class="language-json">{
+  &quot;name&quot;: &quot;TB color drift&quot;,
+  &quot;logic&quot;: &quot;any&quot;,
+  &quot;rules&quot;: [
+    { &quot;object&quot;: &quot;TB&quot;, &quot;condition&quot;: &quot;E_less&quot;,    &quot;E&quot;: 42, &quot;min_confidence&quot;: 30 },
+    { &quot;object&quot;: &quot;TB&quot;, &quot;condition&quot;: &quot;E_greater&quot;, &quot;E&quot;: 64, &quot;min_confidence&quot;: 30 }
+  ]
+}
+</code></pre>
+<p>This ejects TB detections that fall outside the typical color band — without any reference color setup or running average.</p>
+<hr />
+<h2 id="18-troubleshooting">18. Troubleshooting</h2>
+<h3 id="symptom-cause-table">Symptom → cause table</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Dashboard timeline composite empty</td>
+<td>No active pipeline, or active capture state has no enabled phases. Check Inference + Cameras.</td>
+</tr>
+<tr>
+<td>Timeline composite has frames but no bboxes</td>
+<td>The relevant classes don't have <code>show=true</code>. Open Process tab, find the class, tick <strong>Show</strong>.</td>
+</tr>
+<tr>
+<td>One camera produces no detections, the other does</td>
+<td>Almost always ROI. Open Cameras → that camera → tick <code>roi_enabled</code> and check <code>roi_xmax/ymax</code> match your model's training resolution.</td>
+</tr>
+<tr>
+<td>Math channels never fire on one specific camera</td>
+<td>Math phase stride is even (2 cameras + even stride → only cam 2 hits the math counter). Set math stride to 9 (or any odd value).</td>
+</tr>
+<tr>
+<td>AI Assistant returns 401 / "model not found"</td>
+<td>API key wrong, base URL missing (for non-OpenAI providers), or model_id not recognized. Try with explicit <code>base_url</code> + <code>model_id</code>.</td>
+</tr>
+<tr>
+<td><code>/api/config/db_status</code> returns <code>backend: "file"</code></td>
+<td>Postgres is unreachable. Check <code>docker compose ps</code>. MVE keeps running on the file fallback.</td>
+</tr>
+<tr>
+<td>Disk filling fast</td>
+<td>Either raw frames or annotated frames. Use Advanced → Storage to archive old shipments. Also see §19 best practices.</td>
+</tr>
+<tr>
+<td>503 from the shipment quality PDF endpoint</td>
+<td><code>reportlab</code> missing in the container. <code>docker exec monitait_vision_engine pip install reportlab</code>. Rides into the next image bake.</td>
+</tr>
+<tr>
+<td>Browser shows old config after a UI change</td>
+<td>Static-file cache. Hard-refresh (Ctrl+Shift+R). MVE doesn't need a restart for JS/CSS changes.</td>
+</tr>
+<tr>
+<td>MVE crashes on boot with "image bind-mount mismatch"</td>
+<td>Your bind-mounted code is older than the image expects. Re-pull the image OR update <code>./vision_engine</code> to a matching version.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="logs">Logs</h3>
+<ul>
+<li><code>docker logs monitait_vision_engine</code> — main app logs</li>
+<li><code>docker logs monitait_timescaledb</code> — DB logs</li>
+<li><code>docker logs yolo_inference</code> / <code>math_inference</code> — model containers</li>
+<li><code>docker logs --since 5m monitait_vision_engine | grep ERROR</code> — recent errors only</li>
+</ul>
+<hr />
+<h2 id="19-best-practices">19. Best Practices</h2>
+<h3 id="per-class-hygiene">Per-class hygiene</h3>
+<ul>
+<li>Don't enable <strong>Store</strong> on every class. Math channels can flood <code>inference_results</code>. Be selective.</li>
+<li>Use <strong>Min conf</strong> above the p5 baseline (visible on the card) — that's the noise floor.</li>
+<li>Use <strong>Severity</strong> to tier classes: 100 for "ship-killer" defects, 20 for "log but don't reject".</li>
+</ul>
+<h3 id="color-tracking">Color tracking</h3>
+<ul>
+<li>Turn on <strong>ColorE</strong> for the 2–3 classes whose color matters (typically the product class itself). Don't turn it on for everything — LAB extraction is per-bbox <code>cv2.cvtColor</code> and adds up.</li>
+<li>Use <strong>absolute E</strong> (✴ row) for ejection thresholds. It's baseline-free and stable across shifts.</li>
+<li>Use the <strong>L / a / b</strong> breakdown for diagnosis when E shifts — figure out <em>which</em> channel moved.</li>
+</ul>
+<h3 id="disk">Disk</h3>
+<ul>
+<li>Raw frames cost the most. Decide whether you actually need them or just the annotated ones.</li>
+<li>Set a retention policy on <code>inference_results</code> via TimescaleDB chunk-drop (consult Monitait support).</li>
+<li>Archive old shipments before disk hits 80%.</li>
+</ul>
+<h3 id="backups">Backups</h3>
+<p><code>mve_config_kv</code> is in Postgres — your existing pg_dump cron covers it. The <code>.env.prepared_query_data</code> snapshot is also written after every save; copy it to a network share nightly as a belt-and-suspenders.</p>
+<h3 id="multi-site">Multi-site</h3>
+<p>If you run more than one MVE instance, the <strong>Export Config</strong> + <strong>Import Config</strong> buttons in Advanced let you take a JSON snapshot from one site and apply it at another. The format is stable across 3.21.x and 3.22.x.</p>
+<hr />
+<h2 id="20-faq">20. FAQ</h2>
+<p><strong>Q. Why does the same class draw on one camera but not the other?</strong>
+A. Two possible reasons:
+1. The <code>show=true</code> rule was honored only when frames came through the per-camera draw path; the timeline composite path historically had a separate draw rule. Fixed in 3.21.26 — both paths now go through the single-source <code>services/draw_filters.py</code>. If you see this on 3.21.x lower than 3.21.26, upgrade.
+2. ROI on one camera but not the other. Check Cameras tab.</p>
+<p><strong>Q. What's <code>det.E</code> vs <code>det.lab_color</code>?</strong>
+A. <code>lab_color</code> is the <code>[L*, a*, b*]</code> array (three numbers). <code>E</code> is the scalar <code>√(L² + a² + b²)</code> — convenient single number for ejection thresholds. Both are written at detection time when ColorE is on for the class.</p>
+<p><strong>Q. Can I roll back to 3.21.x?</strong>
+A. Yes. The DB migration is one-way (3.22.0 reads file → DB) but doesn't <em>delete</em> the file — <code>.env.prepared_query_data</code> is still updated on every save. A pre-3.22 build reads the file and works. New audit metadata is just ignored by older code.</p>
+<p><strong>Q. Why does cam 1 never get math detections?</strong>
+A. The math phase has a stride. With 2 cameras and an even stride, the global frame counter only hits the math-firing slot on cam 2 (the watcher captures cam 1 → cam 2 → cam 1 → cam 2…). Set math stride to <strong>9</strong> (or any odd value) — math then alternates between cameras. A per-camera-counter refactor is queued for a future release that removes this fragility.</p>
+<p><strong>Q. Can I bring my own AI model for the Assistant?</strong>
+A. Yes, any OpenAI-compatible endpoint. Set <code>base_url</code> and <code>model_id</code> in the AI Configuration. Examples:
+- Local Ollama: <code>base_url=http://host.docker.internal:11434/v1</code>, <code>model_id=llama3:8b</code>
+- Anthropic via OpenAI-compatible proxy: <code>base_url=https://your-proxy/v1</code>, <code>model_id=claude-sonnet-4</code>
+- Custom enterprise: <code>base_url=https://your-internal-endpoint/v1</code>, <code>model_id=your-model</code></p>
+<p><strong>Q. How do I figure out the right Min conf?</strong>
+A. Open the per-class card. The <strong>📊 normal conf</strong> badge shows <code>p5 · p50 · p95</code>. Set Min conf <strong>slightly above p5</strong> to filter noise. If you also see false positives in the Gallery despite that, raise it toward p50.</p>
+<p><strong>Q. How do I figure out the right E_greater / E_less for a color rule?</strong>
+A. Open the per-class card with <strong>ColorE</strong> on. The <strong>✴ E (abs)</strong> badge shows <code>p5 · p50 · p95</code>. Set <code>E_less ≈ p5</code> and <code>E_greater ≈ p95</code>. Anything outside that band is historically unusual color.</p>
+<p><strong>Q. Where do I report bugs?</strong>
+A. <a href="https://github.com/SMART-FALCON-AI/monitait_vision_engine/issues">https://github.com/SMART-FALCON-AI/monitait_vision_engine/issues</a> or your Monitait support contact.</p>
+<hr />
+<p><em>End of manual.</em></p></body></html>
