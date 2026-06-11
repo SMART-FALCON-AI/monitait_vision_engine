@@ -785,14 +785,22 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
         model_id = (active_model.get("model_id") or "").strip()
 
         # ----- gather surrounding context from inference_results -----
+        # 3.24.2 — mode=class (and any caller that didn't pass a timestamp)
+        # defaults to "now". Without this fix the SQL block was skipped and
+        # the AI got an empty context, which is why it kept saying "no
+        # recent samples" even though the card showed 200k+ samples.
+        import time as _time_mod
+        if not ts_in:
+            ts_in = int(_time_mod.time() * 1000)
+
         from services.db import get_db_connection, release_db_connection
         ctx_lines = []
         conn = None
         try:
             conn = get_db_connection()
-            if conn is not None and ts_in:
+            if conn is not None:
                 cur = conn.cursor()
-                # 1. detection-count timeline for THIS class around the dot
+                # 1. detection-count timeline for THIS class over the window
                 cur.execute(
                     """
                     SELECT date_trunc('minute', time) AS m, COUNT(*)
@@ -800,17 +808,18 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                     WHERE time BETWEEN to_timestamp(%s/1000.0) - make_interval(secs => %s)
                                    AND to_timestamp(%s/1000.0) + make_interval(secs => %s)
                       AND (det->>'name') = %s
-                    GROUP BY 1 ORDER BY 1
+                    GROUP BY 1 ORDER BY 1 DESC LIMIT 30
                     """,
                     (ts_in, win_s, ts_in, win_s, metric),
                 )
-                rows = cur.fetchall()
+                rows = list(reversed(cur.fetchall()))
                 if rows:
+                    total = sum(int(r[1] or 0) for r in rows)
                     ctx_lines.append(
-                        f"Counts of '{metric}' (per-minute, ±{win_s}s window):\n"
-                        + "\n".join(f"  {r[0].strftime('%H:%M')}  {r[1]}" for r in rows[:30])
+                        f"Counts of '{metric}' over last {win_s}s ({total:,} total, per-minute):\n"
+                        + "\n".join(f"  {r[0].strftime('%H:%M')}  {r[1]}" for r in rows)
                     )
-                # 2. top-3 other classes firing in the same window
+                # 2. top-5 other classes in the same window
                 cur.execute(
                     """
                     SELECT (det->>'name') AS cls, COUNT(*) AS n
@@ -838,6 +847,74 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                     release_db_connection(conn)
                 except Exception:
                     pass
+
+        # 3.24.2 — for mode=class, also pre-load the per-class analytics
+        # blocks the operator stares at on the Process card: confidence
+        # baselines (overall + per-camera), CIELAB color, absolute E, and
+        # bbox area. Same data, just textualized so the AI can quote it.
+        if mode == "class":
+            try:
+                from routers.timeline import _compute_conf_baselines
+                bl = _compute_conf_baselines().get(metric)
+                if bl:
+                    line = (
+                        f"📊 confidence baseline for '{metric}' (last 7d):\n"
+                        f"  overall  p5={bl.get('p5')} p50={bl.get('p50')} p95={bl.get('p95')} n={bl.get('n')}"
+                    )
+                    for cam, cb in (bl.get("by_camera") or {}).items():
+                        line += (
+                            f"\n  cam {cam}  p5={cb.get('p5')} p50={cb.get('p50')} "
+                            f"p95={cb.get('p95')} n={cb.get('n')}"
+                        )
+                    ctx_lines.append(line)
+            except Exception as _e:
+                logger.debug(f"why mode=class baseline fetch failed: {_e}")
+
+            try:
+                # Reuse the same SQL helpers the endpoints use, in-process.
+                import urllib.request, json as _json
+                # color_drift + area_stats are JSON-only — call our own
+                # FastAPI handlers directly to avoid the HTTP round trip.
+                from routers.timeline import get_color_drift, get_area_stats
+                try:
+                    _cd_resp = await get_color_drift(window="7d")
+                    cd = _json.loads(_cd_resp.body.decode()).get("classes", {}).get(metric)
+                    if cd:
+                        line = f"🎨 CIELAB color for '{metric}' (last 7d): n={cd.get('n')}"
+                        if cd.get("L"):
+                            L = cd["L"]; a = cd["a"]; b = cd["b"]; E = cd.get("E", {})
+                            line += (
+                                f"\n  overall  L p5={L['p5']} p50={L['p50']} p95={L['p95']}  "
+                                f"a p5={a['p5']} p50={a['p50']} p95={a['p95']}  "
+                                f"b p5={b['p5']} p50={b['p50']} p95={b['p95']}  "
+                                f"E p5={E.get('p5')} p50={E.get('p50')} p95={E.get('p95')}"
+                            )
+                        for cam, cc in (cd.get("by_camera") or {}).items():
+                            line += (
+                                f"\n  cam {cam}  L p50={cc['L']['p50']} a p50={cc['a']['p50']} "
+                                f"b p50={cc['b']['p50']} n={cc.get('n')}"
+                            )
+                        ctx_lines.append(line)
+                except Exception as _e:
+                    logger.debug(f"why mode=class color fetch failed: {_e}")
+                try:
+                    _ar_resp = await get_area_stats(window="7d")
+                    ar = _json.loads(_ar_resp.body.decode()).get("classes", {}).get(metric)
+                    if ar:
+                        line = (
+                            f"📐 bbox area for '{metric}' (last 7d, px²): "
+                            f"p5={ar.get('p5')} p50={ar.get('p50')} p95={ar.get('p95')} n={ar.get('n')}"
+                        )
+                        for cam, ca in (ar.get("by_camera") or {}).items():
+                            line += (
+                                f"\n  cam {cam}  p5={ca.get('p5')} p50={ca.get('p50')} "
+                                f"p95={ca.get('p95')} n={ca.get('n')}"
+                            )
+                        ctx_lines.append(line)
+                except Exception as _e:
+                    logger.debug(f"why mode=class area fetch failed: {_e}")
+            except Exception:
+                pass
 
         # ----- real-time system snapshot from Redis -----
         try:

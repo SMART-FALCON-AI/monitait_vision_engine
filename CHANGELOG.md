@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.2] - 2026-06-11
+
+### Fixed — Why? on per-class card had ZERO context (lying about "no recent samples")
+- `mode=class` on the Process tab Why? chip never passes a timestamp, but `/api/why`'s SQL block only ran when `ts_in` was truthy. So `ctx_lines` came back empty and the AI hallucinated "no activity" / "no recent samples" even though the card on screen showed 200k+ samples and rich percentile data. Now defaults `ts_in` to `now` when missing — every call gets the surrounding-context queries.
+
+### Added — Per-class Why? now sees the same analytics the operator sees on the card
+- For `mode=class`, the prompt now includes the per-class baseline data the operator stares at:
+  - **📊 confidence percentiles** (overall + per-camera p5/p50/p95 + n) — same as the 📊 normal-conf badge on the card
+  - **🎨 CIELAB color** (L/a/b percentiles + per-camera breakdown + E magnitude percentiles) — same as the 🎨 color line
+  - **📐 bbox area percentiles** (overall + per-camera) — same as the 📐 area line
+  - Per-minute count timeline over the last hour + top-5 co-occurring classes
+- Backend now calls `_compute_conf_baselines()`, `get_color_drift()`, and `get_area_stats()` in-process (no HTTP round-trip) and serializes the results into the prompt.
+
 ## [3.24.1] - 2026-06-11
 
 ### Fixed — Why? on Quality Score now has real defect data
