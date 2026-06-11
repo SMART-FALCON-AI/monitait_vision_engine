@@ -431,6 +431,7 @@ from routers.ai import router as ai_router
 from routers.ai_trainer import router as ai_trainer_router
 from routers.commands import router as commands_router
 from routers.websocket import router as ws_router
+from routers.notifications import router as notifications_router  # 3.24.0
 
 app.include_router(health_router)
 app.include_router(cameras_router)
@@ -441,8 +442,28 @@ app.include_router(states_router)
 app.include_router(config_router)
 app.include_router(ai_router)
 app.include_router(ai_trainer_router)  # 3.21.22 — AI Trainer integration
+app.include_router(notifications_router)  # 3.24.0 — Telegram/Bale + AI usage
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
+
+
+# 3.24.0 — Background scheduler for shift-end notification fires.
+@app.on_event("startup")
+async def _start_notifications_scheduler():
+    try:
+        from services.scheduler import start_scheduler
+        start_scheduler(app)
+    except Exception as _e:
+        logger.warning(f"notifications scheduler failed to start: {_e}")
+
+
+@app.on_event("shutdown")
+async def _stop_notifications_scheduler():
+    try:
+        from services.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
 
 
 def start_web_server():

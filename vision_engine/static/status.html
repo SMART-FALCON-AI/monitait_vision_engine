@@ -1318,6 +1318,77 @@
                     </div>
                 </div>
 
+                <!-- 3.24.0 — Notifications (Telegram + Bale): shift reports delivered to a bot/chat.
+                     Tokens are write-only from the UI; the API only ever returns masked values. -->
+                <div class="control-section">
+                    <h3>📨 <span>Notifications (Telegram / Bale)</span></h3>
+                    <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
+                        Configure a bot to deliver shift-end PDF reports. Both Telegram and Bale use compatible bot APIs — same payload, just different host. Get a Telegram token from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather</code> or a Bale token from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather_bot</code> on Bale. After saving, schedule shifts with cron expressions (e.g. <code>0 8 * * *</code> = 08:00 daily). The bot must have <i>send-message</i> permission in the target chat or group.
+                    </div>
+                    <div class="control-grid">
+                        <!-- Telegram row -->
+                        <div class="control-item">
+                            <div class="control-label">📨 Telegram bot token <small style="opacity:0.6;">(write-only)</small></div>
+                            <input type="password" class="control-input" id="notif-telegram-token" placeholder="123456:ABCdefGHI…">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Telegram default chat id</div>
+                            <input type="text" class="control-input" id="notif-telegram-chat" placeholder="-100…">
+                        </div>
+                        <div class="control-item">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+                                <input type="checkbox" id="notif-telegram-enabled" style="width:14px; height:14px; cursor:pointer;">
+                                Enable Telegram channel
+                            </label>
+                            <button class="control-button" onclick="saveNotifChannel('telegram')" style="background:var(--secondary-color); color:white; margin-top:6px;">Save Telegram</button>
+                            <button class="control-button" onclick="testNotifChannel('telegram')" style="background:rgba(16,185,129,0.6); color:white; margin-top:6px;">Test send</button>
+                        </div>
+
+                        <!-- Bale row -->
+                        <div class="control-item">
+                            <div class="control-label">📨 Bale bot token <small style="opacity:0.6;">(write-only)</small></div>
+                            <input type="password" class="control-input" id="notif-bale-token" placeholder="123456:ABCdefGHI…">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Bale default chat id</div>
+                            <input type="text" class="control-input" id="notif-bale-chat" placeholder="123456789">
+                        </div>
+                        <div class="control-item">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
+                                <input type="checkbox" id="notif-bale-enabled" style="width:14px; height:14px; cursor:pointer;">
+                                Enable Bale channel
+                            </label>
+                            <button class="control-button" onclick="saveNotifChannel('bale')" style="background:var(--secondary-color); color:white; margin-top:6px;">Save Bale</button>
+                            <button class="control-button" onclick="testNotifChannel('bale')" style="background:rgba(16,185,129,0.6); color:white; margin-top:6px;">Test send</button>
+                        </div>
+
+                        <!-- Schedules editor -->
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label" style="display:flex; align-items:center; justify-content:space-between;">
+                                <span>Shift schedules (cron-style)</span>
+                                <button class="control-button" onclick="addNotifSchedule()" style="background:var(--primary-color); color:white; padding:3px 10px; font-size:11px;">+ Add schedule</button>
+                            </div>
+                            <div id="notif-schedules" style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+                                <div style="color:var(--text-secondary); font-style:italic; font-size:12px;">No schedules yet. Click "+ Add schedule" to wire a shift.</div>
+                            </div>
+                            <div style="display:flex; gap:8px; margin-top:8px;">
+                                <button class="control-button" onclick="saveNotifSchedules()" style="background:var(--primary-color); color:white;">Save schedules</button>
+                                <button class="control-button" onclick="sendShiftReportNow()" style="background:rgba(245,158,11,0.6); color:white;" title="Run the first schedule immediately (skip the cron)">Send now</button>
+                            </div>
+                            <div id="notif-response" class="control-response"></div>
+                        </div>
+
+                        <!-- Audit log -->
+                        <div class="control-item" style="grid-column: span 2;">
+                            <div class="control-label" style="display:flex; align-items:center; justify-content:space-between;">
+                                <span>Recent sends</span>
+                                <button class="control-button" onclick="loadNotifLog()" style="background:rgba(51,65,85,0.6); color:white; padding:3px 10px; font-size:11px;">Refresh</button>
+                            </div>
+                            <div id="notif-log" style="margin-top:6px; max-height:220px; overflow-y:auto; font-size:11px; color:var(--text-secondary);">Loading…</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Storage Path Section (3.21.11) -->
                 <div class="control-section">
                     <h3>💾 <span data-i18n="storage_config">Raw Image Storage</span></h3>

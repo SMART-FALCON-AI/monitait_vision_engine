@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.0] - 2026-06-11
+
+### Added — Telegram + Bale shift report delivery (no SMTP, no email)
+- Shift-end PDF reports now arrive in **Telegram or Bale**, not email. Same payload shape for both (their bot APIs are deliberately compatible), so a single backend wrapper covers both: `services/messaging.py::send_document(channel, token, chat_id, file_bytes, caption)`.
+- **Cron-style scheduler** in `services/scheduler.py` runs as a background asyncio task spawned at MVE startup. Wakes once per minute, checks each enabled schedule against the current local time, fires the matching ones. Supports a useful cron subset: `*`, lists (`0,15,30,45`), simple ranges (`8-17`), step (`*/15`), 5-field `MIN HOUR DOM MON DOW`.
+- **Notifications panel** in Advanced tab — tokens are write-only from the UI (the API only ever returns the masked form `1234…wxyz`), with per-channel enable + default chat ID, a schedule editor (one row per shift with cron / channels / chat IDs / Why?-include / shipment-filter toggles), an explicit **Send now** button to skip the cron, and a live audit log of recent sends.
+- **🤔 Why? caption pre-amble** — every shift report can optionally include the active AI model's 2-sentence diagnosis of the shipment quality score, prepended to the bot message caption. Operator gets a glance answer without opening the PDF.
+- New endpoints:
+  - `GET  /api/notifications/config` — masked config
+  - `POST /api/notifications/config` — partial channel update OR full schedule replace
+  - `POST /api/notifications/test_send` — fire-and-forget test message to validate token+chat_id
+  - `POST /api/notifications/send_now` — manual trigger that skips the cron
+  - `GET  /api/notifications/log` — recent send audit (status, latency, errors)
+- Notification audit lands in a new `notification_log` table, schema bootstrapped on first use.
+
+### Added — Per-call AI usage tracking + billing data
+- Every `/api/why` call now logs to a new `ai_usage_log` table: endpoint, mode, model name, provider, token-in / token-out approximations, estimated cost USD, latency ms, status, operator (X-Operator header), and error if any.
+- Per-model rate cards: defaults to Kimi K2's public rate (≈ $0.28 / 1M input · $1.40 / 1M output). Per-model overrides supported via `audio_settings.ai.<model>.rate_input_per_mtoken` / `rate_output_per_mtoken`, so resellers can charge their own price.
+- New endpoint: `GET /api/ai_usage/summary?window=30d` returns total calls, total cost USD, by-endpoint and by-day breakdowns — the data feed for the per-site monthly bill.
+- Logged regardless of outcome (errors land too) so quota-exceeded / timeout attempts are visible in billing dashboards.
+
+### Expanded — AI Assistant API access (continuation of 3.23.1)
+- Internal API tool list extends to cover the new endpoints: `/api/notifications/log`, `/api/ai_usage/summary` so the chat AI can summarize "how much did Why? cost us this month" and "which schedule failed last night".
+
 ## [3.23.1] - 2026-06-11
 
 ### Added — Why? chip spread to more entry points + multilingual replies

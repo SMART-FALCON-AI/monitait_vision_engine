@@ -920,10 +920,48 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
             )
 
         watcher_instance = request.app.state.watcher_instance
-        answer = await call_ai_model(
-            provider, api_key, system_prompt, user_query, watcher_instance,
-            base_url=base_url, model_id=model_id,
-        )
+        # 3.24.0 — usage tracking. We log regardless of outcome so the per-site
+        # bill captures failed attempts too (model timeouts, quota errors).
+        import time as _t
+        _t0 = _t.time()
+        _status = "ok"
+        _err = None
+        answer = ""
+        try:
+            answer = await call_ai_model(
+                provider, api_key, system_prompt, user_query, watcher_instance,
+                base_url=base_url, model_id=model_id,
+            )
+        except Exception as _e:
+            _status = "error"
+            _err = str(_e)
+            raise
+        finally:
+            try:
+                from services.ai_usage import log_usage
+                # Per-model rate overrides live in audio_settings.ai.<name>.{rate_input_per_mtoken,
+                # rate_output_per_mtoken} so resellers can charge their own rate cards.
+                _ai_cfg = active_model
+                rate_in  = float(_ai_cfg.get("rate_input_per_mtoken")  or 0) or None
+                rate_out = float(_ai_cfg.get("rate_output_per_mtoken") or 0) or None
+                kwargs = {}
+                if rate_in:  kwargs["rate_in"]  = rate_in
+                if rate_out: kwargs["rate_out"] = rate_out
+                log_usage(
+                    endpoint="/api/why",
+                    mode=mode,
+                    model_name=active_name,
+                    provider=provider,
+                    prompt_text=(system_prompt + "\n" + user_query),
+                    answer_text=answer or "",
+                    latency_ms=int((_t.time() - _t0) * 1000),
+                    status=_status,
+                    operator=request.headers.get("X-Operator") or None,
+                    error=_err,
+                    **kwargs,
+                )
+            except Exception:
+                pass
         return JSONResponse(content={
             "answer": (answer or "").strip() or "(no answer)",
             "model":  active_name,
