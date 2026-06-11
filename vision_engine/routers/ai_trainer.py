@@ -371,8 +371,3 @@ async def upload_to_ai_trainer(request: Request):
         },
         status_code=502,
     )
-    finally:
-        try:
-            files["file"][1].close()
-        except Exception:
-            pass
