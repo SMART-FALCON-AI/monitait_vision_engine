@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.23.1] - 2026-06-11
+
+### Added — Why? chip spread to more entry points + multilingual replies
+- 🤔 chip next to every per-class card title on the **Process tab**. Mode = `class` — asks "why is THIS class behaving this way right now?" Result lands in a small inline panel under the card header.
+- 🤔 chip next to the **Shipment Quality Score** card on the Dashboard. Mode = `score` — explains the current score and the dominant contributor in 2 sentences.
+- `/api/why` now accepts a `mode` parameter (`dot` | `class` | `score` | `verdict`) so the same backend handles every entry point with appropriate prompt scaffolding.
+- `/api/why` now respects a `language` field. The AI's natural-language prose is generated in the operator's UI language (English / Persian / Arabic / German / Turkish / Japanese / Spanish — sourced from the existing `currentLang` localStorage key). Technical identifiers (class names, endpoint paths, numeric values, timestamps) stay in their original form.
+
+### Expanded — AI Assistant API access
+- The AI Assistant chat's internal-API tool now covers the analytics endpoints shipped this week: `/api/conf_baselines`, `/api/color_drift`, `/api/area_stats`, `/api/active_classes`, `/api/config/db_status`, `/api/shipment_quality_score`, `/api/audio_settings`, `/api/timeline_config`. The AI can now reach into all the per-class baseline data, color/area drift stats, config-storage health, and per-shipment quality figures without us hand-pasting context.
+- The tool also exposes `POST /api/why` so the AI can chain a Why? lookup as part of a longer answer.
+
 ## [3.23.0] - 2026-06-11
 
 ### Added — 🤔 Why? chip on chart dots (operator-delight tier)

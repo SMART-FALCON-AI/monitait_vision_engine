@@ -404,8 +404,10 @@ function updateObjectsList() {
         card.innerHTML = `
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px;">
                 <div style="font-weight: 600; color: var(--text-primary); font-size: 14px; flex: 1;">${objectName}</div>
+                <button onclick="askWhyForClass('${safeName}', this)" title="Ask the AI why this class is behaving this way right now" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:1px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🤔</button>
                 <span class="info-tooltip-sm" style="cursor: help;">i<span class="info-tooltip-text" style="text-align: left; min-width: 280px;">${infoHtml}</span></span>
             </div>
+            <div class="per-class-why-${safeName.replace(/[^a-zA-Z0-9]/g,'_')}" style="display:none; font-size:11px; color:#d1fae5; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:4px; padding:6px 8px; margin-bottom:6px; line-height:1.45;"></div>
             <div style="display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px;">
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Show bounding box">
                     <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
@@ -632,6 +634,44 @@ function toggleObjectArea(objectName) {
     syncObjectAudioToServer(objectName);
 }
 window.toggleObjectArea = toggleObjectArea;
+
+
+// 3.23.1 — "🤔" chip on each per-class card. Asks /api/why with mode="class"
+// so the AI explains the CURRENT behaviour of this class instead of a
+// specific dot. Result lands in the small panel below the card header.
+async function askWhyForClass(className, btn) {
+    const safe = className.replace(/[^a-zA-Z0-9]/g, '_');
+    const panel = document.querySelector('.per-class-why-' + safe);
+    if (!panel) return;
+    panel.style.display = 'block';
+    panel.innerHTML = '<span style="opacity:0.7;">🤔 thinking…</span>';
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    try {
+        const r = await fetch('/api/why', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode: 'class',
+                metric: className,
+                window_seconds: 3600,
+                language: window.currentLang || 'en',
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            panel.innerHTML = '<span style="color:#fca5a5;">' + (d.error || ('Request failed (' + r.status + ')')) + '</span>';
+            return;
+        }
+        const ans = (d.answer || '').trim();
+        panel.innerHTML =
+            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + (d.model || 'AI') + '</b></div>' +
+            '<div>' + ans.replace(/\n/g, '<br>') + '</div>';
+    } catch (e) {
+        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + (e.message || e) + '</span>';
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+window.askWhyForClass = askWhyForClass;
 
 
 // 3.22.3 — Compact pixel-area formatter. Operators read "12k" faster than "12,450".

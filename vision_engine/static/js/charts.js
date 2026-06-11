@@ -1332,6 +1332,8 @@ async function askWhyForCurrentDefect() {
             shipment: item.shipment || null,
             image_path: item.image_path || null,
             window_seconds: 300,  // 5 min before + after the dot
+            language: window.currentLang || 'en',  // 3.23.1 — AI replies in operator's UI language
+            mode: 'dot',
         };
         const r = await fetch('/api/why', {
             method: 'POST',
@@ -1357,6 +1359,49 @@ async function askWhyForCurrentDefect() {
     }
 }
 window.askWhyForCurrentDefect = askWhyForCurrentDefect;
+
+
+// 3.23.1 — Why? chip on the Dashboard Shipment Quality Score card. Asks the
+// active AI to explain the CURRENT score in the operator's UI language.
+async function askWhyForScore(btn) {
+    const panel = document.getElementById('sqs-why-panel');
+    const scoreEl = document.getElementById('sqs-score');
+    const verdictEl = document.getElementById('sqs-verdict');
+    if (!panel) return;
+    panel.style.display = 'block';
+    panel.innerHTML = '<span style="opacity:0.7;">🤔 thinking…</span>';
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    const score = scoreEl ? parseFloat(scoreEl.textContent) : null;
+    const verdict = verdictEl ? (verdictEl.textContent || '').trim() : '';
+    try {
+        const r = await fetch('/api/why', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode: 'score',
+                metric: 'shipment_quality_score',
+                value: Number.isFinite(score) ? score : null,
+                window_seconds: 3600,
+                shipment: (window._currentShipment || null),
+                language: window.currentLang || 'en',
+                extra: { verdict: verdict },
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            panel.innerHTML = '<span style="color:#fca5a5;">' + (d.error || ('Request failed (' + r.status + ')')) + '</span>';
+            return;
+        }
+        const ans = (d.answer || '').trim();
+        panel.innerHTML =
+            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + (d.model || 'AI') + '</b></div>' +
+            '<div>' + ans.replace(/\n/g, '<br>') + '</div>';
+    } catch (e) {
+        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + (e.message || e) + '</span>';
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+window.askWhyForScore = askWhyForScore;
 
 
 // 3.21.22 — upload the currently-shown raw frame to ai-trainer.monitait.com.

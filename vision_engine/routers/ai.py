@@ -415,7 +415,7 @@ def get_ai_tools():
         },
         {
             "name": "call_api_endpoint",
-            "description": "Call any internal MonitaQC API endpoint. GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/gradio/models. POST endpoints: /api/cameras/discover, /api/timeline_clear.",
+            "description": "Call any internal MonitaQC API endpoint. GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/gradio/models, /api/conf_baselines, /api/color_drift, /api/area_stats, /api/active_classes, /api/config/db_status, /api/shipment_quality_score, /api/audio_settings, /api/timeline_config. POST endpoints: /api/cameras/discover, /api/timeline_clear, /api/why (payload: {mode, metric, value, timestamp, camera, encoder, shipment, window_seconds, language, extra}).",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -742,6 +742,21 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
         encoder = payload.get("encoder")
         shipment = payload.get("shipment") or "no_shipment"
         win_s   = int(payload.get("window_seconds") or 300)
+        # 3.23.1 — entry-point hint:
+        #   "dot"     (default)  — explain THIS specific dot at THIS time
+        #   "class"             — explain the current behavior of a per-class card
+        #   "score"             — explain the shipment quality score
+        #   "verdict"           — explain why a shipment got RELEASE/REINSPECT/HOLD
+        mode = str(payload.get("mode") or "dot").lower()
+        extra = payload.get("extra") or {}
+        # 3.23.1 — Respond in the operator's UI language (en/fa/ar/de/tr/ja/es).
+        language = str(payload.get("language") or "en").lower().strip()
+        _LANG_NAMES = {
+            "en": "English", "fa": "Persian (فارسی)", "ar": "Arabic (العربية)",
+            "de": "German (Deutsch)", "tr": "Turkish (Türkçe)",
+            "ja": "Japanese (日本語)", "es": "Spanish (Español)",
+        }
+        language_name = _LANG_NAMES.get(language, "English")
 
         # ----- active AI model -----
         ai_data = _get_ai_models_from_redis()
@@ -850,19 +865,59 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                 pass
 
         system_prompt = (
-            "You are an industrial QC assistant explaining a specific dot on a quality chart. "
-            "Be CONCISE: at most 2 sentences. Lead with the most likely cause. If the data is "
-            "ambiguous, say so plainly. Do not invent details that aren't in the context."
+            "You are an industrial QC assistant. Be CONCISE: at most 2 sentences. "
+            "Lead with the most likely cause. If the data is ambiguous, say so plainly. "
+            "Do not invent details that aren't in the context. Speak directly to the operator. "
+            f"Respond in {language_name}. Technical identifiers like class names "
+            "(TB, mean_L, blob_brightness, …), endpoint paths, numeric values, "
+            "and timestamps stay in their original form — only the natural-language "
+            "prose is translated."
         )
-        user_query = (
-            f"At {when_str}, on {cam_str}, the class '{metric}' fired ({val_str}).\n"
-            f"{enc_str}\n"
-            f"Shipment: {shipment}.\n"
-            f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
-            f"System: {sys_state}.\n\n"
-            + ("\n\n".join(ctx_lines) if ctx_lines else "(no surrounding context available)")
-            + "\n\nWhy did this happen? (2 sentences max.)"
-        )
+        # 3.23.1 — mode-specific user query so the same endpoint serves "explain
+        # this dot", "explain this class right now", "explain this score",
+        # and "explain this verdict" with the same context-gathering pipeline.
+        if mode == "class":
+            user_query = (
+                f"Per-class card on Process tab: class '{metric}'.\n"
+                f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
+                f"System: {sys_state}.\n\n"
+                + ("\n\n".join(ctx_lines) if ctx_lines else "(no recent samples)")
+                + "\n\nWhy is this class behaving this way right now? "
+                  "Highlight any obvious drift in count, drift in confidence, or anomalous cameras. "
+                  "(2 sentences max.)"
+            )
+        elif mode == "score":
+            try:
+                score = float(value) if value is not None else float("nan")
+            except (TypeError, ValueError):
+                score = float("nan")
+            score_str = f"{score:.1f}" if score == score else "?"  # nan check
+            user_query = (
+                f"Shipment quality score is {score_str}/100 for shipment '{shipment}'.\n"
+                f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
+                f"System: {sys_state}.\n\n"
+                + ("\n\n".join(ctx_lines) if ctx_lines else "(no surrounding context)")
+                + "\n\nWhy is the score at this level? What's the biggest contributor? (2 sentences max.)"
+            )
+        elif mode == "verdict":
+            verdict = str(extra.get("verdict") or "UNKNOWN")
+            user_query = (
+                f"Shipment '{shipment}' has been graded {verdict}.\n"
+                f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
+                f"System: {sys_state}.\n\n"
+                + ("\n\n".join(ctx_lines) if ctx_lines else "(no surrounding context)")
+                + f"\n\nWhy did this shipment land at {verdict}? Name the top driver. (2 sentences max.)"
+            )
+        else:
+            user_query = (
+                f"At {when_str}, on {cam_str}, the class '{metric}' fired ({val_str}).\n"
+                f"{enc_str}\n"
+                f"Shipment: {shipment}.\n"
+                f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
+                f"System: {sys_state}.\n\n"
+                + ("\n\n".join(ctx_lines) if ctx_lines else "(no surrounding context available)")
+                + "\n\nWhy did this happen? (2 sentences max.)"
+            )
 
         watcher_instance = request.app.state.watcher_instance
         answer = await call_ai_model(
