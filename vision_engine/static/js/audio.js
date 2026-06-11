@@ -388,8 +388,10 @@ function updateObjectsList() {
         const isNarrate = audioSettings.narrateObjects[objectName] || false;
         const isBeep = audioSettings.enabledObjects[objectName] || false;
         const isStore = audioSettings.storeObjects[objectName] || false;
+        const isColorE = !!audioSettings.colorEObjects?.[objectName];          // 3.22.2 — track CIELAB ΔE drift over time
         const severity = audioSettings.severityObjects?.[objectName] ?? 0;  // 3.21.12 — per-class severity (0–100, defect impact weight)
         const baseline = audioSettings.confBaselines?.[objectName];          // 3.21.12 — read-only baseline {p50,p95} (auto-learned)
+        const drift    = audioSettings.colorDrift?.[objectName];             // 3.22.2 — read-only ΔE drift {p5_de, p50_de, p95_de, by_camera}
         const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
         const safeName = objectName.replace(/'/g, "\\'");
 
@@ -437,7 +439,19 @@ function updateObjectsList() {
                     <input type="checkbox" ${isStore ? 'checked' : ''} onchange="toggleObjectStore('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
                     Store
                 </label>
+                <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px;" title="ColorE — extract CIELAB color from this class's bbox on every detection. Drives the 🎨 ΔE drift line below + the /api/color_drift analytics endpoint.">
+                    <input type="checkbox" ${isColorE ? 'checked' : ''} onchange="toggleObjectColorE('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    ColorE
+                </label>
             </div>
+            ${isColorE && drift ? `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;" title="CIELAB ΔE drift over the last 7 days. p5 / p50 / p95 of CIE76 ΔE distances vs the window's mean color. Lower = more consistent color, higher = drifting.">
+                🎨 ΔE drift: ${drift.p5_de.toFixed(1)} · <b>${drift.p50_de.toFixed(1)}</b> · ${drift.p95_de.toFixed(1)} (p5–p50–p95) · n=${drift.n>=1000?(drift.n/1000).toFixed(1)+'k':drift.n}
+                ${drift.reference_lab ? `<span style="margin-left:6px; font-size:10px; opacity:0.7;">ref L=${drift.reference_lab[0].toFixed(0)} a=${drift.reference_lab[1].toFixed(0)} b=${drift.reference_lab[2].toFixed(0)}</span>` : ''}
+            </div>
+            ${drift.by_camera && Object.keys(drift.by_camera).length > 0 ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; line-height: 1.6;" title="Per-camera ΔE drift. Useful when one camera's lighting changes more than another's.">
+                ${Object.entries(drift.by_camera).sort((a,b)=>a[0].localeCompare(b[0],undefined,{numeric:true})).map(([cam, c]) => `<span style="display:inline-block; margin-right:8px;">cam ${cam}: ${c.p5_de.toFixed(1)} · <b>${c.p50_de.toFixed(1)}</b> · ${c.p95_de.toFixed(1)} n=${c.n>=1000?(c.n/1000).toFixed(1)+'k':c.n}</span>`).join('')}
+            </div>` : ''}
+            ` : (isColorE ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; font-style: italic;">🎨 ColorE on — gathering ΔE samples (5+ detections needed). Stats appear here once data flows.</div>` : '')}
             <div style="display: flex; gap: 6px; align-items: center;">
                 <select onchange="updateObjectBeepSound('${safeName}', this.value)" style="flex: 1; padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                     <option value="sine" ${beepSound === 'sine' ? 'selected' : ''}>🔔 Sine</option>
@@ -459,11 +473,12 @@ function updateObjectsList() {
 async function syncObjectAudioToServer(objectName) {
     const payload = {
         class_name: objectName,
-        show: audioSettings.showObjects[objectName] !== false,
+        show: audioSettings.showObjects[objectName] === true,
         narrate: !!audioSettings.narrateObjects[objectName],
         beep: !!audioSettings.enabledObjects[objectName],
         min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100,  // UI uses 0-100, server uses 0-1
         severity: audioSettings.severityObjects?.[objectName] ?? 0,  // 3.21.12 — 0-100, per-class impact weight
+        color_e: !!audioSettings.colorEObjects?.[objectName],         // 3.22.2 — track CIELAB ΔE drift over time
     };
     try {
         await fetch('/api/audio_settings', {
@@ -524,12 +539,46 @@ async function loadAudioSettingsFromServer() {
             if (s.beep !== undefined)    audioSettings.enabledObjects[k] = !!s.beep;
             if (s.min_confidence !== undefined) audioSettings.objectConfidence[k] = Math.round(s.min_confidence * 100);
             if (s.severity !== undefined) audioSettings.severityObjects[k] = parseInt(s.severity, 10) || 0;
+            // 3.22.2 — per-class ColorE (CIELAB ΔE tracking) toggle
+            if (s.color_e !== undefined) {
+                if (!audioSettings.colorEObjects) audioSettings.colorEObjects = {};
+                audioSettings.colorEObjects[k] = s.color_e === true;
+            }
         });
         saveAudioSettings();
         if (typeof updateObjectsList === 'function') updateObjectsList();
     } catch (e) { /* not fatal */ }
 }
 document.addEventListener('DOMContentLoaded', loadAudioSettingsFromServer);
+
+
+// 3.22.2 — Per-class CIELAB ΔE drift. Reads /api/color_drift and stores by class.
+// Refreshed on demand (e.g. when ColorE checkbox is toggled on).
+async function loadColorDriftFromServer() {
+    try {
+        const r = await fetch('/api/color_drift?window=7d');
+        if (!r.ok) return;
+        const d = await r.json();
+        audioSettings.colorDrift = d.classes || {};
+        if (typeof updateObjectsList === 'function') updateObjectsList();
+    } catch (e) { /* not fatal */ }
+}
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadColorDriftFromServer, 1500));
+window.loadColorDriftFromServer = loadColorDriftFromServer;
+
+
+// 3.22.2 — Toggle per-class ColorE (ΔE drift tracking). Same shape as
+// toggleObjectShow / toggleObjectNarrate / etc.
+function toggleObjectColorE(objectName) {
+    if (!audioSettings.colorEObjects) audioSettings.colorEObjects = {};
+    audioSettings.colorEObjects[objectName] = !audioSettings.colorEObjects[objectName];
+    saveAudioSettings();
+    updateObjectsList();
+    syncObjectAudioToServer(objectName);
+    // Reload the drift baselines so the new class shows up once data flows
+    setTimeout(loadColorDriftFromServer, 200);
+}
+window.toggleObjectColorE = toggleObjectColorE;
 
 // 3.21.12 — Fetch per-class confidence baselines (auto-learned p50/p95 over
 // last 7 days of stored detections). Surfaces in the per-class card as a

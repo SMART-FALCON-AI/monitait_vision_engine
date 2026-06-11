@@ -873,12 +873,14 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
                     "min_confidence": float(cfg.get("min_confidence", 0.01)),
                     # 3.21.12 — per-class severity weight (0-100). Default 0 = no impact.
                     "severity": max(0, min(100, int(cfg.get("severity", 0) or 0))),
+                    # 3.22.2 — ColorE: track CIELAB ΔE drift over time for this class.
+                    "color_e": bool(cfg.get("color_e", False)),
                 }
             settings = new_settings
         elif "class_name" in payload:
             cls = str(payload["class_name"])
-            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01, "severity": 0})
-            for k in ("show", "narrate", "beep"):
+            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01, "severity": 0, "color_e": False})
+            for k in ("show", "narrate", "beep", "color_e"):
                 if k in payload:
                     entry[k] = bool(payload[k])
             if "min_confidence" in payload:

@@ -1174,13 +1174,30 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             for det in yolo_res:
                 det['_cam'] = cam_id
 
-            # Extract L*a*b* color only if a color_delta procedure exists
+            # 3.22.2 — Extract L*a*b* color when EITHER
+            #   (a) a color_delta procedure exists (legacy ejection path), OR
+            #   (b) the operator opted a class in via audio_settings.<name>.color_e
+            # In case (b) we only extract for the marked classes to save CPU.
+            _classes_for_color = None  # None = "all" (legacy mode)
             if _has_color_delta_procedure():
+                _classes_for_color = None
+            else:
+                _aud_for_color = _get_audio_settings_map()
+                _classes_for_color = {
+                    name for name, v in _aud_for_color.items()
+                    if isinstance(v, dict) and v.get('color_e') is True
+                }
+            if _classes_for_color is None or _classes_for_color:
+                _any_lab = False
                 for det in yolo_res:
+                    if _classes_for_color is not None and det.get('name') not in _classes_for_color:
+                        continue
                     lab = extract_lab_color(image, det)
                     if lab is not None:
                         det['lab_color'] = lab
-                update_color_references(yolo_res)
+                        _any_lab = True
+                if _any_lab:
+                    update_color_references(yolo_res)
 
             # Add audio notification with detected object names.
             # Per-class `min_confidence` from audio_settings gates which detections

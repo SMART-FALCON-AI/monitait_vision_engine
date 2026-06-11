@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.22.2] - 2026-06-11
+
+### Added — ColorE per-class toggle + ΔE drift analytics
+- New **ColorE** checkbox on every per-class card in the Process tab, alongside Show / Narrate / Beep / Store. When ticked, the annotator extracts CIELAB color (`L*a*b*`) from the detection's bbox on every frame for that class and stores it on the detection (`det.lab_color`).
+- New endpoint `GET /api/color_drift?window=7d` computes per-class color drift: the mean LAB over the window becomes the **reference color**, and we return the **p5 / p50 / p95** of CIE76 ΔE distances against that reference, plus a per-camera breakdown. Low p50 means the class's color is staying consistent; rising p95 over time means the line is drifting (lighting change, dye batch swap, etc).
+- New display line on the per-class card when ColorE is on:
+  ```
+  🎨 ΔE drift: 0.8 · 2.4 · 6.1 (p5–p50–p95) · n=4567   ref L=72 a=-3 b=12
+  cam 1: 0.5 · 1.9 · 4.8 n=2.2k · cam 2: 1.2 · 3.1 · 7.4 n=2.4k
+  ```
+  Operators ticking ColorE on a class get immediate "is the color holding steady?" feedback without setting up a full color_delta ejection procedure.
+- Backend extraction is CPU-aware: when no `color_delta` ejection procedure exists (legacy path), the annotator only extracts LAB for the specific classes opted in via ColorE. With a `color_delta` procedure, the legacy path stays — extracts for all detections — for backward compatibility.
+- Cache and persistence: ColorE flips persist in `audio_settings.<class>.color_e`. The bulk-save endpoint accepts the field. The single-class POST accepts it (`{class_name, color_e}`).
+
 ## [3.22.1] - 2026-06-10
 
 ### Removed — 🪄 auto-suggest buttons on the per-class baseline lines

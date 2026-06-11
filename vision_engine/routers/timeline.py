@@ -722,6 +722,134 @@ async def recompute_conf_baselines():
     return JSONResponse(content={"baselines": _compute_conf_baselines()})
 
 
+@router.get("/api/color_drift")
+async def get_color_drift(window: str = "7d"):
+    """3.22.2 — Per-class CIELAB ΔE drift over the requested window.
+
+    For each class with stored detections carrying `lab_color`, returns:
+      - reference_lab: mean L*a*b* across all detections in the window
+                       (the "what counts as normal color")
+      - p5_de / p50_de / p95_de: percentiles of the CIE76 ΔE between each
+                                  detection's lab_color and the reference
+      - n: count of detections with a stored lab_color
+      - by_camera: same metrics broken out per camera
+
+    The operator opts a class in via the ColorE checkbox on the Process
+    tab. The annotator then extracts `lab_color` for that class only,
+    so this endpoint's window only sees data once color_e=True has been
+    on long enough to accumulate.
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    interval = _windows.get(window, "7 days")
+
+    out: dict = {}
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content={"window": window, "classes": {}})
+
+        cur = conn.cursor()
+        # Pass 1: reference LAB = mean across the window, per class
+        cur.execute(
+            """
+            SELECT (det->>'name') AS cls,
+                   AVG((det->'lab_color'->>0)::float) AS ref_L,
+                   AVG((det->'lab_color'->>1)::float) AS ref_a,
+                   AVG((det->'lab_color'->>2)::float) AS ref_b,
+                   COUNT(*) AS n
+            FROM inference_results, LATERAL jsonb_array_elements(detections) det
+            WHERE time > NOW() - INTERVAL %s
+              AND (det ? 'lab_color')
+            GROUP BY (det->>'name')
+            HAVING COUNT(*) >= 5
+            """,
+            (interval,),
+        )
+        for cls, refL, refa, refb, n in cur.fetchall():
+            if not cls:
+                continue
+            out[str(cls)] = {
+                "n": int(n or 0),
+                "reference_lab": [round(float(refL or 0), 2),
+                                  round(float(refa or 0), 2),
+                                  round(float(refb or 0), 2)],
+                "by_camera": {},
+            }
+
+        # Pass 2: ΔE percentiles per class (overall + per-camera)
+        for cls in list(out.keys()):
+            rL, ra, rb = out[cls]["reference_lab"]
+            cur.execute(
+                """
+                SELECT
+                  percentile_cont(0.05) WITHIN GROUP (ORDER BY de) AS p5,
+                  percentile_cont(0.50) WITHIN GROUP (ORDER BY de) AS p50,
+                  percentile_cont(0.95) WITHIN GROUP (ORDER BY de) AS p95
+                FROM (
+                  SELECT |/(
+                    POWER((det->'lab_color'->>0)::float - %s, 2) +
+                    POWER((det->'lab_color'->>1)::float - %s, 2) +
+                    POWER((det->'lab_color'->>2)::float - %s, 2)
+                  ) AS de
+                  FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                  WHERE time > NOW() - INTERVAL %s
+                    AND (det->>'name') = %s
+                    AND (det ? 'lab_color')
+                ) d
+                """,
+                (rL, ra, rb, interval, cls),
+            )
+            p5, p50, p95 = cur.fetchone()
+            out[cls]["p5_de"] = round(float(p5 or 0), 2)
+            out[cls]["p50_de"] = round(float(p50 or 0), 2)
+            out[cls]["p95_de"] = round(float(p95 or 0), 2)
+
+            cur.execute(
+                """
+                SELECT cam,
+                       COUNT(*) AS n,
+                       percentile_cont(0.05) WITHIN GROUP (ORDER BY de) AS p5,
+                       percentile_cont(0.50) WITHIN GROUP (ORDER BY de) AS p50,
+                       percentile_cont(0.95) WITHIN GROUP (ORDER BY de) AS p95
+                FROM (
+                  SELECT (det->>'_cam') AS cam,
+                         |/(
+                           POWER((det->'lab_color'->>0)::float - %s, 2) +
+                           POWER((det->'lab_color'->>1)::float - %s, 2) +
+                           POWER((det->'lab_color'->>2)::float - %s, 2)
+                         ) AS de
+                  FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                  WHERE time > NOW() - INTERVAL %s
+                    AND (det->>'name') = %s
+                    AND (det ? 'lab_color')
+                    AND (det->>'_cam') IS NOT NULL
+                ) d
+                GROUP BY cam
+                """,
+                (rL, ra, rb, interval, cls),
+            )
+            for cam, n, p5, p50, p95 in cur.fetchall():
+                out[cls]["by_camera"][str(cam)] = {
+                    "n": int(n or 0),
+                    "p5_de":  round(float(p5  or 0), 2),
+                    "p50_de": round(float(p50 or 0), 2),
+                    "p95_de": round(float(p95 or 0), 2),
+                }
+        cur.close()
+    except Exception as e:
+        logger.warning(f"color_drift compute failed: {e}")
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+    return JSONResponse(content={"window": window, "classes": out})
+
+
 @router.get("/api/active_classes")
 async def get_active_classes(window: str = "1h"):
     """Classes with at least one detection in the recent window — used by the
