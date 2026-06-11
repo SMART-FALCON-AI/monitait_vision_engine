@@ -1319,49 +1319,49 @@
                 </div>
 
                 <!-- 3.24.0 — Notifications (Telegram + Bale): shift reports delivered to a bot/chat.
+                     3.24.1 — merged into one compact panel since Telegram & Bale only differ by base URL.
                      Tokens are write-only from the UI; the API only ever returns masked values. -->
                 <div class="control-section">
                     <h3>📨 <span>Notifications (Telegram / Bale)</span></h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
-                        Configure a bot to deliver shift-end PDF reports. Both Telegram and Bale use compatible bot APIs — same payload, just different host. Get a Telegram token from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather</code> or a Bale token from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather_bot</code> on Bale. After saving, schedule shifts with cron expressions (e.g. <code>0 8 * * *</code> = 08:00 daily). The bot must have <i>send-message</i> permission in the target chat or group.
+                        Both Telegram and Bale use the same bot API (same payload shape, different host). Get a Telegram bot from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather</code> on Telegram, or a Bale bot from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather_bot</code> on Bale. Configure one or both channels below — each row is a channel, schedules below pick which channel(s) to send to.
                     </div>
-                    <div class="control-grid">
-                        <!-- Telegram row -->
-                        <div class="control-item">
-                            <div class="control-label">📨 Telegram bot token <small style="opacity:0.6;">(write-only)</small></div>
-                            <input type="password" class="control-input" id="notif-telegram-token" placeholder="123456:ABCdefGHI…">
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Telegram default chat id</div>
-                            <input type="text" class="control-input" id="notif-telegram-chat" placeholder="-100…">
-                        </div>
-                        <div class="control-item">
-                            <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
-                                <input type="checkbox" id="notif-telegram-enabled" style="width:14px; height:14px; cursor:pointer;">
-                                Enable Telegram channel
-                            </label>
-                            <button class="control-button" onclick="saveNotifChannel('telegram')" style="background:var(--secondary-color); color:white; margin-top:6px;">Save Telegram</button>
-                            <button class="control-button" onclick="testNotifChannel('telegram')" style="background:rgba(16,185,129,0.6); color:white; margin-top:6px;">Test send</button>
-                        </div>
-
-                        <!-- Bale row -->
-                        <div class="control-item">
-                            <div class="control-label">📨 Bale bot token <small style="opacity:0.6;">(write-only)</small></div>
-                            <input type="password" class="control-input" id="notif-bale-token" placeholder="123456:ABCdefGHI…">
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Bale default chat id</div>
-                            <input type="text" class="control-input" id="notif-bale-chat" placeholder="123456789">
-                        </div>
-                        <div class="control-item">
-                            <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
-                                <input type="checkbox" id="notif-bale-enabled" style="width:14px; height:14px; cursor:pointer;">
-                                Enable Bale channel
-                            </label>
-                            <button class="control-button" onclick="saveNotifChannel('bale')" style="background:var(--secondary-color); color:white; margin-top:6px;">Save Bale</button>
-                            <button class="control-button" onclick="testNotifChannel('bale')" style="background:rgba(16,185,129,0.6); color:white; margin-top:6px;">Test send</button>
-                        </div>
-
+                    <div style="overflow-x:auto;">
+                        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+                            <thead>
+                                <tr style="background:rgba(15,23,42,0.5); color:var(--text-secondary);">
+                                    <th style="padding:6px 8px; text-align:left; border-bottom:1px solid rgba(51,65,85,0.6);">Channel</th>
+                                    <th style="padding:6px 8px; text-align:left; border-bottom:1px solid rgba(51,65,85,0.6);">Bot token <small style="opacity:0.6;">(write-only)</small></th>
+                                    <th style="padding:6px 8px; text-align:left; border-bottom:1px solid rgba(51,65,85,0.6);">Default chat id</th>
+                                    <th style="padding:6px 8px; text-align:center; border-bottom:1px solid rgba(51,65,85,0.6);">Enabled</th>
+                                    <th style="padding:6px 8px; text-align:center; border-bottom:1px solid rgba(51,65,85,0.6);">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr style="border-bottom:1px solid rgba(51,65,85,0.3);">
+                                    <td style="padding:6px 8px; font-weight:600; color:var(--text-primary);">📨 Telegram</td>
+                                    <td style="padding:6px 8px;"><input type="password" class="control-input" id="notif-telegram-token" placeholder="123456:ABCdefGHI…" style="width:100%; min-width:180px;"></td>
+                                    <td style="padding:6px 8px;"><input type="text" class="control-input" id="notif-telegram-chat" placeholder="-100…" style="width:100%; min-width:140px;"></td>
+                                    <td style="padding:6px 8px; text-align:center;"><input type="checkbox" id="notif-telegram-enabled" style="width:16px; height:16px; cursor:pointer;"></td>
+                                    <td style="padding:6px 8px; text-align:center; white-space:nowrap;">
+                                        <button class="control-button" onclick="saveNotifChannel('telegram')" style="background:var(--secondary-color); color:white; padding:3px 10px; font-size:11px;">Save</button>
+                                        <button class="control-button" onclick="testNotifChannel('telegram')" style="background:rgba(16,185,129,0.6); color:white; padding:3px 10px; font-size:11px;">Test</button>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding:6px 8px; font-weight:600; color:var(--text-primary);">📨 Bale</td>
+                                    <td style="padding:6px 8px;"><input type="password" class="control-input" id="notif-bale-token" placeholder="123456:ABCdefGHI…" style="width:100%; min-width:180px;"></td>
+                                    <td style="padding:6px 8px;"><input type="text" class="control-input" id="notif-bale-chat" placeholder="123456789" style="width:100%; min-width:140px;"></td>
+                                    <td style="padding:6px 8px; text-align:center;"><input type="checkbox" id="notif-bale-enabled" style="width:16px; height:16px; cursor:pointer;"></td>
+                                    <td style="padding:6px 8px; text-align:center; white-space:nowrap;">
+                                        <button class="control-button" onclick="saveNotifChannel('bale')" style="background:var(--secondary-color); color:white; padding:3px 10px; font-size:11px;">Save</button>
+                                        <button class="control-button" onclick="testNotifChannel('bale')" style="background:rgba(16,185,129,0.6); color:white; padding:3px 10px; font-size:11px;">Test</button>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="control-grid" style="margin-top:14px;">
                         <!-- Schedules editor -->
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label" style="display:flex; align-items:center; justify-content:space-between;">

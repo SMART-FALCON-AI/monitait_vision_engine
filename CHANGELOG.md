@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.24.1] - 2026-06-11
+
+### Fixed — Why? on Quality Score now has real defect data
+- `/api/why mode=score` fetches the shipment quality-score payload (`_compute_quality_payload`) and stuffs it into the AI prompt: top defects with impact / count / severity, impact total, impact-per-unit, normalization mode, throughput, encoder span. Previously the AI said "no quality subcomponent data is shown" because the prompt only had the bare score + Redis sys-state.
+
+### Fixed — AI calls no longer block the FastAPI event loop
+- The Anthropic and OpenAI SDK clients are synchronous; calling `client.messages.create(...)` / `client.chat.completions.create(...)` directly from an async handler blocked other requests until the AI provider responded (often 5-30 s). When two operators clicked 🤔 Why? at the same time, the second queued behind the first; worse, ANY other endpoint was blocked too.
+- Both calls are now wrapped in `asyncio.to_thread(...)`, so the AI provider's response runs on a worker thread and the FastAPI loop stays free. Concurrent Why? clicks are now genuinely parallel and unrelated endpoints (timeline composite, /api/cameras, …) keep their normal latency under AI load.
+
+### Changed — Notifications UI: Telegram and Bale merged into one table
+- The two-stack-of-fields layout (one section per channel) is replaced by a single 5-column table — channel | bot token | default chat id | enabled | actions. Same fields, half the vertical space, easier to compare at a glance. Backend unchanged; same `/api/notifications/config` shape.
+
 ## [3.24.0] - 2026-06-11
 
 ### Added — Telegram + Bale shift report delivery (no SMTP, no email)

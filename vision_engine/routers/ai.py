@@ -585,14 +585,21 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             messages = [{"role": "user", "content": user_query}]
 
             # Agentic loop - allow multiple tool calls
+            # 3.24.1 — the anthropic SDK's `.create()` is synchronous; calling
+            # it bare from an async handler blocks the event loop and starves
+            # other concurrent requests (e.g. a second operator clicking 🤔
+            # Why? while the first call is in flight). Hand off to a worker
+            # thread so the FastAPI loop stays responsive.
+            import asyncio as _asyncio
             max_iterations = 5
             for iteration in range(max_iterations):
-                response = client.messages.create(
+                response = await _asyncio.to_thread(
+                    client.messages.create,
                     model="claude-sonnet-4-5-20250929",
                     max_tokens=4096,
                     system=system_prompt,
                     messages=messages,
-                    tools=tools
+                    tools=tools,
                 )
 
                 # Check if Claude wants to use tools
@@ -653,13 +660,18 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             ]
 
             # Agentic loop
+            # 3.24.1 — same reasoning as the Claude branch: the openai SDK's
+            # `.create()` is sync, hand off to a thread so concurrent /api/why
+            # callers don't queue behind each other.
+            import asyncio as _asyncio
             max_iterations = 5
             for iteration in range(max_iterations):
-                response = client.chat.completions.create(
+                response = await _asyncio.to_thread(
+                    client.chat.completions.create,
                     model=(model_id or "gpt-4o"),  # 3.21.23 — operator-configurable model id
                     messages=messages,
                     functions=functions,
-                    max_tokens=4096
+                    max_tokens=4096,
                 )
 
                 message = response.choices[0].message
@@ -892,12 +904,47 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
             except (TypeError, ValueError):
                 score = float("nan")
             score_str = f"{score:.1f}" if score == score else "?"  # nan check
+
+            # 3.24.1 — fetch the actual quality-score payload so the AI sees
+            # the top defects, impact totals, throughput, etc. Without this
+            # the model had nothing concrete to point at ("subcomponent
+            # data not shown" was the exact complaint).
+            score_block = ""
+            try:
+                from routers.timeline import _compute_quality_payload
+                qs = _compute_quality_payload(shipment=shipment, window="24h")
+                if qs and qs.get("score") is not None:
+                    top = qs.get("top_defects") or []
+                    top_lines = "\n".join(
+                        f"  {d.get('class')} impact={d.get('impact')} "
+                        f"count={d.get('count')} severity={d.get('severity')}"
+                        for d in top[:5]
+                    ) or "  (no defects with non-zero severity)"
+                    score_block = (
+                        f"\n\nShipment quality breakdown (window={qs.get('window')}):\n"
+                        f"  verdict={qs.get('verdict')}  "
+                        f"thresholds=release≥{qs.get('thresholds',{}).get('release')} "
+                        f"reinspect≥{qs.get('thresholds',{}).get('reinspect')}\n"
+                        f"  impact_total={qs.get('impact_total')} "
+                        f"impact_per_unit={qs.get('impact_per_unit')} "
+                        f"{qs.get('impact_per_unit_label','')}\n"
+                        f"  total_detections={qs.get('total_detections')}\n"
+                        f"  encoder_span={qs.get('encoder_span')} {qs.get('encoder_unit','')} "
+                        f"frames={qs.get('frame_count')} "
+                        f"throughput={qs.get('throughput')} {qs.get('throughput_label','')}\n"
+                        f"  Top defects by impact:\n{top_lines}"
+                    )
+            except Exception as _e:
+                logger.debug(f"why mode=score quality fetch failed: {_e}")
+
             user_query = (
                 f"Shipment quality score is {score_str}/100 for shipment '{shipment}'.\n"
                 f"Current capture state: {current_state}; pipeline: {current_pipeline}.\n"
-                f"System: {sys_state}.\n\n"
-                + ("\n\n".join(ctx_lines) if ctx_lines else "(no surrounding context)")
-                + "\n\nWhy is the score at this level? What's the biggest contributor? (2 sentences max.)"
+                f"System: {sys_state}."
+                + score_block
+                + ("\n\n" + "\n\n".join(ctx_lines) if ctx_lines else "")
+                + "\n\nWhy is the score at this level? What's the biggest contributor? "
+                  "If the top-defects list is empty, point at throughput/frame count or normalization mode. (2 sentences max.)"
             )
         elif mode == "verdict":
             verdict = str(extra.get("verdict") or "UNKNOWN")
