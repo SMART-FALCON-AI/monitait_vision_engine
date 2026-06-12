@@ -1144,7 +1144,8 @@
                             </div>
                             <input type="text" id="severity-context-input" placeholder="(optional) Describe your product / what defects matter — e.g. 'jeans line, TB=fabric tear, MD=missing dye'" style="width:100%; padding:5px 8px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; margin-bottom:8px;">
                             <div style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
-                                <button onclick="runSeveritySuggest()" id="severity-suggest-run-btn" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;">🤖 Run</button>
+                                <button onclick="runSeveritySuggest()" id="severity-suggest-run-btn" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;">🤖 Run (review)</button>
+                                <button onclick="autoTuneAllSeverities()" id="severity-autotune-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Suggest and apply in one click — no review step">🚀 Auto-tune all</button>
                                 <button onclick="applyAllSeveritySuggestions()" id="severity-apply-all-btn" disabled style="background:var(--primary-color); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;">✓ Apply all</button>
                                 <span id="severity-suggest-status" style="font-size:11px; color:var(--text-secondary);"></span>
                             </div>

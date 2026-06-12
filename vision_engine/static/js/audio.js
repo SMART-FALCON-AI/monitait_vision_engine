@@ -789,6 +789,29 @@ async function applyAllSeveritySuggestions() {
 }
 window.applyAllSeveritySuggestions = applyAllSeveritySuggestions;
 
+// 3.25.2 — "🚀 Auto-tune all" — runs suggest_severities, then applies every
+// non-equal suggestion in one go. Skips the review step. Operator gets a
+// confirmation toast at the end.
+async function autoTuneAllSeverities() {
+    if (!confirm('Auto-tune ALL classes? The AI will see your shipment score history and recalibrate every Severity value. This overwrites your existing values.')) return;
+    const btn = document.getElementById('severity-autotune-btn');
+    const statusEl = document.getElementById('severity-suggest-status');
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    if (statusEl) statusEl.textContent = '🤔 thinking — AI analyzing classes + shipment score history…';
+    try {
+        await runSeveritySuggest();
+        if (!_severitySuggestions || !_severitySuggestions.length) return;
+        await applyAllSeveritySuggestions();
+        if (statusEl) statusEl.textContent = `✓ Auto-tuned ${_severitySuggestions.length} classes.`;
+    } catch (e) {
+        if (statusEl) statusEl.textContent = '✗ Auto-tune failed: ' + (e.message || e);
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+window.autoTuneAllSeverities = autoTuneAllSeverities;
+
+
 async function _postSeverityUpdates(updates) {
     try {
         const r = await fetch('/api/apply_severities', {

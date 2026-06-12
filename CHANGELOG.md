@@ -10,8 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.25.2] - 2026-06-12
 
 ### Added — 🤖 AI-suggested Severity values for every class
-- New **🤖 Suggest severities** button at the top of the Process tab (in the filter bar). Clicking opens a green panel with an optional "describe your product" input and a **Run** button.
+- New **🤖 Suggest severities** button at the top of the Process tab (in the filter bar). Clicking opens a green panel with an optional "describe your product" input, a **🤖 Run (review)** button, a **🚀 Auto-tune all** one-click button, and a **✓ Apply all** button.
 - New backend endpoint `POST /api/suggest_severities` gathers every `audio_settings` class with its detection count, p5/p50/p95 confidence from `/api/conf_baselines`, current Severity, plus whether ColorE/Area are on, builds a structured prompt for the active AI model, and asks for a 0–100 Severity per class with a one-sentence reason and a tier (`COSMETIC` / `MODERATE` / `SERIOUS` / `CRITICAL` / `NONE`).
+- **Shipment-score-aware**: the prompt also includes a snapshot of the last 30 shipments' quality scores (p5 / p50 / p95 of the distribution + per-shipment verdicts and top defects). The system prompt tells the AI to aim for severities that keep p50 between 80 and 92 with bad shipments dropping below 70 — so the resulting score distribution is calibrated, not all-clumped at 99 or all-clumped at 30.
+- **Active vs silent class split**: classes with ≥ 5 detections in 7 days go to the AI; the rest are auto-suggested 0 without an AI roundtrip. Keeps prompt size manageable even on sites with 200+ historical classes.
+- **`max_tokens` lifted to 16384** for this endpoint so even very long JSON responses (50+ active classes × ~80 chars each) don't get truncated mid-string.
+- **🚀 Auto-tune all** button = one-click "suggest + apply" sequence. Operator gets a confirmation modal explaining "this overwrites your existing severity values" then watches the panel update.
 - Severity tier scale baked into the system prompt:
   - `0` — math channels / metrics (mean_L, fft_*, blob_*, std_L, …) — auto-suggested at 0
   - `1–20` cosmetic

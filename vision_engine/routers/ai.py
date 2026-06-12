@@ -573,7 +573,7 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
 # AI QUERY ENDPOINT
 # =============================================================================
 
-async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str, watcher_instance=None, base_url: str = "", model_id: str = "", tools_enabled: bool = True) -> str:
+async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query: str, watcher_instance=None, base_url: str = "", model_id: str = "", tools_enabled: bool = True, max_tokens: int = 4096) -> str:
     """Call the appropriate AI model API.
 
     3.24.3 — `tools_enabled` (default True for backward-compat with the chat
@@ -605,7 +605,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             for iteration in range(max_iterations):
                 _create_kwargs = {
                     "model": "claude-sonnet-4-5-20250929",
-                    "max_tokens": 4096,
+                    "max_tokens": max_tokens,
                     "system": system_prompt,
                     "messages": messages,
                 }
@@ -684,7 +684,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
                 _create_kwargs = {
                     "model": (model_id or "gpt-4o"),  # 3.21.23 — operator-configurable model id
                     "messages": messages,
-                    "max_tokens": 4096,
+                    "max_tokens": max_tokens,
                 }
                 if tools_enabled and functions:
                     _create_kwargs["functions"] = functions
@@ -1168,13 +1168,26 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     except Exception:
         aud = {}
 
-    # Build a compact "table" the AI can reason over.
-    classes = sorted(aud.keys())
-    if not classes:
+    # 3.25.2 — split classes into "active" (worth AI's attention) and "silent"
+    # (no recent data — safely auto-suggest 0 / NONE without an AI roundtrip).
+    # This keeps the prompt small AND keeps DeepSeek/Kimi within their token
+    # budgets even on sites with 200+ historical classes.
+    all_classes = sorted(aud.keys())
+    if not all_classes:
         return JSONResponse(content={"suggestions": [], "note": "No classes configured yet."})
 
+    _MIN_N_FOR_AI = 5  # min detections in 7d for a class to be worth asking AI about
+    active_classes = []
+    silent_classes = []
+    for name in all_classes:
+        bl = baselines.get(name) or {}
+        if (bl.get("n") or 0) >= _MIN_N_FOR_AI:
+            active_classes.append(name)
+        else:
+            silent_classes.append(name)
+
     lines = []
-    for name in classes:
+    for name in active_classes:
         entry = aud.get(name) or {}
         bl = baselines.get(name) or {}
         n = bl.get("n", 0)
@@ -1189,7 +1202,78 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
             f"- {name}: n={n}  conf p5={p5:.0f} p50={p50:.0f} p95={p95:.0f}  "
             f"current_severity={cur_sev}  show={is_shown}  color_e={color_on}  area={area_on}"
         )
-    data_block = "\n".join(lines)
+    data_block = "\n".join(lines) if lines else "(no active classes — every class is silent in the last 7 days)"
+
+    # 3.25.2 — feed the AI a snapshot of recent shipment quality scores so it
+    # can tune severities to produce a useful, calibrated score distribution.
+    # Without this, the AI guesses severities in a vacuum and you get either
+    # "every shipment scores 99" (under-weighted) or "every shipment scores 30"
+    # (over-weighted) — both are useless for a RELEASE / REINSPECT decision.
+    shipment_block = ""
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is not None:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT DISTINCT SPLIT_PART(image_path, '/', 1) AS ship,
+                           MIN(time) AS first_t
+                    FROM inference_results
+                    WHERE time > NOW() - INTERVAL '30 days'
+                      AND image_path IS NOT NULL
+                      AND image_path NOT LIKE 'no_shipment%'
+                    GROUP BY 1
+                    ORDER BY first_t DESC
+                    LIMIT 30
+                    """
+                )
+                recent_ships = [row[0] for row in cur.fetchall() if row[0]]
+                cur.close()
+            finally:
+                try:
+                    release_db_connection(conn)
+                except Exception:
+                    pass
+            if recent_ships:
+                try:
+                    from routers.timeline import _compute_quality_payload
+                    scores = []
+                    for s in recent_ships:
+                        try:
+                            qp = _compute_quality_payload(shipment=s, window="24h")
+                            sc = qp and qp.get("score")
+                            if sc is not None:
+                                scores.append({
+                                    "ship": s, "score": round(float(sc), 1),
+                                    "verdict": qp.get("verdict"),
+                                    "top": [d.get("class") for d in (qp.get("top_defects") or [])][:3],
+                                })
+                        except Exception:
+                            continue
+                    if scores:
+                        ss = sorted(s["score"] for s in scores)
+                        def _pct(arr, p):
+                            if not arr: return 0
+                            k = max(0, min(len(arr)-1, int(round((len(arr)-1) * p))))
+                            return arr[k]
+                        p5, p50, p95 = _pct(ss, 0.05), _pct(ss, 0.50), _pct(ss, 0.95)
+                        shipment_block = (
+                            f"\n\nRecent shipment quality scores (last {len(scores)} shipments):\n"
+                            f"  distribution  p5={p5}  p50={p50}  p95={p95}\n"
+                            "  recent shipments (most recent first):\n"
+                            + "\n".join(
+                                f"    {s['ship']:>14s}  score={s['score']:>5}  {s.get('verdict') or '?'}  "
+                                f"top={','.join(s['top']) if s['top'] else '-'}"
+                                for s in scores[:15]
+                            )
+                            + ("\n    ..." if len(scores) > 15 else "")
+                        )
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     _LANG_NAMES = {
         "en": "English", "fa": "Persian (فارسی)", "ar": "Arabic (العربية)",
@@ -1229,8 +1313,13 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     user_query = (
         f"Business context (optional, may be empty):\n"
         f"{business_context or '(none provided — use class-name heuristics + baseline stats)'}\n\n"
-        f"Class data table:\n{data_block}\n\n"
-        f"Now return the JSON array for ALL {len(classes)} classes above."
+        f"Active classes (n >= {_MIN_N_FOR_AI} detections in last 7d):\n{data_block}"
+        + shipment_block
+        + f"\n\nNow return the JSON array for ALL {len(active_classes)} active classes above. "
+        + ("Aim for severities that would keep recent shipment p50 score between 80 and 92, "
+           "with worst shipments dropping below 70. The current distribution is shown above — "
+           "adjust each class's severity so the resulting score distribution stays in that range. "
+           if shipment_block else "")
     )
 
     # Call AI without tools (one-shot, structured).
@@ -1241,6 +1330,7 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
         raw = await call_ai_model(
             provider, api_key, system_prompt, user_query, watcher_instance,
             base_url=base_url, model_id=model_id, tools_enabled=False,
+            max_tokens=16384,   # 3.25.2 — JSON array of ~50-200 classes can be long
         )
     except Exception as e:
         return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
@@ -1260,18 +1350,17 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.IGNORECASE).strip()
     suggestions = []
     parse_err = None
+    cur_sevs = {n: int((aud.get(n) or {}).get("severity") or 0) for n in all_classes}
     try:
         arr = _json.loads(text)
         if isinstance(arr, list):
-            cur_sevs = {n: int((aud.get(n) or {}).get("severity") or 0) for n in classes}
             for item in arr:
                 if not isinstance(item, dict):
                     continue
                 cls = str(item.get("class") or "").strip()
                 if not cls or cls not in cur_sevs:
                     continue
-                sev = int(item.get("severity") or 0)
-                sev = max(0, min(100, sev))
+                sev = max(0, min(100, int(item.get("severity") or 0)))
                 suggestions.append({
                     "class": cls,
                     "suggested_severity": sev,
@@ -1279,6 +1368,20 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
                     "tier": str(item.get("tier") or "").upper(),
                     "reason": str(item.get("reason") or ""),
                 })
+        # 3.25.2 — auto-suggest 0 for silent classes (no AI roundtrip needed).
+        suggested_set = {s["class"] for s in suggestions}
+        for cls in silent_classes:
+            if cls in suggested_set:
+                continue
+            suggestions.append({
+                "class": cls,
+                "suggested_severity": 0,
+                "current_severity": cur_sevs.get(cls, 0),
+                "tier": "NONE",
+                "reason": "No detections in the last 7 days — auto-set to 0.",
+            })
+        # Stable order: highest suggested first, alphabetical tiebreak
+        suggestions.sort(key=lambda s: (-s["suggested_severity"], s["class"]))
     except Exception as e:
         parse_err = f"AI did not return parseable JSON: {e}"
 
