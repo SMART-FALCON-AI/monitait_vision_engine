@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.3] - 2026-06-12
+
+### Added — 🤖 AI auto-pick capture state on the Dashboard
+- New **🤖 ?** button right next to the Dashboard capture-state dropdown. When the operator doesn't know which state to use, click it — the AI inspects the defined states, the active inference pipeline, the camera count, last-hour detection activity, and (optionally) a product description, then recommends the best-fit state.
+- New backend endpoint `POST /api/states/ai_recommend` returns a structured answer:
+  ```json
+  {"recommended_state": "infinite", "current_state": "default",
+   "reason": "Continuous high-volume detections across cam 1+2 fit a steps=-1 state better.",
+   "confidence": "high",
+   "alternatives": [{"name": "default", "reason": "..."}]}
+  ```
+- The Dashboard expands a small green panel under the picker with the recommendation, reason, alternatives, and an **✓ Apply** button that hits the standard activate endpoint. If the AI picks an unknown state name, the endpoint returns 502 with the list of valid options.
+- Uses the same `call_ai_model(tools_enabled=False)` path as the severity suggester — small token budget (2048), one-shot call, logs to `ai_usage_log`.
+
 ## [3.25.2] - 2026-06-12
 
 ### Added — 🤖 AI-suggested Severity values for every class

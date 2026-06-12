@@ -167,6 +167,8 @@
                                 <select id="dashboard-state-picker" onchange="dashboardActivateState(this.value)" style="background: rgba(15,23,42,0.6); color: var(--primary-color); border: 1px solid rgba(51,65,85,0.6); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 700; cursor: pointer; min-width: 90px;">
                                     <option value="" id="dashboard-state-placeholder">…</option>
                                 </select>
+                                <!-- 3.25.3 — AI auto-pick capture state -->
+                                <button onclick="askAiRecommendState()" id="dashboard-state-ai-btn" title="Don't know which state to pick? Ask the AI to recommend one based on the line's current activity + your product." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:2px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🤖 ?</button>
                                 <!-- Hidden span kept so any legacy reader still finds inference-state-name -->
                                 <span id="inference-state-name" style="display:none;"></span>
                                 <span id="capture-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
@@ -179,6 +181,14 @@
                                 <span id="inference-service-name" style="display:none;"></span>
                                 <span id="inference-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                                 <span id="gradio-restart-warning" style="display: none; color: var(--danger-color); font-weight: bold;"> ⚠️</span>
+                            </div>
+                            <!-- 3.25.3 — AI capture-state recommendation panel (hidden until 🤖 ? is clicked) -->
+                            <div id="state-ai-panel" style="display:none; margin-top:6px; padding:6px 8px; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:11px; line-height:1.45;">
+                                <div id="state-ai-content" style="color:#d1fae5;"></div>
+                                <div id="state-ai-actions" style="display:none; margin-top:4px; gap:4px; flex-direction:row;">
+                                    <button onclick="applyAiRecommendedState()" id="state-ai-apply" style="background:var(--primary-color); color:#fff; border:none; padding:2px 8px; cursor:pointer; font-size:10px; border-radius:3px; font-weight:600;">✓ Apply</button>
+                                    <button onclick="document.getElementById('state-ai-panel').style.display='none'" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); padding:1px 7px; cursor:pointer; font-size:10px; border-radius:3px;">✗</button>
+                                </div>
                             </div>
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px;">
                                 <div><span data-i18n="latency">Latency</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_latency">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value">...</strong></div>

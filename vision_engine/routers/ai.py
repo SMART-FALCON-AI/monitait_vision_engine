@@ -1411,6 +1411,212 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     })
 
 
+@router.post("/api/states/ai_recommend")
+async def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
+    """3.25.3 — Ask the active AI to pick the best capture state for the
+    current line + product.
+
+    Operator hits the "🤖 ?" button next to the Dashboard state picker.
+    AI sees:
+      - the list of defined capture states with their phases (which cameras
+        fire, light mode, delay, steps)
+      - the currently active state
+      - the active inference pipeline + how many cameras are physically
+        present
+      - last-hour detection rate so it can sense whether the line is
+        actually running
+      - the operator's optional product description ("knit production",
+        "PVB film, backlit", "jeans dye line", …)
+
+    Returns:
+      {
+        "recommended_state": "<name>",
+        "current_state":     "<name>",
+        "reason":            "one short sentence",
+        "confidence":        "high|medium|low",
+        "alternatives":      [{"name":"...","reason":"..."}, ...]
+      }
+    """
+    payload = payload or {}
+    product_context = str(payload.get("product_context") or "").strip()
+    language = str(payload.get("language") or "en").lower()
+
+    # active AI
+    ai_data = _get_ai_models_from_redis()
+    active_name = ai_data.get("active")
+    if not active_name or active_name not in ai_data.get("models", {}):
+        return JSONResponse(content={"error": "AI not configured."}, status_code=400)
+    am = ai_data["models"][active_name]
+    provider = am["provider"]; api_key = am["api_key"]
+    base_url = (am.get("base_url") or "").strip()
+    model_id = (am.get("model_id") or "").strip()
+
+    # gather state + pipeline + camera + detection context
+    try:
+        from config import load_service_config as _load_svc
+        svc = _load_svc() or {}
+    except Exception:
+        svc = {}
+    states = (svc.get("states") or {})
+    current_state = svc.get("current_state_name") or "?"
+    pipeline_name = (svc.get("pipeline_config") or {}).get("current_pipeline") or "?"
+    cameras_cfg = svc.get("cameras") or {}
+    n_cameras = len([k for k, v in cameras_cfg.items() if isinstance(v, dict)])
+
+    # describe each state for the AI
+    state_lines = []
+    for name, body in (states or {}).items():
+        if not isinstance(body, dict):
+            continue
+        phases = body.get("phases") or []
+        bits = []
+        for i, p in enumerate(phases):
+            cams = p.get("cameras") or p.get("cams") or []
+            bits.append(
+                f"phase{i}(cams={cams}, light={p.get('light_mode','?')}, "
+                f"delay={p.get('delay','?')}s, steps={p.get('steps','?')}, "
+                f"analog={p.get('analog','?')})"
+            )
+        marker = " ← currently active" if name == current_state else ""
+        state_lines.append(f"- {name!r}{marker}: {' '.join(bits) or '(no phases)'}")
+    states_block = "\n".join(state_lines) if state_lines else "(no capture states defined)"
+
+    # last-hour activity from inference_results so the AI knows whether the line is running
+    activity_block = "(no recent activity data)"
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is not None:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT (det->>'name') AS cls, COUNT(*) AS n,
+                           COUNT(DISTINCT (det->>'_cam')) AS cams
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                    WHERE time > NOW() - INTERVAL '1 hour'
+                      AND (det->>'name') IS NOT NULL
+                    GROUP BY 1 ORDER BY n DESC LIMIT 8
+                    """
+                )
+                rows = cur.fetchall()
+                if rows:
+                    activity_block = (
+                        "Last 1h top detected classes (name=count cams):\n"
+                        + "\n".join(f"  {r[0]}={r[1]} cams={r[2]}" for r in rows)
+                    )
+                cur.close()
+            finally:
+                try: release_db_connection(conn)
+                except Exception: pass
+    except Exception:
+        pass
+
+    _LANG_NAMES = {
+        "en": "English", "fa": "Persian (فارسی)", "ar": "Arabic",
+        "de": "German", "tr": "Turkish", "ja": "Japanese", "es": "Spanish",
+    }
+    language_name = _LANG_NAMES.get(language, "English")
+
+    system_prompt = (
+        "You are a quality-control consultant choosing the best capture state "
+        "for a production line. A capture state defines which cameras fire, "
+        "with what lighting, delay between phases, and how many steps per cycle.\n\n"
+        "Decision heuristics:\n"
+        "  * If the line uses ALL cameras simultaneously, prefer a state whose "
+        "phase 0 has all cams listed.\n"
+        "  * For continuous high-speed production (knit, PVB film, conveyor "
+        "fabric): prefer 'infinite' or 'infinite-max' (steps=-1).\n"
+        "  * For step-by-step inspection (one piece at a time, e.g. jeans QC, "
+        "discrete part inspection): prefer 'default' or named single-step states.\n"
+        "  * Light-mode hints in state names matter (U_ON / B_ON / KC-Back / etc.) — "
+        "they reflect the lighting rig that state was built for. Match the "
+        "product description to the lighting.\n"
+        "  * If the line is currently producing nothing (activity block shows no "
+        "recent detections), suggest the operator's stated need or keep the current.\n\n"
+        f"Respond in {language_name}. Return STRICT JSON ONLY (no prose, no "
+        "markdown fences) with shape:\n"
+        '  {"recommended_state": "<exact name from the list>",\n'
+        '   "reason": "<one sentence>",\n'
+        '   "confidence": "high|medium|low",\n'
+        '   "alternatives": [{"name":"<other-state>","reason":"<one sentence>"}, ...]}\n'
+        "Only choose from the state names provided."
+    )
+
+    user_query = (
+        f"Product / line context (optional):\n{product_context or '(none provided)'}\n\n"
+        f"Active inference pipeline: {pipeline_name}\n"
+        f"Cameras configured: {n_cameras}\n"
+        f"Currently active capture state: {current_state}\n\n"
+        f"Available capture states:\n{states_block}\n\n"
+        f"{activity_block}\n\n"
+        f"Now pick the best state."
+    )
+
+    watcher_instance = request.app.state.watcher_instance
+    import time as _t
+    _t0 = _t.time()
+    try:
+        raw = await call_ai_model(
+            provider, api_key, system_prompt, user_query, watcher_instance,
+            base_url=base_url, model_id=model_id, tools_enabled=False, max_tokens=2048,
+        )
+    except Exception as e:
+        return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
+
+    if isinstance(raw, str) and raw.lstrip().lower().startswith(("ai request failed", "error code")):
+        return JSONResponse(content={
+            "error": "upstream_ai_error", "upstream_error": raw[:600],
+            "hint": "Try again or switch model in AI Configuration.",
+        }, status_code=502)
+
+    import json as _json, re as _re
+    text = (raw or "").strip()
+    text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.IGNORECASE).strip()
+    try:
+        d = _json.loads(text)
+    except Exception as e:
+        return JSONResponse(content={
+            "error": f"AI did not return valid JSON: {e}",
+            "raw_preview": text[:300],
+        }, status_code=502)
+
+    # Validate the suggested state name exists
+    rec = str(d.get("recommended_state") or "").strip()
+    if rec not in (states or {}):
+        return JSONResponse(content={
+            "error": f"AI suggested an unknown state {rec!r}",
+            "available_states": list((states or {}).keys()),
+            "raw": d,
+        }, status_code=502)
+
+    # Log usage
+    try:
+        from services.ai_usage import log_usage
+        log_usage(
+            endpoint="/api/states/ai_recommend",
+            mode="state_pick",
+            model_name=active_name,
+            provider=provider,
+            prompt_text=(system_prompt + "\n" + user_query),
+            answer_text=text,
+            latency_ms=int((_t.time() - _t0) * 1000),
+            status="ok",
+            operator=request.headers.get("X-Operator") or None,
+        )
+    except Exception:
+        pass
+
+    return JSONResponse(content={
+        "recommended_state": rec,
+        "current_state": current_state,
+        "reason": str(d.get("reason") or ""),
+        "confidence": str(d.get("confidence") or "").lower(),
+        "alternatives": d.get("alternatives") or [],
+        "model": active_name,
+    })
+
+
 @router.post("/api/apply_severities")
 async def apply_severities(payload: Dict[str, Any]):
     """Bulk-apply suggested severity values to service_config.audio_settings.

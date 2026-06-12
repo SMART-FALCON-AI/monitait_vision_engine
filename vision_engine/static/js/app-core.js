@@ -828,6 +828,69 @@ window.dashboardActivateState    = dashboardActivateState;
 window.dashboardActivatePipeline = dashboardActivatePipeline;
 window.loadDashboardStatePicker    = loadDashboardStatePicker;
 window.loadDashboardPipelinePicker = loadDashboardPipelinePicker;
+
+
+// 3.25.3 — AI auto-pick capture state for the operator.
+let _aiRecommendedState = null;
+
+async function askAiRecommendState() {
+    const panel    = document.getElementById('state-ai-panel');
+    const content  = document.getElementById('state-ai-content');
+    const actions  = document.getElementById('state-ai-actions');
+    const btn      = document.getElementById('dashboard-state-ai-btn');
+    if (!panel || !content) return;
+    panel.style.display = 'block';
+    actions.style.display = 'none';
+    content.innerHTML = '🤔 asking the AI…';
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+
+    // Cheap UX nicety — let operator add a 1-liner product description without a separate input.
+    const productContext = (window._lastStateAiContext || '').trim();
+
+    try {
+        const r = await fetch('/api/states/ai_recommend', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                product_context: productContext,
+                language: window.currentLang || 'en',
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            content.innerHTML = '<span style="color:#fca5a5;">✗ ' +
+                (d.upstream_error ? d.upstream_error.slice(0, 200) : (d.error || ('HTTP ' + r.status))) +
+                '</span>';
+            return;
+        }
+        _aiRecommendedState = d.recommended_state;
+        const conf = (d.confidence || 'medium').toUpperCase();
+        const altsHtml = (d.alternatives || []).length
+            ? '<div style="font-size:10px; color:#94a3b8; margin-top:3px;">Alternatives: '
+              + d.alternatives.map(a => `<b>${a.name}</b> — ${(a.reason || '').slice(0, 70)}`).join(' · ')
+              + '</div>'
+            : '';
+        content.innerHTML =
+            `<div><b style="color:#a7f3d0;">${d.recommended_state}</b> ` +
+            `<span style="opacity:0.7; font-size:10px;">[${conf}]</span> ` +
+            `<span style="opacity:0.6; font-size:10px;">via ${d.model || 'AI'}</span></div>` +
+            `<div style="margin-top:2px;">${d.reason || ''}</div>` +
+            altsHtml;
+        actions.style.display = (d.recommended_state && d.recommended_state !== d.current_state) ? 'flex' : 'none';
+    } catch (e) {
+        content.innerHTML = '<span style="color:#fca5a5;">Network error: ' + e.message + '</span>';
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+window.askAiRecommendState = askAiRecommendState;
+
+async function applyAiRecommendedState() {
+    if (!_aiRecommendedState) return;
+    await dashboardActivateState(_aiRecommendedState);
+    const panel = document.getElementById('state-ai-panel');
+    if (panel) panel.style.display = 'none';
+}
+window.applyAiRecommendedState = applyAiRecommendedState;
 document.addEventListener('DOMContentLoaded', () => {
     setTimeout(loadDashboardStatePicker,    1500);
     setTimeout(loadDashboardPipelinePicker, 1700);
