@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.2] - 2026-06-12
+
+### Added — 🤖 AI-suggested Severity values for every class
+- New **🤖 Suggest severities** button at the top of the Process tab (in the filter bar). Clicking opens a green panel with an optional "describe your product" input and a **Run** button.
+- New backend endpoint `POST /api/suggest_severities` gathers every `audio_settings` class with its detection count, p5/p50/p95 confidence from `/api/conf_baselines`, current Severity, plus whether ColorE/Area are on, builds a structured prompt for the active AI model, and asks for a 0–100 Severity per class with a one-sentence reason and a tier (`COSMETIC` / `MODERATE` / `SERIOUS` / `CRITICAL` / `NONE`).
+- Severity tier scale baked into the system prompt:
+  - `0` — math channels / metrics (mean_L, fft_*, blob_*, std_L, …) — auto-suggested at 0
+  - `1–20` cosmetic
+  - `21–50` moderate
+  - `51–80` serious
+  - `81–100` critical (single instance can reject the shipment)
+- Results land in a sortable table with columns Class · Current · Suggested · Tier · Reason · Apply (✓ per row, ✗ disabled when current == suggested). Tier color-coded for quick scanning.
+- **Apply all** button bulk-applies every non-equal suggestion via `POST /api/apply_severities` (which writes to `audio_settings.<class>.severity` + busts the draw_filters cache so the new values take effect on the next captured frame).
+- Per-row and bulk applies are immediately reflected in the per-class card severity input — no page refresh needed.
+- AI call uses `tools_enabled=False` (no agentic loop), respects the operator's UI language, and logs to `ai_usage_log` like other AI calls so the per-site bill captures it.
+
 ## [3.25.1] - 2026-06-12
 
 ### Changed — internal cleanup

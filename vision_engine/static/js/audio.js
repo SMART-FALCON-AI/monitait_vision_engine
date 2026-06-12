@@ -636,6 +636,168 @@ function toggleObjectArea(objectName) {
 window.toggleObjectArea = toggleObjectArea;
 
 
+// =====================================================================
+// 3.25.2 — AI Severity suggester
+// =====================================================================
+
+let _severitySuggestions = null;  // last response from /api/suggest_severities
+
+function openSeveritySuggestPanel() {
+    const p = document.getElementById('severity-suggest-panel');
+    if (p) p.style.display = 'block';
+    const meta = document.getElementById('severity-suggest-meta');
+    if (meta) meta.textContent = '— ask the AI to score every class on a 0–100 severity scale based on counts, confidence, name keywords, and your business context.';
+    const results = document.getElementById('severity-suggest-results');
+    if (results) results.innerHTML = '';
+    document.getElementById('severity-apply-all-btn').disabled = true;
+    document.getElementById('severity-apply-all-btn').style.opacity = '0.5';
+}
+window.openSeveritySuggestPanel = openSeveritySuggestPanel;
+
+function closeSeveritySuggestPanel() {
+    const p = document.getElementById('severity-suggest-panel');
+    if (p) p.style.display = 'none';
+}
+window.closeSeveritySuggestPanel = closeSeveritySuggestPanel;
+
+async function runSeveritySuggest() {
+    const ctxEl = document.getElementById('severity-context-input');
+    const runBtn = document.getElementById('severity-suggest-run-btn');
+    const applyBtn = document.getElementById('severity-apply-all-btn');
+    const statusEl = document.getElementById('severity-suggest-status');
+    const resultsEl = document.getElementById('severity-suggest-results');
+    if (!resultsEl) return;
+
+    runBtn.disabled = true; runBtn.style.opacity = '0.5';
+    statusEl.textContent = '🤔 thinking — this can take 20–60s depending on the model…';
+    resultsEl.innerHTML = '';
+
+    try {
+        const r = await fetch('/api/suggest_severities', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                business_context: (ctxEl?.value || '').trim(),
+                language: window.currentLang || 'en',
+            }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            statusEl.textContent = '✗ ' + (d.error || ('Request failed (' + r.status + ')'));
+            return;
+        }
+        if (d.parse_error) {
+            statusEl.textContent = '✗ AI response was not valid JSON. Raw preview: ' + (d.raw_preview || '').slice(0, 120);
+            return;
+        }
+        _severitySuggestions = d.suggestions || [];
+        statusEl.textContent = `✓ ${_severitySuggestions.length} suggestions from ${d.model || 'AI'}.`;
+        _renderSeveritySuggestions(_severitySuggestions);
+        if (_severitySuggestions.length > 0) {
+            applyBtn.disabled = false;
+            applyBtn.style.opacity = '1';
+        }
+    } catch (e) {
+        statusEl.textContent = '✗ Network error: ' + (e.message || e);
+    } finally {
+        runBtn.disabled = false; runBtn.style.opacity = '1';
+    }
+}
+window.runSeveritySuggest = runSeveritySuggest;
+
+function _tierColor(tier) {
+    switch ((tier || '').toUpperCase()) {
+        case 'CRITICAL': return '#f87171';
+        case 'SERIOUS':  return '#fb923c';
+        case 'MODERATE': return '#fcd34d';
+        case 'COSMETIC': return '#86efac';
+        default:         return '#94a3b8';   // NONE / unknown
+    }
+}
+
+function _renderSeveritySuggestions(rows) {
+    const el = document.getElementById('severity-suggest-results');
+    if (!el) return;
+    if (!rows.length) { el.innerHTML = '<i>No suggestions returned.</i>'; return; }
+    // Build a table — operator can review and apply per-row.
+    const header = `
+        <tr style="color:#94a3b8; background:rgba(15,23,42,0.55); position:sticky; top:0;">
+            <th style="text-align:left; padding:5px 8px;">Class</th>
+            <th style="text-align:center; padding:5px 8px;">Current</th>
+            <th style="text-align:center; padding:5px 8px;">Suggested</th>
+            <th style="text-align:center; padding:5px 8px;">Tier</th>
+            <th style="text-align:left; padding:5px 8px;">Reason</th>
+            <th style="text-align:center; padding:5px 8px;">Apply</th>
+        </tr>`;
+    const body = rows.map((r, idx) => {
+        const same = r.current_severity === r.suggested_severity;
+        const arrow = r.suggested_severity > r.current_severity ? '↑' :
+                      r.suggested_severity < r.current_severity ? '↓' : '=';
+        const arrowColor = arrow === '↑' ? '#86efac' : arrow === '↓' ? '#fcd34d' : '#94a3b8';
+        return `
+            <tr style="border-top:1px solid rgba(51,65,85,0.4);" data-class="${r.class}">
+                <td style="padding:4px 8px; font-weight:600;">${r.class}</td>
+                <td style="text-align:center; padding:4px 8px;">${r.current_severity}</td>
+                <td style="text-align:center; padding:4px 8px; font-weight:700;">
+                    ${r.suggested_severity} <span style="color:${arrowColor}; font-weight:400;">${arrow}</span>
+                </td>
+                <td style="text-align:center; padding:4px 8px; color:${_tierColor(r.tier)}; font-weight:600;">${r.tier || '?'}</td>
+                <td style="padding:4px 8px; color:var(--text-secondary); font-size:11px;">${(r.reason || '').replace(/</g, '&lt;')}</td>
+                <td style="text-align:center; padding:4px 8px;">
+                    <button onclick="applyOneSeveritySuggestion(${idx})" ${same ? 'disabled' : ''} style="background:${same?'rgba(51,65,85,0.4)':'var(--primary-color)'}; color:#fff; border:none; padding:3px 9px; cursor:${same?'default':'pointer'}; font-size:11px; border-radius:3px; font-weight:600;">${same ? '=' : '✓'}</button>
+                </td>
+            </tr>`;
+    }).join('');
+    el.innerHTML = `<table style="width:100%; border-collapse:collapse;">${header}${body}</table>`;
+}
+
+async function applyOneSeveritySuggestion(idx) {
+    if (!_severitySuggestions || !_severitySuggestions[idx]) return;
+    const row = _severitySuggestions[idx];
+    await _postSeverityUpdates([{ class: row.class, severity: row.suggested_severity }]);
+    // Reflect locally
+    audioSettings.severityObjects = audioSettings.severityObjects || {};
+    audioSettings.severityObjects[row.class] = row.suggested_severity;
+    row.current_severity = row.suggested_severity;
+    _renderSeveritySuggestions(_severitySuggestions);
+    if (typeof updateObjectsList === 'function') updateObjectsList();
+}
+window.applyOneSeveritySuggestion = applyOneSeveritySuggestion;
+
+async function applyAllSeveritySuggestions() {
+    if (!_severitySuggestions || !_severitySuggestions.length) return;
+    const updates = _severitySuggestions
+        .filter(r => r.current_severity !== r.suggested_severity)
+        .map(r => ({ class: r.class, severity: r.suggested_severity }));
+    if (!updates.length) {
+        document.getElementById('severity-suggest-status').textContent = 'Nothing to change.';
+        return;
+    }
+    const result = await _postSeverityUpdates(updates);
+    audioSettings.severityObjects = audioSettings.severityObjects || {};
+    _severitySuggestions.forEach(r => {
+        audioSettings.severityObjects[r.class] = r.suggested_severity;
+        r.current_severity = r.suggested_severity;
+    });
+    _renderSeveritySuggestions(_severitySuggestions);
+    if (typeof updateObjectsList === 'function') updateObjectsList();
+    document.getElementById('severity-suggest-status').textContent =
+        `✓ Applied ${result?.applied ?? updates.length} updates.`;
+}
+window.applyAllSeveritySuggestions = applyAllSeveritySuggestions;
+
+async function _postSeverityUpdates(updates) {
+    try {
+        const r = await fetch('/api/apply_severities', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ updates }),
+        });
+        return await r.json();
+    } catch (e) {
+        return { error: e.message };
+    }
+}
+
+
 // 3.23.1 — "🤔" chip on each per-class card. Asks /api/why with mode="class"
 // so the AI explains the CURRENT behaviour of this class instead of a
 // specific dot. Result lands in the small panel below the card header.

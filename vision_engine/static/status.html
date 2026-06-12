@@ -1131,6 +1131,24 @@
                                 <option value="7d">last 7 d</option>
                             </select>
                             <span id="per-object-count" style="font-size:11px; color:var(--text-secondary);">—</span>
+                            <!-- 3.25.2 — AI suggests Severity values for every class. -->
+                            <button onclick="openSeveritySuggestPanel()" title="Ask the active AI to suggest a Severity 0–100 for every class" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 10px; cursor:pointer; font-size:11px; border-radius:4px; font-weight:600; margin-left:auto;">🤖 Suggest severities</button>
+                        </div>
+
+                        <!-- 3.25.2 — Severity-suggestion panel, hidden until the button above opens it. -->
+                        <div id="severity-suggest-panel" style="display:none; margin-bottom:12px; padding:10px; background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.35); border-radius:6px;">
+                            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+                                <strong style="color:#a7f3d0; font-size:13px;">🤖 AI Severity Suggestions</strong>
+                                <span id="severity-suggest-meta" style="font-size:11px; color:var(--text-secondary);"></span>
+                                <button onclick="closeSeveritySuggestPanel()" style="margin-left:auto; background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:2px 8px; cursor:pointer; font-size:11px;">✕ Close</button>
+                            </div>
+                            <input type="text" id="severity-context-input" placeholder="(optional) Describe your product / what defects matter — e.g. 'jeans line, TB=fabric tear, MD=missing dye'" style="width:100%; padding:5px 8px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; margin-bottom:8px;">
+                            <div style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
+                                <button onclick="runSeveritySuggest()" id="severity-suggest-run-btn" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;">🤖 Run</button>
+                                <button onclick="applyAllSeveritySuggestions()" id="severity-apply-all-btn" disabled style="background:var(--primary-color); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;">✓ Apply all</button>
+                                <span id="severity-suggest-status" style="font-size:11px; color:var(--text-secondary);"></span>
+                            </div>
+                            <div id="severity-suggest-results" style="max-height:340px; overflow-y:auto; font-size:12px;"></div>
                         </div>
 
                         <!-- Per-Object Cards (dynamically populated) -->

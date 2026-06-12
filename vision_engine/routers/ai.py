@@ -1119,6 +1119,222 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+@router.post("/api/suggest_severities")
+async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
+    """3.25.2 — Ask the active AI model to suggest a 0-100 Severity value for
+    every detected class on the Process tab.
+
+    Severity drives the Shipment Quality Score: higher Severity = a fired
+    detection of that class drops the score more. Operators can't guess
+    these well without help — the AI gets:
+      - the class name
+      - its detection count over the last 7d
+      - its confidence percentiles (p5/p50/p95) from /api/conf_baselines
+      - whether it has area / color analytics on
+      - its current Severity (if previously set)
+      - an optional `business_context` string the operator can supply
+        (e.g. "We make car parts, TB = broken pieces, mean_L = metric not defect")
+
+    Returns a structured list `[{class, suggested_severity, current_severity,
+    reason, tier}]`. The UI renders this as a table with per-row Apply
+    buttons + an Apply All button.
+    """
+    payload = payload or {}
+    business_context = str(payload.get("business_context") or "").strip()
+    language = str(payload.get("language") or "en").lower()
+
+    # Resolve the active model
+    ai_data = _get_ai_models_from_redis()
+    active_name = ai_data.get("active")
+    if not active_name or active_name not in ai_data.get("models", {}):
+        return JSONResponse(content={"error": "AI not configured."}, status_code=400)
+    active_model = ai_data["models"][active_name]
+    provider = active_model["provider"]
+    api_key  = active_model["api_key"]
+    base_url = (active_model.get("base_url") or "").strip()
+    model_id = (active_model.get("model_id") or "").strip()
+
+    # Gather per-class data
+    try:
+        from routers.timeline import _compute_conf_baselines
+        baselines = _compute_conf_baselines() or {}
+    except Exception:
+        baselines = {}
+
+    try:
+        from config import load_service_config as _load_svc
+        svc = _load_svc() or {}
+        aud = (svc.get("audio_settings") or {})
+    except Exception:
+        aud = {}
+
+    # Build a compact "table" the AI can reason over.
+    classes = sorted(aud.keys())
+    if not classes:
+        return JSONResponse(content={"suggestions": [], "note": "No classes configured yet."})
+
+    lines = []
+    for name in classes:
+        entry = aud.get(name) or {}
+        bl = baselines.get(name) or {}
+        n = bl.get("n", 0)
+        p5  = (bl.get("p5")  or 0) * 100
+        p50 = (bl.get("p50") or 0) * 100
+        p95 = (bl.get("p95") or 0) * 100
+        cur_sev = int(entry.get("severity") or 0)
+        color_on = bool(entry.get("color_e"))
+        area_on  = bool(entry.get("area"))
+        is_shown = bool(entry.get("show"))
+        lines.append(
+            f"- {name}: n={n}  conf p5={p5:.0f} p50={p50:.0f} p95={p95:.0f}  "
+            f"current_severity={cur_sev}  show={is_shown}  color_e={color_on}  area={area_on}"
+        )
+    data_block = "\n".join(lines)
+
+    _LANG_NAMES = {
+        "en": "English", "fa": "Persian (فارسی)", "ar": "Arabic (العربية)",
+        "de": "German", "tr": "Turkish", "ja": "Japanese", "es": "Spanish",
+    }
+    language_name = _LANG_NAMES.get(language, "English")
+
+    system_prompt = (
+        "You are an industrial quality-control consultant. You map detection "
+        "classes to a 0–100 Severity score so the Shipment Quality system can "
+        "weight defects correctly.\n\n"
+        "Severity tiers:\n"
+        "  0          — math channel / metric / not a defect at all\n"
+        "  1–20  COSMETIC — minor visible issue, low impact\n"
+        "  21–50 MODERATE — should be fixed but won't reject the shipment alone\n"
+        "  51–80 SERIOUS  — multiple instances mean the shipment is at risk\n"
+        "  81–100 CRITICAL — a single instance can reject the shipment\n\n"
+        "Use ALL signals to decide:\n"
+        "  * class NAME — words like 'broken', 'missing', 'defect', 'crack', 'contamination', "
+        "'leak' → SERIOUS or CRITICAL\n"
+        "  * NAMES that look like statistics (mean_L, std_L, fft_*, blob_*, sharpness_*, "
+        "exposure_*, band_*, tophat_*, grad_*, row/col_*, *_period_px, *_anomaly, *_residual) "
+        "→ 0 (these are metrics, not defects)\n"
+        "  * very high detection counts (n > 100,000) for a non-metric class often suggest a "
+        "common defect — usually MODERATE (21–50). Confidence band tells you whether the "
+        "model is decisive: a tight p5–p95 band (<30 points) means a clean signal, deserves "
+        "more weight than a wide noisy one.\n"
+        "  * if current_severity is already set non-zero, do not stray far without strong reason.\n"
+        "  * unknown short-code classes (TB, LL, jea, MD, …) usually map to specific defect "
+        "types in textile/jean/PVB QC — assume MODERATE 30–50 unless evidence suggests otherwise.\n\n"
+        "Return STRICT JSON ONLY (no prose, no markdown fences) — an array where each item is "
+        '`{"class":"<name>","severity":<int 0-100>,"tier":"<NONE|COSMETIC|MODERATE|SERIOUS|CRITICAL>",'
+        '"reason":"<one sentence in ' + language_name + '>"}`. '
+        "Include EVERY class from the input. Do not invent classes that are not in the input."
+    )
+
+    user_query = (
+        f"Business context (optional, may be empty):\n"
+        f"{business_context or '(none provided — use class-name heuristics + baseline stats)'}\n\n"
+        f"Class data table:\n{data_block}\n\n"
+        f"Now return the JSON array for ALL {len(classes)} classes above."
+    )
+
+    # Call AI without tools (one-shot, structured).
+    watcher_instance = request.app.state.watcher_instance
+    import time as _t
+    _t0 = _t.time()
+    try:
+        raw = await call_ai_model(
+            provider, api_key, system_prompt, user_query, watcher_instance,
+            base_url=base_url, model_id=model_id, tools_enabled=False,
+        )
+    except Exception as e:
+        return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
+
+    # Strip markdown code fences if any, then parse JSON.
+    import json as _json, re as _re
+    text = (raw or "").strip()
+    text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.IGNORECASE).strip()
+    suggestions = []
+    parse_err = None
+    try:
+        arr = _json.loads(text)
+        if isinstance(arr, list):
+            cur_sevs = {n: int((aud.get(n) or {}).get("severity") or 0) for n in classes}
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                cls = str(item.get("class") or "").strip()
+                if not cls or cls not in cur_sevs:
+                    continue
+                sev = int(item.get("severity") or 0)
+                sev = max(0, min(100, sev))
+                suggestions.append({
+                    "class": cls,
+                    "suggested_severity": sev,
+                    "current_severity": cur_sevs[cls],
+                    "tier": str(item.get("tier") or "").upper(),
+                    "reason": str(item.get("reason") or ""),
+                })
+    except Exception as e:
+        parse_err = f"AI did not return parseable JSON: {e}"
+
+    # Log usage (same shape as /api/why)
+    try:
+        from services.ai_usage import log_usage
+        log_usage(
+            endpoint="/api/suggest_severities",
+            mode="severity",
+            model_name=active_name,
+            provider=provider,
+            prompt_text=(system_prompt + "\n" + user_query),
+            answer_text=(raw or ""),
+            latency_ms=int((_t.time() - _t0) * 1000),
+            status="ok" if suggestions else "error",
+            operator=request.headers.get("X-Operator") or None,
+            error=parse_err,
+        )
+    except Exception:
+        pass
+
+    return JSONResponse(content={
+        "suggestions": suggestions,
+        "model": active_name,
+        "parse_error": parse_err,
+        "raw_preview": (raw or "")[:300] if parse_err else None,
+    })
+
+
+@router.post("/api/apply_severities")
+async def apply_severities(payload: Dict[str, Any]):
+    """Bulk-apply suggested severity values to service_config.audio_settings.
+    Payload: {"updates": [{"class": "...", "severity": N}, ...]}.
+    Returns how many rows were updated."""
+    updates = payload.get("updates") or []
+    if not isinstance(updates, list) or not updates:
+        return JSONResponse(content={"error": "updates list required"}, status_code=400)
+    from config import load_service_config as _load_svc, save_service_config as _save_svc
+    svc = _load_svc() or {}
+    aud = svc.get("audio_settings") or {}
+    n_applied = 0
+    for u in updates:
+        if not isinstance(u, dict):
+            continue
+        cls = str(u.get("class") or "").strip()
+        if not cls or cls not in aud:
+            continue
+        try:
+            sev = max(0, min(100, int(u.get("severity") or 0)))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(aud[cls], dict):
+            aud[cls] = {}
+        aud[cls]["severity"] = sev
+        n_applied += 1
+    svc["audio_settings"] = aud
+    _save_svc(svc)
+    try:
+        from services.draw_filters import invalidate_cache as _df_inv
+        _df_inv()
+    except Exception:
+        pass
+    return JSONResponse(content={"success": True, "applied": n_applied})
+
+
 @router.post("/api/ai_query")
 async def query_ai(request: Request, payload: Dict[str, Any]):
     """Query AI with production data from TimescaleDB and real-time metrics."""
