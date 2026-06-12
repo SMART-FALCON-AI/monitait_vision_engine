@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.25.5] - 2026-06-12
+## [3.25.6] - 2026-06-12
+
+### Fixed — Strip ↔ scatter alignment
+- **The quality-by-time strip now lines up 1:1 with the Camera × time scatter above it.** Chart.js insets the plot area by the Y-axis label width — the strip was painting at 100% of the container so the timestamps drifted. Fix wraps the strip in a positioned div and uses Chart.js' `animation.onComplete` + `onResize` hooks to set the wrap's `marginLeft` / `marginRight` from `scatter.chartArea` after every render. Same fix applied to the encoder strip.
+- **Scatter X-axis now spans the full selected window** (24h / 6h / 1h / 7d) instead of auto-fitting to the data range. So if there are only 5 hours of detections in a 24h window, the scatter shows 24 hours of empty space — and the strip below it represents the same 24 hours. Direct visual cross-reference between scatter and strip.
+- Strip wrap has `transition: margin 120ms ease` so the inset glides into place on window resize instead of snapping.
 
 ### Changed — Charts tab restructured
 - **One chart per concern, no duplicates.** The standalone *Quality by time* and *Quality by encoder* 1-D heatmap strips were merged into the existing **Camera × time** and **Camera × encoder** scatter plots — each strip now sits flush against the bottom of its matching scatter, sharing the same X-axis context. Same IDs (`quality-time-strip`, `quality-encoder-strip`) so the JS handlers don't change.

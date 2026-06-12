@@ -553,6 +553,13 @@ async function refreshAdvancedCharts() {
         });
     }
 
+    // 3.25.6 — compute scatter X-window in ms so the strip beneath aligns 1:1.
+    const _win = document.getElementById('insight-window')?.value || '24h';
+    const _winMs = (() => { const m = String(_win).match(/^(\d+)([hd])$/); return m ? parseInt(m[1]) * (m[2]==='d'?86400:3600) * 1000 : 24*3600*1000; })();
+    const _nowMs = Date.now();
+    const _scatterXMin = _nowMs - _winMs;
+    const _scatterXMax = _nowMs;
+
     // ---- (3) Camera × TIME scatter — hover a dot to preview that exact frame ----
     const scCtx = document.getElementById('insight-camera-scatter');
     if (scCtx) {
@@ -589,9 +596,14 @@ async function refreshAdvancedCharts() {
                     });
                 },
                 scales: {
-                    x: { type: 'linear', ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) }, grid: { color: 'rgba(148,163,184,0.08)' } },
+                    // 3.25.6 — force span to the selected window so the strip aligns 1:1.
+                    x: { type: 'linear', min: _scatterXMin, max: _scatterXMax, ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) }, grid: { color: 'rgba(148,163,184,0.08)' } },
                     y: { title: { display: true, text: 'Camera', color: '#94a3b8' }, ticks: { color: '#94a3b8', stepSize: 1, precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } }
-                }
+                },
+                // 3.25.6 — align the strip under this chart to the actual plot area after every render.
+                plugins_extra: {},
+                animation: { onComplete: function() { _alignStripToScatter(this, 'quality-time-strip-wrap'); } },
+                onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-time-strip-wrap'), 0); }
             }
         });
     }
@@ -645,11 +657,32 @@ async function refreshAdvancedCharts() {
                 scales: {
                     x: { type: 'linear', ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: 'rgba(148,163,184,0.08)' }, title: { display: true, text: 'Encoder (roll position)', color: '#94a3b8', font: { size: 10 } } },
                     y: { title: { display: true, text: 'Camera', color: '#94a3b8' }, ticks: { color: '#94a3b8', stepSize: 1, precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } }
-                }
+                },
+                // 3.25.6 — align the encoder strip under this chart to the actual plot area.
+                animation: { onComplete: function() { _alignStripToScatter(this, 'quality-encoder-strip-wrap'); } },
+                onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-encoder-strip-wrap'), 0); }
             }
         });
     }
 }
+
+// 3.25.6 — given a Chart.js instance and a wrap div ID, inset the wrap to match the chart's plot area.
+function _alignStripToScatter(scatter, wrapId) {
+    try {
+        const wrap = document.getElementById(wrapId);
+        if (!scatter || !wrap) return;
+        const ca = scatter.chartArea;
+        const canvas = scatter.canvas;
+        if (!ca || !canvas) return;
+        const containerW = canvas.clientWidth || canvas.parentElement?.clientWidth || canvas.width;
+        if (!containerW) return;
+        const left  = Math.max(0, Math.round(ca.left));
+        const right = Math.max(0, Math.round(containerW - ca.right));
+        wrap.style.marginLeft  = left + 'px';
+        wrap.style.marginRight = right + 'px';
+    } catch (e) { /* ignore */ }
+}
+window._alignStripToScatter = _alignStripToScatter;
 
 // ---------------------------------------------------------------------------
 // Ejection Insights: ejections by procedure (bar + distribution doughnut) and
@@ -1481,6 +1514,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const grafanaTab = document.getElementById('tab-grafana');
         if (grafanaTab && grafanaTab.classList.contains('active')) refreshQualityCharts();
     }, 60000);
+    // 3.25.6 — keep strip wraps inset to scatter plot area on viewport resize.
+    window.addEventListener('resize', () => {
+        try {
+            if (_insightCameraScatter)        _alignStripToScatter(_insightCameraScatter, 'quality-time-strip-wrap');
+            if (_insightCameraScatterEncoder) _alignStripToScatter(_insightCameraScatterEncoder, 'quality-encoder-strip-wrap');
+        } catch (e) {}
+    });
 });
 
 

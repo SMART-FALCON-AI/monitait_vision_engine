@@ -924,8 +924,8 @@
                         <div style="min-height:280px;"><canvas id="insight-confidence-class-chart"></canvas></div>
                         <div style="grid-column: 1 / -1;">
                             <div style="min-height:300px;"><canvas id="insight-camera-scatter"></canvas></div>
-                            <!-- 3.25.4 — quality-by-time strip stitched directly under the scatter. -->
-                            <div style="margin-top:4px;">
+                            <!-- 3.25.6 — strip wrap inset to match the scatter's plot area; JS sets marginLeft/Right to scatter.chartArea after render. -->
+                            <div id="quality-time-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📍 quality by time — hover a cell for top defect + score</div>
                                 <div id="quality-time-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-time-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
@@ -933,8 +933,8 @@
                         </div>
                         <div style="grid-column: 1 / -1;">
                             <div style="min-height:300px;"><canvas id="insight-camera-scatter-encoder"></canvas></div>
-                            <!-- 3.25.4 — quality-by-encoder strip stitched directly under the encoder scatter. -->
-                            <div style="margin-top:4px;">
+                            <!-- 3.25.6 — same alignment for encoder strip. -->
+                            <div id="quality-encoder-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📏 quality by encoder — find spots on the material with the most issues</div>
                                 <div id="quality-encoder-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-encoder-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
