@@ -80,26 +80,44 @@ async def config_db_status():
 
 @router.get("/api/shipments/next_code")
 async def next_shipment_code():
-    """3.25.0 — generate the next sequential shipment ID in the form
-    `yyyymmddXXX` where XXX is a 3-digit chronological number for TODAY.
+    """3.25.0 — generate the next sequential shipment ID `yyyymmddXXX`.
 
-    Looks at distinct shipment labels recorded in inference_results for
-    today, finds the highest matching `<today>NNN` suffix, increments it.
-    Empty / unrelated shipment names (operator-typed free-form) are
-    ignored so they don't perturb the counter.
+    Hybrid counter:
+      1) read a Redis-backed per-day counter (`shipment_seq:<yyyymmdd>`)
+         that increments on every 🎲 click — this is what makes back-to-back
+         clicks return 001, 002, 003 even before the operator hits Save.
+      2) also scan `inference_results` for distinct shipment prefixes that
+         match `<today>NNN` — if a higher number is already in the DB
+         (cross-operator scenario, or restored from backup), use that.
+      3) take max(redis, db) + 1, then INCR redis to the new value so the
+         next call continues from there.
+
+    Redis counter auto-expires at end of day so the seq cleanly resets.
     """
     from datetime import datetime as _dt
     today = _dt.now().strftime("%Y%m%d")
-    next_num = 1
+    redis_key = f"shipment_seq:{today}"
+
+    # --- 1) Redis counter (or 0 if unreachable / unset)
+    redis_max = 0
+    try:
+        from redis import Redis
+        from config import REDIS_DB
+        r = Redis("redis", 6379, db=REDIS_DB)
+        v = r.get(redis_key)
+        if v:
+            redis_max = int(v.decode() if isinstance(v, bytes) else v)
+    except Exception as e:
+        logger.debug(f"shipment_seq redis read failed: {e}")
+
+    # --- 2) DB scan (max chronological suffix already used today)
+    db_max = 0
     try:
         from services.db import get_db_connection, release_db_connection
         conn = get_db_connection()
         if conn is not None:
             try:
                 cur = conn.cursor()
-                # SUBSTRING extracts the 3 digits AFTER the date prefix; only
-                # rows whose shipment label starts with today's date and has
-                # exactly 3 trailing digits count toward the chronological seq.
                 cur.execute(
                     """
                     SELECT MAX(CAST(SUBSTRING(image_path FROM %s) AS INTEGER))
@@ -114,7 +132,7 @@ async def next_shipment_code():
                 )
                 row = cur.fetchone()
                 if row and row[0] is not None:
-                    next_num = int(row[0]) + 1
+                    db_max = int(row[0])
                 cur.close()
             finally:
                 try:
@@ -123,8 +141,27 @@ async def next_shipment_code():
                     pass
     except Exception as e:
         logger.warning(f"next_shipment_code db lookup failed: {e}")
+
+    # --- 3) next = max(redis, db) + 1, persist in redis with EOD expiry
+    next_num = max(redis_max, db_max) + 1
+    try:
+        from redis import Redis
+        from config import REDIS_DB
+        r = Redis("redis", 6379, db=REDIS_DB)
+        # Seconds until midnight local time — Redis EXPIREAT would be cleaner
+        # but SETEX works portably.
+        now = _dt.now()
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        ttl = max(60, int((end_of_day - now).total_seconds()))
+        r.setex(redis_key, ttl, str(next_num))
+    except Exception as e:
+        logger.debug(f"shipment_seq redis write failed: {e}")
+
     code = f"{today}{next_num:03d}"
-    return JSONResponse(content={"code": code, "today": today, "seq": next_num})
+    return JSONResponse(content={
+        "code": code, "today": today, "seq": next_num,
+        "redis_seq": redis_max, "db_seq": db_max,
+    })
 
 
 @router.get("/health")

@@ -721,20 +721,36 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(loadAiTrainerConf
 // 3.25.0 — Dashboard inline pickers for capture state + inference pipeline
 // =====================================================================
 
+// 3.25.0 — apply explicit option styling (dark bg, white text) so the dropdown
+// list is readable. Browser default option styling tends to be light-mode.
+const _PICKER_OPT_STYLE = 'background:#0f172a; color:#fff;';
+
+function _renderPickerOptions(sel, names, cur) {
+    if (!names.length) {
+        sel.innerHTML = `<option value="" style="${_PICKER_OPT_STYLE}">(none defined)</option>`;
+        return;
+    }
+    sel.innerHTML = names.map(n =>
+        `<option value="${n}" ${n === cur ? 'selected' : ''} style="${_PICKER_OPT_STYLE}">${n}</option>`
+    ).join('');
+}
+
 async function loadDashboardStatePicker() {
     try {
         const r = await fetch('/api/states');
         if (!r.ok) return;
         const d = await r.json();
-        const states = d.states || d.items || d;
-        const cur = d.current_state || d.current || d.active || '';
+        const states = d.states || d.items || {};
+        // current_state can be an object {name:..} or a plain string
+        const curObj = d.current_state;
+        const cur = (curObj && (curObj.name || curObj)) || d.current || d.active || '';
         const sel = document.getElementById('dashboard-state-picker');
         if (!sel) return;
-        const names = Array.isArray(states) ? states.map(s => s.name || s) : Object.keys(states || {});
-        sel.innerHTML = names.map(n =>
-            `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`
-        ).join('');
-        if (!names.length) sel.innerHTML = '<option value="">(none defined)</option>';
+        // states can be either array of {name} or object keyed by name
+        const names = Array.isArray(states)
+            ? states.map(s => s.name || s)
+            : Object.keys(states);
+        _renderPickerOptions(sel, names, cur);
     } catch (e) { /* not fatal */ }
 }
 
@@ -744,35 +760,48 @@ async function loadDashboardPipelinePicker() {
             fetch('/api/pipelines'),
             fetch('/api/pipelines/current'),
         ]);
-        const ps = pr.ok ? await pr.json() : { pipelines: [] };
+        const ps = pr.ok ? await pr.json() : {};
         const cd = cr.ok ? await cr.json() : null;
-        const cur = (cd && (cd.pipeline?.name || cd.name)) || '';
+        const cur = (cd && ((cd.pipeline && cd.pipeline.name) || cd.name)) || '';
         const sel = document.getElementById('dashboard-pipeline-picker');
         if (!sel) return;
-        const list = ps.pipelines || ps || [];
-        const names = list.map(p => p.name || p);
-        sel.innerHTML = names.map(n =>
-            `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`
-        ).join('');
-        if (!names.length) sel.innerHTML = '<option value="">(none defined)</option>';
+        // /api/pipelines returns `pipelines` as an OBJECT keyed by name
+        // (not an array). Handle both shapes defensively.
+        const pip = ps.pipelines || ps;
+        let names = [];
+        if (Array.isArray(pip)) {
+            names = pip.map(p => p.name || p);
+        } else if (pip && typeof pip === 'object') {
+            names = Object.keys(pip);
+        }
+        _renderPickerOptions(sel, names, cur);
     } catch (e) { /* not fatal */ }
+}
+
+function _flashPicker(sel, ok) {
+    if (!sel) return;
+    const orig = sel.style.boxShadow;
+    sel.style.transition = 'box-shadow 0.25s';
+    sel.style.boxShadow = ok ? '0 0 0 2px rgba(34,197,94,0.7)' : '0 0 0 2px rgba(239,68,68,0.7)';
+    setTimeout(() => { sel.style.boxShadow = orig; }, 1100);
 }
 
 async function dashboardActivateState(name) {
     if (!name) return;
     const sel = document.getElementById('dashboard-state-picker');
     if (sel) sel.disabled = true;
+    let ok = false;
     try {
         const r = await fetch('/api/states/' + encodeURIComponent(name) + '/activate', { method: 'POST' });
-        if (!r.ok) {
-            const e = await r.json().catch(() => ({}));
-            alert('Failed to activate state: ' + (e.error || r.status));
-        }
+        const d = await r.json().catch(() => ({}));
+        ok = r.ok && (d.success !== false);
+        if (!ok) alert('Failed to activate state: ' + (d.error || d.message || r.status));
     } catch (e) {
         alert('Activate state failed: ' + e.message);
     } finally {
         if (sel) sel.disabled = false;
-        loadDashboardStatePicker();  // re-fetch to confirm the change took
+        _flashPicker(sel, ok);
+        loadDashboardStatePicker();
     }
 }
 
@@ -780,16 +809,17 @@ async function dashboardActivatePipeline(name) {
     if (!name) return;
     const sel = document.getElementById('dashboard-pipeline-picker');
     if (sel) sel.disabled = true;
+    let ok = false;
     try {
         const r = await fetch('/api/pipelines/activate/' + encodeURIComponent(name), { method: 'POST' });
-        if (!r.ok) {
-            const e = await r.json().catch(() => ({}));
-            alert('Failed to activate pipeline: ' + (e.error || r.status));
-        }
+        const d = await r.json().catch(() => ({}));
+        ok = r.ok && (d.success !== false);
+        if (!ok) alert('Failed to activate pipeline: ' + (d.error || d.message || r.status));
     } catch (e) {
         alert('Activate pipeline failed: ' + e.message);
     } finally {
         if (sel) sel.disabled = false;
+        _flashPicker(sel, ok);
         loadDashboardPipelinePicker();
     }
 }
