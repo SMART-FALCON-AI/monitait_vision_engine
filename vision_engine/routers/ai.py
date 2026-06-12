@@ -1463,22 +1463,35 @@ async def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
     cameras_cfg = svc.get("cameras") or {}
     n_cameras = len([k for k, v in cameras_cfg.items() if isinstance(v, dict)])
 
-    # describe each state for the AI
+    # 3.25.4 hotfix — give the AI the FULL state config (exposure / gain /
+    # analog threshold / light_status_check at state level, plus phase-level
+    # cams/light/delay/steps/analog). Without this the AI was guessing about
+    # what each state actually does and the recommendations were vague.
     state_lines = []
     for name, body in (states or {}).items():
         if not isinstance(body, dict):
             continue
+        state_meta = (
+            f"exposure={body.get('exposure', 'auto')}  "
+            f"gain={body.get('gain', 'auto')}  "
+            f"analog_threshold={body.get('analog', -1)}  "
+            f"steps_total={body.get('steps', 1)}  "
+            f"light_status_check={body.get('light_status_check', False)}"
+        )
         phases = body.get("phases") or []
-        bits = []
+        phase_bits = []
         for i, p in enumerate(phases):
             cams = p.get("cameras") or p.get("cams") or []
-            bits.append(
+            phase_bits.append(
                 f"phase{i}(cams={cams}, light={p.get('light_mode','?')}, "
                 f"delay={p.get('delay','?')}s, steps={p.get('steps','?')}, "
                 f"analog={p.get('analog','?')})"
             )
         marker = " ← currently active" if name == current_state else ""
-        state_lines.append(f"- {name!r}{marker}: {' '.join(bits) or '(no phases)'}")
+        state_lines.append(
+            f"- {name!r}{marker}:\n    state-level: {state_meta}\n    "
+            + (" ".join(phase_bits) or "(no phases)")
+        )
     states_block = "\n".join(state_lines) if state_lines else "(no capture states defined)"
 
     # last-hour activity from inference_results so the AI knows whether the line is running
@@ -1521,25 +1534,46 @@ async def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
     system_prompt = (
         "You are a quality-control consultant choosing the best capture state "
         "for a production line. A capture state defines which cameras fire, "
-        "with what lighting, delay between phases, and how many steps per cycle.\n\n"
-        "Decision heuristics:\n"
-        "  * If the line uses ALL cameras simultaneously, prefer a state whose "
-        "phase 0 has all cams listed.\n"
-        "  * For continuous high-speed production (knit, PVB film, conveyor "
-        "fabric): prefer 'infinite' or 'infinite-max' (steps=-1).\n"
-        "  * For step-by-step inspection (one piece at a time, e.g. jeans QC, "
-        "discrete part inspection): prefer 'default' or named single-step states.\n"
-        "  * Light-mode hints in state names matter (U_ON / B_ON / KC-Back / etc.) — "
-        "they reflect the lighting rig that state was built for. Match the "
-        "product description to the lighting.\n"
-        "  * If the line is currently producing nothing (activity block shows no "
-        "recent detections), suggest the operator's stated need or keep the current.\n\n"
+        "with what lighting, exposure, gain, delay between phases, and how "
+        "many steps per cycle.\n\n"
+        "Glossary of fields you will see:\n"
+        "  * cams=[1,2]  — which camera ids fire in this phase. Cover-all-cams "
+        "(matching the physical camera count) is best for full-frame inspection.\n"
+        "  * light=U_ON_B_OFF | U_OFF_B_ON | …  — light rig pattern. 'U' = upper / "
+        "front LEDs, 'B' = bottom / back-light. U_ON_B_OFF = front-lit (defect "
+        "shape, surface texture). U_OFF_B_ON = back-lit (translucency, holes, "
+        "thread density, PVB film bubbles).\n"
+        "  * delay  — seconds the watcher waits after switching lights/cam "
+        "before grabbing the frame. Low (~0) suits steady-state high-FPS lines; "
+        "higher (~0.1–5s) suits step-by-step inspection where the part needs "
+        "to settle.\n"
+        "  * steps  — how many sub-shots per phase. -1 means loop forever "
+        "(continuous lines: knit, fabric, PVB film). 1 means one grab per cycle "
+        "(discrete-part QC).\n"
+        "  * exposure / gain  — set non-auto when matching product needs a "
+        "specific brightness. 'auto' means camera decides.\n"
+        "  * analog_threshold  — if >= 0, capture only fires when an analog "
+        "sensor (e.g. proximity, light-curtain) reads above this. Useful for "
+        "discrete parts where each unit triggers a shot.\n\n"
+        "Pick the BEST state by matching the line's character to these fields:\n"
+        "  * Continuous flow (fabric, film, sheet) + 2 cams looking at same area "
+        "→ steps=-1 state with low delay.\n"
+        "  * Discrete parts each triggering a shot → analog_threshold>=0 state "
+        "with steps=1 and a small delay.\n"
+        "  * Back-lit material (PVB, thin fabrics, translucent film) → state "
+        "with U_OFF_B_ON.\n"
+        "  * Surface defect detection (jeans, leather, metal) → U_ON_B_OFF.\n"
+        "  * Multi-camera rig with different lighting per camera → multi-phase "
+        "state.\n\n"
+        "ALSO surface 1–2 alternatives with a one-sentence reason explaining "
+        "the trade-off (e.g. 'infinite-max trades light-settle quality for "
+        "max throughput'). The operator may want to A/B test.\n\n"
         f"Respond in {language_name}. Return STRICT JSON ONLY (no prose, no "
         "markdown fences) with shape:\n"
         '  {"recommended_state": "<exact name from the list>",\n'
-        '   "reason": "<one sentence>",\n'
+        '   "reason": "<one sentence — cite specific field values that drove the pick>",\n'
         '   "confidence": "high|medium|low",\n'
-        '   "alternatives": [{"name":"<other-state>","reason":"<one sentence>"}, ...]}\n'
+        '   "alternatives": [{"name":"<other-state>","reason":"<concrete trade-off>"}, ...]}\n'
         "Only choose from the state names provided."
     )
 
