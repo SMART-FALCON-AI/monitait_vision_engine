@@ -1449,7 +1449,8 @@ async function _loadQualityHeatmap(axis, win) {
         const d = await r.json();
         const cells = d.buckets || [];
         if (!cells.length) {
-            strip.innerHTML = '<div style="color:var(--text-secondary); font-size:11px; padding:6px; flex:1; text-align:center; font-style:italic;">no data in window</div>';
+            const hint = d.note || 'no data in window';
+            strip.innerHTML = `<div style="color:var(--text-secondary); font-size:11px; padding:6px; flex:1; text-align:center; font-style:italic;">${hint}</div>`;
             if (axisEl) axisEl.innerHTML = '';
             return;
         }

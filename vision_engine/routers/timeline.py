@@ -1709,17 +1709,18 @@ async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
             return JSONResponse(content={"shipments": []})
         try:
             cur = conn.cursor()
+            # 3.25.4 hotfix — image_path is `raw_images/<shipment>/<hour>/<frame>.jpg`,
+            # so the shipment label lives in segment 2.
             cur.execute(
                 f"""
-                SELECT SPLIT_PART(image_path, '/', 1) AS ship,
+                SELECT SPLIT_PART(image_path, '/', 2) AS ship,
                        MIN(time) AS first_t,
                        MAX(time) AS last_t,
                        COUNT(*)   AS n_rows
                 FROM inference_results
                 WHERE time > NOW() - INTERVAL %s
                   AND image_path IS NOT NULL
-                  AND image_path NOT LIKE 'no_shipment%%'
-                  AND SPLIT_PART(image_path, '/', 1) <> ''
+                  AND SPLIT_PART(image_path, '/', 2) NOT IN ('', 'no_shipment')
                 GROUP BY 1
                 ORDER BY first_t DESC
                 LIMIT %s
@@ -1820,9 +1821,14 @@ async def quality_heatmap(
                 enc_min, enc_max = cur.fetchone() or (None, None)
                 if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
                     cur.close()
+                    # Differentiate "no encoder at all" from "encoder reports all zeros"
+                    # — the second one means the encoder is wired but not pulsing
+                    # (line stopped, hardware unplugged, calibration missing).
+                    note = "encoder reports no pulses (line not moving or encoder unwired)" \
+                           if (enc_min == 0 and enc_max == 0) else "no encoder data in window"
                     return JSONResponse(content={
                         "axis": "encoder", "buckets": [],
-                        "shipment": shipment, "note": "no encoder data in window",
+                        "shipment": shipment, "note": note,
                     })
                 enc_min = int(enc_min); enc_max = int(enc_max)
                 span = enc_max - enc_min
