@@ -78,6 +78,55 @@ async def config_db_status():
     return JSONResponse(content=out)
 
 
+@router.get("/api/shipments/next_code")
+async def next_shipment_code():
+    """3.25.0 — generate the next sequential shipment ID in the form
+    `yyyymmddXXX` where XXX is a 3-digit chronological number for TODAY.
+
+    Looks at distinct shipment labels recorded in inference_results for
+    today, finds the highest matching `<today>NNN` suffix, increments it.
+    Empty / unrelated shipment names (operator-typed free-form) are
+    ignored so they don't perturb the counter.
+    """
+    from datetime import datetime as _dt
+    today = _dt.now().strftime("%Y%m%d")
+    next_num = 1
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is not None:
+            try:
+                cur = conn.cursor()
+                # SUBSTRING extracts the 3 digits AFTER the date prefix; only
+                # rows whose shipment label starts with today's date and has
+                # exactly 3 trailing digits count toward the chronological seq.
+                cur.execute(
+                    """
+                    SELECT MAX(CAST(SUBSTRING(image_path FROM %s) AS INTEGER))
+                    FROM (
+                      SELECT DISTINCT SPLIT_PART(image_path, '/', 1) AS image_path
+                      FROM inference_results
+                      WHERE time::date = CURRENT_DATE
+                    ) ships
+                    WHERE image_path ~ %s
+                    """,
+                    (rf'^{today}(\d{{3}})$', rf'^{today}\d{{3}}$'),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    next_num = int(row[0]) + 1
+                cur.close()
+            finally:
+                try:
+                    release_db_connection(conn)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"next_shipment_code db lookup failed: {e}")
+    code = f"{today}{next_num:03d}"
+    return JSONResponse(content={"code": code, "today": today, "seq": next_num})
+
+
 @router.get("/health")
 async def health_check(request: Request):
     """Health check endpoint."""

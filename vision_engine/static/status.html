@@ -59,20 +59,26 @@
 
             <!-- Dashboard Tab -->
             <div id="tab-dashboard" class="tab-content active">
-                <div style="display: grid; grid-template-columns: 160px 1fr; gap: 8px;">
-                    <!-- Left Column: Compact Stats Grid (fixed 160px) -->
+                <div style="display: grid; grid-template-columns: 200px 1fr; gap: 8px;">
+                    <!-- Left Column: Compact Stats Grid (fixed 200px) -->
                     <div style="display: flex; flex-direction: column; gap: 5px; min-width: 0;">
-                        <!-- Shipment -->
-                        <div class="status-box" style="padding: 5px;">
-                            <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 2px;"><span data-i18n="shipment">Shipment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_shipment">Current shipment/batch ID. Click to edit.</span></span></div>
-                            <div id="shipment-value" style="display: flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10px; font-weight: 600;" onclick="editShipmentId()">
-                                <span id="shipment-text">-</span>
-                                <span style="font-size: 9px; opacity: 0.6;">✏️</span>
+                        <!-- 3.25.0 — Shipment block enlarged + auto-generate button.
+                             Generator format: yyyymmddXXX (XXX = chronological seq for today). -->
+                        <div class="status-box" style="padding: 10px 12px; background: linear-gradient(135deg, rgba(59,130,246,0.10), rgba(15,23,42,0.4)); border: 1px solid rgba(59,130,246,0.35);">
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; letter-spacing: 0.5px; text-transform: uppercase;"><span data-i18n="shipment">Shipment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_shipment">Current shipment/batch ID. Click to edit. Click 🎲 to auto-generate a yyyymmddXXX ID.</span></span></div>
+                            <div id="shipment-value" style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 18px; font-weight: 700; color: var(--text-primary); line-height: 1.2;" onclick="editShipmentId()" title="Click to edit">
+                                <span id="shipment-text" style="word-break: break-all;">-</span>
+                                <span style="font-size: 13px; opacity: 0.7;">✏️</span>
                             </div>
-                            <input type="text" id="shipment-input" style="display: none; padding: 3px; border: 2px solid var(--primary-color); border-radius: 3px; font-weight: bold; font-size: 10px; width: 100%;" placeholder="Shipment ID">
-                            <div style="display: none; gap: 3px; margin-top: 3px;" id="shipment-buttons">
-                                <button onclick="saveShipmentId()" style="padding: 2px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✓</button>
-                                <button onclick="cancelEditShipment()" style="padding: 2px 8px; background: var(--text-secondary); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 9px;">✗</button>
+                            <div id="shipment-edit-row" style="display: none; flex-direction: column; gap: 4px; margin-top: 4px;">
+                                <div style="display: flex; gap: 4px; align-items: stretch;">
+                                    <input type="text" id="shipment-input" style="flex: 1; padding: 5px 6px; border: 2px solid var(--primary-color); border-radius: 3px; font-weight: bold; font-size: 13px; min-width: 0;" placeholder="yyyymmddXXX">
+                                    <button onclick="generateShipmentCode()" title="Auto-generate next yyyymmddXXX" style="padding: 4px 8px; background: linear-gradient(135deg,#8b5cf6,#6d28d9); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 13px;">🎲</button>
+                                </div>
+                                <div id="shipment-buttons" style="display: flex; gap: 4px;">
+                                    <button onclick="saveShipmentId()" style="flex: 1; padding: 4px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 11px;">✓ Save</button>
+                                    <button onclick="cancelEditShipment()" style="padding: 4px 10px; background: var(--text-secondary); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 11px;">✗</button>
+                                </div>
                             </div>
                         </div>
 
@@ -153,13 +159,24 @@
 
                         <!-- Live Inference Stats -->
                         <div class="status-box" style="padding: 5px;">
-                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
-                                <strong><span data-i18n="capture">Capture</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_capture">Current capture mode and trigger configuration.</span></span>:</strong> <span id="inference-state-name" style="color: var(--primary-color); font-weight: 700;">...</span>
+                            <!-- 3.25.0 — inline dropdown pickers so the operator can switch capture
+                                 state + inference pipeline directly from the Dashboard, without
+                                 jumping to Cameras / Inference tabs. -->
+                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
+                                <strong><span data-i18n="capture">Capture</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_capture">Current capture state. Pick from the dropdown to switch — runs the active state's phases.</span></span>:</strong>
+                                <select id="dashboard-state-picker" onchange="dashboardActivateState(this.value)" style="background: rgba(15,23,42,0.6); color: var(--primary-color); border: 1px solid rgba(51,65,85,0.6); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 700; cursor: pointer; min-width: 90px;">
+                                    <option value="" id="dashboard-state-placeholder">…</option>
+                                </select>
+                                <!-- Hidden span kept so any legacy reader still finds inference-state-name -->
+                                <span id="inference-state-name" style="display:none;"></span>
                                 <span id="capture-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                             </div>
-                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px;">
-                                <strong><span data-i18n="inference">Inference</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inference">AI model used for object detection (local YOLO or remote Gradio).</span></span>:</strong>
-                                <strong id="inference-service-name" style="color: var(--primary-color);">...</strong>
+                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
+                                <strong><span data-i18n="inference">Inference</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inference">Active inference pipeline (YOLO, math, gradio combos). Pick from the dropdown to switch.</span></span>:</strong>
+                                <select id="dashboard-pipeline-picker" onchange="dashboardActivatePipeline(this.value)" style="background: rgba(15,23,42,0.6); color: var(--primary-color); border: 1px solid rgba(51,65,85,0.6); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 700; cursor: pointer; min-width: 110px;">
+                                    <option value="" id="dashboard-pipeline-placeholder">…</option>
+                                </select>
+                                <span id="inference-service-name" style="display:none;"></span>
                                 <span id="inference-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
                                 <span id="gradio-restart-warning" style="display: none; color: var(--danger-color); font-weight: bold;"> ⚠️</span>
                             </div>

@@ -1693,33 +1693,50 @@ document.addEventListener('DOMContentLoaded', function() {
 })();
 
 // Shipment ID editing functionality
+// 3.25.0 — single edit row (input + 🎲 + ✓/✗) inside a shipment-edit-row container;
+// shows when the display value is clicked, hides on Cancel/Save.
 function editShipmentId() {
     const shipmentValue = document.getElementById('shipment-value');
+    const editRow       = document.getElementById('shipment-edit-row');
     const shipmentInput = document.getElementById('shipment-input');
-    const shipmentButtons = document.getElementById('shipment-buttons');
-    const shipmentText = document.getElementById('shipment-text');
+    const shipmentText  = document.getElementById('shipment-text');
 
-    // Hide the display value, show input and buttons
-    shipmentValue.style.display = 'none';
-    shipmentInput.style.display = 'block';
-    shipmentButtons.style.display = 'flex';
-
-    // Set current value in input
-    shipmentInput.value = shipmentText.textContent;
-    shipmentInput.focus();
-    shipmentInput.select();
+    if (shipmentValue) shipmentValue.style.display = 'none';
+    if (editRow)       editRow.style.display = 'flex';
+    if (shipmentInput) {
+        shipmentInput.value = (shipmentText && shipmentText.textContent !== '-')
+            ? shipmentText.textContent : '';
+        shipmentInput.focus();
+        shipmentInput.select();
+    }
 }
 
 function cancelEditShipment() {
     const shipmentValue = document.getElementById('shipment-value');
-    const shipmentInput = document.getElementById('shipment-input');
-    const shipmentButtons = document.getElementById('shipment-buttons');
-
-    // Show the display value, hide input and buttons
-    shipmentValue.style.display = 'flex';
-    shipmentInput.style.display = 'none';
-    shipmentButtons.style.display = 'none';
+    const editRow       = document.getElementById('shipment-edit-row');
+    if (shipmentValue) shipmentValue.style.display = 'flex';
+    if (editRow)       editRow.style.display = 'none';
 }
+
+// 3.25.0 — call /api/shipments/next_code and stuff the result into the input.
+// Format: yyyymmddXXX where XXX is the chronological seq for today.
+async function generateShipmentCode() {
+    const shipmentInput = document.getElementById('shipment-input');
+    if (!shipmentInput) return;
+    try {
+        const r = await fetch('/api/shipments/next_code');
+        if (!r.ok) {
+            alert('Generator failed (HTTP ' + r.status + ')');
+            return;
+        }
+        const d = await r.json();
+        shipmentInput.value = d.code || '';
+        shipmentInput.focus();
+    } catch (e) {
+        alert('Generator error: ' + (e.message || e));
+    }
+}
+window.generateShipmentCode = generateShipmentCode;
 
 async function saveShipmentId() {
     const shipmentInput = document.getElementById('shipment-input');

@@ -717,6 +717,96 @@ window.loadAiTrainerConfig = loadAiTrainerConfig;
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadAiTrainerConfig, 1200));
 
 
+// =====================================================================
+// 3.25.0 — Dashboard inline pickers for capture state + inference pipeline
+// =====================================================================
+
+async function loadDashboardStatePicker() {
+    try {
+        const r = await fetch('/api/states');
+        if (!r.ok) return;
+        const d = await r.json();
+        const states = d.states || d.items || d;
+        const cur = d.current_state || d.current || d.active || '';
+        const sel = document.getElementById('dashboard-state-picker');
+        if (!sel) return;
+        const names = Array.isArray(states) ? states.map(s => s.name || s) : Object.keys(states || {});
+        sel.innerHTML = names.map(n =>
+            `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`
+        ).join('');
+        if (!names.length) sel.innerHTML = '<option value="">(none defined)</option>';
+    } catch (e) { /* not fatal */ }
+}
+
+async function loadDashboardPipelinePicker() {
+    try {
+        const [pr, cr] = await Promise.all([
+            fetch('/api/pipelines'),
+            fetch('/api/pipelines/current'),
+        ]);
+        const ps = pr.ok ? await pr.json() : { pipelines: [] };
+        const cd = cr.ok ? await cr.json() : null;
+        const cur = (cd && (cd.pipeline?.name || cd.name)) || '';
+        const sel = document.getElementById('dashboard-pipeline-picker');
+        if (!sel) return;
+        const list = ps.pipelines || ps || [];
+        const names = list.map(p => p.name || p);
+        sel.innerHTML = names.map(n =>
+            `<option value="${n}" ${n === cur ? 'selected' : ''}>${n}</option>`
+        ).join('');
+        if (!names.length) sel.innerHTML = '<option value="">(none defined)</option>';
+    } catch (e) { /* not fatal */ }
+}
+
+async function dashboardActivateState(name) {
+    if (!name) return;
+    const sel = document.getElementById('dashboard-state-picker');
+    if (sel) sel.disabled = true;
+    try {
+        const r = await fetch('/api/states/' + encodeURIComponent(name) + '/activate', { method: 'POST' });
+        if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            alert('Failed to activate state: ' + (e.error || r.status));
+        }
+    } catch (e) {
+        alert('Activate state failed: ' + e.message);
+    } finally {
+        if (sel) sel.disabled = false;
+        loadDashboardStatePicker();  // re-fetch to confirm the change took
+    }
+}
+
+async function dashboardActivatePipeline(name) {
+    if (!name) return;
+    const sel = document.getElementById('dashboard-pipeline-picker');
+    if (sel) sel.disabled = true;
+    try {
+        const r = await fetch('/api/pipelines/activate/' + encodeURIComponent(name), { method: 'POST' });
+        if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            alert('Failed to activate pipeline: ' + (e.error || r.status));
+        }
+    } catch (e) {
+        alert('Activate pipeline failed: ' + e.message);
+    } finally {
+        if (sel) sel.disabled = false;
+        loadDashboardPipelinePicker();
+    }
+}
+
+window.dashboardActivateState    = dashboardActivateState;
+window.dashboardActivatePipeline = dashboardActivatePipeline;
+window.loadDashboardStatePicker    = loadDashboardStatePicker;
+window.loadDashboardPipelinePicker = loadDashboardPipelinePicker;
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(loadDashboardStatePicker,    1500);
+    setTimeout(loadDashboardPipelinePicker, 1700);
+    // Refresh every 30s so changes from other operators show up too.
+    setInterval(loadDashboardStatePicker,    30000);
+    setInterval(loadDashboardPipelinePicker, 30000);
+});
+
+
 // 3.24.8 — try a fresh login against the trainer with the saved email+password
 async function testAiTrainerLogin() {
     const resp = document.getElementById('ai-trainer-response');

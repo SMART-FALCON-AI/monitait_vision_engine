@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.24.9] - 2026-06-11
+## [3.25.0] - 2026-06-12
+
+### Added — Dashboard operator quick-controls
+- **Shipment block is bigger**: 200px column width (was 160px), 18px shipment text (was 10px), highlighted gradient border. The Shipment label moves up to a small uppercase header, the ID itself is now prominent and readable at a glance from the line.
+- **🎲 Auto-generate button** next to the shipment input. Produces a `yyyymmddXXX` ID where `XXX` is today's chronological sequence (001, 002, …). Backed by a new `GET /api/shipments/next_code` endpoint that scans the day's existing shipment rows in `inference_results` and picks the next free number — same operator can keep clicking 🎲 and get 001, 002, 003 across the shift; another operator clicking later in the day continues the sequence cleanly.
+- **Inline pickers for capture state + inference pipeline** on the Dashboard. The two read-only status labels are replaced by `<select>` dropdowns populated from `/api/states` and `/api/pipelines`. Picking a different option calls the existing activate endpoints (`POST /api/states/{name}/activate`, `POST /api/pipelines/activate/{name}`). Operators can switch between `infinite` / `infinite-max` / `KC-Back` (or whichever states the site has defined) or between `yolo_plus_math` / `yolo` / `default` pipelines without leaving the Dashboard.
+- Pickers self-refresh every 30 s so changes made by another operator on the same site stay visible.
+
+
 
 ### Fixed — AI Trainer upload: send `status=" "` + list-of-tuples multipart + auth-path retries
 - The trainer's `TaskImage.status` DB column is NOT NULL (model default = `" "` literal space — `TaskImageStatus.NULL` in their `choices_fields.py`). Their view does `status=request.POST.get("status")` which returns Python `None` when we don't send it, overriding the model default and triggering an `IntegrityError: null value in column "status" of relation "api_taskimage" violates not-null constraint`. That surfaced to MVE as `400 "No files were processed successfully"` because the view's per-file `except` catches the DB error, logs it, and the empty `upload_locations` list at the end returns the generic 400.
