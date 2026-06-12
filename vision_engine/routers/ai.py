@@ -1245,6 +1245,15 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     except Exception as e:
         return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
 
+    # Detect the case where call_ai_model swallowed an upstream error and
+    # returned it as a fake "answer" — don't try to parse that as JSON.
+    if isinstance(raw, str) and raw.lstrip().lower().startswith(("ai request failed", "error code")):
+        return JSONResponse(content={
+            "suggestions": [], "model": active_name,
+            "upstream_error": raw[:600],
+            "hint": "The AI provider returned an error. Try again, or switch model in AI Configuration.",
+        }, status_code=502)
+
     # Strip markdown code fences if any, then parse JSON.
     import json as _json, re as _re
     text = (raw or "").strip()

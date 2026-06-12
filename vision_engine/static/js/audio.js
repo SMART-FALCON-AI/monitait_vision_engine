@@ -682,7 +682,11 @@ async function runSeveritySuggest() {
         });
         const d = await r.json();
         if (!r.ok) {
-            statusEl.textContent = '✗ ' + (d.error || ('Request failed (' + r.status + ')'));
+            // 3.25.2 — surface upstream provider errors clearly (rate limit, 500, etc.)
+            const msg = d.upstream_error
+                ? ('AI provider error: ' + d.upstream_error.slice(0, 200) + '  · ' + (d.hint || ''))
+                : (d.error || ('Request failed (' + r.status + ')'));
+            statusEl.textContent = '✗ ' + msg;
             return;
         }
         if (d.parse_error) {
