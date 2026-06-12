@@ -442,7 +442,7 @@ app.include_router(states_router)
 app.include_router(config_router)
 app.include_router(ai_router)
 app.include_router(ai_trainer_router)  # 3.21.22 — AI Trainer integration
-app.include_router(notifications_router)  # 3.24.0 — Telegram/Bale + AI usage
+app.include_router(notifications_router)  # 3.24.0 — Telegram + AI usage
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 

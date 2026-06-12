@@ -870,7 +870,7 @@ window.testAiTrainerLogin = testAiTrainerLogin;
 
 
 // =====================================================================
-// 3.24.0 — Notifications (Telegram / Bale) + scheduler editor
+// 3.24.0 — Notifications (Telegram) + scheduler editor
 // =====================================================================
 
 let _notifConfigCache = { channels: {}, schedules: [] };

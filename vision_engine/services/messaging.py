@@ -1,8 +1,8 @@
-"""Telegram bot delivery for shift reports (3.24.0; 3.24.4 — Bale removed).
+"""Telegram bot delivery for shift reports (3.24.0).
 
 The channel is always called "telegram" but accepts a configurable
-`base_url` so any Telegram-compatible bot service (Bale, a self-hosted
-gateway, a custom relay, …) plugs in by pointing at a different host.
+`base_url` so any Telegram-compatible bot service (self-hosted gateway,
+custom relay, …) plugs in by pointing at a different host.
 Default `base_url` is `https://api.telegram.org/bot{token}/`.
 
 Usage:
@@ -54,7 +54,7 @@ def send_document(
     timeout: int = 60,
     channel: Optional[str] = None,   # back-compat: ignored, kept so old callers don't crash
 ) -> Tuple[bool, Dict[str, Any]]:
-    """Send a single PDF (or any bytes) to a Telegram/Bale chat.
+    """Send a single PDF (or any bytes) to a Telegram chat.
 
     Returns (ok, info_dict). info_dict has either {message_id, chat_id}
     on success or {error, status_code, body} on failure.
@@ -108,7 +108,7 @@ def send_text(
     if not token or not chat_id:
         return False, {"error": "token and chat_id are required"}
     url = _base(token, base_url) + "sendMessage"
-    # Telegram limits to 4096 chars / Bale similar — truncate to be safe.
+    # Telegram limits to 4096 chars — truncate to be safe.
     if len(text) > 4000:
         text = text[:3990] + "…"
     try:
@@ -145,7 +145,7 @@ def _ensure_log_schema(conn) -> bool:
             """
             CREATE TABLE IF NOT EXISTS notification_log (
                 time         TIMESTAMPTZ DEFAULT NOW(),
-                channel      TEXT NOT NULL,         -- telegram / bale / email
+                channel      TEXT NOT NULL,         -- telegram
                 chat_id      TEXT,
                 kind         TEXT,                  -- shift_report / test / why_summary
                 caption      TEXT,

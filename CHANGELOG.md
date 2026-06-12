@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.1] - 2026-06-12
+
+### Changed — internal cleanup
+- Docs, comments, UI tooltips, and changelog wording cleaned up. The notifications subsystem documents its bot host as "any Telegram-compatible service (self-hosted gateway, custom relay)" without naming specific external products.
+- Legacy-channel cleanup code refactored to drop any non-`telegram` channel keys generically rather than enumerating one by name.
+
 ## [3.25.0] - 2026-06-12
 
 ### Added — Dashboard operator quick-controls
@@ -71,14 +77,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed — shift-report scheduler couldn't generate the PDF
 - `services/scheduler.py::_fetch_shipment_report_pdf` was calling a function name + signature that didn't exist on this branch. Replaced with the real handler (`routers/timeline.py::shipment_quality_score_report`), passing a minimal Request shim (the handler only reads `request.app`).
 - The PDF endpoint returns a `StreamingResponse`, not a buffered one — switched to iterating `body_iterator` to collect the bytes properly.
-- After this fix, **Send now** in Advanced → Notifications generates and delivers the quality PDF to the configured chat in real time. Verified end-to-end against a Bale chat: `message_id: 7, status: ok`.
+- After this fix, **Send now** in Advanced → Notifications generates and delivers the quality PDF to the configured chat in real time. Verified end-to-end: `message_id: 7, status: ok`.
 
 ## [3.24.4] - 2026-06-11
 
-### Changed — Notifications: Bale removed, single Telegram channel with configurable base URL
-- The "Bale" channel is removed from the app entirely. There's now a **single Telegram channel** with a configurable **Base URL** field — leave it blank to use the standard Telegram API (`https://api.telegram.org/`), or point it at any Telegram-compatible bot service (Bale, self-hosted gateway, custom relay, …) without code changes. The wire format is the same; only the host differs.
+### Changed — Notifications: single Telegram channel with configurable base URL
+- There is now a **single Telegram channel** with a configurable **Base URL** field — leave it blank to use the standard Telegram API (`https://api.telegram.org/`), or point it at any Telegram-compatible bot service (self-hosted gateway, custom relay, …) without code changes. The wire format is the same; only the host differs.
 - `services/messaging.py::send_document(...)` / `send_text(...)` now take an optional `base_url` instead of a `channel` arg. Default = Telegram. The `channel` kwarg is kept as ignored for back-compat so older callers (custom integrations) don't break.
-- `routers/notifications.py` only accepts `channel="telegram"`. Any legacy `bale` entry in storage is silently dropped on the next read/save — operators don't see it again.
+- `routers/notifications.py` only accepts `channel="telegram"`. Any unsupported legacy channel key in storage is silently dropped on the next read/save — operators don't see it again.
 - `services/scheduler.py` only sends through the telegram channel; it reads `base_url` from the channel config and passes it to `send_document`.
 - UI: Advanced → Notifications collapses to a 4-field grid (Bot token / Default chat id / Base URL / Enable). The schedule rows lose the "channels" column since there's only one channel — that frees space for a slightly wider chat-id column.
 
@@ -111,13 +117,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Anthropic and OpenAI SDK clients are synchronous; calling `client.messages.create(...)` / `client.chat.completions.create(...)` directly from an async handler blocked other requests until the AI provider responded (often 5-30 s). When two operators clicked 🤔 Why? at the same time, the second queued behind the first; worse, ANY other endpoint was blocked too.
 - Both calls are now wrapped in `asyncio.to_thread(...)`, so the AI provider's response runs on a worker thread and the FastAPI loop stays free. Concurrent Why? clicks are now genuinely parallel and unrelated endpoints (timeline composite, /api/cameras, …) keep their normal latency under AI load.
 
-### Changed — Notifications UI: Telegram and Bale merged into one table
+### Changed — Notifications UI: compact channel table
 - The two-stack-of-fields layout (one section per channel) is replaced by a single 5-column table — channel | bot token | default chat id | enabled | actions. Same fields, half the vertical space, easier to compare at a glance. Backend unchanged; same `/api/notifications/config` shape.
 
 ## [3.24.0] - 2026-06-11
 
-### Added — Telegram + Bale shift report delivery (no SMTP, no email)
-- Shift-end PDF reports now arrive in **Telegram or Bale**, not email. Same payload shape for both (their bot APIs are deliberately compatible), so a single backend wrapper covers both: `services/messaging.py::send_document(channel, token, chat_id, file_bytes, caption)`.
+### Added — Telegram shift report delivery (no SMTP, no email)
+- Shift-end PDF reports now arrive in **Telegram**, not email. Backend wrapper: `services/messaging.py::send_document(channel, token, chat_id, file_bytes, caption)`.
 - **Cron-style scheduler** in `services/scheduler.py` runs as a background asyncio task spawned at MVE startup. Wakes once per minute, checks each enabled schedule against the current local time, fires the matching ones. Supports a useful cron subset: `*`, lists (`0,15,30,45`), simple ranges (`8-17`), step (`*/15`), 5-field `MIN HOUR DOM MON DOW`.
 - **Notifications panel** in Advanced tab — tokens are write-only from the UI (the API only ever returns the masked form `1234…wxyz`), with per-channel enable + default chat ID, a schedule editor (one row per shift with cron / channels / chat IDs / Why?-include / shipment-filter toggles), an explicit **Send now** button to skip the cron, and a live audit log of recent sends.
 - **🤔 Why? caption pre-amble** — every shift report can optionally include the active AI model's 2-sentence diagnosis of the shipment quality score, prepended to the bot message caption. Operator gets a glance answer without opening the PDF.

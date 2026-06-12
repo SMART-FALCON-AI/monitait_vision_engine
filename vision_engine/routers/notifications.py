@@ -3,14 +3,13 @@
 Config shape (lives at service_config.notifications):
 {
   "channels": {
-    "telegram": {"enabled": false, "bot_token": "", "default_chat_id": ""},
-    "bale":     {"enabled": false, "bot_token": "", "default_chat_id": ""}
+    "telegram": {"enabled": false, "bot_token": "", "default_chat_id": "", "base_url": ""}
   },
   "schedules": [
     {
       "name": "End of morning shift",
       "cron": "0 8 * * *",
-      "channels": ["telegram", "bale"],
+      "channels": ["telegram"],
       "chat_ids": ["123456789"],        // overrides default if non-empty
       "include_why": true,
       "shipment_filter": "",            // empty = current/most-recent shipment
@@ -42,7 +41,7 @@ router = APIRouter()
 def _default_channels() -> Dict[str, Any]:
     # 3.24.4 — single "telegram" channel. The base_url is configurable so the
     # operator can point at any Telegram-compatible bot host without code
-    # changes (Bale, self-hosted gateway, custom relay, etc.). Default empty
+    # changes (self-hosted gateway, custom relay, etc.). Default empty
     # base_url means "use the standard Telegram API host".
     return {
         "telegram": {
@@ -81,10 +80,10 @@ async def get_notifications_config():
     """Return the notification config with bot tokens MASKED.
     The full token is only visible to scheduled jobs and test-send (server-side)."""
     cfg = _get_config()
-    # 3.24.4 — silently drop any legacy "bale" key still in storage so the
-    # UI / clients never see it after the next config save.
-    if "bale" in (cfg.get("channels") or {}):
-        cfg["channels"].pop("bale", None)
+    # Drop any unsupported legacy channel keys that may linger from older configs.
+    for _legacy in list((cfg.get("channels") or {}).keys()):
+        if _legacy != "telegram":
+            cfg["channels"].pop(_legacy, None)
     safe = {"channels": {}, "schedules": cfg.get("schedules", [])}
     for ch, val in (cfg.get("channels") or {}).items():
         safe["channels"][ch] = {
@@ -101,8 +100,8 @@ async def post_notifications_config(payload: Dict[str, Any]):
     """Update notification config.
 
     Payload accepts:
-      - {channel: 'telegram'|'bale', bot_token?, default_chat_id?, enabled?}
-        — partial update of one channel
+      - {channel: 'telegram', bot_token?, default_chat_id?, base_url?, enabled?}
+        — partial update of the channel
       - {schedules: [...]}  — replace the schedule list wholesale
     """
     cfg = _get_config()
@@ -120,8 +119,10 @@ async def post_notifications_config(payload: Dict[str, Any]):
             entry["base_url"] = str(payload["base_url"] or "").strip()
         if "enabled" in payload:
             entry["enabled"] = bool(payload["enabled"])
-    # 3.24.4 — clean up any legacy bale entry whenever we save.
-    cfg["channels"].pop("bale", None)
+    # Strip any unsupported channel keys whenever we save.
+    for _legacy in list(cfg["channels"].keys()):
+        if _legacy != "telegram":
+            cfg["channels"].pop(_legacy, None)
 
     if "schedules" in payload and isinstance(payload["schedules"], list):
         clean = []
