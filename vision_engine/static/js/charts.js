@@ -1382,8 +1382,12 @@ function _verdictColor(v) {
 }
 
 async function refreshQualityCharts() {
-    const winEl = document.getElementById('quality-charts-window');
-    const win = (winEl && winEl.value) || '24h';
+    // 3.25.5 — strips moved under Detection Insights' scatters; follow that panel's
+    // window selector so the X-axis context matches the scatter above. Fall back to
+    // the legacy (hidden) quality-charts-window if Detection Insights isn't on screen.
+    const insightWin = document.getElementById('insight-window');
+    const qualityWin = document.getElementById('quality-charts-window');
+    const win = (insightWin && insightWin.value) || (qualityWin && qualityWin.value) || '24h';
     await Promise.all([
         _loadQualityShipmentsChart(),
         _loadQualityHeatmap('time', win),

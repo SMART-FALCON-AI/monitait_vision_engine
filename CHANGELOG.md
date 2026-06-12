@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.5] - 2026-06-12
+
+### Changed — Charts tab restructured
+- **One chart per concern, no duplicates.** The standalone *Quality by time* and *Quality by encoder* 1-D heatmap strips were merged into the existing **Camera × time** and **Camera × encoder** scatter plots — each strip now sits flush against the bottom of its matching scatter, sharing the same X-axis context. Same IDs (`quality-time-strip`, `quality-encoder-strip`) so the JS handlers don't change.
+- **Detection Insights pinned at the TOP** of the Charts tab (it carries the Shipment Quality Score card + scatters + strips — the most-used panel).
+- **New panel order**: Detection Insights → Score per shipment → Ejection Insights → Production KPIs (reordered by frequency of operator use).
+- *Score per shipment* card slimmed down — it now only carries the per-shipment bar chart; the window picker is hidden (both heatmaps live inside Detection Insights and use Detection Insights' window selector).
+
 ## [3.25.4] - 2026-06-12
 
 ### Added — Quality charts on the Charts tab
