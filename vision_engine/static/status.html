@@ -916,15 +916,12 @@
                         No stored detections in this window yet. Detections appear here once a class has <b>Store</b> enabled (Process tab → Per-Object Configuration) and the line is running.
                     </div>
                     <div id="insight-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                        <!-- 3.25.7 — Pareto (top-impact classes) stays at top: most-used chart on the tab. -->
                         <div style="min-height:240px;"><canvas id="insight-class-chart"></canvas></div>
                         <div style="min-height:240px;"><canvas id="insight-class-pie"></canvas></div>
-                        <div style="min-height:240px;"><canvas id="insight-timeline-chart"></canvas></div>
-                        <div style="min-height:260px;"><canvas id="insight-size-chart"></canvas></div>
-                        <div style="min-height:260px;"><canvas id="insight-confidence-chart"></canvas></div>
-                        <div style="min-height:280px;"><canvas id="insight-confidence-class-chart"></canvas></div>
+                        <!-- 3.25.7 — Camera scatters promoted above the secondary charts. -->
                         <div style="grid-column: 1 / -1;">
                             <div style="min-height:300px;"><canvas id="insight-camera-scatter"></canvas></div>
-                            <!-- 3.25.6 — strip wrap inset to match the scatter's plot area; JS sets marginLeft/Right to scatter.chartArea after render. -->
                             <div id="quality-time-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📍 quality by time — hover a cell for top defect + score</div>
                                 <div id="quality-time-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
@@ -933,13 +930,18 @@
                         </div>
                         <div style="grid-column: 1 / -1;">
                             <div style="min-height:300px;"><canvas id="insight-camera-scatter-encoder"></canvas></div>
-                            <!-- 3.25.6 — same alignment for encoder strip. -->
                             <div id="quality-encoder-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📏 quality by encoder — find spots on the material with the most issues</div>
                                 <div id="quality-encoder-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-encoder-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
                             </div>
                         </div>
+                        <!-- 3.25.7 — Secondary diagnostics (less load-bearing at-a-glance): pushed below the scatters. -->
+                        <div style="grid-column: 1 / -1; margin-top:8px; padding-top:8px; border-top:1px dashed rgba(71,85,105,0.5); font-size:11px; color:var(--text-secondary); letter-spacing:0.4px; text-transform:uppercase;">Secondary diagnostics</div>
+                        <div style="min-height:240px;"><canvas id="insight-timeline-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="insight-size-chart"></canvas></div>
+                        <div style="min-height:260px;"><canvas id="insight-confidence-chart"></canvas></div>
+                        <div style="min-height:280px;"><canvas id="insight-confidence-class-chart"></canvas></div>
                     </div>
                     <div id="insight-total" style="margin-top:10px; font-size:12px; color:var(--text-secondary);"></div>
                 </div>

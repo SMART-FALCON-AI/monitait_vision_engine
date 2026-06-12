@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.7] - 2026-06-12
+
+### Changed — Detection Insights grid reordered by importance
+- **Top of the grid: Pareto bar + Pareto pie + Camera × time + Camera × encoder** (the at-a-glance answers — "what's the biggest defect" and "where on the line / when").
+- **"Secondary diagnostics" separator + the four less-glanceable charts pushed below**: Detection over time, Object size, Detection confidence over time, Detection confidence by class. Operator scrolls to them only when investigating a specific dimension; the top-of-fold view stays focused on the high-value questions.
+
 ## [3.25.6] - 2026-06-12
 
 ### Fixed — Strip ↔ scatter alignment
