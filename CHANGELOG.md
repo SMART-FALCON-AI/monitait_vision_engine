@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.8] - 2026-06-12
+
+### Added — Ejection procedures get their own Severity score
+- **New `Sev` field on every ejection procedure** (Process tab → Ejection Procedures, header row next to Enabled / Store). Range 0–100, persists immediately on change (same auto-save path as the Store checkbox). Default 0 = legacy behavior, doesn't affect score.
+- **Quality score now includes ejection impact.** `_compute_quality_payload` joins `ejection_events` (rows with Store=ON) against the procedures config:
+  - `ejection_impact = Σ (proc.severity / 100 × event_count)` for the window.
+  - Folded into the existing `impact_total` and surfaced in `top_defects` as `"⏏ <proc_name>"` rows with `kind: "ejection"`, alongside the per-class detection rows.
+  - Separately exposed in the payload as `ejection_impact` and `ejection_counts` for transparency / future visualizations.
+- Same scale as per-class severity: a single ejection at severity 50 ≈ 0.5 impact-units (≈ one detection of severity 50 at confidence 1.0). So ejections and detections are commensurable in the score formula — no calibration knob needed.
+
 ## [3.25.7] - 2026-06-12
 
 ### Changed — Detection Insights grid reordered by importance

@@ -1078,6 +1078,7 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         "throughput": 0.0, "throughput_label": "units/sec",
         "normalized_by": "none",
         "persisted": False,
+        "ejection_impact": 0.0, "ejection_counts": {},
     }
 
     conn = None
@@ -1091,6 +1092,15 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         _svc = _lsc() or {}
         _audio = _svc.get("audio_settings", {}) or {}
         severities = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+        # 3.25.8 — ejection procedures contribute severity too. Map procedure_name → severity (0–100).
+        # Only procedures with Store=ON are written to ejection_events so other procedures have no rows
+        # to score against; keying by name is safe (procedure rename = retroactive re-attribution, which
+        # is the expected behavior for an analytics view).
+        _procs = _svc.get("procedures", []) or []
+        proc_severities = {
+            str(p.get("name") or ""): int(p.get("severity") or 0)
+            for p in _procs if isinstance(p, dict) and p.get("name")
+        }
         encoder_unit = str(_svc.get("encoder_unit") or "encoder_unit")
         try:
             encoder_units_per_meter = float(_svc.get("encoder_units_per_meter") or 0)
@@ -1143,6 +1153,44 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             if sev > 0:
                 impact_by_class[cls_s] = round((sev / 100.0) * conf_sum_f, 3)
 
+        # 3.25.8 — fold per-procedure ejection severity into the same impact ledger.
+        # ejection_events has one row per fired (Store=ON) procedure; we count rows
+        # per procedure_name within the window and add (severity/100 × count) to a
+        # virtual "ejection:<name>" key so the existing impact_total / top_defects /
+        # PDF report machinery picks them up alongside detection classes.
+        ejection_impact = 0.0
+        ejection_counts: dict = {}
+        try:
+            cur2 = conn.cursor()
+            ej_ship_clause = "AND shipment = %s" if shipment else ""
+            ej_params = [interval] + ([shipment] if shipment else [])
+            cur2.execute(
+                f"""
+                SELECT procedure_name, COUNT(*) AS n
+                FROM ejection_events
+                WHERE time > NOW() - INTERVAL %s {ej_ship_clause}
+                GROUP BY procedure_name
+                """,
+                ej_params,
+            )
+            for proc_name, n in cur2.fetchall():
+                pname = str(proc_name) if proc_name is not None else ""
+                n_i = int(n or 0)
+                if not pname or n_i <= 0:
+                    continue
+                ejection_counts[pname] = n_i
+                psev = proc_severities.get(pname, 0)
+                if psev > 0:
+                    imp = round((psev / 100.0) * n_i, 3)
+                    ejection_impact += imp
+                    # Surface in impact_by_class under a namespaced key so the existing
+                    # top_defects renderer + PDF table treat it as just another row.
+                    impact_by_class[f"⏏ {pname}"] = imp
+                    count_by_class[f"⏏ {pname}"] = n_i
+            cur2.close()
+        except Exception as _ej_e:
+            logger.warning(f"ejection-impact merge failed: {_ej_e}")
+
         impact_total = round(sum(impact_by_class.values()), 3)
 
         encoder_span = 0
@@ -1185,13 +1233,22 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         top_defects = []
         for cls, imp in sorted(impact_by_class.items(), key=lambda kv: -kv[1])[:5]:
             n = count_by_class.get(cls, 0)
+            # 3.25.8 — ejection rows are namespaced "⏏ <proc_name>"; look up severity
+            # against the procedure map so the top-defect row shows the right value.
+            if cls.startswith("⏏ "):
+                sev = proc_severities.get(cls[2:], 0)
+                kind = "ejection"
+            else:
+                sev = severities.get(cls, 0)
+                kind = "detection"
             top_defects.append({
                 "class":         cls,
                 "impact":        round(imp, 2),
                 "impact_per_unit": round(imp / denom, 4) if denom > 0 else 0.0,
                 "count":         n,
                 "count_per_unit": round(n / denom, 4) if denom > 0 else 0.0,
-                "severity":      severities.get(cls, 0),
+                "severity":      sev,
+                "kind":          kind,
             })
 
         return {
@@ -1218,6 +1275,9 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             "throughput_label": (f"{encoder_unit}/sec" if encoder_unit != "encoder_unit" else "encoder_units/sec"),
             "normalized_by": normalized_by,
             "persisted": True,
+            # 3.25.8 — surface the ejection contribution separately for transparency.
+            "ejection_impact": round(ejection_impact, 3),
+            "ejection_counts": ejection_counts,
         }
     except Exception as e:
         logger.warning(f"_compute_quality_payload failed: {e}")

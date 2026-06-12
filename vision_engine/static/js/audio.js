@@ -971,7 +971,11 @@ function addProcedure() {
         name: 'New Procedure',
         enabled: true,
         logic: 'any',
-        rules: []
+        rules: [],
+        // 3.25.8 — Severity (0–100) for ejection events. Each stored ejection
+        // adds (severity / 100) to the shipment-quality impact, same scale as
+        // per-class detection severity. Default 0 = doesn't affect score.
+        severity: 0,
     });
     renderProcedures();
 }
@@ -1151,6 +1155,15 @@ function renderProcedures() {
                                 onchange="toggleProcedureStore('${proc.id}', this.checked)"
                                 style="width: 14px; height: 14px; cursor: pointer;">
                             Store
+                        </label>
+                        <!-- 3.25.8 — Severity for this ejection procedure. Counts like per-class severity:
+                             each stored ejection adds (severity / 100) to the shipment quality impact. -->
+                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-secondary);"
+                            title="Severity 0–100 for this ejection. Each stored event adds (severity/100) to the shipment quality impact — same scale as per-class severity. 0 = doesn't affect score.">
+                            <span>Sev</span>
+                            <input type="number" min="0" max="100" step="1" value="${proc.severity != null ? proc.severity : 0}"
+                                onchange="updateProcedureField('${proc.id}', 'severity', Math.max(0, Math.min(100, parseInt(this.value) || 0))); saveProcedures();"
+                                style="width: 48px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                         </label>
                         <select onchange="updateProcedureField('${proc.id}', 'logic', this.value)"
                             title="Rule logic: ANY = eject if at least one rule matches (OR), ALL = eject only if every rule matches (AND)"
