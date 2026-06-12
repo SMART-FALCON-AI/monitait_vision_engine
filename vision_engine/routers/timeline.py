@@ -1689,6 +1689,277 @@ async def shipment_quality_score_trend(
                 pass
 
 
+from datetime import timedelta as _td   # 3.25.4 — used by /api/quality/heatmap
+
+@router.get("/api/quality/shipments")
+async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
+    """3.25.4 — recent shipments + their quality scores for a per-shipment bar chart.
+
+    Returns up to `n` shipments started within `window`, each with its
+    quality score + verdict + detection count. Order is most-recent-first.
+    Chart shows one bar per shipment: bar height = score, color = verdict.
+    """
+    _windows = {"24h": "24 hours", "7d": "7 days", "30d": "30 days", "90d": "90 days"}
+    interval = _windows.get(window, "30 days")
+    out: list = []
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content={"shipments": []})
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"""
+                SELECT SPLIT_PART(image_path, '/', 1) AS ship,
+                       MIN(time) AS first_t,
+                       MAX(time) AS last_t,
+                       COUNT(*)   AS n_rows
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s
+                  AND image_path IS NOT NULL
+                  AND image_path NOT LIKE 'no_shipment%%'
+                  AND SPLIT_PART(image_path, '/', 1) <> ''
+                GROUP BY 1
+                ORDER BY first_t DESC
+                LIMIT %s
+                """,
+                (interval, int(n)),
+            )
+            rows = cur.fetchall()
+            cur.close()
+        finally:
+            try: release_db_connection(conn)
+            except Exception: pass
+
+        # Compute the quality score per shipment by reusing the existing helper.
+        for ship, first_t, last_t, n_rows in rows:
+            try:
+                qp = _compute_quality_payload(shipment=ship, window="24h")
+                out.append({
+                    "shipment": ship,
+                    "score":   qp.get("score") if qp else None,
+                    "verdict": qp.get("verdict") if qp else None,
+                    "rows":    int(n_rows or 0),
+                    "first_t": first_t.isoformat() if first_t else None,
+                    "last_t":  last_t.isoformat()  if last_t  else None,
+                    "top_defects": [d.get("class") for d in (qp.get("top_defects") or [])][:3] if qp else [],
+                })
+            except Exception:
+                out.append({
+                    "shipment": ship, "score": None, "verdict": None,
+                    "rows": int(n_rows or 0), "top_defects": [],
+                })
+    except Exception as e:
+        logger.warning(f"quality/shipments failed: {e}")
+    return JSONResponse(content={"shipments": out})
+
+
+@router.get("/api/quality/heatmap")
+async def quality_heatmap(
+    request: Request,
+    axis: str = "time",
+    window: str = "24h",
+    buckets: int = 48,
+    shipment: str = "",
+):
+    """3.25.4 — 1D quality heatmap. `axis`: "time" or "encoder".
+
+    Divides the window into N buckets and computes a quality score per
+    bucket. Operator sees a strip like:
+      00:00 ─🟢🟢🟢🟢🟡🔴🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢─ 24:00
+    Each cell carries: {bucket, label, n_detections, score, top_class}.
+
+    Score within a bucket = clip(100 - 100 × normalized_impact, 0, 100)
+    where impact = Σ (severity × confidence) and the normalization
+    target is "1 detection of severity 50 at confidence 0.5 per bucket
+    counts as ~10 points off". Tunable later.
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "24 hours")
+    buckets = max(8, min(120, int(buckets)))
+    axis_l = (axis or "time").lower()
+
+    # pull per-class severity from audio_settings
+    try:
+        from config import load_service_config as _load_svc
+        svc = _load_svc() or {}
+        sev_map = {
+            k: int(v.get("severity") or 0)
+            for k, v in (svc.get("audio_settings") or {}).items()
+            if isinstance(v, dict)
+        }
+    except Exception:
+        sev_map = {}
+
+    cells = []
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content={"axis": axis_l, "buckets": [], "shipment": shipment})
+        try:
+            cur = conn.cursor()
+            ship_clause = ""
+            params: list = []
+            if shipment:
+                ship_clause = "AND image_path LIKE %s "
+                params.append(f"{shipment}/%")
+
+            if axis_l == "encoder":
+                cur.execute(
+                    f"""
+                    SELECT MIN(encoder_value), MAX(encoder_value)
+                    FROM inference_results
+                    WHERE time > NOW() - INTERVAL %s
+                      AND encoder_value IS NOT NULL
+                      {ship_clause}
+                    """,
+                    [interval, *params],
+                )
+                enc_min, enc_max = cur.fetchone() or (None, None)
+                if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
+                    cur.close()
+                    return JSONResponse(content={
+                        "axis": "encoder", "buckets": [],
+                        "shipment": shipment, "note": "no encoder data in window",
+                    })
+                enc_min = int(enc_min); enc_max = int(enc_max)
+                span = enc_max - enc_min
+                width = max(1, span // buckets)
+                cur.execute(
+                    f"""
+                    SELECT bucket, name, COUNT(*) AS n,
+                           AVG((det->>'confidence')::float) AS avg_conf
+                    FROM (
+                      SELECT
+                        LEAST(%s - 1, GREATEST(0,
+                            ((encoder_value - %s)::bigint / NULLIF(%s,0)::bigint))::int
+                        ) AS bucket,
+                        (det->>'name') AS name,
+                        det
+                      FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                      WHERE time > NOW() - INTERVAL %s
+                        AND encoder_value IS NOT NULL
+                        AND (det->>'name') IS NOT NULL
+                        {ship_clause}
+                    ) src
+                    GROUP BY bucket, name
+                    """,
+                    [buckets, enc_min, width, interval, *params],
+                )
+                bucket_data: dict = {}
+                for b, name, n, ac in cur.fetchall():
+                    b = int(b or 0)
+                    n = int(n or 0)
+                    ac = float(ac or 0)
+                    sev = sev_map.get(name, 0)
+                    impact = sev * ac * n
+                    bd = bucket_data.setdefault(b, {"n": 0, "impact": 0.0, "top_class": None, "top_count": 0})
+                    bd["n"] += n
+                    bd["impact"] += impact
+                    if n > bd["top_count"]:
+                        bd["top_count"] = n
+                        bd["top_class"] = name
+                cur.close()
+
+                for b in range(buckets):
+                    bd = bucket_data.get(b, {"n": 0, "impact": 0.0, "top_class": None})
+                    score = max(0.0, 100.0 - bd["impact"] * 0.0001)  # tunable
+                    cells.append({
+                        "bucket": b,
+                        "label": f"{enc_min + b * width:,} – {enc_min + (b+1) * width - 1:,}",
+                        "n": bd["n"],
+                        "score": round(score, 1),
+                        "top_class": bd["top_class"],
+                    })
+                return JSONResponse(content={
+                    "axis": "encoder", "buckets": cells,
+                    "encoder_min": enc_min, "encoder_max": enc_max,
+                    "width_per_bucket": width, "shipment": shipment,
+                })
+
+            # ----- TIME axis -----
+            cur.execute(
+                f"""
+                SELECT MIN(time), MAX(time)
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s
+                  {ship_clause}
+                """,
+                [interval, *params],
+            )
+            t_min, t_max = cur.fetchone() or (None, None)
+            if not t_min or not t_max:
+                cur.close()
+                return JSONResponse(content={"axis": "time", "buckets": [], "shipment": shipment})
+
+            cur.execute(
+                f"""
+                SELECT bucket, name, COUNT(*) AS n,
+                       AVG((det->>'confidence')::float) AS avg_conf
+                FROM (
+                  SELECT
+                    LEAST(%s - 1, GREATEST(0,
+                        EXTRACT(EPOCH FROM (time - %s))::bigint
+                          / NULLIF(EXTRACT(EPOCH FROM (%s::timestamptz - %s))::bigint / %s, 0)
+                    ))::int AS bucket,
+                    (det->>'name') AS name,
+                    det
+                  FROM inference_results, LATERAL jsonb_array_elements(detections) det
+                  WHERE time > NOW() - INTERVAL %s
+                    AND (det->>'name') IS NOT NULL
+                    {ship_clause}
+                ) src
+                GROUP BY bucket, name
+                """,
+                [buckets, t_min, t_max, t_min, buckets, interval, *params],
+            )
+            bucket_data2: dict = {}
+            for b, name, n, ac in cur.fetchall():
+                try:
+                    b = int(b or 0)
+                except (TypeError, ValueError):
+                    continue
+                n = int(n or 0)
+                ac = float(ac or 0)
+                sev = sev_map.get(name, 0)
+                impact = sev * ac * n
+                bd = bucket_data2.setdefault(b, {"n": 0, "impact": 0.0, "top_class": None, "top_count": 0})
+                bd["n"] += n
+                bd["impact"] += impact
+                if n > bd["top_count"]:
+                    bd["top_count"] = n
+                    bd["top_class"] = name
+            cur.close()
+
+            total_secs = (t_max - t_min).total_seconds()
+            secs_per_bucket = max(1.0, total_secs / buckets)
+            for b in range(buckets):
+                bd = bucket_data2.get(b, {"n": 0, "impact": 0.0, "top_class": None})
+                ts_start = t_min + _td(seconds=int(b * secs_per_bucket))
+                score = max(0.0, 100.0 - bd["impact"] * 0.0001)
+                cells.append({
+                    "bucket": b,
+                    "label": ts_start.strftime("%H:%M") if total_secs <= 86400 else ts_start.strftime("%m-%d %H:%M"),
+                    "ts":    ts_start.isoformat(),
+                    "n":     bd["n"],
+                    "score": round(score, 1),
+                    "top_class": bd["top_class"],
+                })
+            return JSONResponse(content={
+                "axis": "time", "buckets": cells,
+                "t_min": t_min.isoformat(), "t_max": t_max.isoformat(),
+                "secs_per_bucket": int(secs_per_bucket), "shipment": shipment,
+            })
+        finally:
+            try: release_db_connection(conn)
+            except Exception: pass
+    except Exception as e:
+        logger.warning(f"quality/heatmap failed: {e}")
+    return JSONResponse(content={"axis": axis_l, "buckets": cells})
+
+
 @router.get("/api/detection_stats")
 async def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0):
     """Detection-quality insight for the Charts tab embedded panel.

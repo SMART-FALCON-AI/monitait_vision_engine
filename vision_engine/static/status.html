@@ -928,6 +928,52 @@
                     <div id="insight-total" style="margin-top:10px; font-size:12px; color:var(--text-secondary);"></div>
                 </div>
 
+                <!-- 3.25.4 — Quality charts (per-shipment + time-heatmap + encoder-heatmap) -->
+                <div id="quality-charts-panel" style="margin-bottom: 15px; padding: 14px 18px; background: linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4)); border: 1px solid rgba(51,65,85,0.7); border-radius: 8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+                        <h4 style="margin:0; color: var(--text-primary);">📊 Quality Charts</h4>
+                        <div style="display:flex; gap:6px; align-items:center; font-size:12px;">
+                            <label style="color:var(--text-secondary);">Window</label>
+                            <select id="quality-charts-window" onchange="refreshQualityCharts()" style="background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:2px 6px; font-size:11px;">
+                                <option value="1h">1h</option>
+                                <option value="6h">6h</option>
+                                <option value="24h" selected>24h</option>
+                                <option value="7d">7d</option>
+                            </select>
+                            <button onclick="refreshQualityCharts()" style="background:rgba(51,65,85,0.6); color:#fff; border:none; padding:3px 8px; cursor:pointer; font-size:11px; border-radius:3px;">⟳ Refresh</button>
+                        </div>
+                    </div>
+
+                    <!-- Per-shipment bar chart -->
+                    <div style="margin-bottom:14px;">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                            <span style="font-size:12px; font-weight:600; color:var(--text-primary);">Score per shipment</span>
+                            <span style="font-size:10px; color:var(--text-secondary);">— last 30 shipments (most recent on the right). Color = verdict.</span>
+                        </div>
+                        <div style="position:relative; min-height:160px;"><canvas id="quality-shipments-chart"></canvas></div>
+                    </div>
+
+                    <!-- 1D heatmap by time -->
+                    <div style="margin-bottom:14px;">
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                            <span style="font-size:12px; font-weight:600; color:var(--text-primary);">📍 Quality by time</span>
+                            <span style="font-size:10px; color:var(--text-secondary);">— hover a cell for top defect + count. Red = many high-severity detections.</span>
+                        </div>
+                        <div id="quality-time-strip" style="display:flex; height:32px; width:100%; gap:1px; border-radius:4px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                        <div id="quality-time-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
+                    </div>
+
+                    <!-- 1D heatmap by encoder -->
+                    <div>
+                        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+                            <span style="font-size:12px; font-weight:600; color:var(--text-primary);">📏 Quality by encoder position</span>
+                            <span style="font-size:10px; color:var(--text-secondary);">— roll/conveyor position. Find spots on the material that produced most issues.</span>
+                        </div>
+                        <div id="quality-encoder-strip" style="display:flex; height:32px; width:100%; gap:1px; border-radius:4px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                        <div id="quality-encoder-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
+                    </div>
+                </div>
+
                 <!-- Ejection Insights — reads ejection_events (per-procedure Store=ON), 3.17.0 -->
                 <div id="ejection-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
                     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">

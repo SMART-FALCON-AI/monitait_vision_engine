@@ -1361,6 +1361,124 @@ async function askWhyForCurrentDefect() {
 window.askWhyForCurrentDefect = askWhyForCurrentDefect;
 
 
+// =====================================================================
+// 3.25.4 — Quality charts: per-shipment bar + time/encoder 1D heatmaps
+// =====================================================================
+
+let _qualityShipmentsChart = null;
+
+function _scoreColor(score) {
+    if (score == null || isNaN(score)) return 'rgba(100,116,139,0.5)';
+    if (score >= 85) return '#22c55e';
+    if (score >= 60) return '#facc15';
+    return '#ef4444';
+}
+
+function _verdictColor(v) {
+    if (v === 'RELEASE')    return 'rgba(34,197,94,0.7)';
+    if (v === 'RE-INSPECT') return 'rgba(234,179,8,0.7)';
+    if (v === 'HOLD')       return 'rgba(239,68,68,0.7)';
+    return 'rgba(100,116,139,0.5)';
+}
+
+async function refreshQualityCharts() {
+    const winEl = document.getElementById('quality-charts-window');
+    const win = (winEl && winEl.value) || '24h';
+    await Promise.all([
+        _loadQualityShipmentsChart(),
+        _loadQualityHeatmap('time', win),
+        _loadQualityHeatmap('encoder', win),
+    ]);
+}
+window.refreshQualityCharts = refreshQualityCharts;
+
+async function _loadQualityShipmentsChart() {
+    const canvas = document.getElementById('quality-shipments-chart');
+    if (!canvas) return;
+    try {
+        const r = await fetch('/api/quality/shipments?n=30&window=30d');
+        const d = await r.json();
+        const rows = (d.shipments || []).slice().reverse();  // oldest left → newest right
+        const labels = rows.map(s => s.shipment);
+        const data   = rows.map(s => s.score != null ? s.score : 0);
+        const colors = rows.map(s => _verdictColor(s.verdict));
+        if (_qualityShipmentsChart) _qualityShipmentsChart.destroy();
+        _qualityShipmentsChart = new Chart(canvas, {
+            type: 'bar',
+            data: { labels, datasets: [{ data, backgroundColor: colors,
+                borderColor: colors.map(c => c.replace('0.7', '1')), borderWidth: 1 }] },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            title: (items) => items[0].label,
+                            label:  (item) => {
+                                const r = rows[item.dataIndex];
+                                const tops = (r.top_defects || []).join(', ');
+                                return [
+                                    `Score: ${r.score ?? '—'}`,
+                                    `Verdict: ${r.verdict || '—'}`,
+                                    `Detections: ${r.rows || 0}`,
+                                    tops ? `Top defects: ${tops}` : '',
+                                ].filter(Boolean);
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 50, minRotation: 35 }, grid: { display: false } },
+                    y: { min: 0, max: 100, ticks: { color: '#94a3b8', font: { size: 10 }, stepSize: 20 },
+                         grid: { color: 'rgba(148,163,184,0.1)' },
+                         title: { display: true, text: 'Score / 100', color: '#94a3b8', font: { size: 10 } } },
+                },
+            },
+        });
+    } catch (e) { console.warn('shipments chart failed', e); }
+}
+
+async function _loadQualityHeatmap(axis, win) {
+    const stripId = axis === 'encoder' ? 'quality-encoder-strip' : 'quality-time-strip';
+    const axisId  = axis === 'encoder' ? 'quality-encoder-axis'  : 'quality-time-axis';
+    const strip   = document.getElementById(stripId);
+    const axisEl  = document.getElementById(axisId);
+    if (!strip) return;
+    try {
+        const r = await fetch(`/api/quality/heatmap?axis=${axis}&window=${encodeURIComponent(win)}&buckets=48`);
+        const d = await r.json();
+        const cells = d.buckets || [];
+        if (!cells.length) {
+            strip.innerHTML = '<div style="color:var(--text-secondary); font-size:11px; padding:6px; flex:1; text-align:center; font-style:italic;">no data in window</div>';
+            if (axisEl) axisEl.innerHTML = '';
+            return;
+        }
+        strip.innerHTML = cells.map(c => {
+            const color = _scoreColor(c.score);
+            const top = c.top_class ? `Top: ${c.top_class}` : '';
+            const tip = `${c.label}\nScore: ${c.score}\nDetections: ${c.n}\n${top}`.trim();
+            return `<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`;
+        }).join('');
+        if (axisEl) {
+            const first = cells[0]?.label || '';
+            const mid   = cells[Math.floor(cells.length / 2)]?.label || '';
+            const last  = cells[cells.length - 1]?.label || '';
+            axisEl.innerHTML = `<span>${first}</span><span>${mid}</span><span>${last}</span>`;
+        }
+    } catch (e) { console.warn(`heatmap ${axis} failed`, e); }
+}
+
+// Auto-refresh when the Charts tab opens or window changes.
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(refreshQualityCharts, 1800);
+    // Refresh every 60s while the tab is visible.
+    setInterval(() => {
+        const grafanaTab = document.getElementById('tab-grafana');
+        if (grafanaTab && grafanaTab.classList.contains('active')) refreshQualityCharts();
+    }, 60000);
+});
+
+
 // 3.23.1 — Why? chip on the Dashboard Shipment Quality Score card. Asks the
 // active AI to explain the CURRENT score in the operator's UI language.
 async function askWhyForScore(btn) {

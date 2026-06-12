@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.4] - 2026-06-12
+
+### Added — Quality charts on the Charts tab
+- **📊 Score per shipment** — horizontal bar chart, one bar per recent shipment (last 30 with non-`no_shipment` IDs). Bar height = quality score (0–100), color = verdict (green RELEASE / amber RE-INSPECT / red HOLD). Tooltip shows top 3 defects. Backed by new `GET /api/quality/shipments?n=30&window=30d`.
+- **📍 Quality by time (1D heatmap)** — a 48-cell colored strip across the chosen window. Each cell = a time slice (~30 min for 24h). Color encodes the quality score in that slice. Hover shows the slice label + total detections + top class. Spots an operator can act on: "around 14:00 we had a red cluster — what shipment was running?"
+- **📏 Quality by encoder position (1D heatmap)** — same idea but X-axis is encoder position (roll/conveyor distance). Operators see "trouble around encoder 80k–90k" without ploughing through frames. Falls back to "no encoder data" when the line wasn't moving.
+- Both heatmaps share `GET /api/quality/heatmap?axis=time|encoder&window=24h&buckets=48`. Buckets are derived per call; score uses `Σ (severity × confidence × n_per_bucket)` against the per-class severity already in `audio_settings`.
+- **Window picker** + **Refresh** on the card; auto-refresh every 60s while the Charts tab is visible.
+
 ## [3.25.3] - 2026-06-12
 
 ### Added — 🤖 AI auto-pick capture state on the Dashboard
