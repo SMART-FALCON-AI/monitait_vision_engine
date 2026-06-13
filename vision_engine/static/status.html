@@ -163,13 +163,14 @@
                             <!-- 3.25.0 — inline dropdown pickers so the operator can switch capture
                                  state + inference pipeline directly from the Dashboard, without
                                  jumping to Cameras / Inference tabs. -->
-                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px; display: flex; align-items: center; gap: 4px; flex-wrap: wrap;">
-                                <strong><span data-i18n="capture">Capture</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_capture">Current capture state. Pick from the dropdown to switch — runs the active state's phases.</span></span>:</strong>
-                                <select id="dashboard-state-picker" onchange="dashboardActivateState(this.value)" style="background: rgba(15,23,42,0.6); color: var(--primary-color); border: 1px solid rgba(51,65,85,0.6); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 700; cursor: pointer; min-width: 90px;">
+                            <!-- 3.25.9 — flex-wrap:nowrap on the Capture row + flex:1 on the select keeps the AI ? button on the SAME LINE as the picker, even when the dashboard column is narrow. -->
+                            <div style="font-size: 9px; color: var(--text-secondary); margin-bottom: 4px; display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;">
+                                <strong style="flex-shrink:0;"><span data-i18n="capture">Capture</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_capture">Current capture state. Pick from the dropdown to switch — runs the active state's phases.</span></span>:</strong>
+                                <select id="dashboard-state-picker" onchange="dashboardActivateState(this.value)" style="background: rgba(15,23,42,0.6); color: var(--primary-color); border: 1px solid rgba(51,65,85,0.6); border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 700; cursor: pointer; flex: 1 1 0; min-width: 0;">
                                     <option value="" id="dashboard-state-placeholder">…</option>
                                 </select>
                                 <!-- 3.25.3 — AI auto-pick capture state -->
-                                <button onclick="askAiRecommendState()" id="dashboard-state-ai-btn" title="Don't know which state to pick? Ask the AI to recommend one based on the line's current activity + your product." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:2px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">?</button>
+                                <button onclick="askAiRecommendState()" id="dashboard-state-ai-btn" title="Don't know which state to pick? Ask the AI to recommend one based on the line's current activity + your product." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:2px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600; flex-shrink:0;">?</button>
                                 <!-- Hidden span kept so any legacy reader still finds inference-state-name -->
                                 <span id="inference-state-name" style="display:none;"></span>
                                 <span id="capture-heartbeat" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success-color); margin-left: 4px; opacity: 0;"></span>
