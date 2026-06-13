@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.9] - 2026-06-13
+
+### Fixed — Browser cache no longer pins old JS after a deploy
+- Added `?v=X.Y.Z` cache-busters to every custom script tag in `status.html` (i18n.js, iframes.js, charts.js, audio.js, app-core.js). Browsers treat `app-core.js?v=3.25.9` as a different resource from `app-core.js?v=3.25.8`, so the new JS is fetched on the first page reload — no more empty Dashboard dropdowns + no more "Ctrl+Shift+R or it won't work" instruction after each deploy.
+- Operator-visible symptom this fixes: after upgrading from 3.25.7 → 3.25.8 the Dashboard Capture + Inference dropdowns stayed empty because the cached old `app-core.js` didn't have `loadDashboardStatePicker`/`loadDashboardPipelinePicker`.
+- Bump the literal `?v=` strings every release. CHANGELOG entry serves as the reminder.
+
 ## [3.25.8] - 2026-06-12
 
 ### Added — Ejection procedures get their own Severity score

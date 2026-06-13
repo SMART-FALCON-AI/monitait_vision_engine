@@ -11,7 +11,8 @@
         <link rel="stylesheet" href="/static/css/main.css">
     </head>
     <body>
-        <script src="/static/js/i18n.js"></script>
+        <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
+        <script src="/static/js/i18n.js?v=3.25.9"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -1025,9 +1026,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js"></script>
+            <script src="/static/js/iframes.js?v=3.25.9"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js"></script>
+            <script src="/static/js/charts.js?v=3.25.9"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1718,7 +1719,7 @@
             </div>
         </div>
 
-        <script src="/static/js/audio.js"></script>
-        <script src="/static/js/app-core.js"></script>
+        <script src="/static/js/audio.js?v=3.25.9"></script>
+        <script src="/static/js/app-core.js?v=3.25.9"></script>
     </body>
 </html>
