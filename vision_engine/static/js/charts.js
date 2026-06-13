@@ -10,7 +10,8 @@ let _insightSizeChart = null;
 let _insightConfidenceChart = null;
 let _insightConfClassChart = null;
 let _insightCameraScatter = null;
-let _insightCameraScatterEncoder = null;
+let _insightCameraScatterEncoder = null;  // 3.25.13: kept (unused) to avoid touching unrelated old refs.
+let _insightAxis = 'time';   // 3.25.13 — current X-axis mode for the merged scatter + strips.
 let _ejectionProcBar = null;
 let _ejectionProcPie = null;
 let _ejectionTimeline = null;
@@ -630,12 +631,18 @@ async function refreshAdvancedCharts() {
     const _scatterXMin = _nowMs - _winMs;
     const _scatterXMax = _nowMs;
 
-    // ---- (3) Camera × TIME scatter — hover a dot to preview that exact frame ----
+    // ---- (3) Camera × {time|encoder} scatter — single merged renderer (3.25.13).
+    // Builds the bubble chart for the currently selected `_insightAxis`; toggling
+    // via setInsightAxis() destroys + rebuilds with the other axis's data.
     const scCtx = document.getElementById('insight-camera-scatter');
     if (scCtx) {
         if (_insightCameraScatter) _insightCameraScatter.destroy();
+        const axisMode = (_insightAxis === 'encoder') ? 'encoder' : 'time';
+        const points = axisMode === 'encoder'
+            ? (data.camera_scatter_encoder || [])
+            : (scatter || []);
         const byClass = {};
-        scatter.forEach(p => {
+        points.forEach(p => {
             if (!_isShown(p.cls)) return;
             (byClass[p.cls] = byClass[p.cls] || []).push({
                 x: p.x, y: p.y, r: 3 + (p.r || 0) * 9, conf: p.r, cls: p.cls, img: p.img, ship: p.ship
@@ -645,6 +652,17 @@ async function refreshAdvancedCharts() {
             label: cls, data: byClass[cls],
             backgroundColor: _classColor(cls) + 'cc', borderColor: _classColor(cls)
         }));
+        const xScaleCfg = axisMode === 'time'
+            ? { type: 'linear', min: _scatterXMin, max: _scatterXMax,
+                ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) },
+                grid: { color: 'rgba(148,163,184,0.08)' } }
+            : { type: 'linear',
+                ticks: { color: '#94a3b8', font: { size: 9 } },
+                grid: { color: 'rgba(148,163,184,0.08)' },
+                title: { display: true, text: 'Encoder (roll position)', color: '#94a3b8', font: { size: 10 } } };
+        const titleText = axisMode === 'time'
+            ? 'Camera × time — hover for image, click dot to open the exact frame'
+            : 'Camera × encoder (roll position) — hover for image, click dot for the exact frame';
         _insightCameraScatter = new Chart(scCtx, {
             type: 'bubble',
             data: { datasets },
@@ -652,7 +670,7 @@ async function refreshAdvancedCharts() {
                 responsive: true, maintainAspectRatio: false,
                 plugins: {
                     legend: { display: true, labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 } },
-                    title: { display: true, text: 'Camera × time — hover for image, click dot to open the exact frame', color: '#cbd5e1', font: { size: 13 } },
+                    title: { display: true, text: titleText, color: '#cbd5e1', font: { size: 13 } },
                     tooltip: { enabled: false, external: _scatterImageTooltip }
                 },
                 onClick: (evt, els, chart) => {
@@ -660,81 +678,70 @@ async function refreshAdvancedCharts() {
                     const dp = chart.data.datasets[els[0].datasetIndex].data[els[0].index];
                     if (!dp) return;
                     const cls = (chart.data.datasets[els[0].datasetIndex].label) || dp.cls || '';
-                    openDefectDrawerForFrame({
-                        image_path: dp.img, shipment: dp.ship, t: dp.x,
-                        cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
-                    });
+                    if (axisMode === 'time') {
+                        openDefectDrawerForFrame({
+                            image_path: dp.img, shipment: dp.ship, t: dp.x,
+                            cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
+                        });
+                    } else {
+                        // encoder mode: dot has no timestamp — parse from filename if present.
+                        let t = null;
+                        try {
+                            const fn = String(dp.img || '').split('/').pop() || '';
+                            const m = fn.match(/^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/);
+                            if (m) t = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
+                        } catch (e) {}
+                        openDefectDrawerForFrame({
+                            image_path: dp.img, shipment: dp.ship, t: t,
+                            cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
+                            encoder: dp.x, camera_index: dp.y,
+                        });
+                    }
                 },
                 scales: {
-                    // 3.25.6 — force span to the selected window so the strip aligns 1:1.
-                    x: { type: 'linear', min: _scatterXMin, max: _scatterXMax, ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) }, grid: { color: 'rgba(148,163,184,0.08)' } },
+                    x: xScaleCfg,
                     y: { title: { display: true, text: 'Camera', color: '#94a3b8' }, ticks: { color: '#94a3b8', stepSize: 1, precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } }
                 },
-                // 3.25.6 — align the strip under this chart to the actual plot area after every render.
-                plugins_extra: {},
-                animation: { onComplete: function() { _alignStripToScatter(this, 'quality-time-strip-wrap'); } },
-                onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-time-strip-wrap'), 0); }
-            }
-        });
-    }
-
-    // ---- (3b) Camera × ENCODER scatter — defect map by roll position ----
-    const scEncCtx = document.getElementById('insight-camera-scatter-encoder');
-    const scatterEnc = data.camera_scatter_encoder || [];
-    if (scEncCtx) {
-        if (_insightCameraScatterEncoder) _insightCameraScatterEncoder.destroy();
-        const byClassE = {};
-        scatterEnc.forEach(p => {
-            if (!_isShown(p.cls)) return;
-            (byClassE[p.cls] = byClassE[p.cls] || []).push({
-                x: p.x, y: p.y, r: 3 + (p.r || 0) * 9, conf: p.r, cls: p.cls, img: p.img, ship: p.ship
-            });
-        });
-        const datasetsE = Object.keys(byClassE).map(cls => ({
-            label: cls, data: byClassE[cls],
-            backgroundColor: _classColor(cls) + 'cc', borderColor: _classColor(cls)
-        }));
-        _insightCameraScatterEncoder = new Chart(scEncCtx, {
-            type: 'bubble',
-            data: { datasets: datasetsE },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: true, labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 } },
-                    title: { display: true, text: 'Camera × encoder (roll position) — hover for image, click dot for the exact frame', color: '#cbd5e1', font: { size: 13 } },
-                    tooltip: { enabled: false, external: _scatterImageTooltip }
-                },
-                onClick: (evt, els, chart) => {
-                    if (!els || !els.length) return;
-                    const dp = chart.data.datasets[els[0].datasetIndex].data[els[0].index];
-                    if (!dp) return;
-                    const cls = (chart.data.datasets[els[0].datasetIndex].label) || dp.cls || '';
-                    // encoder-scatter has no timestamp on the dot; derive from filename if present
-                    let t = null;
-                    try {
-                        const fn = String(dp.img || '').split('/').pop() || '';
-                        const m = fn.match(/^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/);
-                        if (m) t = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
-                    } catch (e) {}
-                    // 3.21.17: surface encoder value + camera index in the drawer.
-                    // dp.x = encoder, dp.y = camera index (Y axis labelled "Camera").
-                    openDefectDrawerForFrame({
-                        image_path: dp.img, shipment: dp.ship, t: t,
-                        cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
-                        encoder: dp.x, camera_index: dp.y,
-                    });
-                },
-                scales: {
-                    x: { type: 'linear', ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: 'rgba(148,163,184,0.08)' }, title: { display: true, text: 'Encoder (roll position)', color: '#94a3b8', font: { size: 10 } } },
-                    y: { title: { display: true, text: 'Camera', color: '#94a3b8' }, ticks: { color: '#94a3b8', stepSize: 1, precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } }
-                },
-                // 3.25.6 — align the encoder strip under this chart to the actual plot area.
-                animation: { onComplete: function() { _alignStripToScatter(this, 'quality-encoder-strip-wrap'); } },
-                onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-encoder-strip-wrap'), 0); }
+                // Align the merged strip wrap (which contains quality + ejection strips)
+                // to the scatter's chartArea on every render + resize.
+                animation: { onComplete: function() { _alignStripToScatter(this, 'quality-strip-wrap'); } },
+                onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-strip-wrap'), 0); }
             }
         });
     }
 }
+
+// 3.25.13 — toggle the merged scatter's X-axis between time and encoder.
+// Re-renders the scatter (destroy + rebuild), reloads the quality + ejection
+// strips for the new axis, updates the strip titles + button styling.
+function setInsightAxis(axis) {
+    if (axis !== 'time' && axis !== 'encoder') return;
+    if (_insightAxis === axis) return;
+    _insightAxis = axis;
+    // Active-button styling.
+    const tBtn = document.getElementById('insight-axis-toggle-time');
+    const eBtn = document.getElementById('insight-axis-toggle-encoder');
+    if (tBtn) {
+        tBtn.style.background = axis === 'time' ? 'linear-gradient(135deg,#10b981,#047857)' : 'rgba(51,65,85,0.5)';
+        tBtn.style.color = axis === 'time' ? '#fff' : '#cbd5e1';
+    }
+    if (eBtn) {
+        eBtn.style.background = axis === 'encoder' ? 'linear-gradient(135deg,#10b981,#047857)' : 'rgba(51,65,85,0.5)';
+        eBtn.style.color = axis === 'encoder' ? '#fff' : '#cbd5e1';
+    }
+    // Strip titles.
+    const qTitle = document.getElementById('quality-strip-title');
+    if (qTitle) qTitle.textContent = axis === 'encoder'
+        ? '📏 quality by encoder — find spots on the material with the most issues'
+        : '📍 quality by time — hover a cell for top defect + score';
+    const eTitle = document.getElementById('ejection-strip-title');
+    if (eTitle) eTitle.textContent = axis === 'encoder'
+        ? '⏏️ ejections by encoder — color = procedure; hover for breakdown'
+        : '⏏️ ejections by time — color = procedure; hover for breakdown';
+    // Re-fetch insight + re-render scatter + reload both strips for the new axis.
+    if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+}
+window.setInsightAxis = setInsightAxis;
 
 // 3.25.6 — given a Chart.js instance and a wrap div ID, inset the wrap to match the chart's plot area.
 function _alignStripToScatter(scatter, wrapId) {
@@ -1485,19 +1492,17 @@ function _verdictColor(v) {
 }
 
 async function refreshQualityCharts() {
-    // 3.25.5 — strips moved under Detection Insights' scatters; follow that panel's
-    // window selector so the X-axis context matches the scatter above. Fall back to
-    // the legacy (hidden) quality-charts-window if Detection Insights isn't on screen.
+    // 3.25.5/13 — strips share the merged scatter's X-axis. Follow Detection
+    // Insights' window selector and the current _insightAxis (time vs encoder)
+    // so quality + ejection strips both align to whatever the scatter shows.
     const insightWin = document.getElementById('insight-window');
     const qualityWin = document.getElementById('quality-charts-window');
     const win = (insightWin && insightWin.value) || (qualityWin && qualityWin.value) || '24h';
+    const axis = _insightAxis || 'time';
     await Promise.all([
         _loadQualityShipmentsChart(),
-        _loadQualityHeatmap('time', win),
-        _loadQualityHeatmap('encoder', win),
-        // 3.25.12 — ejection axis strips beneath the quality strips.
-        _loadEjectionAxis('time', win),
-        _loadEjectionAxis('encoder', win),
+        _loadQualityHeatmap(axis, win),
+        _loadEjectionAxis(axis, win),
     ]);
 }
 window.refreshQualityCharts = refreshQualityCharts;
@@ -1561,8 +1566,9 @@ function _procColor(name) {
 }
 
 async function _loadEjectionAxis(axis, win) {
-    const stripId  = axis === 'encoder' ? 'ejection-encoder-strip'  : 'ejection-time-strip';
-    const legendId = axis === 'encoder' ? 'ejection-encoder-legend' : 'ejection-time-legend';
+    // 3.25.13 — unified IDs (single strip + single legend regardless of axis).
+    const stripId  = 'ejection-strip';
+    const legendId = 'ejection-strip-legend';
     const strip  = document.getElementById(stripId);
     const legend = document.getElementById(legendId);
     if (!strip) return;
@@ -1576,13 +1582,26 @@ async function _loadEjectionAxis(axis, win) {
             if (legend) legend.innerHTML = '';
             return;
         }
+        // 3.25.13 — local-TZ label formatting on the time axis (matches scatter).
+        const _fmtEjCellLabel = (c) => {
+            if (!c) return '';
+            if (axis === 'time' && c.ts) {
+                const d = new Date(c.ts);
+                const win24h = (win === '24h' || win === '1h' || win === '6h');
+                return win24h
+                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    : d.toLocaleDateString([], { month: '2-digit', day: '2-digit' }) + ' ' +
+                      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+            return c.label || '';
+        };
         // Cells: colored by top_procedure; empty buckets stay transparent.
         strip.innerHTML = cells.map(c => {
             const color = c.top_procedure ? _procColor(c.top_procedure) : 'transparent';
             const parts = Object.entries(c.by_procedure || {})
                 .sort((a, b) => b[1] - a[1])
                 .map(([n, k]) => `${n}: ${k}`).join('\n');
-            const tip = `${c.label}\nTotal ejections: ${c.n}\n${parts}`.trim();
+            const tip = `${_fmtEjCellLabel(c)}\nTotal ejections: ${c.n}\n${parts}`.trim();
             return `<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`;
         }).join('');
         // Legend: chip per procedure that fired in the window (deterministic colors).
@@ -1601,8 +1620,9 @@ async function _loadEjectionAxis(axis, win) {
 
 
 async function _loadQualityHeatmap(axis, win) {
-    const stripId = axis === 'encoder' ? 'quality-encoder-strip' : 'quality-time-strip';
-    const axisId  = axis === 'encoder' ? 'quality-encoder-axis'  : 'quality-time-axis';
+    // 3.25.13 — unified IDs (single strip regardless of axis).
+    const stripId = 'quality-strip';
+    const axisId  = 'quality-strip-axis';
     const strip   = document.getElementById(stripId);
     const axisEl  = document.getElementById(axisId);
     if (!strip) return;
@@ -1616,16 +1636,32 @@ async function _loadQualityHeatmap(axis, win) {
             if (axisEl) axisEl.innerHTML = '';
             return;
         }
+        // 3.25.13 — for the time axis, format labels in the OPERATOR'S local TZ
+        // (the scatter does the same via toLocaleTimeString). Backend already
+        // sends `ts` as ISO, so we just re-format here. Encoder axis labels are
+        // numeric position ranges and don't need this.
+        const _fmtCellLabel = (c) => {
+            if (!c) return '';
+            if (axis === 'time' && c.ts) {
+                const d = new Date(c.ts);
+                const win24h = (win === '24h' || win === '1h' || win === '6h');
+                return win24h
+                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    : d.toLocaleDateString([], { month: '2-digit', day: '2-digit' }) + ' ' +
+                      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
+            return c.label || '';
+        };
         strip.innerHTML = cells.map(c => {
             const color = _scoreColor(c.score);
             const top = c.top_class ? `Top: ${c.top_class}` : '';
-            const tip = `${c.label}\nScore: ${c.score}\nDetections: ${c.n}\n${top}`.trim();
+            const tip = `${_fmtCellLabel(c)}\nScore: ${c.score}\nDetections: ${c.n}\n${top}`.trim();
             return `<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`;
         }).join('');
         if (axisEl) {
-            const first = cells[0]?.label || '';
-            const mid   = cells[Math.floor(cells.length / 2)]?.label || '';
-            const last  = cells[cells.length - 1]?.label || '';
+            const first = _fmtCellLabel(cells[0]);
+            const mid   = _fmtCellLabel(cells[Math.floor(cells.length / 2)]);
+            const last  = _fmtCellLabel(cells[cells.length - 1]);
             axisEl.innerHTML = `<span>${first}</span><span>${mid}</span><span>${last}</span>`;
         }
     } catch (e) { console.warn(`heatmap ${axis} failed`, e); }
@@ -1642,8 +1678,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // 3.25.6 — keep strip wraps inset to scatter plot area on viewport resize.
     window.addEventListener('resize', () => {
         try {
-            if (_insightCameraScatter)        _alignStripToScatter(_insightCameraScatter, 'quality-time-strip-wrap');
-            if (_insightCameraScatterEncoder) _alignStripToScatter(_insightCameraScatterEncoder, 'quality-encoder-strip-wrap');
+            // 3.25.13 — single merged scatter + single strip wrap.
+            if (_insightCameraScatter) _alignStripToScatter(_insightCameraScatter, 'quality-strip-wrap');
         } catch (e) {}
     });
 });

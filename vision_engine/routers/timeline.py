@@ -2107,21 +2107,17 @@ async def quality_ejection_axis(
                 })
 
             # ----- TIME axis -----
-            cur.execute(
-                f"""
-                SELECT MIN(time), MAX(time)
-                FROM ejection_events
-                WHERE time > NOW() - INTERVAL %s
-                  {ship_clause}
-                """,
-                [interval, *params],
-            )
+            # 3.25.13 — bucket the FULL window (NOW() - interval → NOW()) instead
+            # of MIN/MAX of ejection_events, so the strip's X-axis aligns with the
+            # scatter (which spans the full window). Empty buckets at the edges
+            # just render transparent.
+            cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
             t_min, t_max = cur.fetchone() or (None, None)
             if not t_min or not t_max:
                 cur.close()
                 return JSONResponse(content={
                     "axis": "time", "buckets": [],
-                    "shipment": shipment, "note": "no ejection events in window",
+                    "shipment": shipment, "note": "no time window",
                 })
 
             cur.execute(
@@ -2320,15 +2316,9 @@ async def quality_heatmap(
                 })
 
             # ----- TIME axis -----
-            cur.execute(
-                f"""
-                SELECT MIN(time), MAX(time)
-                FROM inference_results
-                WHERE time > NOW() - INTERVAL %s
-                  {ship_clause}
-                """,
-                [interval, *params],
-            )
+            # 3.25.13 — same alignment fix as quality_ejection_axis: bucket the
+            # full window so the strip matches the scatter X-axis 1:1.
+            cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
             t_min, t_max = cur.fetchone() or (None, None)
             if not t_min or not t_max:
                 cur.close()

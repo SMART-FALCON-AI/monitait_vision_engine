@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.13] - 2026-06-13
+
+### Changed — merged Time + Encoder scatters into one with a toggle
+- The two redundant "Camera × time" and "Camera × encoder" scatter charts collapsed into a single scatter with a **📍 Time / 📏 Encoder** toggle above it. Less real estate, less duplication.
+- The detection scatter, quality strip, and ejection strip all share the SAME X-axis. Toggling the axis re-renders the scatter (data + tick formatter + click handler all switch) and reloads both strips so a vertical column on any of the three points to the same time or encoder position.
+- New `setInsightAxis('time'|'encoder')` in `charts.js`. Default = time. State persists for the page session.
+- Strip element IDs unified (`quality-strip`, `quality-strip-axis`, `quality-strip-wrap`, `ejection-strip`, `ejection-strip-legend`, `ejection-strip-title`, `quality-strip-title`). Old IDs (`quality-time-strip`, `quality-encoder-strip`, etc.) are gone.
+
+### Fixed — strip labels timezone + edge alignment
+- Quality strip and ejection strip labels were formatted in UTC by the backend (`strftime("%H:%M")` on a `timestamptz`), but the scatter was rendered in the browser's local TZ via `toLocaleTimeString`. Result: a 3.5h offset on Iran sites where the strip read "18:38" while the scatter read "22:08". Backend now also returns `ts` (ISO); frontend formats every time-strip label via `toLocaleTimeString` so the operator sees their own clock.
+- Both time-axis backends (`/api/quality/heatmap` and `/api/quality/ejection_axis`) now bucket the FULL window `(NOW() - interval, NOW())` instead of `MIN/MAX` of the data rows. The strip now spans the same range as the scatter even when detections only fill part of the window — empty edge buckets render transparent.
+- Cache-buster bumped to `?v=3.25.13` on every custom JS script tag.
+
 ## [3.25.12] - 2026-06-13
 
 ### Fixed — quality strip stuck on all-green
