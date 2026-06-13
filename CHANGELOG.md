@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.10] - 2026-06-13
+
+### Added — AI Severity Suggester now scores ejection procedures too
+- The 🤖 **Suggest severities** button on the Process tab now returns suggestions for BOTH detection classes AND ejection procedures in a single AI call. Two tables appear in the green review panel — *Detection classes (N)* on top, *Ejection procedures (N)* below — each with the same per-row Apply / Apply-all flow.
+- `POST /api/suggest_severities` payload now includes `procedure_suggestions: [{procedure, suggested_severity, current_severity, tier, reason, kind:"procedure"}]` alongside the existing `suggestions` array. The AI receives each procedure's rule summary, enabled/store flags, 7-day event count, and current severity, and is told to use the same 0–100 tier scheme. Procedures with 0 events_7d and 0 saved severity are auto-suggested 0 client-side (no AI roundtrip).
+- New `POST /api/apply_procedure_severities` (`{updates: [{procedure, severity}]}`) writes the suggested severity back into `service_config.procedures[*].severity`. The Process tab updates without a page reload (calls `renderProcedures()`).
+- **🚀 Auto-tune all** now covers procedures too — one click adjusts every class severity AND every procedure severity together, and the AI sees the full picture so the rebalance is coherent (e.g. lowering a class severity but raising the matching ejection-procedure severity stays in the same shipment-quality-score budget).
+- Backwards-compatible parser: if an older AI prompt returns a bare JSON array, it's treated as classes-only and the procedure_suggestions array comes back empty.
+- `?v=3.25.10` cache-buster on every custom JS script tag (see [[3.25.9]] for the why).
+
 ## [3.25.9] - 2026-06-13
 
 ### Fixed — Browser cache no longer pins old JS after a deploy

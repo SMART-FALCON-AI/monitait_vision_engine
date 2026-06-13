@@ -1165,16 +1165,18 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
         from config import load_service_config as _load_svc
         svc = _load_svc() or {}
         aud = (svc.get("audio_settings") or {})
+        procs_cfg = (svc.get("procedures") or []) or []
     except Exception:
         aud = {}
+        procs_cfg = []
 
     # 3.25.2 — split classes into "active" (worth AI's attention) and "silent"
     # (no recent data — safely auto-suggest 0 / NONE without an AI roundtrip).
     # This keeps the prompt small AND keeps DeepSeek/Kimi within their token
     # budgets even on sites with 200+ historical classes.
     all_classes = sorted(aud.keys())
-    if not all_classes:
-        return JSONResponse(content={"suggestions": [], "note": "No classes configured yet."})
+    if not all_classes and not procs_cfg:
+        return JSONResponse(content={"suggestions": [], "procedure_suggestions": [], "note": "No classes or procedures configured yet."})
 
     _MIN_N_FOR_AI = 5  # min detections in 7d for a class to be worth asking AI about
     active_classes = []
@@ -1203,6 +1205,72 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
             f"current_severity={cur_sev}  show={is_shown}  color_e={color_on}  area={area_on}"
         )
     data_block = "\n".join(lines) if lines else "(no active classes — every class is silent in the last 7 days)"
+
+    # 3.25.10 — gather ejection procedures + their last-7d firing counts so the AI
+    # can rate them on the same 0–100 scale as detection classes. The score uses
+    # ejection_impact = Σ (proc.severity / 100 × events) so a procedure that fires
+    # 50× per shipment at severity 60 contributes ~30 impact-units, same as 30
+    # detections of a sev=100 class at conf=1.0. Operators rarely guess this well.
+    proc_event_counts: Dict[str, int] = {}
+    try:
+        from services.db import get_db_connection, release_db_connection
+        _pc = get_db_connection()
+        if _pc is not None:
+            try:
+                _cur = _pc.cursor()
+                _cur.execute(
+                    """
+                    SELECT procedure_name, COUNT(*) AS n
+                    FROM ejection_events
+                    WHERE time > NOW() - INTERVAL '7 days'
+                      AND procedure_name IS NOT NULL
+                    GROUP BY procedure_name
+                    """
+                )
+                for _name, _n in _cur.fetchall():
+                    proc_event_counts[str(_name)] = int(_n or 0)
+                _cur.close()
+            finally:
+                try:
+                    release_db_connection(_pc)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    proc_lines = []
+    active_procs = []   # name -> events_7d > 0 OR severity already set
+    silent_procs = []   # name -> 0 events AND 0 severity (auto-suggest 0)
+    for p in procs_cfg:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "").strip()
+        if not name:
+            continue
+        cur_sev  = int(p.get("severity") or 0)
+        enabled  = bool(p.get("enabled"))
+        store    = bool(p.get("store"))
+        logic    = str(p.get("logic") or "any")
+        n_events = proc_event_counts.get(name, 0)
+        rules    = p.get("rules") or []
+        # Compact rule summary so the prompt stays small even on procs with many rules.
+        rule_bits = []
+        for r in rules[:4]:
+            if not isinstance(r, dict):
+                continue
+            obj  = r.get("object", "?")
+            cond = r.get("condition", "?")
+            val  = r.get("count", r.get("area", r.get("max_delta_e", "")))
+            rule_bits.append(f"{obj}.{cond}={val}")
+        rule_summary = "; ".join(rule_bits) + (f" (+{len(rules)-4} more)" if len(rules) > 4 else "")
+        if n_events > 0 or cur_sev > 0:
+            active_procs.append(name)
+            proc_lines.append(
+                f'- "{name}": rules=[{rule_summary}]  logic={logic}  enabled={enabled}  store={store}  events_7d={n_events}  current_severity={cur_sev}'
+            )
+        else:
+            silent_procs.append(name)
+    proc_data_block = "\n".join(proc_lines) if proc_lines else "(no procedures with events or saved severity — every procedure is silent)"
 
     # 3.25.2 — feed the AI a snapshot of recent shipment quality scores so it
     # can tune severities to produce a useful, calibrated score distribution.
@@ -1281,17 +1349,23 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     }
     language_name = _LANG_NAMES.get(language, "English")
 
+    # 3.25.10 — system prompt now also instructs the AI on ejection procedures. Same
+    # 0–100 scale, same tier names, but for a fired ejection rule (which combines
+    # one or more class detections via count/area/color conditions) instead of a
+    # single detection. The score formula treats both identically:
+    #   detection impact = severity/100 × confidence
+    #   ejection  impact = severity/100 × event_count
     system_prompt = (
         "You are an industrial quality-control consultant. You map detection "
-        "classes to a 0–100 Severity score so the Shipment Quality system can "
-        "weight defects correctly.\n\n"
-        "Severity tiers:\n"
+        "classes AND ejection procedures to a 0–100 Severity score so the Shipment "
+        "Quality system can weight defects correctly.\n\n"
+        "Severity tiers (apply to BOTH classes and procedures):\n"
         "  0          — math channel / metric / not a defect at all\n"
         "  1–20  COSMETIC — minor visible issue, low impact\n"
         "  21–50 MODERATE — should be fixed but won't reject the shipment alone\n"
         "  51–80 SERIOUS  — multiple instances mean the shipment is at risk\n"
         "  81–100 CRITICAL — a single instance can reject the shipment\n\n"
-        "Use ALL signals to decide:\n"
+        "For CLASSES use ALL signals to decide:\n"
         "  * class NAME — words like 'broken', 'missing', 'defect', 'crack', 'contamination', "
         "'leak' → SERIOUS or CRITICAL\n"
         "  * NAMES that look like statistics (mean_L, std_L, fft_*, blob_*, sharpness_*, "
@@ -1304,21 +1378,33 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
         "  * if current_severity is already set non-zero, do not stray far without strong reason.\n"
         "  * unknown short-code classes (TB, LL, jea, MD, …) usually map to specific defect "
         "types in textile/jean/PVB QC — assume MODERATE 30–50 unless evidence suggests otherwise.\n\n"
-        "Return STRICT JSON ONLY (no prose, no markdown fences) — an array where each item is "
-        '`{"class":"<name>","severity":<int 0-100>,"tier":"<NONE|COSMETIC|MODERATE|SERIOUS|CRITICAL>",'
-        '"reason":"<one sentence in ' + language_name + '>"}`. '
-        "Include EVERY class from the input. Do not invent classes that are not in the input."
+        "For PROCEDURES (ejection rules):\n"
+        "  * A procedure fires when its rules match — so events_7d is the count of physical "
+        "ejections it caused in the last week. A procedure that fires every shipment AT MOST "
+        "should be at MODERATE; one that fires only on bad shipments deserves SERIOUS/CRITICAL.\n"
+        "  * Look at the rule summary — a procedure triggering on a SERIOUS class (cracks, breaks, "
+        "missing parts) inherits at least the class's tier; on a COSMETIC class it tends lower.\n"
+        "  * Procedures with store=false won't appear in events_7d even if they fire. Use the "
+        "rule_summary + procedure name to estimate severity in that case.\n"
+        "  * enabled=false procedures don't fire at all — score them by their NAME only.\n\n"
+        "Return STRICT JSON ONLY (no prose, no markdown fences) — an OBJECT with two arrays:\n"
+        '  {"classes":    [{"class":"<name>","severity":<int 0-100>,"tier":"<NONE|COSMETIC|MODERATE|SERIOUS|CRITICAL>","reason":"<one sentence in ' + language_name + '>"}],\n'
+        '   "procedures": [{"procedure":"<name>","severity":<int 0-100>,"tier":"<NONE|COSMETIC|MODERATE|SERIOUS|CRITICAL>","reason":"<one sentence in ' + language_name + '>"}]}\n'
+        "Include EVERY class AND EVERY procedure from the input. Do not invent items that are not in the input."
     )
 
     user_query = (
         f"Business context (optional, may be empty):\n"
         f"{business_context or '(none provided — use class-name heuristics + baseline stats)'}\n\n"
-        f"Active classes (n >= {_MIN_N_FOR_AI} detections in last 7d):\n{data_block}"
+        f"Active classes (n >= {_MIN_N_FOR_AI} detections in last 7d):\n{data_block}\n\n"
+        f"Active ejection procedures (events_7d > 0 OR current_severity > 0):\n{proc_data_block}"
         + shipment_block
-        + f"\n\nNow return the JSON array for ALL {len(active_classes)} active classes above. "
+        + f"\n\nNow return the JSON OBJECT with classes={len(active_classes)} and procedures={len(active_procs)} entries above. "
         + ("Aim for severities that would keep recent shipment p50 score between 80 and 92, "
            "with worst shipments dropping below 70. The current distribution is shown above — "
-           "adjust each class's severity so the resulting score distribution stays in that range. "
+           "adjust both class severities AND procedure severities so the resulting score "
+           "distribution stays in that range. Detection impact + ejection impact are summed "
+           "on the same scale, so you can rebalance between the two. "
            if shipment_block else "")
     )
 
@@ -1349,25 +1435,55 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     text = (raw or "").strip()
     text = _re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=_re.IGNORECASE).strip()
     suggestions = []
+    procedure_suggestions = []
     parse_err = None
     cur_sevs = {n: int((aud.get(n) or {}).get("severity") or 0) for n in all_classes}
+    # 3.25.10 — current severity per procedure (by name).
+    cur_proc_sevs = {
+        str(p.get("name") or "").strip(): int(p.get("severity") or 0)
+        for p in procs_cfg if isinstance(p, dict) and p.get("name")
+    }
     try:
-        arr = _json.loads(text)
-        if isinstance(arr, list):
-            for item in arr:
-                if not isinstance(item, dict):
-                    continue
-                cls = str(item.get("class") or "").strip()
-                if not cls or cls not in cur_sevs:
-                    continue
-                sev = max(0, min(100, int(item.get("severity") or 0)))
-                suggestions.append({
-                    "class": cls,
-                    "suggested_severity": sev,
-                    "current_severity": cur_sevs[cls],
-                    "tier": str(item.get("tier") or "").upper(),
-                    "reason": str(item.get("reason") or ""),
-                })
+        parsed = _json.loads(text)
+        # 3.25.10 — accept BOTH the new dict form (classes+procedures) and the
+        # legacy bare-array form (classes only, kept so we don't break old prompts).
+        cls_arr = []
+        proc_arr = []
+        if isinstance(parsed, dict):
+            cls_arr  = parsed.get("classes")    or []
+            proc_arr = parsed.get("procedures") or []
+        elif isinstance(parsed, list):
+            cls_arr = parsed
+        for item in cls_arr:
+            if not isinstance(item, dict):
+                continue
+            cls = str(item.get("class") or "").strip()
+            if not cls or cls not in cur_sevs:
+                continue
+            sev = max(0, min(100, int(item.get("severity") or 0)))
+            suggestions.append({
+                "class": cls,
+                "suggested_severity": sev,
+                "current_severity": cur_sevs[cls],
+                "tier": str(item.get("tier") or "").upper(),
+                "reason": str(item.get("reason") or ""),
+                "kind": "class",
+            })
+        for item in proc_arr:
+            if not isinstance(item, dict):
+                continue
+            pname = str(item.get("procedure") or item.get("name") or "").strip()
+            if not pname or pname not in cur_proc_sevs:
+                continue
+            sev = max(0, min(100, int(item.get("severity") or 0)))
+            procedure_suggestions.append({
+                "procedure": pname,
+                "suggested_severity": sev,
+                "current_severity": cur_proc_sevs[pname],
+                "tier": str(item.get("tier") or "").upper(),
+                "reason": str(item.get("reason") or ""),
+                "kind": "procedure",
+            })
         # 3.25.2 — auto-suggest 0 for silent classes (no AI roundtrip needed).
         suggested_set = {s["class"] for s in suggestions}
         for cls in silent_classes:
@@ -1379,9 +1495,24 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
                 "current_severity": cur_sevs.get(cls, 0),
                 "tier": "NONE",
                 "reason": "No detections in the last 7 days — auto-set to 0.",
+                "kind": "class",
+            })
+        # 3.25.10 — same for silent procedures (0 events AND 0 saved severity).
+        proc_suggested_set = {s["procedure"] for s in procedure_suggestions}
+        for pname in silent_procs:
+            if pname in proc_suggested_set:
+                continue
+            procedure_suggestions.append({
+                "procedure": pname,
+                "suggested_severity": 0,
+                "current_severity": cur_proc_sevs.get(pname, 0),
+                "tier": "NONE",
+                "reason": "No ejection events in the last 7 days — auto-set to 0.",
+                "kind": "procedure",
             })
         # Stable order: highest suggested first, alphabetical tiebreak
         suggestions.sort(key=lambda s: (-s["suggested_severity"], s["class"]))
+        procedure_suggestions.sort(key=lambda s: (-s["suggested_severity"], s["procedure"]))
     except Exception as e:
         parse_err = f"AI did not return parseable JSON: {e}"
 
@@ -1405,6 +1536,7 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
 
     return JSONResponse(content={
         "suggestions": suggestions,
+        "procedure_suggestions": procedure_suggestions,
         "model": active_name,
         "parse_error": parse_err,
         "raw_preview": (raw or "")[:300] if parse_err else None,
@@ -1684,6 +1816,48 @@ async def apply_severities(payload: Dict[str, Any]):
         _df_inv()
     except Exception:
         pass
+    return JSONResponse(content={"success": True, "applied": n_applied})
+
+
+# 3.25.10 — companion to /api/apply_severities for ejection procedures. The
+# AI Severity Suggester now returns suggestions for both classes (audio_settings)
+# and procedures (config.procedures); each goes to its own writer so the
+# config file's procedure list is updated in-place without touching other fields.
+@router.post("/api/apply_procedure_severities")
+async def apply_procedure_severities(payload: Dict[str, Any]):
+    """Bulk-apply suggested severity values to service_config.procedures.
+    Payload: {"updates": [{"procedure": "<name>", "severity": N}, ...]}.
+    Returns how many procedures were updated."""
+    updates = payload.get("updates") or []
+    if not isinstance(updates, list) or not updates:
+        return JSONResponse(content={"error": "updates list required"}, status_code=400)
+    from config import load_service_config as _load_svc, save_service_config as _save_svc
+    svc = _load_svc() or {}
+    procs = svc.get("procedures") or []
+    if not isinstance(procs, list):
+        return JSONResponse(content={"error": "procedures config is not a list"}, status_code=500)
+    name_to_sev: Dict[str, int] = {}
+    for u in updates:
+        if not isinstance(u, dict):
+            continue
+        name = str(u.get("procedure") or "").strip()
+        if not name:
+            continue
+        try:
+            sev = max(0, min(100, int(u.get("severity") or 0)))
+        except (TypeError, ValueError):
+            continue
+        name_to_sev[name] = sev
+    n_applied = 0
+    for p in procs:
+        if not isinstance(p, dict):
+            continue
+        n = str(p.get("name") or "").strip()
+        if n in name_to_sev:
+            p["severity"] = name_to_sev[n]
+            n_applied += 1
+    svc["procedures"] = procs
+    _save_svc(svc)
     return JSONResponse(content={"success": True, "applied": n_applied})
 
 

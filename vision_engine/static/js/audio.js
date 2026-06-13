@@ -640,13 +640,14 @@ window.toggleObjectArea = toggleObjectArea;
 // 3.25.2 — AI Severity suggester
 // =====================================================================
 
-let _severitySuggestions = null;  // last response from /api/suggest_severities
+let _severitySuggestions     = null;  // last class suggestions from /api/suggest_severities
+let _severityProcSuggestions = null;  // 3.25.10 — last procedure suggestions (same response)
 
 function openSeveritySuggestPanel() {
     const p = document.getElementById('severity-suggest-panel');
     if (p) p.style.display = 'block';
     const meta = document.getElementById('severity-suggest-meta');
-    if (meta) meta.textContent = '— ask the AI to score every class on a 0–100 severity scale based on counts, confidence, name keywords, and your business context.';
+    if (meta) meta.textContent = '— ask the AI to score every class AND every ejection procedure on a 0–100 severity scale based on counts, confidence, name keywords, rule shape, and your business context.';
     const results = document.getElementById('severity-suggest-results');
     if (results) results.innerHTML = '';
     document.getElementById('severity-apply-all-btn').disabled = true;
@@ -693,10 +694,13 @@ async function runSeveritySuggest() {
             statusEl.textContent = '✗ AI response was not valid JSON. Raw preview: ' + (d.raw_preview || '').slice(0, 120);
             return;
         }
-        _severitySuggestions = d.suggestions || [];
-        statusEl.textContent = `✓ ${_severitySuggestions.length} suggestions from ${d.model || 'AI'}.`;
-        _renderSeveritySuggestions(_severitySuggestions);
-        if (_severitySuggestions.length > 0) {
+        _severitySuggestions     = d.suggestions || [];
+        _severityProcSuggestions = d.procedure_suggestions || [];   // 3.25.10
+        const nC = _severitySuggestions.length;
+        const nP = _severityProcSuggestions.length;
+        statusEl.textContent = `✓ ${nC} class + ${nP} procedure suggestion${(nC + nP) === 1 ? '' : 's'} from ${d.model || 'AI'}.`;
+        _renderSeveritySuggestions(_severitySuggestions, _severityProcSuggestions);
+        if (nC > 0 || nP > 0) {
             applyBtn.disabled = false;
             applyBtn.style.opacity = '1';
         }
@@ -718,40 +722,58 @@ function _tierColor(tier) {
     }
 }
 
-function _renderSeveritySuggestions(rows) {
+function _renderSeveritySuggestions(rows, procRows) {
     const el = document.getElementById('severity-suggest-results');
     if (!el) return;
-    if (!rows.length) { el.innerHTML = '<i>No suggestions returned.</i>'; return; }
-    // Build a table — operator can review and apply per-row.
-    const header = `
-        <tr style="color:#94a3b8; background:rgba(15,23,42,0.55); position:sticky; top:0;">
-            <th style="text-align:left; padding:5px 8px;">Class</th>
-            <th style="text-align:center; padding:5px 8px;">Current</th>
-            <th style="text-align:center; padding:5px 8px;">Suggested</th>
-            <th style="text-align:center; padding:5px 8px;">Tier</th>
-            <th style="text-align:left; padding:5px 8px;">Reason</th>
-            <th style="text-align:center; padding:5px 8px;">Apply</th>
-        </tr>`;
-    const body = rows.map((r, idx) => {
-        const same = r.current_severity === r.suggested_severity;
-        const arrow = r.suggested_severity > r.current_severity ? '↑' :
-                      r.suggested_severity < r.current_severity ? '↓' : '=';
-        const arrowColor = arrow === '↑' ? '#86efac' : arrow === '↓' ? '#fcd34d' : '#94a3b8';
-        return `
-            <tr style="border-top:1px solid rgba(51,65,85,0.4);" data-class="${r.class}">
-                <td style="padding:4px 8px; font-weight:600;">${r.class}</td>
-                <td style="text-align:center; padding:4px 8px;">${r.current_severity}</td>
-                <td style="text-align:center; padding:4px 8px; font-weight:700;">
-                    ${r.suggested_severity} <span style="color:${arrowColor}; font-weight:400;">${arrow}</span>
-                </td>
-                <td style="text-align:center; padding:4px 8px; color:${_tierColor(r.tier)}; font-weight:600;">${r.tier || '?'}</td>
-                <td style="padding:4px 8px; color:var(--text-secondary); font-size:11px;">${(r.reason || '').replace(/</g, '&lt;')}</td>
-                <td style="text-align:center; padding:4px 8px;">
-                    <button onclick="applyOneSeveritySuggestion(${idx})" ${same ? 'disabled' : ''} style="background:${same?'rgba(51,65,85,0.4)':'var(--primary-color)'}; color:#fff; border:none; padding:3px 9px; cursor:${same?'default':'pointer'}; font-size:11px; border-radius:3px; font-weight:600;">${same ? '=' : '✓'}</button>
-                </td>
+    rows     = rows     || [];
+    procRows = procRows || [];
+    if (!rows.length && !procRows.length) {
+        el.innerHTML = '<i>No suggestions returned.</i>';
+        return;
+    }
+    // 3.25.10 — shared row-renderer for both tables. `kind` decides the label
+    // column (Class vs Procedure) and which apply handler to call.
+    function _section(title, items, kind) {
+        if (!items.length) return '';
+        const labelCol = kind === 'procedure' ? 'Procedure' : 'Class';
+        const handler  = kind === 'procedure' ? 'applyOneProcedureSeveritySuggestion' : 'applyOneSeveritySuggestion';
+        const header = `
+            <tr style="color:#94a3b8; background:rgba(15,23,42,0.55); position:sticky; top:0;">
+                <th style="text-align:left; padding:5px 8px;">${labelCol}</th>
+                <th style="text-align:center; padding:5px 8px;">Current</th>
+                <th style="text-align:center; padding:5px 8px;">Suggested</th>
+                <th style="text-align:center; padding:5px 8px;">Tier</th>
+                <th style="text-align:left; padding:5px 8px;">Reason</th>
+                <th style="text-align:center; padding:5px 8px;">Apply</th>
             </tr>`;
-    }).join('');
-    el.innerHTML = `<table style="width:100%; border-collapse:collapse;">${header}${body}</table>`;
+        const body = items.map((r, idx) => {
+            const name = (kind === 'procedure' ? r.procedure : r.class) || '';
+            const same = r.current_severity === r.suggested_severity;
+            const arrow = r.suggested_severity > r.current_severity ? '↑' :
+                          r.suggested_severity < r.current_severity ? '↓' : '=';
+            const arrowColor = arrow === '↑' ? '#86efac' : arrow === '↓' ? '#fcd34d' : '#94a3b8';
+            const nameDisp = (kind === 'procedure') ? `⏏ ${name}` : name;
+            return `
+                <tr style="border-top:1px solid rgba(51,65,85,0.4);" data-${kind}="${name}">
+                    <td style="padding:4px 8px; font-weight:600;">${nameDisp}</td>
+                    <td style="text-align:center; padding:4px 8px;">${r.current_severity}</td>
+                    <td style="text-align:center; padding:4px 8px; font-weight:700;">
+                        ${r.suggested_severity} <span style="color:${arrowColor}; font-weight:400;">${arrow}</span>
+                    </td>
+                    <td style="text-align:center; padding:4px 8px; color:${_tierColor(r.tier)}; font-weight:600;">${r.tier || '?'}</td>
+                    <td style="padding:4px 8px; color:var(--text-secondary); font-size:11px;">${(r.reason || '').replace(/</g, '&lt;')}</td>
+                    <td style="text-align:center; padding:4px 8px;">
+                        <button onclick="${handler}(${idx})" ${same ? 'disabled' : ''} style="background:${same?'rgba(51,65,85,0.4)':'var(--primary-color)'}; color:#fff; border:none; padding:3px 9px; cursor:${same?'default':'pointer'}; font-size:11px; border-radius:3px; font-weight:600;">${same ? '=' : '✓'}</button>
+                    </td>
+                </tr>`;
+        }).join('');
+        return `
+            <div style="margin-bottom:8px; font-size:11px; color:#a7f3d0; font-weight:600; letter-spacing:0.4px; text-transform:uppercase;">${title}</div>
+            <table style="width:100%; border-collapse:collapse; margin-bottom:14px;">${header}${body}</table>`;
+    }
+    el.innerHTML =
+        _section(`Detection classes (${rows.length})`, rows, 'class') +
+        _section(`Ejection procedures (${procRows.length})`, procRows, 'procedure');
 }
 
 async function applyOneSeveritySuggestion(idx) {
@@ -762,30 +784,68 @@ async function applyOneSeveritySuggestion(idx) {
     audioSettings.severityObjects = audioSettings.severityObjects || {};
     audioSettings.severityObjects[row.class] = row.suggested_severity;
     row.current_severity = row.suggested_severity;
-    _renderSeveritySuggestions(_severitySuggestions);
+    _renderSeveritySuggestions(_severitySuggestions, _severityProcSuggestions);
     if (typeof updateObjectsList === 'function') updateObjectsList();
 }
 window.applyOneSeveritySuggestion = applyOneSeveritySuggestion;
 
+// 3.25.10 — apply a single procedure-severity suggestion. Same shape as the class
+// path but hits /api/apply_procedure_severities and reflects into the in-memory
+// procedures list so the Process tab updates without a reload.
+async function applyOneProcedureSeveritySuggestion(idx) {
+    if (!_severityProcSuggestions || !_severityProcSuggestions[idx]) return;
+    const row = _severityProcSuggestions[idx];
+    await _postProcedureSeverityUpdates([{ procedure: row.procedure, severity: row.suggested_severity }]);
+    // Reflect locally so the Process tab severity input updates without a reload.
+    if (Array.isArray(procedures)) {
+        const p = procedures.find(pp => pp && pp.name === row.procedure);
+        if (p) p.severity = row.suggested_severity;
+    }
+    row.current_severity = row.suggested_severity;
+    _renderSeveritySuggestions(_severitySuggestions, _severityProcSuggestions);
+    if (typeof renderProcedures === 'function') renderProcedures();
+}
+window.applyOneProcedureSeveritySuggestion = applyOneProcedureSeveritySuggestion;
+
 async function applyAllSeveritySuggestions() {
-    if (!_severitySuggestions || !_severitySuggestions.length) return;
-    const updates = _severitySuggestions
+    const classUpdates = (_severitySuggestions || [])
         .filter(r => r.current_severity !== r.suggested_severity)
         .map(r => ({ class: r.class, severity: r.suggested_severity }));
-    if (!updates.length) {
+    const procUpdates  = (_severityProcSuggestions || [])
+        .filter(r => r.current_severity !== r.suggested_severity)
+        .map(r => ({ procedure: r.procedure, severity: r.suggested_severity }));
+    if (!classUpdates.length && !procUpdates.length) {
         document.getElementById('severity-suggest-status').textContent = 'Nothing to change.';
         return;
     }
-    const result = await _postSeverityUpdates(updates);
-    audioSettings.severityObjects = audioSettings.severityObjects || {};
-    _severitySuggestions.forEach(r => {
-        audioSettings.severityObjects[r.class] = r.suggested_severity;
-        r.current_severity = r.suggested_severity;
-    });
-    _renderSeveritySuggestions(_severitySuggestions);
-    if (typeof updateObjectsList === 'function') updateObjectsList();
+    let appliedCls = 0, appliedProc = 0;
+    if (classUpdates.length) {
+        const r = await _postSeverityUpdates(classUpdates);
+        appliedCls = r?.applied ?? classUpdates.length;
+        audioSettings.severityObjects = audioSettings.severityObjects || {};
+        _severitySuggestions.forEach(r => {
+            audioSettings.severityObjects[r.class] = r.suggested_severity;
+            r.current_severity = r.suggested_severity;
+        });
+        if (typeof updateObjectsList === 'function') updateObjectsList();
+    }
+    if (procUpdates.length) {
+        const r = await _postProcedureSeverityUpdates(procUpdates);
+        appliedProc = r?.applied ?? procUpdates.length;
+        if (Array.isArray(procedures)) {
+            (_severityProcSuggestions || []).forEach(row => {
+                const p = procedures.find(pp => pp && pp.name === row.procedure);
+                if (p) p.severity = row.suggested_severity;
+                row.current_severity = row.suggested_severity;
+            });
+        } else {
+            (_severityProcSuggestions || []).forEach(row => { row.current_severity = row.suggested_severity; });
+        }
+        if (typeof renderProcedures === 'function') renderProcedures();
+    }
+    _renderSeveritySuggestions(_severitySuggestions, _severityProcSuggestions);
     document.getElementById('severity-suggest-status').textContent =
-        `✓ Applied ${result?.applied ?? updates.length} updates.`;
+        `✓ Applied ${appliedCls} class + ${appliedProc} procedure update${(appliedCls + appliedProc) === 1 ? '' : 's'}.`;
 }
 window.applyAllSeveritySuggestions = applyAllSeveritySuggestions;
 
@@ -793,16 +853,18 @@ window.applyAllSeveritySuggestions = applyAllSeveritySuggestions;
 // non-equal suggestion in one go. Skips the review step. Operator gets a
 // confirmation toast at the end.
 async function autoTuneAllSeverities() {
-    if (!confirm('Auto-tune ALL classes? The AI will see your shipment score history and recalibrate every Severity value. This overwrites your existing values.')) return;
+    if (!confirm('Auto-tune ALL classes AND ejection procedures? The AI will see your shipment score history + ejection event counts and recalibrate every Severity value. This overwrites your existing values.')) return;
     const btn = document.getElementById('severity-autotune-btn');
     const statusEl = document.getElementById('severity-suggest-status');
     if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
-    if (statusEl) statusEl.textContent = '🤔 thinking — AI analyzing classes + shipment score history…';
+    if (statusEl) statusEl.textContent = '🤔 thinking — AI analyzing classes + procedures + shipment score history…';
     try {
         await runSeveritySuggest();
-        if (!_severitySuggestions || !_severitySuggestions.length) return;
+        const nC = (_severitySuggestions || []).length;
+        const nP = (_severityProcSuggestions || []).length;
+        if (!nC && !nP) return;
         await applyAllSeveritySuggestions();
-        if (statusEl) statusEl.textContent = `✓ Auto-tuned ${_severitySuggestions.length} classes.`;
+        if (statusEl) statusEl.textContent = `✓ Auto-tuned ${nC} classes + ${nP} procedures.`;
     } catch (e) {
         if (statusEl) statusEl.textContent = '✗ Auto-tune failed: ' + (e.message || e);
     } finally {
@@ -815,6 +877,19 @@ window.autoTuneAllSeverities = autoTuneAllSeverities;
 async function _postSeverityUpdates(updates) {
     try {
         const r = await fetch('/api/apply_severities', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ updates }),
+        });
+        return await r.json();
+    } catch (e) {
+        return { error: e.message };
+    }
+}
+
+// 3.25.10 — companion to _postSeverityUpdates for ejection procedures.
+async function _postProcedureSeverityUpdates(updates) {
+    try {
+        const r = await fetch('/api/apply_procedure_severities', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ updates }),
         });
