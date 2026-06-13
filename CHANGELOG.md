@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.25.12] - 2026-06-13
+
+### Fixed — quality strip stuck on all-green
+- Root cause: `score = 100 × (1 − impact_per_unit × SCALE)` with SCALE hard-coded at 1.0. On encoder-normalised lines, `impact_per_unit` is typically ~1e-4 (impact_total ≈ 25, encoder_span ≈ 250 000), so the score asymptotes to 99.99 regardless of severity values.
+- **Fix:** new `score_scale_factor` in `service_config`, defaults to 1.0 (backwards-compat). Applied in `_compute_quality_payload`, the trend computation, and both axes of `/api/quality/heatmap`.
+- **Operator UX:** new 🎯 **Calibrate score** button on the Shipment Quality Score card. First click previews the recommended factor (no DB write); second click applies. Target: p50=85, p5=60 over last 7 days. After applying, the strip starts showing red/yellow where the data warrants it.
+- **New endpoint** `POST /api/score/calibrate {target_p50, target_p5, window, apply}` does the math + optionally writes `score_scale_factor` to `service_config`. Returns the projected p5/p50/p95 of the score distribution.
+
+### Added — ejection axis strip
+- Two new strips under the existing Quality strips, one per axis (time + encoder). Cell color = the procedure that fired most in that bucket (golden-angle hue, deterministic by name → same color across both strips so an ejection cluster matches visually). Hover shows the per-procedure breakdown. Legend below each strip lists every procedure that fired in the window with totals.
+- **New endpoint** `GET /api/quality/ejection_axis?axis=time|encoder&window=24h&buckets=48` — returns per-bucket `{n, top_procedure, by_procedure: {name: count}}`.
+
+### Fixed — shipment code 404 + new format
+- `/api/shipments/next_code` was 404 on sites where `routers/health.py` was stale (drift-check earlier flagged this). New `health.py` deployed to all four sites.
+- **New code format:** `yyyymmddXXYYZZZ` (15 chars) where `XX` = 2-digit ID of the active capture state and `YY` = 2-digit ID of the active inference pipeline (alphabetical index, padded). `ZZZ` is the per-day chronological counter (Redis + DB hybrid, same as 3.25.0). Legacy 11-char codes from earlier today are still respected by the DB scan so the counter never collides.
+
+### Fixed — grid overflow on Detection Insights
+- `min-width: 0` added to `#insight-charts` + `#ejection-charts` grid containers and every direct child. Chart.js canvases default to their intrinsic device-pixel width and were pushing the donut chart off-screen on smaller viewports (reproduced on khoy-vteam19 screenshot).
+
+### Notes
+- Cache-buster bumped to `?v=3.25.12` on all custom JS so a normal F5 picks up the new code.
+
 ## [3.25.10] - 2026-06-13
 
 ### Added — AI Severity Suggester now scores ejection procedures too

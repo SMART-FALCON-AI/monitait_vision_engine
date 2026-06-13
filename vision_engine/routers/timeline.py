@@ -1212,8 +1212,19 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
 
         impact_per_unit = impact_total / denom if denom > 0 else 0.0
 
-        SCALE = 1.0
-        score = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit * SCALE))))
+        # 3.25.12 — score_scale_factor is the global "loudness knob" — multiplies
+        # impact_per_unit before the 100×(1−x) formula. Default 1.0 makes a long
+        # shipment with a handful of defects score ~99.99 (impact_per_unit on
+        # encoder-normalised lines is typically ~1e-4). The operator calibrates
+        # this once via POST /api/score/calibrate so the p50 of recent shipment
+        # scores lands at a target (default 85). Without it, severity changes
+        # can't move the score and the quality strip stays uniformly green.
+        try:
+            score_scale_factor = float(_svc.get("score_scale_factor") or 1.0)
+        except (TypeError, ValueError):
+            score_scale_factor = 1.0
+        impact_per_unit_scaled = impact_per_unit * score_scale_factor
+        score = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit_scaled))))
 
         if score >= QUALITY_RELEASE_SCORE:
             verdict = "RELEASE"
@@ -1278,6 +1289,9 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             # 3.25.8 — surface the ejection contribution separately for transparency.
             "ejection_impact": round(ejection_impact, 3),
             "ejection_counts": ejection_counts,
+            # 3.25.12 — surface the calibration knob so the UI + /api/score/calibrate
+            # can read/show the currently-applied loudness.
+            "score_scale_factor": round(score_scale_factor, 4),
         }
     except Exception as e:
         logger.warning(f"_compute_quality_payload failed: {e}")
@@ -1289,6 +1303,160 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
                 release_db_connection(conn)
             except Exception:
                 pass
+
+
+# 3.25.12 — auto-calibrate the score_scale_factor so the p50 of recent shipment
+# scores lands on a target (default 85). Without this calibration, scores are
+# typically stuck near 100 because impact_per_unit on encoder-normalised lines
+# is ~1e-4 — the formula 100*(1-impact_per_unit) bottoms out at 99.99. The
+# operator runs this once per site; the resulting scale_factor stays in config.
+@router.post("/api/score/calibrate")
+async def calibrate_score_scale(payload: dict = None):
+    """Auto-tune `score_scale_factor` against recent shipment data.
+
+    Body (all optional):
+      {
+        "target_p50": 85,          // desired median shipment score (0..100)
+        "target_p5":  60,          // desired floor (worst 5% lands at or below)
+        "window":     "7d",        // history window to sample
+        "min_shipments": 5,        // bail if fewer than this many distinct shipments
+        "apply":      false,       // if true, write to service_config and persist
+      }
+
+    Returns the recommended scale_factor + the projected p5 / p50 / p95
+    of the score distribution after applying it. No DB / config mutation
+    unless `apply=true`.
+    """
+    payload = payload or {}
+    target_p50 = float(payload.get("target_p50") or 85)
+    target_p5  = float(payload.get("target_p5")  or 60)
+    window     = str(payload.get("window") or "7d")
+    min_n      = int(payload.get("min_shipments") or 5)
+    apply      = bool(payload.get("apply") or False)
+
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    interval = _windows.get(window, "7 days")
+
+    try:
+        from services.db import get_db_connection, release_db_connection
+        from config import load_service_config as _lsc, save_service_config as _ssc
+    except Exception as e:
+        return JSONResponse(content={"error": f"db/config import failed: {e}"}, status_code=500)
+
+    conn = get_db_connection()
+    if conn is None:
+        return JSONResponse(content={"error": "DB unreachable"}, status_code=503)
+
+    try:
+        # Distinct recent shipments (segment 2 of image_path, per 3.25.4 fix).
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT SPLIT_PART(image_path, '/', 2) AS ship
+            FROM inference_results
+            WHERE time > NOW() - INTERVAL %s
+              AND image_path IS NOT NULL
+              AND SPLIT_PART(image_path, '/', 2) NOT IN ('', 'no_shipment')
+            """,
+            [interval],
+        )
+        ships = [r[0] for r in cur.fetchall() if r[0]]
+        cur.close()
+    finally:
+        try:
+            release_db_connection(conn)
+        except Exception:
+            pass
+
+    if len(ships) < min_n:
+        return JSONResponse(content={
+            "error": f"Need at least {min_n} shipments in {window}, found {len(ships)}.",
+            "shipments_found": len(ships),
+        }, status_code=400)
+
+    # Compute UNSCALED impact_per_unit for each shipment by recomputing the payload
+    # but ignoring the scale factor — we'll solve for it.
+    ipu_list = []
+    for s in ships:
+        try:
+            pl = _compute_quality_payload(shipment=s, window=window)
+            ipu = float(pl.get("impact_per_unit") or 0.0)
+            # _compute_quality_payload returns ALREADY-SCALED ipu since 3.25.12.
+            # We need the raw value, so divide back out.
+            current_scale = float(pl.get("score_scale_factor") or 1.0)
+            ipu_raw = ipu / current_scale if current_scale > 0 else ipu
+            if ipu_raw > 0:
+                ipu_list.append(ipu_raw)
+        except Exception:
+            continue
+
+    if len(ipu_list) < min_n:
+        return JSONResponse(content={
+            "error": "Recent shipments have zero impact — nothing to calibrate against.",
+            "shipments_with_impact": len(ipu_list),
+        }, status_code=400)
+
+    ipu_list.sort()
+    def _pct(arr, p):
+        if not arr: return 0.0
+        k = max(0, min(len(arr)-1, int(round((len(arr)-1) * p))))
+        return arr[k]
+    p5_raw  = _pct(ipu_list, 0.05)
+    p50_raw = _pct(ipu_list, 0.50)
+    p95_raw = _pct(ipu_list, 0.95)
+
+    # We want: score_p50 = 100 * (1 - ipu_p50 * scale) = target_p50
+    #          => scale = (1 - target_p50/100) / ipu_p50
+    # Same equation for p5. Pick the LARGER of the two so neither percentile
+    # exceeds its target (the score curve is bounded above by 100 so over-
+    # scaling on p50 won't blow up p5).
+    candidates = []
+    if p50_raw > 0:
+        candidates.append(max(0.0, (1.0 - target_p50 / 100.0) / p50_raw))
+    if p5_raw > 0:
+        candidates.append(max(0.0, (1.0 - target_p5  / 100.0) / p5_raw))
+    if not candidates:
+        return JSONResponse(content={
+            "error": "All ipu values are 0 — can't solve for scale.",
+        }, status_code=400)
+    new_scale = max(candidates)
+    # Sanity bounds: don't allow runaway factors or zero.
+    new_scale = max(0.001, min(1e9, new_scale))
+
+    # Project p5 / p50 / p95 of scores AFTER applying new_scale.
+    def _score(ipu):
+        return max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, ipu * new_scale))))
+    projected_p5  = _score(p95_raw)   # worst-impact -> lowest score
+    projected_p50 = _score(p50_raw)
+    projected_p95 = _score(p5_raw)    # least-impact -> highest score
+
+    result = {
+        "shipments_sampled": len(ipu_list),
+        "ipu_p5_raw":  round(p5_raw, 6),
+        "ipu_p50_raw": round(p50_raw, 6),
+        "ipu_p95_raw": round(p95_raw, 6),
+        "current_scale_factor": None,
+        "recommended_scale_factor": round(new_scale, 4),
+        "projected_score_p5":  round(projected_p5, 1),
+        "projected_score_p50": round(projected_p50, 1),
+        "projected_score_p95": round(projected_p95, 1),
+        "target_p50": target_p50,
+        "target_p5":  target_p5,
+        "applied": False,
+    }
+
+    try:
+        svc = _lsc() or {}
+        result["current_scale_factor"] = float(svc.get("score_scale_factor") or 1.0)
+        if apply:
+            svc["score_scale_factor"] = round(new_scale, 4)
+            _ssc(svc)
+            result["applied"] = True
+    except Exception as e:
+        logger.warning(f"calibrate_score_scale config write failed: {e}")
+        result["apply_error"] = str(e)
+
+    return JSONResponse(content=result)
 
 
 @router.get("/api/shipment_quality_score")
@@ -1666,7 +1834,13 @@ async def shipment_quality_score_trend(
             per_bucket_impact[bkt] = per_bucket_impact.get(bkt, 0.0) + sev * cs
             per_bucket_count[bkt] = per_bucket_count.get(bkt, 0) + n_i
 
-        SCALE = 1.0
+        # 3.25.12 — same calibration knob as the main shipment score (see
+        # _compute_quality_payload). Without this the trend buckets are also
+        # near-100 for any real factory throughput.
+        try:
+            SCALE = float(_svc.get("score_scale_factor") or 1.0)
+        except (TypeError, ValueError):
+            SCALE = 1.0
         result = []
         for bkt, frames, enc_min, enc_max, t0, t1 in frame_rows:
             impact = per_bucket_impact.get(bkt, 0.0)
@@ -1816,6 +1990,198 @@ async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
     return JSONResponse(content={"shipments": out})
 
 
+# 3.25.12 — ejection axis: where ejections occurred, colored by procedure name.
+# Renders as a thin strip below the quality-by-time / quality-by-encoder strips.
+# The Charts tab calls this with axis=time or axis=encoder. Each bucket gets:
+#   - the dominant procedure name (most-fired in that bucket) → strip cell color
+#   - a tooltip with the per-procedure breakdown
+@router.get("/api/quality/ejection_axis")
+async def quality_ejection_axis(
+    request: Request,
+    axis: str = "time",
+    window: str = "24h",
+    buckets: int = 48,
+    shipment: str = "",
+):
+    """Return per-bucket ejection event counts grouped by procedure_name.
+
+    Output: {
+        "axis": "time"|"encoder",
+        "buckets": [{
+            "bucket": <int>,
+            "label":  <str>,                # bucket axis label
+            "n":      <int>,                # total events in bucket
+            "top_procedure": <str|None>,    # most-fired proc name (drives color)
+            "by_procedure": {<name>: <int>, ...}
+        }, ...],
+        # for time:
+        "t_min": iso, "t_max": iso, "secs_per_bucket": int,
+        # for encoder:
+        "encoder_min": int, "encoder_max": int, "width_per_bucket": int,
+    }
+    """
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    interval = _windows.get(window, "24 hours")
+    buckets = max(8, min(120, int(buckets)))
+    axis_l = (axis or "time").lower()
+
+    cells = []
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content={"axis": axis_l, "buckets": [], "shipment": shipment})
+        try:
+            cur = conn.cursor()
+            ship_clause = ""
+            params: list = []
+            if shipment:
+                ship_clause = "AND shipment = %s "
+                params.append(shipment)
+
+            if axis_l == "encoder":
+                cur.execute(
+                    f"""
+                    SELECT MIN(encoder_value), MAX(encoder_value)
+                    FROM ejection_events
+                    WHERE time > NOW() - INTERVAL %s
+                      AND encoder_value IS NOT NULL
+                      {ship_clause}
+                    """,
+                    [interval, *params],
+                )
+                enc_min, enc_max = cur.fetchone() or (None, None)
+                if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
+                    cur.close()
+                    note = "no ejection events in window" if enc_min is None else \
+                           "encoder reports no pulses on ejection events"
+                    return JSONResponse(content={
+                        "axis": "encoder", "buckets": [],
+                        "shipment": shipment, "note": note,
+                    })
+                enc_min = int(enc_min); enc_max = int(enc_max)
+                span = enc_max - enc_min
+                width = max(1, span // buckets)
+                cur.execute(
+                    f"""
+                    SELECT bucket, procedure_name, COUNT(*) AS n
+                    FROM (
+                      SELECT
+                        LEAST(%s - 1, GREATEST(0,
+                            ((encoder_value - %s)::bigint / NULLIF(%s,0)::bigint))::int
+                        ) AS bucket,
+                        procedure_name
+                      FROM ejection_events
+                      WHERE time > NOW() - INTERVAL %s
+                        AND encoder_value IS NOT NULL
+                        {ship_clause}
+                    ) src
+                    GROUP BY bucket, procedure_name
+                    """,
+                    [buckets, enc_min, width, interval, *params],
+                )
+                bd_data: dict = {}
+                for b, name, n in cur.fetchall():
+                    try: b = int(b or 0)
+                    except (TypeError, ValueError): continue
+                    n_i = int(n or 0)
+                    pname = str(name) if name is not None else "(unknown)"
+                    bd = bd_data.setdefault(b, {"n": 0, "by_procedure": {}})
+                    bd["n"] += n_i
+                    bd["by_procedure"][pname] = bd["by_procedure"].get(pname, 0) + n_i
+                cur.close()
+                for b in range(buckets):
+                    bd = bd_data.get(b, {"n": 0, "by_procedure": {}})
+                    top = max(bd["by_procedure"].items(), key=lambda kv: kv[1])[0] if bd["by_procedure"] else None
+                    cells.append({
+                        "bucket": b,
+                        "label": f"{enc_min + b * width:,} – {enc_min + (b+1) * width - 1:,}",
+                        "n": bd["n"],
+                        "top_procedure": top,
+                        "by_procedure": bd["by_procedure"],
+                    })
+                return JSONResponse(content={
+                    "axis": "encoder", "buckets": cells,
+                    "encoder_min": enc_min, "encoder_max": enc_max,
+                    "width_per_bucket": width, "shipment": shipment,
+                })
+
+            # ----- TIME axis -----
+            cur.execute(
+                f"""
+                SELECT MIN(time), MAX(time)
+                FROM ejection_events
+                WHERE time > NOW() - INTERVAL %s
+                  {ship_clause}
+                """,
+                [interval, *params],
+            )
+            t_min, t_max = cur.fetchone() or (None, None)
+            if not t_min or not t_max:
+                cur.close()
+                return JSONResponse(content={
+                    "axis": "time", "buckets": [],
+                    "shipment": shipment, "note": "no ejection events in window",
+                })
+
+            cur.execute(
+                f"""
+                SELECT bucket, procedure_name, COUNT(*) AS n
+                FROM (
+                  SELECT
+                    LEAST(%s - 1, GREATEST(0,
+                        EXTRACT(EPOCH FROM (time - %s))::bigint
+                          / NULLIF(EXTRACT(EPOCH FROM (%s::timestamptz - %s))::bigint / %s, 0)
+                    ))::int AS bucket,
+                    procedure_name
+                  FROM ejection_events
+                  WHERE time > NOW() - INTERVAL %s
+                    {ship_clause}
+                ) src
+                GROUP BY bucket, procedure_name
+                """,
+                [buckets, t_min, t_max, t_min, buckets, interval, *params],
+            )
+            bd_time: dict = {}
+            for b, name, n in cur.fetchall():
+                try: b = int(b or 0)
+                except (TypeError, ValueError): continue
+                n_i = int(n or 0)
+                pname = str(name) if name is not None else "(unknown)"
+                bd = bd_time.setdefault(b, {"n": 0, "by_procedure": {}})
+                bd["n"] += n_i
+                bd["by_procedure"][pname] = bd["by_procedure"].get(pname, 0) + n_i
+            cur.close()
+
+            total_secs = (t_max - t_min).total_seconds()
+            secs_per_bucket = max(1.0, total_secs / buckets)
+            for b in range(buckets):
+                bd = bd_time.get(b, {"n": 0, "by_procedure": {}})
+                ts_start = t_min + _td(seconds=int(b * secs_per_bucket))
+                top = max(bd["by_procedure"].items(), key=lambda kv: kv[1])[0] if bd["by_procedure"] else None
+                cells.append({
+                    "bucket": b,
+                    "label": ts_start.strftime("%H:%M") if total_secs <= 86400 else ts_start.strftime("%m-%d %H:%M"),
+                    "ts":    ts_start.isoformat(),
+                    "n":     bd["n"],
+                    "top_procedure": top,
+                    "by_procedure": bd["by_procedure"],
+                })
+            return JSONResponse(content={
+                "axis": "time", "buckets": cells,
+                "t_min": t_min.isoformat(), "t_max": t_max.isoformat(),
+                "secs_per_bucket": int(secs_per_bucket), "shipment": shipment,
+            })
+        finally:
+            try:
+                release_db_connection(conn)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(f"quality_ejection_axis failed: {e}")
+        return JSONResponse(content={"axis": axis_l, "buckets": [], "error": str(e)})
+
+
 @router.get("/api/quality/heatmap")
 async def quality_heatmap(
     request: Request,
@@ -1850,8 +2216,16 @@ async def quality_heatmap(
             for k, v in (svc.get("audio_settings") or {}).items()
             if isinstance(v, dict)
         }
+        # 3.25.12 — same global loudness knob as the shipment quality score so
+        # the heatmap strips reflect the same calibration. The legacy 0.0001
+        # constant stays as the base scale; score_scale_factor multiplies it.
+        try:
+            _heatmap_scale = float(svc.get("score_scale_factor") or 1.0)
+        except (TypeError, ValueError):
+            _heatmap_scale = 1.0
     except Exception:
         sev_map = {}
+        _heatmap_scale = 1.0
 
     cells = []
     try:
@@ -1931,7 +2305,7 @@ async def quality_heatmap(
 
                 for b in range(buckets):
                     bd = bucket_data.get(b, {"n": 0, "impact": 0.0, "top_class": None})
-                    score = max(0.0, 100.0 - bd["impact"] * 0.0001)  # tunable
+                    score = max(0.0, 100.0 - bd["impact"] * 0.0001 * _heatmap_scale)
                     cells.append({
                         "bucket": b,
                         "label": f"{enc_min + b * width:,} – {enc_min + (b+1) * width - 1:,}",
@@ -2004,7 +2378,7 @@ async def quality_heatmap(
             for b in range(buckets):
                 bd = bucket_data2.get(b, {"n": 0, "impact": 0.0, "top_class": None})
                 ts_start = t_min + _td(seconds=int(b * secs_per_bucket))
-                score = max(0.0, 100.0 - bd["impact"] * 0.0001)
+                score = max(0.0, 100.0 - bd["impact"] * 0.0001 * _heatmap_scale)
                 cells.append({
                     "bucket": b,
                     "label": ts_start.strftime("%H:%M") if total_secs <= 86400 else ts_start.strftime("%m-%d %H:%M"),

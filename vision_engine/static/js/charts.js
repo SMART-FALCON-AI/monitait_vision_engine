@@ -231,6 +231,76 @@ async function downloadQualityReport() {
 window.downloadQualityReport = downloadQualityReport;
 
 
+// 3.25.12 — calibrate the global score_scale_factor so the strip stops being
+// all-green. Two clicks: first to preview (no DB write), second to apply.
+async function calibrateShipmentScore() {
+    const btn = document.getElementById('sqs-calibrate');
+    const resultEl = document.getElementById('sqs-calibrate-result');
+    if (!btn || !resultEl) return;
+    btn.disabled = true; btn.style.opacity = '0.6';
+    const prevState = btn.dataset.calState || 'preview';
+    try {
+        if (prevState === 'preview') {
+            // Preview: ask for the recommendation but DON'T apply.
+            const r = await fetch('/api/score/calibrate', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ target_p50: 85, target_p5: 60, window: '7d', apply: false }),
+            });
+            const d = await r.json();
+            if (!r.ok) {
+                resultEl.style.display = 'block';
+                resultEl.innerHTML = '<b>✗ ' + (d.error || ('HTTP ' + r.status)) + '</b>';
+                return;
+            }
+            resultEl.style.display = 'block';
+            resultEl.innerHTML =
+                '<b>Calibration preview (' + d.shipments_sampled + ' shipments, 7d):</b><br>' +
+                'Current scale: <code>' + d.current_scale_factor + '</code><br>' +
+                'Recommended:   <code>' + d.recommended_scale_factor + '</code><br>' +
+                'After applying:&nbsp; p5 ≈ <b>' + d.projected_score_p5 + '</b>, ' +
+                'p50 ≈ <b>' + d.projected_score_p50 + '</b>, ' +
+                'p95 ≈ <b>' + d.projected_score_p95 + '</b><br>' +
+                '<i>Click again to apply.</i>';
+            btn.textContent = '✓ Apply ' + d.recommended_scale_factor;
+            btn.dataset.calState = 'apply';
+            btn.dataset.calRecommended = String(d.recommended_scale_factor);
+        } else {
+            // Apply.
+            const r = await fetch('/api/score/calibrate', {
+                method: 'POST', headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({ target_p50: 85, target_p5: 60, window: '7d', apply: true }),
+            });
+            const d = await r.json();
+            if (!r.ok || !d.applied) {
+                resultEl.style.display = 'block';
+                resultEl.innerHTML = '<b>✗ Apply failed: ' + (d.error || d.apply_error || ('HTTP ' + r.status)) + '</b>';
+                return;
+            }
+            resultEl.innerHTML =
+                '<b>✓ Applied scale = ' + d.recommended_scale_factor + '.</b><br>' +
+                'New score distribution: p5 ≈ ' + d.projected_score_p5 + ', ' +
+                'p50 ≈ ' + d.projected_score_p50 + ', p95 ≈ ' + d.projected_score_p95 + '.<br>' +
+                '<i>Refresh the page to see the new score / strip colors.</i>';
+            btn.textContent = '🎯 Calibrate score';
+            btn.dataset.calState = 'preview';
+            // Refresh the score card so the operator sees the new score immediately.
+            if (typeof refreshShipmentQualityScore === 'function') {
+                setTimeout(refreshShipmentQualityScore, 600);
+            }
+            if (typeof refreshQualityCharts === 'function') {
+                setTimeout(refreshQualityCharts, 800);
+            }
+        }
+    } catch (e) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = '<b>✗ Network error: ' + (e.message || e) + '</b>';
+    } finally {
+        btn.disabled = false; btn.style.opacity = '1';
+    }
+}
+window.calibrateShipmentScore = calibrateShipmentScore;
+
+
 // 3.21.16 — Quality drift / trend chart under the score card.
 // Bucketed impact-per-unit timeline with verdict-threshold guide lines.
 let _sqsTrendChart = null;
@@ -1425,6 +1495,9 @@ async function refreshQualityCharts() {
         _loadQualityShipmentsChart(),
         _loadQualityHeatmap('time', win),
         _loadQualityHeatmap('encoder', win),
+        // 3.25.12 — ejection axis strips beneath the quality strips.
+        _loadEjectionAxis('time', win),
+        _loadEjectionAxis('encoder', win),
     ]);
 }
 window.refreshQualityCharts = refreshQualityCharts;
@@ -1474,6 +1547,58 @@ async function _loadQualityShipmentsChart() {
         });
     } catch (e) { console.warn('shipments chart failed', e); }
 }
+
+// 3.25.12 — deterministic color per procedure name (golden-angle hue). Same name
+// → same color across the time + encoder strip so the operator can visually
+// match an ejection cluster across both axes.
+function _procColor(name) {
+    if (!name) return 'rgba(100,116,139,0.5)';
+    let h = 0;
+    for (let i = 0; i < name.length; i++) { h = ((h << 5) - h + name.charCodeAt(i)) | 0; }
+    // 137.508° is the golden angle — gives well-separated hues for distinct names.
+    const hue = ((h * 137.508) % 360 + 360) % 360;
+    return `hsl(${hue.toFixed(0)}, 70%, 55%)`;
+}
+
+async function _loadEjectionAxis(axis, win) {
+    const stripId  = axis === 'encoder' ? 'ejection-encoder-strip'  : 'ejection-time-strip';
+    const legendId = axis === 'encoder' ? 'ejection-encoder-legend' : 'ejection-time-legend';
+    const strip  = document.getElementById(stripId);
+    const legend = document.getElementById(legendId);
+    if (!strip) return;
+    try {
+        const r = await fetch(`/api/quality/ejection_axis?axis=${axis}&window=${encodeURIComponent(win)}&buckets=48`);
+        const d = await r.json();
+        const cells = d.buckets || [];
+        if (!cells.length) {
+            const hint = d.note || 'no ejection events in window';
+            strip.innerHTML = `<div style="color:var(--text-secondary); font-size:10px; padding:2px; flex:1; text-align:center; font-style:italic;">${hint}</div>`;
+            if (legend) legend.innerHTML = '';
+            return;
+        }
+        // Cells: colored by top_procedure; empty buckets stay transparent.
+        strip.innerHTML = cells.map(c => {
+            const color = c.top_procedure ? _procColor(c.top_procedure) : 'transparent';
+            const parts = Object.entries(c.by_procedure || {})
+                .sort((a, b) => b[1] - a[1])
+                .map(([n, k]) => `${n}: ${k}`).join('\n');
+            const tip = `${c.label}\nTotal ejections: ${c.n}\n${parts}`.trim();
+            return `<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`;
+        }).join('');
+        // Legend: chip per procedure that fired in the window (deterministic colors).
+        if (legend) {
+            const totals = {};
+            cells.forEach(c => {
+                Object.entries(c.by_procedure || {}).forEach(([n, k]) => { totals[n] = (totals[n] || 0) + k; });
+            });
+            legend.innerHTML = Object.entries(totals)
+                .sort((a, b) => b[1] - a[1])
+                .map(([n, k]) => `<span style="display:inline-flex; align-items:center; gap:3px;"><span style="display:inline-block; width:10px; height:10px; background:${_procColor(n)}; border-radius:2px;"></span>${n} (${k})</span>`)
+                .join('');
+        }
+    } catch (e) { console.warn(`ejection_axis ${axis} failed`, e); }
+}
+
 
 async function _loadQualityHeatmap(axis, win) {
     const stripId = axis === 'encoder' ? 'quality-encoder-strip' : 'quality-time-strip';

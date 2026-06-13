@@ -12,7 +12,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=3.25.10"></script>
+        <script src="/static/js/i18n.js?v=3.25.12"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -899,7 +899,10 @@
                             </div>
                             <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
                                 <button id="sqs-download-pdf" type="button" onclick="downloadQualityReport()" style="padding:8px 14px; background:linear-gradient(135deg,#10b981,#059669); color:white; border:none; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.2);">📄 Download PDF</button>
+                                <!-- 3.25.12 — Calibrate the global score_scale_factor so p50 of recent shipment scores lands at 85. Without this, all impact_per_unit values on encoder-normalised lines are ~1e-4 and every shipment scores 99.99 (the all-green strip). -->
+                                <button id="sqs-calibrate" type="button" onclick="calibrateShipmentScore()" title="Auto-tune the score so half your recent shipments land at 85 — useful when the strip is stuck on all-green." style="padding:6px 12px; background:linear-gradient(135deg,#f59e0b,#d97706); color:white; border:none; border-radius:6px; font-size:11px; font-weight:600; cursor:pointer;">🎯 Calibrate score</button>
                                 <span id="sqs-download-hint" style="font-size:10px; color:var(--text-secondary); font-style:italic;">uses current window + shipment</span>
+                                <div id="sqs-calibrate-result" style="display:none; max-width:340px; margin-top:4px; padding:6px 8px; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.4); border-radius:4px; font-size:11px; line-height:1.45; color:#fde68a;"></div>
                             </div>
                         </div>
                         <!-- 3.21.16 — Quality drift / trend within shipment -->
@@ -917,33 +920,42 @@
                     <div id="insight-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
                         No stored detections in this window yet. Detections appear here once a class has <b>Store</b> enabled (Process tab → Per-Object Configuration) and the line is running.
                     </div>
-                    <div id="insight-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
+                    <!-- 3.25.11 — `min-width:0` on the grid container forces grid items to shrink with the viewport; without it, the Chart.js canvases default to their intrinsic device-pixel width and push the donut/pie off-screen. Each direct child also gets `min-width:0` so the same behavior applies one level deeper. -->
+                    <div id="insight-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; min-width:0;">
                         <!-- 3.25.7 — Pareto (top-impact classes) stays at top: most-used chart on the tab. -->
-                        <div style="min-height:240px;"><canvas id="insight-class-chart"></canvas></div>
-                        <div style="min-height:240px;"><canvas id="insight-class-pie"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="insight-class-chart"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="insight-class-pie"></canvas></div>
                         <!-- 3.25.7 — Camera scatters promoted above the secondary charts. -->
-                        <div style="grid-column: 1 / -1;">
-                            <div style="min-height:300px;"><canvas id="insight-camera-scatter"></canvas></div>
+                        <div style="grid-column: 1 / -1; min-width:0;">
+                            <div style="min-height:300px; min-width:0; overflow:hidden;"><canvas id="insight-camera-scatter"></canvas></div>
                             <div id="quality-time-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📍 quality by time — hover a cell for top defect + score</div>
                                 <div id="quality-time-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-time-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
+                                <!-- 3.25.12 — ejection axis: where ejections occurred, colored by procedure name. -->
+                                <div style="font-size:10px; color:var(--text-secondary); margin-top:6px; margin-bottom:2px;">⏏️ ejections by time — color = procedure; hover for breakdown</div>
+                                <div id="ejection-time-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                <div id="ejection-time-legend" style="display:flex; flex-wrap:wrap; gap:8px; font-size:10px; color:var(--text-secondary); margin-top:3px;"></div>
                             </div>
                         </div>
-                        <div style="grid-column: 1 / -1;">
-                            <div style="min-height:300px;"><canvas id="insight-camera-scatter-encoder"></canvas></div>
+                        <div style="grid-column: 1 / -1; min-width:0;">
+                            <div style="min-height:300px; min-width:0; overflow:hidden;"><canvas id="insight-camera-scatter-encoder"></canvas></div>
                             <div id="quality-encoder-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📏 quality by encoder — find spots on the material with the most issues</div>
                                 <div id="quality-encoder-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-encoder-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
+                                <!-- 3.25.12 — ejection axis (encoder): same as time-axis but indexed by encoder position. -->
+                                <div style="font-size:10px; color:var(--text-secondary); margin-top:6px; margin-bottom:2px;">⏏️ ejections by encoder — color = procedure; hover for breakdown</div>
+                                <div id="ejection-encoder-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                <div id="ejection-encoder-legend" style="display:flex; flex-wrap:wrap; gap:8px; font-size:10px; color:var(--text-secondary); margin-top:3px;"></div>
                             </div>
                         </div>
                         <!-- 3.25.7 — Secondary diagnostics (less load-bearing at-a-glance): pushed below the scatters. -->
                         <div style="grid-column: 1 / -1; margin-top:8px; padding-top:8px; border-top:1px dashed rgba(71,85,105,0.5); font-size:11px; color:var(--text-secondary); letter-spacing:0.4px; text-transform:uppercase;">Secondary diagnostics</div>
-                        <div style="min-height:240px;"><canvas id="insight-timeline-chart"></canvas></div>
-                        <div style="min-height:260px;"><canvas id="insight-size-chart"></canvas></div>
-                        <div style="min-height:260px;"><canvas id="insight-confidence-chart"></canvas></div>
-                        <div style="min-height:280px;"><canvas id="insight-confidence-class-chart"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="insight-timeline-chart"></canvas></div>
+                        <div style="min-height:260px; min-width:0; overflow:hidden;"><canvas id="insight-size-chart"></canvas></div>
+                        <div style="min-height:260px; min-width:0; overflow:hidden;"><canvas id="insight-confidence-chart"></canvas></div>
+                        <div style="min-height:280px; min-width:0; overflow:hidden;"><canvas id="insight-confidence-class-chart"></canvas></div>
                     </div>
                     <div id="insight-total" style="margin-top:10px; font-size:12px; color:var(--text-secondary);"></div>
                 </div>
@@ -969,10 +981,11 @@
                     <div id="ejection-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
                         No ejection events stored in this window yet. Tick <b>Store</b> on a procedure (Process tab → Ejection Procedures) and run the line — each fired procedure with Store on is logged here.
                     </div>
-                    <div id="ejection-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
-                        <div style="min-height:240px;"><canvas id="ejection-proc-bar"></canvas></div>
-                        <div style="min-height:240px;"><canvas id="ejection-proc-pie"></canvas></div>
-                        <div style="min-height:240px; grid-column: 1 / -1;"><canvas id="ejection-timeline"></canvas></div>
+                    <!-- 3.25.11 — same min-width:0 grid fix as insight-charts above. -->
+                    <div id="ejection-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; min-width:0;">
+                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="ejection-proc-bar"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="ejection-proc-pie"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden; grid-column: 1 / -1;"><canvas id="ejection-timeline"></canvas></div>
                     </div>
                 </div>
                 <!-- Production KPIs — from production_metrics (PLC OK/NG, downtime), 3.18.0 -->
@@ -1027,9 +1040,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=3.25.10"></script>
+            <script src="/static/js/iframes.js?v=3.25.12"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=3.25.10"></script>
+            <script src="/static/js/charts.js?v=3.25.12"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1720,7 +1733,7 @@
             </div>
         </div>
 
-        <script src="/static/js/audio.js?v=3.25.10"></script>
-        <script src="/static/js/app-core.js?v=3.25.10"></script>
+        <script src="/static/js/audio.js?v=3.25.12"></script>
+        <script src="/static/js/app-core.js?v=3.25.12"></script>
     </body>
 </html>

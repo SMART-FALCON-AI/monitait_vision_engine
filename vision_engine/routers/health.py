@@ -79,24 +79,75 @@ async def config_db_status():
 
 
 @router.get("/api/shipments/next_code")
-async def next_shipment_code():
-    """3.25.0 — generate the next sequential shipment ID `yyyymmddXXX`.
+async def next_shipment_code(request: Request):
+    """3.25.12 — generate the next shipment ID in the format `yyyymmddXXYYZZZ`:
 
-    Hybrid counter:
-      1) read a Redis-backed per-day counter (`shipment_seq:<yyyymmdd>`)
-         that increments on every 🎲 click — this is what makes back-to-back
-         clicks return 001, 002, 003 even before the operator hits Save.
-      2) also scan `inference_results` for distinct shipment prefixes that
-         match `<today>NNN` — if a higher number is already in the DB
-         (cross-operator scenario, or restored from backup), use that.
-      3) take max(redis, db) + 1, then INCR redis to the new value so the
-         next call continues from there.
+      * yyyymmdd  — date
+      * XX        — 2-digit ID of the currently-active capture state
+                    (alphabetical index across all defined states, padded)
+      * YY        — 2-digit ID of the currently-active inference pipeline
+      * ZZZ       — chronological per-day counter
 
-    Redis counter auto-expires at end of day so the seq cleanly resets.
+    State/pipeline IDs are derived from their alphabetical position in the
+    saved config so the mapping is deterministic across restarts and across
+    sites (provided the same names exist). When the operator adds a new
+    state, the IDs of existing states are stable as long as the new name
+    sorts after them.
+
+    Hybrid counter for ZZZ (unchanged from 3.25.0):
+      1) Redis-backed per-day counter `shipment_seq:<yyyymmdd>` — back-to-back
+         🎲 clicks return 001, 002, 003 even before the operator saves.
+      2) DB scan over `inference_results` for any shipment matching today's
+         date — if a higher ZZZ is already in the DB (cross-operator,
+         restored backup, or pre-3.25.12 short codes), use that.
+      3) next ZZZ = max(redis, db) + 1; persist to redis with EOD expiry.
     """
     from datetime import datetime as _dt
     today = _dt.now().strftime("%Y%m%d")
     redis_key = f"shipment_seq:{today}"
+
+    # --- A) Derive 2-digit IDs for the currently-active state + pipeline.
+    state_id = 0
+    pipeline_id = 0
+    try:
+        from config import load_service_config as _lsc
+        svc = _lsc() or {}
+        states = svc.get("states") or {}
+        active_state = svc.get("current_state_name") or "default"
+        if isinstance(states, dict) and states:
+            ordered = sorted(states.keys())
+            try:
+                state_id = ordered.index(active_state)
+            except ValueError:
+                state_id = 0
+        # Pipeline: prefer the live PipelineManager (covers in-memory swap
+        # before service_config sync), fall back to config.
+        try:
+            pm = request.app.state.pipeline_manager
+            pipelines = getattr(pm, "pipelines", None) or {}
+            cur_pipe = getattr(pm, "current_pipeline", None)
+            active_pipeline = (cur_pipe.name if cur_pipe and hasattr(cur_pipe, "name") else None) or ""
+            if isinstance(pipelines, dict) and pipelines:
+                ordered_p = sorted(pipelines.keys())
+                if active_pipeline in ordered_p:
+                    pipeline_id = ordered_p.index(active_pipeline)
+        except Exception:
+            # Fall back to config-only lookup
+            try:
+                pipelines = svc.get("pipelines") or {}
+                active_pipeline = svc.get("current_pipeline_name") or ""
+                if isinstance(pipelines, dict) and pipelines:
+                    ordered_p = sorted(pipelines.keys())
+                    if active_pipeline in ordered_p:
+                        pipeline_id = ordered_p.index(active_pipeline)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"shipment_code: state/pipeline lookup failed: {e}")
+
+    state_id = max(0, min(99, int(state_id)))
+    pipeline_id = max(0, min(99, int(pipeline_id)))
+    prefix = f"{today}{state_id:02d}{pipeline_id:02d}"  # 12-char prefix
 
     # --- 1) Redis counter (or 0 if unreachable / unset)
     redis_max = 0
@@ -110,7 +161,8 @@ async def next_shipment_code():
     except Exception as e:
         logger.debug(f"shipment_seq redis read failed: {e}")
 
-    # --- 2) DB scan (max chronological suffix already used today)
+    # --- 2) DB scan — find max ZZZ over BOTH new (15-char) and legacy (11-char)
+    # codes for today, so the counter never collides with a pre-3.25.12 code.
     db_max = 0
     try:
         from services.db import get_db_connection, release_db_connection
@@ -118,6 +170,23 @@ async def next_shipment_code():
         if conn is not None:
             try:
                 cur = conn.cursor()
+                # New format: yyyymmddXXYYZZZ — match any state/pipeline pair.
+                cur.execute(
+                    """
+                    SELECT MAX(CAST(RIGHT(image_path, 3) AS INTEGER))
+                    FROM (
+                      SELECT DISTINCT SPLIT_PART(image_path, '/', 1) AS image_path
+                      FROM inference_results
+                      WHERE time::date = CURRENT_DATE
+                    ) ships
+                    WHERE image_path ~ %s
+                    """,
+                    (rf'^{today}\d{{7}}$',),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    db_max = max(db_max, int(row[0]))
+                # Legacy: yyyymmddZZZ (11 chars).
                 cur.execute(
                     """
                     SELECT MAX(CAST(SUBSTRING(image_path FROM %s) AS INTEGER))
@@ -132,7 +201,7 @@ async def next_shipment_code():
                 )
                 row = cur.fetchone()
                 if row and row[0] is not None:
-                    db_max = int(row[0])
+                    db_max = max(db_max, int(row[0]))
                 cur.close()
             finally:
                 try:
@@ -148,8 +217,6 @@ async def next_shipment_code():
         from redis import Redis
         from config import REDIS_DB
         r = Redis("redis", 6379, db=REDIS_DB)
-        # Seconds until midnight local time — Redis EXPIREAT would be cleaner
-        # but SETEX works portably.
         now = _dt.now()
         end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
         ttl = max(60, int((end_of_day - now).total_seconds()))
@@ -157,10 +224,11 @@ async def next_shipment_code():
     except Exception as e:
         logger.debug(f"shipment_seq redis write failed: {e}")
 
-    code = f"{today}{next_num:03d}"
+    code = f"{prefix}{next_num:03d}"  # yyyymmddXXYYZZZ (15 chars)
     return JSONResponse(content={
-        "code": code, "today": today, "seq": next_num,
-        "redis_seq": redis_max, "db_seq": db_max,
+        "code": code, "today": today,
+        "state_id": state_id, "pipeline_id": pipeline_id,
+        "seq": next_num, "redis_seq": redis_max, "db_seq": db_max,
     })
 
 
