@@ -408,34 +408,70 @@ WEIGHTS_DIR = pathlib.Path("/weights")
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
 
 
-def _yolo_base_url():
-    """Derive YOLO service base URL (without /detect/) from the configured detection URL."""
-    url = config.YOLO_INFERENCE_URL.rstrip("/")
+def _yolo_base_url(request: "Request | None" = None):
+    """Derive YOLO service base URL (without /detect/) from the ACTIVE pipeline.
+
+    4.0.47 — previously this read `config.YOLO_INFERENCE_URL` (a static env-var
+    snapshot at process start). When the operator switched to "Local YOLO" via
+    the Inference tab, the PipelineManager.current_pipeline got updated but
+    this helper kept pointing at the legacy HuggingFace Space URL. Result:
+    /set-model called the HF Space → 404 Not Found → "Failed to activate
+    model: unknown error" in the UI. Verified on vteam12 2026-06-22: logs
+    showed `base='https://smartfalcon-ai-industrial-defect-detection.hf.space'`.
+
+    Resolution order:
+      1. pipeline_manager.get_current_model().inference_url  (operator's choice)
+      2. config.YOLO_INFERENCE_URL                            (legacy fallback)
+    Then strip a trailing /detect/ to get the base.
+    """
+    url = None
+    try:
+        if request is not None:
+            pm = getattr(request.app.state, "pipeline_manager", None)
+            if pm and pm.get_current_model():
+                url = pm.get_current_model().inference_url
+    except Exception:
+        url = None
+    if not url:
+        url = config.YOLO_INFERENCE_URL
+    url = (url or "").rstrip("/")
     if url.endswith("/detect"):
         url = url[:-len("/detect")]
     return url
 
 
-def _call_set_model_all_replicas(model_path: str):
+def _call_set_model_all_replicas(model_path: str, request=None):
     """Call set-model on yolo_inference, repeating to cover all replicas via DNS round-robin."""
-    base = _yolo_base_url()
+    base = _yolo_base_url(request)
     replicas = int(os.environ.get("YOLO_REPLICAS", 2))
     attempts = max(replicas * 3, 6)
     successes = 0
     last_error = None
-    for _ in range(attempts):
+    # 4.0.47 — log every attempt so we can see WHY successes stays 0 even when
+    # a direct curl to the same URL returns 200. Earlier "unknown error"
+    # response on the UI gave us nothing to debug; this surfaces it.
+    logger.info(f"set-model: base={base!r} model_path={model_path!r} attempts={attempts}")
+    for i in range(attempts):
         try:
             resp = requests.post(f"{base}/set-model", data={"model_path": model_path}, timeout=30)
+            logger.info(f"set-model attempt {i+1}/{attempts}: status={resp.status_code} body={resp.text[:200]!r}")
             if resp.status_code == 200:
                 successes += 1
+            else:
+                # Capture the non-200 as last_error too so the caller's error
+                # message is informative (was always "unknown error" because
+                # last_error stayed None when status was non-200).
+                last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
         except Exception as e:
             last_error = e
+            logger.info(f"set-model attempt {i+1}/{attempts}: exception={e!r}")
+    logger.info(f"set-model done: successes={successes}/{attempts} last_error={last_error!r}")
     return successes, last_error
 
 
-def _fetch_classes():
+def _fetch_classes(request=None):
     """Fetch class names from the currently loaded YOLO model."""
-    base = _yolo_base_url()
+    base = _yolo_base_url(request)
     try:
         resp = requests.get(f"{base}/classes", timeout=10)
         if resp.status_code == 200:
@@ -448,7 +484,7 @@ def _fetch_classes():
 
 
 @router.get("/api/models/weights")
-def list_weights():
+def list_weights(request: Request):
     """List available .pt weight files in /weights/ directory, plus current active classes."""
     weights = []
     if WEIGHTS_DIR.exists():
@@ -460,12 +496,12 @@ def list_weights():
                 "modified": stat.st_mtime,
             })
 
-    current_classes = _fetch_classes()
+    current_classes = _fetch_classes(request)
     return JSONResponse(content={"weights": weights, "current_classes": current_classes})
 
 
 @router.post("/api/models/upload-weights")
-async def upload_weights(file: UploadFile = File(...)):
+async def upload_weights(request: Request, file: UploadFile = File(...)):
     """Upload a .pt weight file and activate it on all YOLO replicas."""
     if not file.filename or not file.filename.endswith(".pt"):
         return JSONResponse(content={"error": "Only .pt files are allowed"}, status_code=400)
@@ -507,7 +543,7 @@ async def upload_weights(file: UploadFile = File(...)):
 
     # Activate on all YOLO replicas (use the just-uploaded path)
     model_path = f"/weights/{safe_name}"
-    successes, last_error = _call_set_model_all_replicas(model_path)
+    successes, last_error = _call_set_model_all_replicas(model_path, request=request)
     if successes == 0:
         err_msg = str(last_error) if last_error else "unknown error"
         return JSONResponse(content={
@@ -516,7 +552,7 @@ async def upload_weights(file: UploadFile = File(...)):
             "size_mb": size_mb,
         }, status_code=502)
 
-    classes = _fetch_classes()
+    classes = _fetch_classes(request)
     logger.info(f"Activated {safe_name} on {successes} replica(s), classes: {classes}")
 
     return JSONResponse(content={
@@ -553,12 +589,12 @@ async def activate_weights(request: Request):
         logger.warning(f"Failed to mirror {safe_name} -> /weights/best.pt: {_e}")
 
     model_path = f"/weights/{safe_name}"
-    successes, last_error = _call_set_model_all_replicas(model_path)
+    successes, last_error = _call_set_model_all_replicas(model_path, request=request)
     if successes == 0:
         err_msg = str(last_error) if last_error else "unknown error"
         return JSONResponse(content={"error": f"Failed to activate model: {err_msg}"}, status_code=502)
 
-    classes = _fetch_classes()
+    classes = _fetch_classes(request)
     logger.info(f"Activated {safe_name} on {successes} replica(s), classes: {classes}")
 
     return JSONResponse(content={

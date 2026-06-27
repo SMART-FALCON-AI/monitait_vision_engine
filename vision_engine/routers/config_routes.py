@@ -177,6 +177,53 @@ def build_current_service_config(app_state):
         if _preserved in existing:
             svc_config[_preserved] = existing[_preserved]
 
+    # 4.0.17 — current_shipment ALSO has no source in the literal above.
+    # Without this, any auto-save (camera edit, AI model change, state
+    # change) silently wipes the active shipment from DB. Next restart then
+    # sees current_shipment=None and skips the restore-on-boot path, so the
+    # dashboard reverts to "no_shipment" even though Redis still had the
+    # live value before the restart.
+    #
+    # Order of preference:
+    #   1. watcher.shipment if set to a real (non-sentinel) value — captures
+    #      a freshly-set shipment that hasn't been persisted yet.
+    #   2. existing saved value if it's a real shipment — protects against
+    #      the boot-race window where watcher.shipment is still None because
+    #      the restore-on-boot hook hasn't fired yet but auto-save did.
+    #   3. otherwise omit, so an explicit "no_shipment" propagates.
+    try:
+        watcher = getattr(app_state, 'watcher_instance', None)
+        live_ship = (getattr(watcher, 'shipment', None) or "").strip() if watcher else ""
+        exist_ship = (existing.get("current_shipment") or "").strip()
+        if live_ship and live_ship != "no_shipment":
+            svc_config["current_shipment"] = live_ship
+        elif exist_ship and exist_ship != "no_shipment":
+            svc_config["current_shipment"] = exist_ship
+    except Exception:
+        # Never block service-config save on this best-effort preservation.
+        pass
+
+    # 4.0.21 — same-shape regression for `ai_trainer` and `notifications` (and
+    # anything else routers save under their own top-level key). The literal
+    # above doesn't generate these, so every auto-save (camera edit, AI model
+    # change, etc.) was silently wiping them. After restart the operator saw
+    # the AI Trainer task_id back to empty and got "no task_id configured"
+    # when clicking a chart dot, and Telegram/notification schedules vanished.
+    # Generic preservation: ANY top-level key that exists in the saved file
+    # but is NOT rebuilt by this function survives. The runtime-rebuilt keys
+    # are intentional overwrites (see literal at top); everything else
+    # belongs to a router that owns its own save path.
+    _runtime_rebuilt = {
+        "cameras", "infrastructure", "inference", "ai", "ejector", "capture",
+        "image_processing", "histogram", "class_count_check", "datamatrix",
+        "store_annotation", "states", "current_state_name", "pipeline_config",
+        # Explicitly-preserved above:
+        "store_objects", "audio_settings", "current_shipment",
+    }
+    for k, v in existing.items():
+        if k not in svc_config and k not in _runtime_rebuilt:
+            svc_config[k] = v
+
     return svc_config
 
 
@@ -448,12 +495,23 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
         # Shipment ID
         if "shipment" in config_data:
             shipment_id = str(config_data["shipment"]).strip() or "no_shipment"
-            # Store in Redis (db now config.REDIS_DB; single db across MVE — see redis_service.py)
+            # 3.26.4 — dual-write: Redis (hot read for the watcher loop) + DB
+            # (so the active shipment survives `docker compose down` / restart).
+            # On boot, main.py reads service_config["current_shipment"] and primes
+            # the watcher AND Redis cache, so the operator never loses the active
+            # shipment unless they explicitly clear it to "no_shipment".
             try:
                 r = Redis("redis", 6379, db=config.REDIS_DB)
                 r.set("shipment", shipment_id)
             except Exception as e:
                 logger.warning(f"Failed to set shipment in Redis: {e}")
+            try:
+                from config import load_service_config, save_service_config
+                _svc = load_service_config() or {}
+                _svc["current_shipment"] = shipment_id
+                save_service_config(_svc)
+            except Exception as e:
+                logger.warning(f"Failed to persist current_shipment to DB: {e}")
             watcher = request.app.state.watcher_instance
             if watcher:
                 watcher.shipment = shipment_id
@@ -498,6 +556,156 @@ async def get_encoder_calibration():
     except Exception as e:
         logger.error(f"get_encoder_calibration error: {e}")
         return JSONResponse(content={"encoder_unit": "encoder_unit", "encoder_units_per_meter": None})
+
+
+# 4.0.32 — operator-set per-camera L*a*b* "target" baseline for the heatmap's
+# 🎯 Target mode. Each camera gets a {L, a, b} tuple (E is derived). When
+# set, the heatmap's 🎯 Target button enables and clicking it makes every
+# cell's ΔE relative to its camera's target colour instead of the window
+# median. Manual gold-standard for cross-shipment comparison.
+@router.get("/api/color_target")
+async def get_color_target():
+    """Return the per-camera colour target. Empty dict when nothing set."""
+    try:
+        svc = load_service_config() or {}
+        return JSONResponse(content={"color_target": svc.get("color_target") or {}})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/api/color_target")
+async def set_color_target(payload: Dict[str, Any]):
+    """Set per-camera L*a*b* target.
+    Body: { "color_target": { "<cam_id>": {"L": <0-100>, "a": <-128..127>, "b": <-128..127>} } }
+       or to clear: { "color_target": {} }"""
+    try:
+        raw = payload.get("color_target")
+        if not isinstance(raw, dict):
+            return JSONResponse(content={"error": "color_target must be an object"}, status_code=400)
+        clean = {}
+        for k, v in raw.items():
+            if not isinstance(v, dict):
+                continue
+            try:
+                cam_id = str(int(k))
+                L = max(0.0, min(100.0, float(v.get("L") or 0)))
+                a = max(-128.0, min(127.0, float(v.get("a") or 0)))
+                b = max(-128.0, min(127.0, float(v.get("b") or 0)))
+                E = (L*L + a*a + b*b) ** 0.5
+                clean[cam_id] = {
+                    "L": round(L, 2), "a": round(a, 2), "b": round(b, 2),
+                    "E": round(E, 2),
+                }
+            except (TypeError, ValueError):
+                continue
+        svc = load_service_config() or {}
+        if clean:
+            svc["color_target"] = clean
+        else:
+            svc.pop("color_target", None)
+        save_service_config(svc)
+        return JSONResponse(content={"status": "ok", "color_target": clean})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# 4.0.31 — operator-picked baseline reference point for the heatmap's
+# "🖼️ Reference" mode. The operator clicks somewhere on the chart and the
+# colour at that position becomes the baseline. We store the axis (encoder
+# vs time) + the picked value + an optional window so the baseline computation
+# can grab a small range around the click instead of a single frame.
+@router.get("/api/color_reference_position")
+async def get_color_reference_position():
+    """Return the stored reference position (or null if unset)."""
+    try:
+        svc = load_service_config() or {}
+        pos = svc.get("color_reference_position")
+        return JSONResponse(content={"color_reference_position": pos})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/api/color_reference_position")
+async def set_color_reference_position(payload: Dict[str, Any]):
+    """Set the operator-picked baseline reference point.
+    Body: {axis: "encoder"|"time", value: <float>, window: <float, optional>}
+       - encoder: value is the encoder count clicked, window = +/-encoder counts
+       - time:    value is epoch-ms,                 window = +/-milliseconds
+    Setting `value=null` clears the reference (back to "unconfigured")."""
+    try:
+        if payload.get("value") in (None, ""):
+            svc = load_service_config() or {}
+            if "color_reference_position" in svc:
+                svc.pop("color_reference_position", None)
+                save_service_config(svc)
+            return JSONResponse(content={"status": "cleared"})
+
+        axis = str(payload.get("axis") or "").lower().strip()
+        if axis not in ("encoder", "time"):
+            return JSONResponse(content={"error": "axis must be 'encoder' or 'time'"}, status_code=400)
+        try:
+            value = float(payload["value"])
+        except (TypeError, ValueError):
+            return JSONResponse(content={"error": "value must be a number"}, status_code=400)
+        try:
+            window = float(payload.get("window") or 0)
+        except (TypeError, ValueError):
+            window = 0.0
+        import time as _t
+        svc = load_service_config() or {}
+        svc["color_reference_position"] = {
+            "axis": axis,
+            "value": value,
+            "window": max(0.0, window),
+            "set_at": int(_t.time()),
+        }
+        save_service_config(svc)
+        return JSONResponse(content={
+            "status": "ok",
+            "color_reference_position": svc["color_reference_position"],
+        })
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# 4.0.28 — manual override for `score_scale_factor`. The 🎯 Calibrate score
+# button on the Charts tab auto-tunes this against recent shipments; this
+# pair lets the operator read + write it explicitly without going through the
+# auto-tuner (useful when they want a specific value, or when calibration's
+# 7-day window doesn't reflect what they want to score against).
+@router.get("/api/score_scale_factor")
+async def get_score_scale_factor():
+    """Return the current `score_scale_factor` (default 1.0)."""
+    try:
+        svc = load_service_config() or {}
+        return JSONResponse(content={
+            "score_scale_factor": float(svc.get("score_scale_factor") or 1.0),
+        })
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.post("/api/score_scale_factor")
+async def set_score_scale_factor(payload: Dict[str, Any]):
+    """Manually set `score_scale_factor`. Same bounds as the auto-calibrator
+    (0.001 .. 1e9) so a typo can't poison the score for every shipment."""
+    try:
+        raw = payload.get("score_scale_factor", payload.get("value"))
+        val = float(raw)
+        if val <= 0:
+            return JSONResponse(content={"error": "score_scale_factor must be > 0"}, status_code=400)
+        val = max(0.001, min(1e9, val))
+        svc = load_service_config() or {}
+        svc["score_scale_factor"] = round(val, 4)
+        save_service_config(svc)
+        return JSONResponse(content={
+            "status": "ok",
+            "score_scale_factor": svc["score_scale_factor"],
+        })
+    except (TypeError, ValueError):
+        return JSONResponse(content={"error": "score_scale_factor must be a number"}, status_code=400)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @router.post("/api/encoder_calibration")
@@ -860,19 +1068,38 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
         svc = load_service_config() or {}
         settings = svc.get("audio_settings", {})
 
+        # 4.0.26 — semantic ROLE per class. Replaces the global parent_object_list
+        # text-box. Valid values:
+        #   "context" (default) — informational, no special wiring
+        #   "defect"  — counted into the quality score / NG counter
+        #   "parent"  — defines inspection area (`parent_object_list` is derived
+        #               from any class with role=parent; falls back to ['_root']
+        #               when no class is flagged parent)
+        #   "marker"  — encoder-axis landmark, not scored
+        _VALID_ROLES = {"context", "defect", "parent", "marker"}
+        def _clean_role(v):
+            s = str(v or "").strip().lower()
+            return s if s in _VALID_ROLES else "context"
+
         if "audio_settings" in payload and isinstance(payload["audio_settings"], dict):
             # Bulk replace — caller owns the full mapping
             new_settings = {}
             for cls, cfg in payload["audio_settings"].items():
                 if not isinstance(cfg, dict):
                     continue
+                role = _clean_role(cfg.get("role", "context"))
+                # 4.0.26 — role=parent forces severity to 0 so the impact-score
+                # numbers stay clean even if the caller sent a non-zero value.
+                sev = 0 if role == "parent" else max(0, min(100, int(cfg.get("severity", 0) or 0)))
                 new_settings[str(cls)] = {
                     "show": bool(cfg.get("show", True)),
                     "narrate": bool(cfg.get("narrate", False)),
                     "beep": bool(cfg.get("beep", False)),
                     "min_confidence": float(cfg.get("min_confidence", 0.01)),
                     # 3.21.12 — per-class severity weight (0-100). Default 0 = no impact.
-                    "severity": max(0, min(100, int(cfg.get("severity", 0) or 0))),
+                    "severity": sev,
+                    # 4.0.26 — context | defect | parent | marker
+                    "role": role,
                     # 3.22.2 — ColorE: track CIELAB ΔE drift over time for this class.
                     "color_e": bool(cfg.get("color_e", False)),
                     # 3.22.3 — Area: show bbox-area percentiles for this class on the card.
@@ -881,7 +1108,7 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
             settings = new_settings
         elif "class_name" in payload:
             cls = str(payload["class_name"])
-            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01, "severity": 0, "color_e": False, "area": False})
+            entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01, "severity": 0, "role": "context", "color_e": False, "area": False})
             for k in ("show", "narrate", "beep", "color_e", "area"):
                 if k in payload:
                     entry[k] = bool(payload[k])
@@ -890,11 +1117,17 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
                     entry["min_confidence"] = float(payload["min_confidence"])
                 except (TypeError, ValueError):
                     pass
+            if "role" in payload:
+                entry["role"] = _clean_role(payload["role"])
             if "severity" in payload:
                 try:
                     entry["severity"] = max(0, min(100, int(payload["severity"] or 0)))
                 except (TypeError, ValueError):
                     pass
+            # 4.0.26 — enforce the parent-zeroes-severity invariant even when
+            # the partial update only changes role (not severity).
+            if entry.get("role") == "parent":
+                entry["severity"] = 0
             settings[cls] = entry
         else:
             return JSONResponse(

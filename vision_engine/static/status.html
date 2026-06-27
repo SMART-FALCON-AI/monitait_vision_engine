@@ -6,13 +6,20 @@
         <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
         <meta http-equiv="Pragma" content="no-cache">
         <meta http-equiv="Expires" content="0">
+        <!-- 4.0.19 — hard signal to Chrome / Edge / Safari that this site IS
+             already dark themed, so the browser's "Force Dark Mode for Web
+             Contents" feature does NOT invert our light text. The CSS-side
+             `:root { color-scheme: dark }` we already ship is the same
+             intent but lands after CSS parse; this meta tag is read FIRST. -->
+        <meta name="color-scheme" content="dark">
+        <meta name="supported-color-schemes" content="dark">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-        <title>MonitaQC Vision Engine</title>
+        <title>Monitait Vision Engine</title>
         <link rel="stylesheet" href="/static/css/main.css">
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=3.25.13"></script>
+        <script src="/static/js/i18n.js?v=4.0.48"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -46,6 +53,8 @@
                         <option value="ja">日本語</option>
                         <option value="tr">Türkçe</option>
                         <option value="es">Español</option>
+                        <option value="it">Italiano</option>
+                        <option value="pl">Polski</option>
                         <option value="ar">العربية</option>
                         <option value="fa">فارسی</option>
                     </select>
@@ -92,40 +101,40 @@
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="speed">Speed</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_speed">Production speed in pulses per minute (PPM).</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="speed-value">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="speed-value">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="pulses_s">Pulses/s</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_pulses_s">Raw encoder pulses per second.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="pps-value">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="pps-value">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="movement">Movement</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_movement">Whether the conveyor belt is currently moving.</span></span></div>
                                     <div style="display: flex; align-items: center; gap: 2px;">
                                         <span class="movement-indicator" id="movement-indicator" style="width: 7px; height: 7px;"></span>
-                                        <span style="font-size: 9px; font-weight: 600;" id="movement-value">-</span>
+                                        <span style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="movement-value">-</span>
                                     </div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_queue">Ej Queue</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_queue">Number of items waiting to be ejected.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-queue">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="ejector-queue">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_active">Ej Active</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_active">Whether the ejector is currently firing.</span></span></div>
                                     <div style="display: flex; align-items: center; gap: 2px;">
                                         <span class="movement-indicator" id="ejector-running-indicator" style="width: 7px; height: 7px;"></span>
-                                        <span style="font-size: 9px; font-weight: 600;" id="ejector-running">-</span>
+                                        <span style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="ejector-running">-</span>
                                     </div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_enable">Ej Enable</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_enable">Whether ejection is enabled. Disable to inspect without ejecting.</span></span></div>
                                     <div style="display: flex; align-items: center; gap: 2px;">
                                         <span class="movement-indicator" id="ejector-enabled-indicator" style="width: 7px; height: 7px;"></span>
-                                        <span style="font-size: 9px; font-weight: 600;" id="ejector-enabled">-</span>
+                                        <span style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="ejector-enabled">-</span>
                                     </div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ej_offset">Ej Offset</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ej_offset">Encoder count delay between camera and ejector position.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="ejector-offset">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="ejector-offset">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="ok">OK</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ok">Total count of items that passed inspection.</span></span></div>
@@ -145,15 +154,15 @@
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="downtime">Downtime</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_downtime">Seconds since the conveyor last stopped moving.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="downtime-value">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="downtime-value">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="analog">Analog</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_analog">Current analog sensor reading from the hardware.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="analog-value">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="analog-value">-</div>
                                 </div>
                                 <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="power">Power</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_power">Power supply voltage reading from the hardware.</span></span></div>
-                                    <div style="font-size: 9px; font-weight: 600;" id="power-value">-</div>
+                                    <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="power-value">-</div>
                                 </div>
                             </div>
                         </div>
@@ -192,10 +201,11 @@
                                     <button onclick="document.getElementById('state-ai-panel').style.display='none'" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); padding:1px 7px; cursor:pointer; font-size:10px; border-radius:3px;">✗</button>
                                 </div>
                             </div>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px;">
-                                <div><span data-i18n="latency">Latency</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_latency">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value">...</strong></div>
-                                <div><span data-i18n="inf_fps">Inf</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inf_fps">Inference frames per second — how fast the model processes.</span></span>: <strong id="inference-fps-value" style="color: inherit;">...</strong></div>
-                                <div><span data-i18n="cap_fps">Cap</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_cap_fps">Capture frames per second — how fast the camera captures.</span></span>: <strong id="capture-fps-value">...</strong>
+                            <!-- 4.0.2 — pin colour on the latency/FPS row to var(--text-primary) so the strong/inherit chain can't drift to black. -->
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 9px; color: var(--text-primary);">
+                                <div><span data-i18n="latency">Latency</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_latency">Time to process one frame through the inference model (ms).</span></span>: <strong id="inference-time-value" style="color: var(--text-primary);">...</strong></div>
+                                <div><span data-i18n="inf_fps">Inf</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_inf_fps">Inference frames per second — how fast the model processes.</span></span>: <strong id="inference-fps-value" style="color: var(--text-primary);">...</strong></div>
+                                <div><span data-i18n="cap_fps">Cap</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_cap_fps">Capture frames per second — how fast the camera captures.</span></span>: <strong id="capture-fps-value" style="color: var(--text-primary);">...</strong>
                                     <span id="capture-heartbeat" style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--success-color); margin-left: 2px; opacity: 0;"></span>
                                 </div>
                             </div>
@@ -274,7 +284,7 @@
                     <div class="discovery-input-group">
                         <label for="subnet-input">Network Subnet (first 3 octets)</label>
                         <input type="text" id="subnet-input" class="discovery-input" value="192.168.0" placeholder="192.168.0">
-                        <small style="color: #666; font-size: 11px;">Scan for IP cameras on this subnet</small>
+                        <small style="color: var(--text-secondary); font-size: 11px;">Scan for IP cameras on this subnet</small>
                     </div>
                     <div class="discovery-input-group" style="display: flex; align-items: flex-end;">
                         <button id="scan-button" class="discovery-button" onclick="scanForCameras()">🔎 Scan Network</button>
@@ -341,7 +351,7 @@
                     <h3 data-i18n="state_management">State Management (Camera Capture Control)</h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: #333;">Current State:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);">Current State:</span>
                             <span id="current-state-name" style="font-size: 16px; font-weight: bold; color: #007bff;">Loading...</span>
                             <span id="capture-state-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
                         </div>
@@ -353,9 +363,9 @@
                     </div>
 
                     <div style="margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;" data-i18n="available_states">Available States</h4>
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="available_states">Available States</h4>
                         <div id="states-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <span style="color: #666; font-style: italic;">Loading states...</span>
+                            <span style="color: var(--text-secondary); font-style: italic;">Loading states...</span>
                         </div>
                     </div>
 
@@ -385,7 +395,7 @@
 
                         <div style="background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px; padding: 10px; margin-bottom: 10px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                <h5 style="margin: 0; color: #495057;">Capture Phases</h5>
+                                <h5 style="margin: 0; color: var(--text-primary);">Capture Phases</h5>
                                 <button class="camera-btn camera-btn-success" onclick="addPhase()" style="padding: 4px 10px; font-size: 11px;">+ Add Phase</button>
                             </div>
 
@@ -393,7 +403,7 @@
                                 <!-- Phase 1 (default) - all cameras -->
                                 <div class="phase-row" id="phase-row-0" style="display: grid; grid-template-columns: 1.2fr 0.8fr 1fr 0.8fr 0.8fr auto; gap: 6px; align-items: end; margin-bottom: 8px; padding: 8px; background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(51, 65, 85, 0.4); border-radius: 4px;">
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Light Mode <span class="info-tooltip">i<span class="info-tooltip-text">Which lights to turn on/off during this capture phase.</span></span></label>
+                                        <label style="font-size: 10px; color: var(--text-secondary);">Light Mode <span class="info-tooltip">i<span class="info-tooltip-text">Which lights to turn on/off during this capture phase.</span></span></label>
                                         <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
                                             <option value="U_ON_B_OFF" selected>U On, B Off</option>
                                             <option value="U_OFF_B_ON">U Off, B On</option>
@@ -402,25 +412,25 @@
                                         </select>
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Delay (s) <span class="info-tooltip">i<span class="info-tooltip-text">Wait time in seconds after setting lights, before capturing.</span></span></label>
+                                        <label style="font-size: 10px; color: var(--text-secondary);">Delay (s) <span class="info-tooltip">i<span class="info-tooltip-text">Wait time in seconds after setting lights, before capturing.</span></span></label>
                                         <input type="number" class="control-input phase-delay" value="0.1" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Cameras <span class="info-tooltip">i<span class="info-tooltip-text">Comma-separated camera IDs to capture in this phase.</span></span></label>
+                                        <label style="font-size: 10px; color: var(--text-secondary);">Cameras <span class="info-tooltip">i<span class="info-tooltip-text">Comma-separated camera IDs to capture in this phase.</span></span></label>
                                         <input type="text" class="control-input phase-cameras" value="1,2,3,4" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Steps (-1=loop) <span class="info-tooltip">i<span class="info-tooltip-text">Capture every N encoder steps. -1 = continuous capture loop.</span></span></label>
+                                        <label style="font-size: 10px; color: var(--text-secondary);">Steps (-1=loop) <span class="info-tooltip">i<span class="info-tooltip-text">Capture every N encoder steps. -1 = continuous capture loop.</span></span></label>
                                         <input type="number" class="control-input phase-steps" value="1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <div>
-                                        <label style="font-size: 10px; color: #666;">Analog (-1=off) <span class="info-tooltip">i<span class="info-tooltip-text">Analog sensor threshold. -1 = disabled. N = trigger when value >= N.</span></span></label>
+                                        <label style="font-size: 10px; color: var(--text-secondary);">Analog (-1=off) <span class="info-tooltip">i<span class="info-tooltip-text">Analog sensor threshold. -1 = disabled. N = trigger when value >= N.</span></span></label>
                                         <input type="number" class="control-input phase-analog" value="-1" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
                                     </div>
                                     <button class="camera-btn camera-btn-danger" onclick="removePhase(0)" style="padding: 4px 8px; font-size: 11px;">✕</button>
                                 </div>
                             </div>
-                            <p style="font-size: 10px; color: #888; margin: 8px 0 0 0;">Steps: -1=infinite loop, 1=every step, N=every N steps. Analog: -1=disabled, N=trigger when analog≥N.</p>
+                            <p style="font-size: 10px; color: var(--text-secondary); margin: 8px 0 0 0;">Steps: -1=infinite loop, 1=every step, N=every N steps. Analog: -1=disabled, N=trigger when analog≥N.</p>
                         </div>
 
                         <div style="margin-top: 10px; display: flex; gap: 8px;">
@@ -446,15 +456,15 @@
                         <div class="status-indicators" style="justify-content: center; gap: 40px;">
                             <div class="status-indicator">
                                 <div class="status-circle U" id="U-status"></div>
-                                <span style="font-size: 14px; font-weight: 600;">U (Upper)</span>
+                                <span style="font-size: 14px; font-weight: 600; color: var(--text-primary);" data-i18n="status_upper">U (Upper)</span>
                             </div>
                             <div class="status-indicator">
                                 <div class="status-circle B" id="B-status"></div>
-                                <span style="font-size: 14px; font-weight: 600;">B (Bottom)</span>
+                                <span style="font-size: 14px; font-weight: 600; color: var(--text-primary);" data-i18n="status_bottom">B (Bottom)</span>
                             </div>
                             <div class="status-indicator">
                                 <div class="status-circle warning" id="warning-status"></div>
-                                <span style="font-size: 14px; font-weight: 600;">Warning</span>
+                                <span style="font-size: 14px; font-weight: 600; color: var(--text-primary);" data-i18n="status_warning">Warning</span>
                             </div>
                         </div>
                     </div>
@@ -562,7 +572,7 @@
                         </div>
                     </div>
                     <div class="verbose-panel" style="margin-top: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;" data-i18n="watcher_verbose">Watcher Verbose Configuration (Read-only)</h4>
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="watcher_verbose">Watcher Verbose Configuration (Read-only)</h4>
                         <div class="verbose-grid">
                             <div>
                                 <div class="verbose-item-label">OK Offset Delay (OOD)</div>
@@ -860,6 +870,13 @@
                                    style="vertical-align:middle; width:120px;">
                             <span id="insight-min-conf-val" style="font-size:12px; color:var(--text-primary); min-width:32px; display:inline-block;">0%</span>
                             <button onclick="exportInsightCSV()" title="Download all detections for the selected shipment + window as CSV" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(34,197,94,0.25); color:#86efac; border:1px solid rgba(34,197,94,0.5); border-radius:4px;">⬇ CSV</button>
+                            <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;" data-i18n="hover_size">Hover size:</span>
+                            <select id="hover-preview-size" onchange="setHoverPreviewSize(this.value)" title="Size of the floating image preview shown when hovering a chart dot" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+                                <option value="small" data-i18n="size_small">Small (420×280)</option>
+                                <option value="medium" selected data-i18n="size_medium">Medium (640×420)</option>
+                                <option value="large" data-i18n="size_large">Large (900×580)</option>
+                                <option value="xlarge" data-i18n="size_xlarge">X-Large (1200×780)</option>
+                            </select>
                             <button onclick="refreshDetectionInsights()" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px;">Refresh</button>
                         </div>
                     </div>
@@ -921,37 +938,70 @@
                         No stored detections in this window yet. Detections appear here once a class has <b>Store</b> enabled (Process tab → Per-Object Configuration) and the line is running.
                     </div>
                     <!-- 3.25.11 — `min-width:0` on the grid container forces grid items to shrink with the viewport; without it, the Chart.js canvases default to their intrinsic device-pixel width and push the donut/pie off-screen. Each direct child also gets `min-width:0` so the same behavior applies one level deeper. -->
+                    <!-- 4.0.19 — Charts tab reorder. The user-facing reading order on this
+                         tab is now: (1) Detection Insights header + quality score + trend,
+                         (2) Score per shipment (moved up via JS — see _reorderChartsTab in
+                         charts.js), (3) camera × encoder scatter, (4) bar + pie, then the
+                         secondary diagnostics. CSS `order` on the grid items below puts the
+                         scatter first INSIDE this grid; the JS reorder moves the Score per
+                         shipment panel between sqs-trend-row and this grid. -->
                     <div id="insight-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px; min-width:0;">
                         <!-- 3.25.7 — Pareto (top-impact classes) stays at top: most-used chart on the tab. -->
-                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="insight-class-chart"></canvas></div>
-                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="insight-class-pie"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden; order:2;"><canvas id="insight-class-chart"></canvas></div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden; order:3;"><canvas id="insight-class-pie"></canvas></div>
                         <!-- 3.25.13 — single merged scatter with a Time/Encoder X-axis toggle.
                              Detection scatter, quality strip, and ejection strip all share the
                              same X-axis so the operator can scan a column vertically. -->
-                        <div style="grid-column: 1 / -1; min-width:0;">
-                            <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11px;">
+                        <div style="grid-column: 1 / -1; min-width:0; order:1;">
+                            <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11px; flex-wrap:wrap;">
                                 <span style="color:var(--text-secondary);">X-axis:</span>
-                                <button id="insight-axis-toggle-time" onclick="setInsightAxis('time')" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📍 Time</button>
-                                <button id="insight-axis-toggle-encoder" onclick="setInsightAxis('encoder')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📏 Encoder</button>
+                                <!-- 3.26.0 — default is now 📏 Encoder; 📍 Time can still be toggled. -->
+                                <button id="insight-axis-toggle-time" onclick="setInsightAxis('time')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📍 Time</button>
+                                <button id="insight-axis-toggle-encoder" onclick="setInsightAxis('encoder')" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📏 Encoder</button>
                                 <span style="color:var(--text-secondary); font-size:10px; margin-left:6px;">scatter + quality strip + ejection strip all use the selected axis</span>
+                                <span style="color:var(--text-secondary); margin-left:14px;">Color baseline:</span>
+                                <!-- 4.0.30 — heatmap baseline mode toggle. Stored as `mve_heatmap_baseline`
+                                     in localStorage; the heatmap plugin recomputes ΔE on every render
+                                     from the raw E values (no server round-trip). Modes whose data
+                                     isn't available in the response disable themselves. -->
+                                <button id="hm-baseline-camera"          onclick="setHeatmapBaseline('camera')"          title="Each camera's median E across the visible window. Auto, no operator action."         style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📷 Camera</button>
+                                <button id="hm-baseline-shipment_start"  onclick="setHeatmapBaseline('shipment_start')"  title="Median E of the first 60 s of the active shipment. Requires a specific shipment selected." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🚀 Shipment start</button>
+                                <button id="hm-baseline-target"          onclick="setHeatmapBaseline('target')"          title="Operator-set per-camera L*a*b*. Configured under Process tab → Color Target."        style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🎯 Target</button>
+                                <button id="hm-baseline-reference_frame" onclick="setHeatmapBaseline('reference_frame')" title="L*a*b* at an operator-picked position on the chart. Click button → next chart click sets the reference point. Click again later to re-pick." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🖼️ Reference</button>
+                                <span id="hm-pick-hint" style="display:none; color:#fcd34d; font-style:italic; margin-left:8px; font-size:11px;">🎯 Click anywhere on the chart to set the colour reference point</span>
+                                <!-- 4.0.34 — phase filter (heatmap-only). Buttons are rendered dynamically from
+                                     phases_available in /api/detection_charts. Active choice is stored as
+                                     `mve_heatmap_phase` in localStorage. Scatter / quality strip / ejection strip
+                                     are intentionally NOT filtered — phase is a colour-channel concept. -->
+                                <span style="color:var(--text-secondary); margin-left:14px;">Phase:</span>
+                                <span id="hm-phase-buttons" style="display:inline-flex; gap:4px; flex-wrap:wrap;">
+                                    <button id="hm-phase-all" onclick="setHeatmapPhase('')" title="Show colour data from every capture phase combined." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🌐 All</button>
+                                </span>
+                                <!-- 4.0.35 — single bucket count drives colour heatmap, quality strip, ejection strip. -->
+                                <span style="color:var(--text-secondary); margin-left:14px;">Buckets:</span>
+                                <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window. Click a class in the chart legend to hide it — your choice is remembered across reloads." style="width:60px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px;">
                             </div>
+                            <!-- 4.0.44 — title + legend lifted OUT of Chart.js so the colour heatmap (which paints inside chartArea) can't reach them. -->
+                            <div id="insight-scatter-title" style="text-align:center; color:#cbd5e1; font-size:13px; font-weight:500; margin-top:8px; margin-bottom:4px;">Camera × encoder (roll position) — hover for image, click dot for the exact frame</div>
+                            <div id="insight-scatter-legend" style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-bottom:6px; font-size:11px; color:#cbd5e1; min-height:14px;"></div>
                             <div style="min-height:300px; min-width:0; overflow:hidden;"><canvas id="insight-camera-scatter"></canvas></div>
                             <!-- Strip wrap inset to match the scatter's plot area (JS sets marginLeft/Right from scatter.chartArea). -->
                             <div id="quality-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
-                                <div id="quality-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📍 quality by time — hover a cell for top defect + score</div>
+                                <!-- 3.26.0 — default axis is encoder; setInsightAxis() swaps these on toggle. -->
+                                <div id="quality-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📏 quality by encoder — find spots on the material with the most issues</div>
                                 <div id="quality-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-strip-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
-                                <div id="ejection-strip-title" style="font-size:10px; color:var(--text-secondary); margin-top:6px; margin-bottom:2px;">⏏️ ejections by time — color = procedure; hover for breakdown</div>
+                                <div id="ejection-strip-title" style="font-size:10px; color:var(--text-secondary); margin-top:6px; margin-bottom:2px;">⏏️ ejections by encoder — color = procedure; hover for breakdown</div>
                                 <div id="ejection-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="ejection-strip-legend" style="display:flex; flex-wrap:wrap; gap:8px; font-size:10px; color:var(--text-secondary); margin-top:3px;"></div>
                             </div>
                         </div>
                         <!-- 3.25.7 — Secondary diagnostics (less load-bearing at-a-glance): pushed below the scatters. -->
-                        <div style="grid-column: 1 / -1; margin-top:8px; padding-top:8px; border-top:1px dashed rgba(71,85,105,0.5); font-size:11px; color:var(--text-secondary); letter-spacing:0.4px; text-transform:uppercase;">Secondary diagnostics</div>
-                        <div style="min-height:240px; min-width:0; overflow:hidden;"><canvas id="insight-timeline-chart"></canvas></div>
-                        <div style="min-height:260px; min-width:0; overflow:hidden;"><canvas id="insight-size-chart"></canvas></div>
-                        <div style="min-height:260px; min-width:0; overflow:hidden;"><canvas id="insight-confidence-chart"></canvas></div>
-                        <div style="min-height:280px; min-width:0; overflow:hidden;"><canvas id="insight-confidence-class-chart"></canvas></div>
+                        <div style="grid-column: 1 / -1; margin-top:8px; padding-top:8px; border-top:1px dashed rgba(71,85,105,0.5); font-size:11px; color:var(--text-secondary); letter-spacing:0.4px; text-transform:uppercase; order:4;" data-i18n="secondary_diagnostics">Secondary diagnostics</div>
+                        <div style="min-height:240px; min-width:0; overflow:hidden; order:5;"><canvas id="insight-timeline-chart"></canvas></div>
+                        <div style="min-height:260px; min-width:0; overflow:hidden; order:6;"><canvas id="insight-size-chart"></canvas></div>
+                        <div style="min-height:260px; min-width:0; overflow:hidden; order:7;"><canvas id="insight-confidence-chart"></canvas></div>
+                        <div style="min-height:280px; min-width:0; overflow:hidden; order:8;"><canvas id="insight-confidence-class-chart"></canvas></div>
                     </div>
                     <div id="insight-total" style="margin-top:10px; font-size:12px; color:var(--text-secondary);"></div>
                 </div>
@@ -1036,9 +1086,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=3.25.13"></script>
+            <script src="/static/js/iframes.js?v=4.0.48"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=3.25.13"></script>
+            <script src="/static/js/charts.js?v=4.0.48"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1214,6 +1264,49 @@
                     </div>
                 </div>
 
+                <!-- 4.0.32 — Color Target: per-camera L*a*b* gold-standard the
+                     heatmap's 🎯 Target baseline subtracts from each cell. Per
+                     camera so cross-camera lighting differences don't drown the
+                     signal. Setting values here enables the 🎯 Target button on
+                     the Charts tab heatmap toggle row. -->
+                <div class="control-section">
+                    <h3 data-i18n="color_target_section">🎨 Colour Target (heatmap baseline)</h3>
+                    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px; line-height:1.5;">
+                        Per-camera CIE L*a*b* values used as the "gold standard" by the heatmap's
+                        <b>🎯 Target</b> baseline button on the Charts tab. The heatmap colours each
+                        cell by its ΔE against this target. Leave a camera's L=0 to skip it.
+                        <br><br>
+                        <span style="color:var(--text-secondary);">Tip: set L to the median brightness you'd expect for that camera under nominal lighting (rough range 30–80). Set a and b near 0 unless your product has a strong colour tint.</span>
+                    </div>
+                    <div id="color-target-rows" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;"></div>
+                    <button class="control-button" onclick="addColorTargetRow()" style="margin-right:8px;">+ Add Camera</button>
+                    <button class="control-button" onclick="saveColorTarget()" style="background-color: var(--success-color);">💾 Save Color Target</button>
+                    <div class="control-response" id="config-color_target-response" style="margin-top:6px;"></div>
+                </div>
+
+                <!-- 4.0.28 — Quality Scoring (manual override of score_scale_factor).
+                     The Charts-tab `🎯 Calibrate score` button auto-tunes this from
+                     recent shipment history; this card lets the operator set the
+                     value explicitly when they want a specific scoring sensitivity. -->
+                <div class="control-section">
+                    <h3 data-i18n="quality_scoring">📊 Quality Scoring</h3>
+                    <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px; line-height:1.5;">
+                        <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">score_scale_factor</code>
+                        is the gain knob on impact-to-score conversion:
+                        <code style="background:rgba(15,23,42,0.4); padding:1px 4px; border-radius:3px;">score = 100 × (1 − min(1, impact_per_unit × factor))</code>.
+                        Higher factor = harsher scoring. Default 1.0 makes most shipments score ~99.9; the auto-calibrator picks a value that lands the median recent shipment at ~85.
+                    </div>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label" data-i18n="score_scale_factor_label">Score Scale Factor (0.001 – 1e9)</div>
+                            <input type="number" class="control-input" id="score-scale-factor-input" min="0.001" max="1000000000" step="any" value="1">
+                            <button class="control-button" onclick="setScoreScaleFactor()">Set</button>
+                            <div class="control-response" id="config-score_scale_factor-response"></div>
+                            <span id="score-scale-current" style="font-size:11px; color:var(--text-secondary); margin-top:4px; display:block;">current: …</span>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Image Processing Configuration (from Cameras) -->
                 <div class="control-section">
                     <h3 data-i18n="image_processing">Image Processing Configuration</h3>
@@ -1298,15 +1391,15 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="camera_order">Camera Order (Columns)</div>
                             <div style="display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap;">
-                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-primary);">
                                     <input type="radio" name="camera-order" value="normal" checked>
                                     <span data-i18n="ascending">Ascending (1→2→3...)</span>
                                 </label>
-                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-primary);">
                                     <input type="radio" name="camera-order" value="reverse">
                                     <span data-i18n="descending">Descending (...3→2→1)</span>
                                 </label>
-                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--text-primary);">
                                     <input type="radio" name="camera-order" value="custom">
                                     <span data-i18n="custom_order">Custom</span>
                                 </label>
@@ -1388,9 +1481,9 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Trainer URL</div>
-                            <input type="text" class="control-input" id="ai-trainer-url-input" placeholder="https://ai-trainer.monitait.com/api/images/">
-                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Default: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px; color:#86efac;">https://ai-trainer.monitait.com/api/images/</code> — the trainer's real upload endpoint (3.24.7).</div>
+                            <div class="control-label">Trainer base URL</div>
+                            <input type="text" class="control-input" id="ai-trainer-url-input" placeholder="https://ai-trainer.monitait.com">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">3.26.0 — Just the origin (no path). MVE appends <code>/api/images/</code>, <code>/api/categories/</code>, <code>/api/annotations/</code>, etc. Default: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px; color:#86efac;">https://ai-trainer.monitait.com</code></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label">Task ID</div>
@@ -1538,16 +1631,16 @@
                     <h3>🔑 <span data-i18n="ai_config">AI Configuration</span></h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: #333;">Active Model:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);">Active Model:</span>
                             <span id="ai-active-model-name" style="font-size: 16px; font-weight: bold; color: #007bff;">None</span>
                             <span id="ai-active-model-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
                         </div>
                     </div>
 
                     <div style="margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;" data-i18n="configured_models">Configured Models</h4>
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="configured_models">Configured Models</h4>
                         <div id="ai-models-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <span style="color: #666; font-style: italic;">Loading models...</span>
+                            <span style="color: var(--text-secondary); font-style: italic;">Loading models...</span>
                         </div>
                     </div>
 
@@ -1600,7 +1693,7 @@
                     <h3>⚙️ <span data-i18n="db_config">Database Configuration</span></h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: #333;">Active Profile:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);">Active Profile:</span>
                             <span id="db-active-profile-name" style="font-size: 16px; font-weight: bold; color: #007bff;">None</span>
                             <span id="db-active-profile-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
                             <div id="db-status" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background: var(--warning-color); color: white;">Checking...</div>
@@ -1608,9 +1701,9 @@
                     </div>
 
                     <div style="margin-bottom: 15px;">
-                        <h4 style="margin: 0 0 10px 0; color: #495057;" data-i18n="configured_profiles">Configured Profiles</h4>
+                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="configured_profiles">Configured Profiles</h4>
                         <div id="db-profiles-list" style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <span style="color: #666; font-style: italic;">Loading profiles...</span>
+                            <span style="color: var(--text-secondary); font-style: italic;">Loading profiles...</span>
                         </div>
                     </div>
 
@@ -1673,7 +1766,7 @@
                         <button class="control-button" style="background-color: #6c757d;" onclick="formatDataFile()">Format JSON</button>
                     </div>
                     <div class="control-response" id="data-file-response"></div>
-                    <div style="margin-top: 10px; padding: 10px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 4px; font-size: 12px; color: #0c5460;">
+                    <div style="margin-top: 10px; padding: 10px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 4px; font-size: 12px; color: var(--secondary-color);">
                         ℹ️ <strong>Note:</strong> Use the "💾 Save" button at the top of the page to save both service config and data file.
                     </div>
                 </div>
@@ -1686,11 +1779,10 @@
 
         <!-- Chart hover image preview (scatter etc.) — single instance, follows cursor.
              Side-by-side raw | annotated thumbnails for instant comparison. -->
+        <!-- 4.0.4 — single render-on-demand preview (was 2-img side-by-side). The
+             user wanted just the detected image on hover; click goes to LSF. -->
         <div id="chart-image-preview" style="display:none; position:fixed; z-index:999998; background:#0f172a; border:1px solid rgba(100,160,255,0.5); border-radius:6px; padding:4px; box-shadow:0 6px 24px rgba(0,0,0,0.5); pointer-events:none;">
-            <div style="display:flex; gap:3px;">
-                <img style="display:block; width:200px; height:140px; object-fit:cover; background:#000; border-radius:3px;">
-                <img style="display:block; width:200px; height:140px; object-fit:cover; background:#000; border-radius:3px;">
-            </div>
+            <img style="display:block; width:420px; height:280px; object-fit:contain; background:#000; border-radius:3px;">
             <div class="cap" style="margin-top:4px; padding:2px 6px; font-size:10px; color:#cbd5e1; text-align:center;"></div>
         </div>
 
@@ -1708,6 +1800,8 @@
                         <!-- 3.21.22 — Upload the RAW image of the current frame to ai-trainer.monitait.com.
                              Config (URL + task_id) lives in Advanced → AI Trainer. -->
                         <button id="defect-upload-trainer" onclick="uploadCurrentDefectToAiTrainer()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Send the raw image of this frame to the AI trainer for retraining">📤 Upload to AI Trainer</button>
+                        <!-- 3.26.0 — Embedded Label Studio Frontend 1.4.0 (same library + version as ai-trainer.monitait.com) so the operator can correct the YOLO box(es) in-place and submit them back to the trainer. -->
+                        <button id="defect-annotate-btn" onclick="openAnnotateModal()" style="background:linear-gradient(135deg,#ec4899,#db2777); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Open Label Studio in-line to correct this frame's boxes and submit them to ai-trainer">✏️ Annotate</button>
                         <!-- 3.23.0 — Ask the active AI model "why did this happen?" with the dot's
                              metric/value/time + surrounding chart context pre-loaded. -->
                         <button id="defect-why-btn" onclick="askWhyForCurrentDefect()" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Ask the active AI model to explain this dot — uses the surrounding chart context">🤔 Why?</button>
@@ -1729,7 +1823,37 @@
             </div>
         </div>
 
-        <script src="/static/js/audio.js?v=3.25.13"></script>
-        <script src="/static/js/app-core.js?v=3.25.13"></script>
+        <!-- 3.26.0 — Annotation modal: hosts Label Studio Frontend 1.4.0 (self-hosted under
+             /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
+             as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
+             the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.48">
+        <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
+            <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
+                <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
+                    <span style="font-weight:600;">✏️ Annotate</span>
+                    <span id="annotate-meta" style="font-size:11px; color:var(--text-secondary);"></span>
+                    <span id="annotate-status" style="font-size:11px; color:#fcd34d; font-style:italic; margin-left:auto;"></span>
+                    <!-- 4.0.2 — Download bundles raw + render-on-demand DETECTED for offline analysis. -->
+                    <button onclick="downloadFrameBundle()" title="Download both the raw frame AND the rendered-with-boxes frame" style="background:linear-gradient(135deg,#3b82f6,#1d4ed8); color:#fff; border:none; padding:6px 14px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;">📥 Download (raw + DETECTED)</button>
+                    <button id="annotate-submit" onclick="submitAnnotations()" disabled style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:6px 14px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;">💾 Save & ship to trainer</button>
+                    <button onclick="closeAnnotateModal()" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; padding:2px 10px; cursor:pointer; font-size:16px;" title="Close (ESC)">✕</button>
+                </div>
+                <!-- Inline class→category mapping panel; hidden once every MVE class the frame uses is mapped. -->
+                <div id="annotate-classmap" style="display:none; padding:8px 16px; border-bottom:1px solid rgba(245,158,11,0.5); background:rgba(245,158,11,0.06); font-size:12px; color:#fde68a;"></div>
+                <!-- 4.0.24 — `overflow:auto` instead of `hidden` so the LSF label
+                     strip is reachable when the image's intrinsic aspect ratio
+                     leaves it pushed off the bottom of the modal. The labels
+                     palette IS rendered, just outside the container's visible
+                     box; auto lets the operator scroll to it. -->
+                <div id="label-studio" class="studio" style="flex:1; overflow:auto; background:#fff;"></div>
+            </div>
+        </div>
+
+        <script src="/static/js/audio.js?v=4.0.48"></script>
+        <script src="/static/js/app-core.js?v=4.0.48"></script>
+        <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.48"></script>
+        <script src="/static/js/annotate.js?v=4.0.48"></script>
     </body>
 </html>

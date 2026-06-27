@@ -226,7 +226,20 @@ var translations = {
 
             // ----- Fallback for unknown / trained-model classes -----
             tip_yolo_class: ["<b>Trained-model class</b>", "Defined in the loaded model weights file (model.names).", "Train your own classes via the AI trainer; rename / add as needed.", "Rule patterns: present, count_greater, area_greater, color_delta."]
-        }
+        },
+        // 4.0.15 — new feature strings (px/mm calibration, hover-preview size)
+        pixels_per_mm: "Pixels per mm",
+        not_calibrated: "not calibrated",
+        hover_size: "Hover size:",
+        size_small: "Small (420×280)",
+        size_medium: "Medium (640×420)",
+        size_large: "Large (900×580)",
+        size_xlarge: "X-Large (1200×780)",
+        tip_pixels_per_mm: "Camera calibration: how many image pixels equal 1 mm in the real world. Enter once per camera; defect dimensions downstream are shown in mm / mm² instead of px / px². Leave blank to keep raw pixel values.",
+        // 4.0.18
+        status_upper: "U (Upper)",
+        status_bottom: "B (Bottom)",
+        status_warning: "Warning",
     },
     fa: {
         tab_dashboard: "داشبورد", tab_ai: "دستیار هوشمند", tab_gallery: "گالری",
@@ -353,7 +366,20 @@ var translations = {
         tip_offset_delay: "میلی‌ثانیه تاخیر پس از تشخیص قبل از شمارش. فاصله فیزیکی سنسور تا نقطه شمارش را جبران می‌کند.",
         tip_duration_pulses: "تعداد نمونه‌ها (~16 میکروثانیه) برای فیلتر نویز. بالاتر = مطمئن‌تر ولی کندتر. 0 = شمارش فوری.",
         tip_duration_percent: "درصد نمونه‌هایی که باید HIGH باشند. مثلا 60 یعنی 6 از 10 پالس باید HIGH باشد.",
-        tip_encoder_factor: "ضریب شمارش انکودر به ازای هر تشخیص. پیش‌فرض 1 = یک شمارش به ازای هر محصول."
+        tip_encoder_factor: "ضریب شمارش انکودر به ازای هر تشخیص. پیش‌فرض 1 = یک شمارش به ازای هر محصول.",
+        // 4.0.15
+        pixels_per_mm: "پیکسل بر میلی‌متر",
+        not_calibrated: "کالیبره نشده",
+        hover_size: "اندازه پیش‌نمایش:",
+        size_small: "کوچک (۴۲۰×۲۸۰)",
+        size_medium: "متوسط (۶۴۰×۴۲۰)",
+        size_large: "بزرگ (۹۰۰×۵۸۰)",
+        size_xlarge: "خیلی بزرگ (۱۲۰۰×۷۸۰)",
+        tip_pixels_per_mm: "کالیبراسیون دوربین: چند پیکسل تصویر برابر با ۱ میلی‌متر در دنیای واقعی است. برای هر دوربین یک‌بار وارد کنید؛ ابعاد عیوب به جای پیکسل به میلی‌متر نمایش داده می‌شود. خالی بگذارید تا واحد پیکسل بماند.",
+        // 4.0.18
+        status_upper: "U (بالا)",
+        status_bottom: "B (پایین)",
+        status_warning: "هشدار"
     },
     ar: {
         tab_dashboard: "لوحة التحكم", tab_ai: "مساعد ذكي", tab_gallery: "معرض",
@@ -864,6 +890,78 @@ var translations = {
         tip_duration_pulses: "Número de muestras (~16µs) para filtrado de ruido. Mayor = más fiable pero lento. 0 = conteo instantáneo.",
         tip_duration_percent: "Porcentaje de muestras que deben ser HIGH durante la ventana de rebote. Ej. 60 significa 6 de 10 pulsos HIGH.",
         tip_encoder_factor: "Multiplicador de conteo del codificador por detección. Predeterminado 1 = un conteo por producto."
+    },
+    // 4.0.17 — Italiano (skeleton). Unmapped keys fall back to English via t().
+    it: {
+        tab_dashboard: "Dashboard", tab_ai: "Assistente AI", tab_gallery: "Galleria",
+        tab_charts: "Grafici", tab_hardware: "Hardware", tab_cameras: "Telecamere",
+        tab_inference: "Inferenza", tab_process: "Processo", tab_advanced: "Avanzate",
+        process_config: "Configurazione del processo",
+        save_all: "Salva tutta la configurazione", last_saved: "Ultimo:", never: "Mai",
+        shipment: "Spedizione", status: "Stato", encoder: "Encoder", speed: "Velocità",
+        movement: "Movimento", ej_queue: "Coda eject", ej_active: "Eject attivo",
+        ej_enable: "Eject", ej_offset: "Offset eject",
+        ok: "OK", ng: "NG", ej_ok: "Eject OK", ej_ng: "Eject NG", downtime: "Fermo", analog: "Analog",
+        power: "Alim.", capture: "Acquisizione", inference: "Inferenza",
+        checking: "Controllo...", online: "Online", offline: "Offline",
+        moving: "In moto", stopped: "Fermo", enabled: "Abilitato", disabled: "Disabilitato",
+        first: "Primo", previous: "Precedente", next: "Successivo", last: "Ultimo",
+        zoom_in: "Zoom +", reset_zoom: "Reset zoom", zoom_out: "Zoom -",
+        stop_update: "Pausa aggiornamento", resume_update: "Riprendi aggiornamento",
+        no_frames: "Nessun frame ancora",
+        camera_discovery: "Rilevamento telecamere IP", network_subnet: "Subnet (primi 3 ottetti)",
+        scan_network: "Scansiona rete", camera_preview: "Anteprima telecamera",
+        camera_name: "Nome telecamera (opzionale)", camera_monitoring: "Monitoraggio telecamera",
+        camera_status: "Stato connessione telecamera",
+        ejection_procedures: "Procedure di espulsione", data_file_editor: "Editor file dati",
+        refresh: "Aggiorna", apply: "Applica", save: "Salva", delete: "Elimina",
+        system: "Sistema", cpu: "CPU", ram: "RAM", disk: "Disco",
+        pulses_s: "Impulsi/s", latency: "Latenza", interval: "Intervallo",
+        inf_fps: "Inf", cap_fps: "Cap", disk_queue: "Coda disco", inf_queue: "Coda inferenza",
+        // 4.0.17 new keys
+        pixels_per_mm: "Pixel per mm",
+        not_calibrated: "non calibrato",
+        hover_size: "Dimensione anteprima:",
+        size_small: "Piccolo (420×280)",
+        size_medium: "Medio (640×420)",
+        size_large: "Grande (900×580)",
+        size_xlarge: "Molto grande (1200×780)",
+    },
+    // 4.0.17 — Polski (skeleton). Klucze niezmapowane wracają do angielskiego.
+    pl: {
+        tab_dashboard: "Panel", tab_ai: "Asystent AI", tab_gallery: "Galeria",
+        tab_charts: "Wykresy", tab_hardware: "Sprzęt", tab_cameras: "Kamery",
+        tab_inference: "Inferencja", tab_process: "Proces", tab_advanced: "Zaawansowane",
+        process_config: "Konfiguracja procesu",
+        save_all: "Zapisz całą konfigurację", last_saved: "Ostatnio:", never: "Nigdy",
+        shipment: "Wysyłka", status: "Status", encoder: "Enkoder", speed: "Prędkość",
+        movement: "Ruch", ej_queue: "Kolejka wyrzutu", ej_active: "Wyrzut aktywny",
+        ej_enable: "Wyrzut", ej_offset: "Offset wyrzutu",
+        ok: "OK", ng: "NG", ej_ok: "Wyrzut OK", ej_ng: "Wyrzut NG", downtime: "Postój", analog: "Analog",
+        power: "Zasil.", capture: "Akwizycja", inference: "Inferencja",
+        checking: "Sprawdzanie...", online: "Online", offline: "Offline",
+        moving: "Ruch", stopped: "Stop", enabled: "Włączony", disabled: "Wyłączony",
+        first: "Pierwszy", previous: "Poprzedni", next: "Następny", last: "Ostatni",
+        zoom_in: "Powiększ", reset_zoom: "Reset zoom", zoom_out: "Pomniejsz",
+        stop_update: "Wstrzymaj odświeżanie", resume_update: "Wznów odświeżanie",
+        no_frames: "Brak klatek",
+        camera_discovery: "Wykrywanie kamer IP", network_subnet: "Podsieć (pierwsze 3 oktety)",
+        scan_network: "Skanuj sieć", camera_preview: "Podgląd kamery",
+        camera_name: "Nazwa kamery (opcjonalna)", camera_monitoring: "Monitoring kamer",
+        camera_status: "Stan połączenia kamery",
+        ejection_procedures: "Procedury wyrzutu", data_file_editor: "Edytor pliku danych",
+        refresh: "Odśwież", apply: "Zastosuj", save: "Zapisz", delete: "Usuń",
+        system: "System", cpu: "CPU", ram: "RAM", disk: "Dysk",
+        pulses_s: "Impulsy/s", latency: "Opóźnienie", interval: "Interwał",
+        inf_fps: "Inf", cap_fps: "Cap", disk_queue: "Kolejka dysku", inf_queue: "Kolejka inferencji",
+        // 4.0.17 new keys
+        pixels_per_mm: "Piksele na mm",
+        not_calibrated: "nieskalibrowane",
+        hover_size: "Rozmiar podglądu:",
+        size_small: "Mały (420×280)",
+        size_medium: "Średni (640×420)",
+        size_large: "Duży (900×580)",
+        size_xlarge: "Bardzo duży (1200×780)",
     }
 };
 
@@ -898,6 +996,10 @@ function applyLanguage(lang) {
     // Set RTL for Arabic and Persian
     var isRTL = (currentLang === 'ar' || currentLang === 'fa');
     document.documentElement.dir = isRTL ? 'rtl' : 'ltr';
+    // 4.0.18 — propagate the lang code onto <html> so CSS selectors like
+    // `html[lang="fa"]` can swap fonts (Vazir for Persian, Badr for Arabic, etc.).
+    // Without this, font-family overrides keyed to language never fire.
+    document.documentElement.lang = currentLang;
 
     // Update all data-i18n elements
     document.querySelectorAll('[data-i18n]').forEach(function(el) {

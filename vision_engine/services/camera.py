@@ -339,6 +339,10 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         # restart; watcher.py reads it back on next init via
         # CameraBuffer(..., auto_exposure=cc.get('auto_exposure', False))
         "auto_exposure": bool(getattr(cam, 'auto_exposure', False)),
+        # 4.0.15 — Per-camera pixel-to-millimetre calibration. None until
+        # the operator enters it on the Cameras tab. Consumers convert
+        # px → mm only when present.
+        "px_per_mm": getattr(cam, 'px_per_mm', None),
     }
 
     # Include name from metadata if available

@@ -26,6 +26,34 @@ services:
       # Note: All settings (infrastructure, serial port, ejector, capture, cameras, image processing, etc.)
       #       are configured via the web interface at http://localhost:5050/status
       #       and saved to .env.prepared_query_data for persistence
+    # 4.0.47 — MVE depends on its persistent data stores being healthy at boot.
+    # It does NOT depend on yolo_inference / math_inference because those are
+    # called via HTTP per-frame and the call sites already retry; making MVE
+    # block on them at startup would mean a slow GPU init delays every MVE
+    # boot instead of just delaying the first inference.
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # 4.0.48 — frame-recency healthcheck (refined).
+    # Reads /api/health/watchdog and exits non-zero when `stalled=true`.
+    # 4.0.48 narrows the stall definition to "captures > 0 AND inferences == 0
+    # in the last 120s" — i.e. frames ARE being grabbed but the inference
+    # path is broken. Pure idle (no captures, no inferences) is now treated
+    # as healthy so we don't restart-loop a peacefully-parked line.
+    # Operator-parked shipment=no_shipment is also always healthy.
+    #
+    # Tuning: interval=90s + retries=4 (= 6 minutes of stuck state before a
+    # restart fires). Generous so we never restart a line during a brief
+    # network hiccup or yolo container warmup. start_period=180s lets MVE
+    # enumerate cameras + warm caches without false trigger on first boot.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,json,sys; d=json.loads(urllib.request.urlopen('http://127.0.0.1:5050/api/health/watchdog',timeout=8).read()); sys.exit(1 if d.get('stalled') else 0)\""]
+      interval: 90s
+      timeout: 10s
+      retries: 4
+      start_period: 180s
     logging:
       options:
         max-size: "10m"
@@ -146,30 +174,9 @@ services:
         max-file: "3"
     restart: "always"
 
-  # Grafana Visualization
-  grafana:
-    container_name: "monitait_grafana"
-    image: grafana/grafana:latest
-    user: "0"
-    expose:
-      - 3000
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_SECURITY_ALLOW_EMBEDDING=true
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-    volumes:
-      - ${DATA_ROOT:-.}/volumes/grafana:/var/lib/grafana
-    networks:
-      - main_network
-    depends_on:
-      - timescaledb
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "2"
-    restart: "always"
+  # 4.0.47 — grafana service removed (unused on sites; operator views charts
+  # via MVE's Charts tab. Was previously taking RAM + disk and the only
+  # depends_on link in compose).
 
   # PiGallery2 Image Gallery
   pigallery2:

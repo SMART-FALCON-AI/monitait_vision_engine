@@ -487,6 +487,14 @@ class ArduinoSocket:
                     roi_config=cc if cc.get('roi_enabled') else None,
                     auto_exposure=cc.get('auto_exposure', False),
                 )
+                # 4.0.15 — restore per-camera px/mm calibration from saved
+                # config. Stored as a plain attribute so callers can read
+                # `cam.px_per_mm` without touching the CameraBuffer constructor.
+                try:
+                    _ppm = cc.get('px_per_mm')
+                    cam.px_per_mm = float(_ppm) if _ppm not in (None, "") else None
+                except (TypeError, ValueError):
+                    cam.px_per_mm = None
                 self.cameras[idx] = cam
                 logger.info(f"Camera {idx} initialized: {cam_path} (success={cam.success})")
 
@@ -1124,33 +1132,48 @@ class ArduinoSocket:
                 time.sleep(0.03)
             except Exception as e:
                 self.health_check = False
-                # Skip reconnection attempts if serial was never available
-                if not self.serial_available:
-                    time.sleep(0.1)
-                    continue
-
-                if "Input/output" in str(e):
+                # 4.0.47 — universal serial reconnect with backoff.
+                #
+                # The previous code only attempted reconnect on "Input/output"
+                # or "fileno" errors, AND short-circuited entirely if serial
+                # was never available initially. Both gates failed on the
+                # 2026-06-20 incident: the `.state` NoneType error didn't
+                # match either substring AND the encoder USB drop set
+                # serial_available=False which then prevented all future
+                # reconnect attempts. Result: watcher loop kept calling
+                # `time.sleep(0.1) ; continue` for ~12 hours with no recovery
+                # while the inference pipeline stayed at hot=0 cold=0.
+                #
+                # New behaviour: ALWAYS attempt to reopen the serial port on
+                # any exception, regardless of error type or prior state.
+                # Backoff between attempts (capped at ~5s) so a hard-down
+                # device doesn't flood logs.
+                now = time.time()
+                last = getattr(self, "_serial_reconnect_last", 0.0)
+                backoff = getattr(self, "_serial_reconnect_backoff", 0.5)
+                if now - last >= backoff:
+                    self._serial_reconnect_last = now
                     try:
                         if self.serial:
-                            self.serial.close()
+                            try: self.serial.close()
+                            except Exception: pass
                         self.serial = serial.Serial(self.serial_port, self.serial_baudrate, 8, 'N', 1, timeout=1)
-                        self.serial.flushInput()  # clear input serial buffer
-                        self.serial.flushOutput()  # clear output serial buffer
+                        self.serial.flushInput()
+                        self.serial.flushOutput()
+                        if not self.serial_available:
+                            logger.warning(f"Serial reconnected on {self.serial_port} after error: {e}")
                         self.serial_available = True
-                        logger.warning(f"Serial reconnected after I/O error: {e}")
+                        self._serial_reconnect_backoff = 0.5
                     except Exception as er:
+                        was_available = self.serial_available
                         self.serial_available = False
-                        logger.error(f"Serial reconnection failed: {er}")
-                if "fileno" in str(e):
-                    try:
-                        self.serial = serial.Serial(self.serial_port, self.serial_baudrate, 8, 'N', 1, timeout=1)
-                        self.serial.flushInput()  # clear input serial buffer
-                        self.serial.flushOutput()  # clear output serial buffer
-                        self.serial_available = True
-                    except Exception as ers:
-                        self.serial_available = False
-                        logger.error(f"Serial reconnection failed: {ers}")
-                logger.error(f"Serial run error: {e}")
+                        # Cap the backoff at ~5s so dead device doesn't flood logs.
+                        self._serial_reconnect_backoff = min(backoff * 2, 5.0)
+                        # Only log a state CHANGE (available -> unavailable), or
+                        # one error per backoff window, to keep the log readable.
+                        if was_available:
+                            logger.error(f"Serial reconnection failed (lost device): {er}")
+                logger.debug(f"Serial run error (will retry): {e}")
                 time.sleep(0.1)
 
     def run_ejector(self):
@@ -1277,13 +1300,21 @@ class ArduinoSocket:
                             # Clear signal before capture
                             self.clear_signal()
 
-                            # Capture cameras specified in this phase
+                            # Capture cameras specified in this phase.
+                            # 4.0.23 — carry phase_idx so the encode/save loop
+                            # below can put the phase into the filename. Without
+                            # this, phase-2 frames for a given camera OVERWRITE
+                            # phase-1's file (same `<d>_<cam>.jpg` path), but
+                            # phase-1's inference row survives the Redis dedupe,
+                            # producing the "bbox from phase-1 image drawn on
+                            # phase-2 image" visual mismatch operators have been
+                            # reporting on khoy + razin.
                             for cam_id in phase.cameras:
                                 cam = self.cameras.get(cam_id)
                                 if cam and cam.success:
                                     capture_ts = time.time()
                                     frame = cam.read()
-                                    grabbed_frames.append((cam_id, frame))
+                                    grabbed_frames.append((cam_id, frame, phase_idx, phase.light_mode))
 
                                     # Track capture FPS via persistent Redis connection (db=cfg.REDIS_DB)
                                     try:
@@ -1300,8 +1331,22 @@ class ArduinoSocket:
                         logger.error("StateManager not available or state disabled - no capture performed")
 
                     # Second loop - encode frames in-memory and queue for inference + disk archival
-                    for camera_index, grabbed in grabbed_frames:
-                        d_path = f"{self.shipment}/{hour_chunk}/{d}_{camera_index}"
+                    # 4.0.23 — `p<phase_idx>` token inserted BEFORE the camera
+                    # index makes the path unique per (timestamp, phase, camera)
+                    # while keeping the camera ID at the END of the stem. That
+                    # last-token-is-cam-id contract is relied on by
+                    # `int(frame_id.rsplit('_', 1)[-1])` in detection.py:1197 /
+                    # 1416 and `int(stream_frame[0].split('_')[-1])` in
+                    # watcher.py:1487 — putting phase AFTER cam would have
+                    # turned those parses into `int("p0")` and broken inference.
+                    # Multi-phase states (e.g. Phase 0=U_OFF_B_ON,
+                    # Phase 1=U_ON_B_OFF) used to collide on the same
+                    # `<d>_<cam>.jpg` path, with the second phase's file
+                    # overwriting the first on disk while two inference rows
+                    # existed for the same path. That was the source of the
+                    # wrong-bbox-on-right-image symptom reported on khoy + razin.
+                    for camera_index, grabbed, phase_idx, light_mode in grabbed_frames:
+                        d_path = f"{self.shipment}/{hour_chunk}/{d}_p{phase_idx}_{camera_index}"
                         name = os.path.join("raw_images", f"{d_path}.jpg")
 
                         # Encode to JPEG in memory (fast ~2-5ms, avoids disk round-trip for inference)
@@ -1377,10 +1422,33 @@ class ArduinoSocket:
                     for stream_frame in self.stream_data:
                         frame_histogram_data = []
                         stream_path = os.path.join("raw_images", f"{stream_frame[0]}.jpg")
+                        # 4.0.47 — guard cv2.imread against missing files. The
+                        # disk_cleanup_loop deletes hourly chunks under
+                        # raw_images/<shipment>/<YYYY-MM-DD_HH>/ when disk is
+                        # >75%; if the stream_queue still holds a path inside
+                        # a deleted chunk, imread returns None and the next
+                        # access (.shape, cv2.rectangle, etc.) crashes the
+                        # stream loop with `'NoneType' has no attribute 'shape'`.
+                        # 603 of these occurred on khoy on 2026-06-20 23:46.
+                        # Skip this frame cleanly when the JPG is gone.
+                        if not os.path.exists(stream_path):
+                            continue
                         stream_frame[1] = cv2.imread(stream_path)
+                        if stream_frame[1] is None:
+                            # Path exists but cv2 couldn't decode it (corrupt write
+                            # or partial flush). Same skip — log once at debug to
+                            # avoid log flooding when many frames in a row fail.
+                            logger.debug(f"stream_results: cv2.imread returned None for {stream_path}")
+                            continue
                         # 3.21.26 — single source of truth: draw_filters owns
                         # the audio_settings read. Just ask `should_draw_class(name)`.
-                        _tl_cfg = getattr(_app.state, 'timeline_config', {})
+                        # 4.0.47 — guard `_app` against being None. main.py calls
+                        # set_app(app) once at startup; if stream_results() runs
+                        # before that completes (race window), _app.state raises
+                        # `'NoneType' has no attribute 'state'`. The 32 errors at
+                        # 2026-06-20 11:33 on khoy were exactly this.
+                        _tl_cfg = getattr(_app, 'state', None)
+                        _tl_cfg = getattr(_tl_cfg, 'timeline_config', {}) if _tl_cfg else {}
                         _skip_bbox = not _tl_cfg.get('show_bounding_boxes', True)
                         from services.draw_filters import should_draw_class, min_confidence_for
                         for idx, res in enumerate(stream_frame[2]):

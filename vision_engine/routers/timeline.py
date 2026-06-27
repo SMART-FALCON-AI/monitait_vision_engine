@@ -1061,7 +1061,13 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
     endpoint serializes). Returns the `empty` payload if the DB is unreachable
     or has no rows for the requested window/shipment.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    # 4.0.29d — added 30d / 90d so the "Score per shipment" chart can score
+    # shipments older than 24h. Before, /api/quality/shipments listed 30 days
+    # of shipments but their score was computed with a hard-coded 24h window,
+    # so anything inactive for >24h came back score=None and rendered as a
+    # zero-height bar.
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours",
+                "7d": "7 days", "30d": "30 days", "90d": "90 days"}
     interval = _windows.get(window, "24 hours")
     ship_clause = "AND shipment = %s" if shipment else ""
     base_params = [interval] + ([shipment] if shipment else [])
@@ -1374,17 +1380,21 @@ async def calibrate_score_scale(payload: dict = None):
             "shipments_found": len(ships),
         }, status_code=400)
 
-    # Compute UNSCALED impact_per_unit for each shipment by recomputing the payload
-    # but ignoring the scale factor — we'll solve for it.
+    # Compute UNSCALED impact_per_unit for each shipment.
+    # 4.0.29 — FIX runaway-calibration bug: `_compute_quality_payload`
+    # returns the RAW `impact_per_unit` at line 1213/1272 (`impact_total /
+    # denom`, no scale applied). The previous logic here divided by
+    # `current_scale_factor` thinking the payload was already scaled — that
+    # comment was wrong, the payload was always raw. With a 16M scale stored
+    # in config, every calibration click computed `ipu_raw = ipu / 16M` →
+    # vanishingly small → recommended new scale near the 1e9 cap → next click
+    # divided by the new larger scale → bigger still → pinned at the cap.
+    # No division needed; the payload IS the raw value.
     ipu_list = []
     for s in ships:
         try:
             pl = _compute_quality_payload(shipment=s, window=window)
-            ipu = float(pl.get("impact_per_unit") or 0.0)
-            # _compute_quality_payload returns ALREADY-SCALED ipu since 3.25.12.
-            # We need the raw value, so divide back out.
-            current_scale = float(pl.get("score_scale_factor") or 1.0)
-            ipu_raw = ipu / current_scale if current_scale > 0 else ipu
+            ipu_raw = float(pl.get("impact_per_unit") or 0.0)
             if ipu_raw > 0:
                 ipu_list.append(ipu_raw)
         except Exception:
@@ -1405,16 +1415,27 @@ async def calibrate_score_scale(payload: dict = None):
     p50_raw = _pct(ipu_list, 0.50)
     p95_raw = _pct(ipu_list, 0.95)
 
-    # We want: score_p50 = 100 * (1 - ipu_p50 * scale) = target_p50
-    #          => scale = (1 - target_p50/100) / ipu_p50
-    # Same equation for p5. Pick the LARGER of the two so neither percentile
-    # exceeds its target (the score curve is bounded above by 100 so over-
-    # scaling on p50 won't blow up p5).
+    # We want:
+    #   target_p50 = score of the MEDIAN shipment  => scale uses p50_raw
+    #   target_p5  = score of the WORST shipment   => scale uses p95_raw
+    #     (5th-percentile-of-scores corresponds to 95th-percentile-of-impact
+    #      because score is monotonically decreasing in impact)
+    # Pick the LARGER of the two so we MEET both targets (the projection
+    # function later uses _score(p95_raw) for projected_p5 — bug fixed
+    # here so that mapping is consistent on both sides).
+    # 4.0.29 — Was previously using p5_raw (lowest impact) on the second
+    # candidate, which "constrained the BEST shipment to score 60" and
+    # ALWAYS dominated max() because (0.4 / very-small) is huge. That made
+    # every recommendation push median + best down toward 60 simultaneously
+    # while saturating the worst at 0. Using p95_raw (highest impact) makes
+    # the candidate represent its true semantic — "the worst-impact shipment
+    # must score ≥ 60" — which is normally a SMALLER scale than the p50
+    # candidate, so max() correctly hits target_p50=85.
     candidates = []
     if p50_raw > 0:
         candidates.append(max(0.0, (1.0 - target_p50 / 100.0) / p50_raw))
-    if p5_raw > 0:
-        candidates.append(max(0.0, (1.0 - target_p5  / 100.0) / p5_raw))
+    if p95_raw > 0:
+        candidates.append(max(0.0, (1.0 - target_p5  / 100.0) / p95_raw))
     if not candidates:
         return JSONResponse(content={
             "error": "All ipu values are 0 — can't solve for scale.",
@@ -1967,10 +1988,15 @@ async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
             try: release_db_connection(conn)
             except Exception: pass
 
-        # Compute the quality score per shipment by reusing the existing helper.
+        # 4.0.29d — pass through the chart's window (default 30d) so the score
+        # is computed against the SAME range that picked the shipment list.
+        # Previously this was hard-coded to "24h", which silently zeroed scores
+        # for any shipment whose last activity was older than 24h, leaving the
+        # bar chart with invisible bars and X-axis labels for shipments that
+        # never seemed to "load".
         for ship, first_t, last_t, n_rows in rows:
             try:
-                qp = _compute_quality_payload(shipment=ship, window="24h")
+                qp = _compute_quality_payload(shipment=ship, window=window)
                 out.append({
                     "shipment": ship,
                     "score":   qp.get("score") if qp else None,
@@ -1995,6 +2021,84 @@ async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
 # The Charts tab calls this with axis=time or axis=encoder. Each bucket gets:
 #   - the dominant procedure name (most-fired in that bucket) → strip cell color
 #   - a tooltip with the per-procedure breakdown
+# 3.26.0 — single-frame detection lookup, used by the LSF annotation modal so it
+# can pre-fill EVERY box on that frame (not just the dot the operator clicked).
+@router.get("/api/frame_detections")
+async def frame_detections(image_path: str = "", request: Request = None):
+    """Return all stored detections for one frame.
+
+    Output:
+      { image_path, image_url, px_per_mm, detections: [
+          {name, confidence, xmin, ymin, xmax, ymax, ...}
+      ] }
+    Image dimensions are deliberately omitted — the browser already loads the
+    image into an <img> for LSF, so it uses naturalWidth / naturalHeight for
+    pixel→percent conversion. Saves one disk read per modal-open.
+
+    4.0.15 — `px_per_mm` reflects the per-camera calibration on the camera
+    whose stem matches `..._<cam_id>.jpg`. None if not calibrated; consumers
+    (LSF modal title, defect drawer) only show mm when present.
+    """
+    if not image_path or "/" not in image_path:
+        return JSONResponse(content={"error": "image_path required"}, status_code=400)
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content={"error": "db unreachable"}, status_code=503)
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT detections FROM inference_results WHERE image_path = %s ORDER BY time DESC LIMIT 1",
+                (image_path,),
+            )
+            row = cur.fetchone()
+            cur.close()
+        finally:
+            try: release_db_connection(conn)
+            except Exception: pass
+        dets = row[0] if row and row[0] else []
+        # `detections` is a jsonb array — psycopg2 returns it as a Python list of dicts.
+        if not isinstance(dets, list):
+            dets = []
+        # 3.26.2 — build the URL through the existing /api/raw_image/<path> serve route
+        # (NOT a non-existent /raw_images/ path). Also strip `_DETECTED.jpg` so the
+        # editor opens the RAW frame — annotating over YOLO's drawn boxes is wrong.
+        rel = image_path.split("raw_images/")[-1].lstrip("/") if "raw_images/" in image_path else image_path.lstrip("/")
+        # _DETECTED.jpg → .jpg ; the raw file lives at the same path without the suffix.
+        rel_raw = rel.replace("_DETECTED.jpg", ".jpg")
+
+        # 4.0.15 — px/mm calibration lookup. Filename ends with `_<cam_id>.jpg`
+        # (e.g. `2026-06-15-14-44-10-579709_2.jpg` → cam 2). When the cam has a
+        # `px_per_mm` attribute set on the live watcher, include it so the LSF
+        # modal can show bbox dimensions in mm. Silently None on any failure.
+        px_per_mm = None
+        try:
+            import re as _re
+            m = _re.search(r"_(\d+)(?:_DETECTED)?\.jpg$", image_path)
+            if m and request is not None:
+                cam_id = int(m.group(1))
+                watcher_inst = getattr(request.app.state, "watcher_instance", None)
+                if watcher_inst is not None:
+                    cam = watcher_inst.cameras.get(cam_id)
+                    if cam is not None:
+                        v = getattr(cam, "px_per_mm", None)
+                        if v not in (None, "") and float(v) > 0:
+                            px_per_mm = float(v)
+        except Exception:
+            px_per_mm = None
+
+        return JSONResponse(content={
+            "image_path": image_path,
+            "image_url": "/api/raw_image/" + rel_raw,
+            "px_per_mm": px_per_mm,
+            "detections": dets,
+        })
+    except Exception as e:
+        logger.warning(f"frame_detections failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
 @router.get("/api/quality/ejection_axis")
 async def quality_ejection_axis(
     request: Request,
@@ -2022,7 +2126,11 @@ async def quality_ejection_axis(
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
-    buckets = max(8, min(120, int(buckets)))
+    # 4.0.39 — raise cap from 120 to 192 so the strip can match the colour
+    # heatmap's max (N_BINS=192 in detection_charts). At 120 the heatmap had
+    # more cells than the quality / ejection strip below it and the columns
+    # didn't line up at high bucket counts.
+    buckets = max(8, min(192, int(buckets)))
     axis_l = (axis or "time").lower()
 
     cells = []
@@ -2200,7 +2308,11 @@ async def quality_heatmap(
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
-    buckets = max(8, min(120, int(buckets)))
+    # 4.0.39 — raise cap from 120 to 192 so the strip can match the colour
+    # heatmap's max (N_BINS=192 in detection_charts). At 120 the heatmap had
+    # more cells than the quality / ejection strip below it and the columns
+    # didn't line up at high bucket counts.
+    buckets = max(8, min(192, int(buckets)))
     axis_l = (axis or "time").lower()
 
     # pull per-class severity from audio_settings
@@ -2436,6 +2548,9 @@ async def detection_stats(request: Request, window: str = "1h", min_conf: float 
             ) recent,
             LATERAL jsonb_array_elements(recent.detections) AS elem
             WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+              -- 4.0.38: skip synthetic entries (e.g. `_color`) so they don't
+              -- show up as a real class in the Detections-by-class bar / pie.
+              AND COALESCE(elem->>'name', '') !~ '^_'
             GROUP BY cls
             ORDER BY n DESC
             LIMIT 30
@@ -2479,6 +2594,8 @@ async def detection_stats(request: Request, window: str = "1h", min_conf: float 
                 FROM inference_results, LATERAL jsonb_array_elements(detections) det
                 WHERE time > NOW() - INTERVAL %s
                   AND COALESCE((det->>'confidence')::float, 0) >= %s
+                  -- 4.0.38: skip synthetic (`_color` etc.) from impact-by-class too.
+                  AND COALESCE(det->>'name', '') !~ '^_'
                 GROUP BY (det->>'name')
                 """,
                 (interval, float(min_conf or 0.0)),
@@ -2512,7 +2629,7 @@ async def detection_stats(request: Request, window: str = "1h", min_conf: float 
 
 
 @router.get("/api/detection_charts")
-async def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
+async def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -2584,6 +2701,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                        ((elem->>'ymax')::float - (elem->>'ymin')::float) AS h
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
                 WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+                  AND COALESCE(elem->>'name', '') !~ '^_'  -- 4.0.29: skip synthetic (_color full-frame bbox skews size percentiles)
             )
             SELECT
                 bkt,
@@ -2615,6 +2733,30 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                 "c_max": round((cmax or 0) * 100, 1),
             })
 
+        # 4.0.37 — link Charts to Process tab "Show" toggle. Classes where
+        # service_config.audio_settings[cls].show == False are excluded from
+        # the scatter (they're already excluded from the detection annotator
+        # via services/draw_filters.py, so this just brings the chart in line
+        # with the operator's "this class shouldn't be visible anywhere"
+        # decision). The per-chart legend click (sticky in localStorage) still
+        # works on top of this as a transient override.
+        _hidden_by_process = []
+        try:
+            from config import load_service_config as _lsc_ps
+            _svc_ps = _lsc_ps() or {}
+            _as = _svc_ps.get("audio_settings") or {}
+            _hidden_by_process = sorted([
+                str(cls) for cls, cfg in _as.items()
+                if isinstance(cfg, dict) and cfg.get("show") is False
+            ])
+        except Exception as _pse:
+            logger.debug(f"audio_settings show-flag lookup failed: {_pse}")
+        _parent_filter_sql = ""
+        _parent_filter_args = []
+        if _hidden_by_process:
+            _parent_filter_sql = " AND COALESCE(elem->>'name','') <> ALL(%s)"
+            _parent_filter_args = [_hidden_by_process]
+
         # --- camera scatter: stratified per-class so rare classes (spot/warp/stitch)
         # don't get swamped by dominant ones (weft_up). Up to 750 newest dots PER
         # CLASS, capped at 6000 total across classes.
@@ -2635,6 +2777,8 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                        shipment AS ship
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
                 WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+                  AND COALESCE(elem->>'name', '') !~ '^_'  -- 4.0.29: skip synthetic (_color etc.)
+                  {_parent_filter_sql}
             ),
             ranked AS (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY cls ORDER BY t DESC) AS rn
@@ -2645,7 +2789,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
             ORDER BY t DESC
             LIMIT 6000
             """,
-            base_params,
+            base_params + _parent_filter_args,
         )
         camera_scatter = [
             {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
@@ -2674,6 +2818,8 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                        shipment AS ship
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
                 WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+                  AND COALESCE(elem->>'name', '') !~ '^_'  -- 4.0.29: skip synthetic (_color etc.)
+                  {_parent_filter_sql}
             ),
             ranked AS (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY cls ORDER BY t DESC) AS rn
@@ -2683,7 +2829,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
             WHERE rn <= 750
             LIMIT 6000
             """,
-            base_params,
+            base_params + _parent_filter_args,
         )
         camera_scatter_encoder = [
             {"x": int(enc or 0), "y": cam, "cls": cls,
@@ -2705,6 +2851,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
                        (elem->>'confidence')::float AS conf
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
                 WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+                  AND COALESCE(elem->>'name', '') !~ '^_'  -- 4.0.29: skip synthetic
             )
             SELECT bkt, cls, AVG(conf) AS c_avg
             FROM expanded
@@ -2726,6 +2873,371 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
         }
         cur.close()
 
+        # 4.0.31 — initialise these here (default empty) so the camera_y_order
+        # block below can union the cameras across scatter + heatmap without a
+        # forward-reference error. The actual aggregation happens further down.
+        color_heatmap = {"enc_min": None, "enc_max": None, "n_bins": 0, "cells": []}
+        color_heatmap_time = {"t_min": None, "t_max": None, "n_bins": 0, "cells": []}
+        # We need the heatmap cells available BEFORE building camera_y_order
+        # (so the Y axis includes cameras that have ONLY _color samples and no
+        # defect dots — the case when the line is idle but colour data is
+        # flowing). Run the encoder + time heatmap aggregations now; the
+        # downstream baselines block reuses their results.
+        # 4.0.34 — `phase` (optional) lets the operator filter the colour heatmap
+        # to a single capture phase (e.g. shipment / ejection). Empty string =
+        # all phases collapsed (back-compat). Phase filter is heatmap-only —
+        # scatter / quality / ejection charts are NOT phase-filtered.
+        _phase = (phase or "").strip()
+        _phase_clause = " AND elem->>'phase' = %s" if _phase else ""
+        _phase_args = [_phase] if _phase else []
+        try:
+            # 4.0.35 — bucket count is now user-configurable from the chart
+            # toolbar. Same value powers the colour heatmap and is echoed to
+            # the quality / ejection strips (the JS calls those endpoints
+            # with the same `buckets` value). Clamp to a sane range.
+            try:
+                N_BINS = int(bins)
+            except Exception:
+                N_BINS = 32
+            N_BINS = max(4, min(192, N_BINS))
+            _hm_cur = conn.cursor()
+            _hm_cur.execute(
+                f"""
+                WITH color_rows AS (
+                    SELECT
+                        encoder_value AS enc,
+                        (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                        (elem->>'L')::float AS L,
+                        (elem->>'E')::float AS E,
+                        (elem->>'phase') AS phase
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                      AND elem->>'name' = '_color'
+                      AND encoder_value IS NOT NULL
+                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                      {_phase_clause}
+                ),
+                bounds AS (SELECT MIN(enc) AS lo, MAX(enc) AS hi FROM color_rows),
+                binned AS (
+                    SELECT cr.cam,
+                           CASE WHEN b.hi > b.lo
+                                THEN LEAST({N_BINS} - 1, GREATEST(0,
+                                     FLOOR(((cr.enc - b.lo)::numeric * {N_BINS}) / (b.hi - b.lo))))::int
+                                ELSE 0 END AS bin,
+                           cr.L, cr.E
+                    FROM color_rows cr CROSS JOIN bounds b
+                ),
+                cam_baselines AS (
+                    SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                    FROM binned GROUP BY cam
+                )
+                SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
+                       AVG(b.E)::float - MAX(cb.base_E)::float
+                FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
+                GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
+                """,
+                [interval] + ([shipment] if shipment else []) + _phase_args,
+            )
+            cells = []
+            for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
+                cells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
+                              "L": round(mL or 0, 2), "E": round(mE or 0, 2),
+                              "delta_e": round(de or 0, 2), "n": int(n or 0)})
+            _hm_cur.execute(
+                f"""SELECT MIN(encoder_value), MAX(encoder_value)
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                      AND elem->>'name' = '_color' AND encoder_value IS NOT NULL
+                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                      {_phase_clause}""",
+                [interval] + ([shipment] if shipment else []) + _phase_args,
+            )
+            row = _hm_cur.fetchone()
+            color_heatmap = {
+                "enc_min": int(row[0]) if row and row[0] is not None else None,
+                "enc_max": int(row[1]) if row and row[1] is not None else None,
+                "n_bins": N_BINS, "cells": cells,
+            }
+            # Time-binned twin
+            _hm_cur.execute(
+                f"""
+                WITH color_rows AS (
+                    SELECT EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
+                        (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                        (elem->>'L')::float AS L, (elem->>'E')::float AS E
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                      AND elem->>'name' = '_color'
+                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                      {_phase_clause}
+                ),
+                bounds AS (SELECT MIN(t_ms) AS lo, MAX(t_ms) AS hi FROM color_rows),
+                binned AS (
+                    SELECT cr.cam,
+                           CASE WHEN b.hi > b.lo
+                                THEN LEAST({N_BINS} - 1, GREATEST(0,
+                                     FLOOR(((cr.t_ms - b.lo) * {N_BINS}) / (b.hi - b.lo))))::int
+                                ELSE 0 END AS bin,
+                           cr.L, cr.E
+                    FROM color_rows cr CROSS JOIN bounds b
+                ),
+                cam_baselines AS (
+                    SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                    FROM binned GROUP BY cam
+                )
+                SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
+                       AVG(b.E)::float - MAX(cb.base_E)::float
+                FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
+                GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
+                """,
+                [interval] + ([shipment] if shipment else []) + _phase_args,
+            )
+            tcells = []
+            for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
+                tcells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
+                               "L": round(mL or 0, 2), "E": round(mE or 0, 2),
+                               "delta_e": round(de or 0, 2), "n": int(n or 0)})
+            _hm_cur.execute(
+                f"""SELECT MIN(EXTRACT(EPOCH FROM time) * 1000.0),
+                           MAX(EXTRACT(EPOCH FROM time) * 1000.0)
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                      AND elem->>'name' = '_color'
+                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                      {_phase_clause}""",
+                [interval] + ([shipment] if shipment else []) + _phase_args,
+            )
+            row = _hm_cur.fetchone()
+            color_heatmap_time = {
+                "t_min": float(row[0]) if row and row[0] is not None else None,
+                "t_max": float(row[1]) if row and row[1] is not None else None,
+                "n_bins": N_BINS, "cells": tcells,
+            }
+            _hm_cur.close()
+        except Exception as _he:
+            logger.debug(f"color heatmap pre-aggregation failed: {_he}")
+
+        # 4.0.34 — discover the phases that actually have _color data in this
+        # window so the UI can render exactly the right buttons. NOT filtered
+        # by the selected phase (we want the full menu either way).
+        phases_available = []
+        try:
+            _ph_cur = conn.cursor()
+            _ph_cur.execute(
+                f"""SELECT DISTINCT elem->>'phase' AS phase
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                      AND elem->>'name' = '_color'
+                      AND elem->>'phase' IS NOT NULL
+                    ORDER BY 1""",
+                [interval] + ([shipment] if shipment else []),
+            )
+            phases_available = [r[0] for r in _ph_cur.fetchall() if r and r[0]]
+            _ph_cur.close()
+        except Exception as _pe:
+            logger.debug(f"phases_available discovery failed: {_pe}")
+
+        # 4.0.24 — propagate the dashboard's camera column ordering into the
+        # chart so the scatter Y-axis matches the timeline grid the operator
+        # is already used to. Single source of truth: timeline_config.camera_order
+        # + timeline_config.custom_camera_order (same fields websocket.py reads
+        # to lay out the timeline columns at routers/websocket.py:150-164).
+        # Any camera that appears in the data but NOT in the custom list gets
+        # appended at the end in numeric order, so nothing disappears.
+        camera_y_order = []
+        try:
+            tl_config = getattr(request.app.state, "timeline_config", {}) or {}
+            mode = str(tl_config.get("camera_order") or "normal").lower()
+            # Discover every camera present in the scatter payloads so the
+            # axis covers EVERYTHING shown, even cams not enumerated in the
+            # operator's custom list.
+            # 4.0.31 — also include cameras that appear ONLY in the color
+            # heatmap (i.e., no defect dots but we have _color samples). Without
+            # this, when the line is stopped or the YOLO is quiet, the Y-axis
+            # collapses to empty and the heatmap plugin can't map cell.cam to
+            # a Y index — so the background never paints even though cells
+            # exist.
+            seen = set()
+            for pt in camera_scatter_encoder:
+                seen.add(int(pt.get("y") or 0))
+            for pt in camera_scatter:
+                seen.add(int(pt.get("y") or 0))
+            for cell in (color_heatmap.get("cells") or []):
+                seen.add(int(cell.get("cam") or 0))
+            for cell in (color_heatmap_time.get("cells") or []):
+                seen.add(int(cell.get("cam") or 0))
+            seen.discard(0)
+            if mode == "custom":
+                raw = str(tl_config.get("custom_camera_order") or "").strip()
+                explicit = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+                # Order = explicit list first (preserving order, dropping dups),
+                # then any cameras present in data that weren't enumerated.
+                seen_in_order = set()
+                for cid in explicit:
+                    if cid not in seen_in_order:
+                        camera_y_order.append(cid)
+                        seen_in_order.add(cid)
+                for cid in sorted(seen):
+                    if cid not in seen_in_order:
+                        camera_y_order.append(cid)
+            elif mode == "reverse":
+                camera_y_order = sorted(seen, reverse=True)
+            else:  # "normal" or anything unknown
+                camera_y_order = sorted(seen)
+        except Exception as _e:
+            logger.debug(f"camera_y_order compute failed (falling back to numeric): {_e}")
+            camera_y_order = []
+
+        # 4.0.31 — color_heatmap + color_heatmap_time were aggregated
+        # earlier (right after confidence_by_class) so camera_y_order could
+        # union the heatmap-only cameras into the Y-axis order. The old
+        # duplicate blocks that lived here have been removed.
+        color_baseline = {}
+
+        # 4.0.30 — baseline for the heatmap's ΔE computation. The frontend
+        # picks ONE mode at a time via the `baseline` query param; we only
+        # compute that one to avoid running SQL the operator didn't ask for.
+        # Modes:
+        #   camera          — median E across the visible window per camera
+        #                     (default; auto, no operator action needed)
+        #   shipment_start  — median E of the FIRST 60 s of the active shipment
+        #                     per camera ("colour at shipment start = correct")
+        #   target          — operator-set L*a*b* per camera in
+        #                     service_config.color_target (manual gold standard)
+        #   reference_frame — L*a*b* of a single operator-picked frame stored
+        #                     as service_config.color_reference_frame_id
+        # `color_baseline_modes` reports which modes have data available right
+        # now so the frontend can enable/disable toggle buttons accordingly.
+        try:
+            # ---- availability survey (cheap) ----
+            # We always tell the frontend which modes COULD work right now
+            # so it can grey-out / enable the toggle buttons accordingly,
+            # without computing values for unused modes.
+            color_baseline_modes = ["camera"]   # always available when there's any _color data
+            try:
+                from config import load_service_config as _lsc
+                _svc = _lsc() or {}
+            except Exception:
+                _svc = {}
+            if shipment:
+                color_baseline_modes.append("shipment_start")
+            if isinstance(_svc.get("color_target"), dict) and _svc.get("color_target"):
+                color_baseline_modes.append("target")
+            # 4.0.31 — reference_frame is available when EITHER an explicit
+            # frame_id is configured OR the operator has clicked a position
+            # on the chart (color_reference_position).
+            if (_svc.get("color_reference_frame_id") or "").strip() \
+               or isinstance(_svc.get("color_reference_position"), dict):
+                color_baseline_modes.append("reference_frame")
+
+            # ---- selected mode (clamp to available) ----
+            mode = baseline if baseline in color_baseline_modes else "camera"
+
+            # ---- compute only the picked baseline ----
+            cur = conn.cursor()
+            if mode == "camera":
+                cur.execute(
+                    f"""
+                    WITH color_rows AS (
+                        SELECT
+                            (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                            (elem->>'E')::float AS E,
+                            (elem->>'L')::float AS L,
+                            (elem->>'a')::float AS a_ch,
+                            (elem->>'b')::float AS b_ch
+                        FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                          AND elem->>'name' = '_color'
+                          AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                    )
+                    SELECT cam,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY E)    AS E,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY L)    AS L,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY a_ch) AS a_ch,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY b_ch) AS b_ch
+                    FROM color_rows GROUP BY cam
+                    """,
+                    [interval] + ([shipment] if shipment else []),
+                )
+                for cam, E_, L_, a_, b_ in cur.fetchall():
+                    if cam is None: continue
+                    color_baseline[str(int(cam))] = {
+                        "E": round(E_ or 0, 2), "L": round(L_ or 0, 2),
+                        "a": round(a_ or 0, 2), "b": round(b_ or 0, 2),
+                    }
+            elif mode == "shipment_start":
+                cur.execute(
+                    """
+                    WITH color_rows AS (
+                        SELECT time,
+                            (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                            (elem->>'E')::float AS E,
+                            (elem->>'L')::float AS L,
+                            (elem->>'a')::float AS a_ch,
+                            (elem->>'b')::float AS b_ch
+                        FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                        WHERE shipment = %s
+                          AND elem->>'name' = '_color'
+                          AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                    ),
+                    start_window AS (SELECT MIN(time) AS t0 FROM color_rows)
+                    SELECT cam,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY E)    AS E,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY L)    AS L,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY a_ch) AS a_ch,
+                           percentile_cont(0.5) WITHIN GROUP (ORDER BY b_ch) AS b_ch
+                    FROM color_rows, start_window
+                    WHERE time <= t0 + INTERVAL '60 seconds'
+                    GROUP BY cam
+                    """,
+                    [shipment],
+                )
+                for cam, E_, L_, a_, b_ in cur.fetchall():
+                    if cam is None: continue
+                    color_baseline[str(int(cam))] = {
+                        "E": round(E_ or 0, 2), "L": round(L_ or 0, 2),
+                        "a": round(a_ or 0, 2), "b": round(b_ or 0, 2),
+                    }
+            elif mode == "target":
+                tgt = _svc.get("color_target") or {}
+                for k, v in tgt.items():
+                    try:
+                        cid = str(int(k))
+                        if not isinstance(v, dict): continue
+                        L_ = float(v.get("L") or 0)
+                        a_ = float(v.get("a") or 0)
+                        b_ = float(v.get("b") or 0)
+                        E_ = float(v.get("E") or (L_*L_ + a_*a_ + b_*b_) ** 0.5)
+                        color_baseline[cid] = {"E": round(E_,2), "L": round(L_,2),
+                                               "a": round(a_,2), "b": round(b_,2)}
+                    except (TypeError, ValueError):
+                        continue
+            elif mode == "reference_frame":
+                ref_id = (_svc.get("color_reference_frame_id") or "").strip()
+                cur.execute(
+                    """
+                    SELECT (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                           (elem->>'E')::float AS E,
+                           (elem->>'L')::float AS L,
+                           (elem->>'a')::float AS a_ch,
+                           (elem->>'b')::float AS b_ch
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE image_path LIKE %s
+                      AND elem->>'name' = '_color'
+                    ORDER BY time DESC LIMIT 50
+                    """,
+                    ('%' + ref_id + '%',),
+                )
+                for cam, E_, L_, a_, b_ in cur.fetchall():
+                    if cam is None: continue
+                    color_baseline[str(int(cam))] = {
+                        "E": round(E_ or 0, 2), "L": round(L_ or 0, 2),
+                        "a": round(a_ or 0, 2), "b": round(b_ or 0, 2),
+                    }
+            cur.close()
+        except Exception as _be:
+            logger.debug(f"color baseline compute failed: {_be}")
+
         return JSONResponse(content={
             "shipments": shipments,
             "size_over_time": size_over_time,
@@ -2733,6 +3245,20 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
             "confidence_by_class": confidence_by_class,
             "camera_scatter": camera_scatter,
             "camera_scatter_encoder": camera_scatter_encoder,
+            "camera_y_order": camera_y_order,
+            "color_heatmap": color_heatmap,
+            "color_heatmap_time": color_heatmap_time,
+            "phases_available": phases_available,
+            "phase": _phase,
+            "bins": N_BINS,
+            "hidden_by_process": _hidden_by_process,
+            "color_baseline": color_baseline,
+            "color_baseline_mode": baseline if baseline in color_baseline_modes else "camera",
+            "color_baseline_modes": color_baseline_modes,
+            # 4.0.32 — surface the picked reference point so the chart can
+            # paint a vertical marker showing the operator's chosen baseline
+            # spot. Null when nothing's been picked.
+            "color_reference_position": (locals().get("_svc") or {}).get("color_reference_position"),
             "window": window,
             "shipment": shipment,
         })
@@ -3358,6 +3884,187 @@ async def serve_raw_image(path: str):
         raise HTTPException(status_code=404, detail="Image not found")
 
     return FileResponse(str(resolved), media_type="image/jpeg")
+
+
+# =============================================================================
+# 4.0.0 — render-on-demand annotated frames.
+#
+# Replaces the `<frame>_DETECTED.jpg` files that the detection pipeline used to
+# write to disk for every detected frame. Now:
+#   - storage = raw JPG only (one file per frame instead of two)
+#   - viewing = this endpoint reads the raw + the `detections` JSON from the
+#               inference_results row + draws bboxes with OpenCV on-the-fly
+#   - download = same endpoint with ?download=1 (Content-Disposition: attachment)
+#
+# Redis cache: rendered bytes are cached for 1 hour keyed by (path, show, mtime).
+# First view after restart pays ~20 ms of OpenCV work; every subsequent hit is
+# a Redis lookup (<1 ms). The cache invalidates automatically when the raw file
+# changes (mtime in key) or when a class is hidden/shown (show in key).
+# =============================================================================
+@router.get("/api/render_detected/{path:path}")
+async def render_detected(path: str, show: str = "", download: int = 0):
+    """Render the raw frame at `path` with its stored bounding boxes drawn on top.
+
+    Query:
+      show     — comma-separated allowlist of class names; empty = use the
+                 current Show-toggle state from audio_settings (default).
+      download — when 1, sets Content-Disposition: attachment so the browser
+                 downloads instead of inlining.
+    """
+    import hashlib, io
+    safe_path = pathlib.Path("raw_images") / path
+    try:
+        resolved = safe_path.resolve()
+        if not str(resolved).startswith(str(_RAW_IMAGES_ROOT)):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid path")
+    if not resolved.exists():
+        # Accept the legacy `_DETECTED.jpg` URL form by stripping the suffix so
+        # any cached link from the pre-4.0 era still works.
+        if str(resolved).endswith("_DETECTED.jpg"):
+            resolved = pathlib.Path(str(resolved)[:-len("_DETECTED.jpg")] + ".jpg")
+        if not resolved.exists():
+            raise HTTPException(status_code=404, detail="Raw image not found")
+
+    # Build cache key: hash(path + show + mtime) so any file/visibility change
+    # invalidates automatically.
+    try:
+        mtime_ns = resolved.stat().st_mtime_ns
+    except Exception:
+        mtime_ns = 0
+    key_seed = f"{resolved}|{show}|{mtime_ns}".encode("utf-8")
+    cache_key = "render:" + hashlib.sha1(key_seed).hexdigest()
+
+    cached = None
+    try:
+        r = Redis("redis", 6379, db=cfg_module.REDIS_DB)
+        cached = r.get(cache_key)
+    except Exception:
+        r = None
+    if cached:
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = f'attachment; filename="{resolved.stem}_DETECTED.jpg"'
+        return Response(content=cached, media_type="image/jpeg", headers=headers)
+
+    # 4.0.22 — resolve the inference_results row by EXACT image_path first.
+    # The previous LIKE '%<stem>%' query was prone to picking the wrong row
+    # when two rows shared the same `<timestamp>_<cam>` stem (one under raw
+    # shipment-A path + one under shipment-B, one raw row + one pre-4.0.0
+    # _DETECTED row, or any other path sharing the substring). That meant
+    # the hover preview could show wrong boxes on the right image.
+    #
+    # New lookup order, each one EXACT:
+    #   1. raw_images/<rel>                     (post-4.0.10 rows)
+    #   2. raw_images/<rel-stem>_DETECTED.jpg   (legacy pre-4.0.0 rows)
+    #   3. stem LIKE %                          (final fallback for paths
+    #      stored without the `raw_images/` prefix or in other legacy shapes)
+    detections = []
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is not None:
+            try:
+                # `path` is the URL parameter (e.g. `no_shipment/.../<stem>.jpg`).
+                # Stored image_path includes the `raw_images/` prefix.
+                exact_raw = "raw_images/" + path.lstrip("/")
+                # The DETECTED-form sibling (legacy rows).
+                if exact_raw.endswith(".jpg"):
+                    exact_det = exact_raw[:-4] + "_DETECTED.jpg"
+                else:
+                    exact_det = exact_raw + "_DETECTED.jpg"
+                stem = resolved.stem
+                cur = conn.cursor()
+                # 1: exact raw
+                cur.execute(
+                    "SELECT detections FROM inference_results WHERE image_path = %s "
+                    "ORDER BY time DESC LIMIT 1",
+                    (exact_raw,),
+                )
+                row = cur.fetchone()
+                # 2: exact DETECTED sibling
+                if not row:
+                    cur.execute(
+                        "SELECT detections FROM inference_results WHERE image_path = %s "
+                        "ORDER BY time DESC LIMIT 1",
+                        (exact_det,),
+                    )
+                    row = cur.fetchone()
+                # 3: legacy stem LIKE (kept for any out-of-pattern stored paths,
+                # but BOTH endpoints in this row pair are now warned-logged
+                # so we can find and clean them up).
+                if not row:
+                    cur.execute(
+                        "SELECT detections FROM inference_results WHERE image_path LIKE %s "
+                        "ORDER BY time DESC LIMIT 1",
+                        ("%" + stem + "%",),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        logger.warning(
+                            f"render_detected: matched via legacy LIKE fallback "
+                            f"for stem={stem!r} (request path={path!r}). Row "
+                            f"image_path does NOT equal either exact form — check "
+                            f"for path-format drift in detection.py."
+                        )
+                if row and row[0]:
+                    d = row[0]
+                    if isinstance(d, list):
+                        detections = d
+                cur.close()
+            finally:
+                try: release_db_connection(conn)
+                except Exception: pass
+    except Exception as e:
+        logger.warning(f"render_detected: detection lookup failed: {e}")
+
+    # Optional class-allowlist filter (`show=cls1,cls2`). When unset, the
+    # draw_filters module decides per-class visibility from audio_settings.
+    if show:
+        allow = {c.strip() for c in show.split(",") if c.strip()}
+        detections = [d for d in detections if str(d.get("name", "")) in allow]
+
+    # Draw boxes via the existing per-detection renderer.
+    try:
+        img = cv2.imread(str(resolved))
+        if img is None:
+            raise HTTPException(status_code=500, detail="OpenCV cannot read raw frame")
+        try:
+            from services.render import draw_detection_on as _draw
+            kv_y = 4
+            for det in detections:
+                if isinstance(det, dict):
+                    try:
+                        kv_y = _draw(img, det, kv_y=kv_y, bbox_thickness=3)
+                    except Exception as _e:
+                        logger.debug(f"render_detected: skipped one det: {_e}")
+        except Exception as _e:
+            logger.warning(f"render_detected: draw loop failed: {_e}")
+
+        ok, encoded = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ok:
+            raise HTTPException(status_code=500, detail="JPEG encode failed")
+        rendered = bytes(encoded)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"render_detected: render failed: {e}")
+        raise HTTPException(status_code=500, detail=f"render failed: {e}")
+
+    # Populate cache (best-effort; never block the response on Redis failure).
+    if r is not None:
+        try:
+            r.setex(cache_key, 3600, rendered)
+        except Exception as _e:
+            logger.debug(f"render cache write failed: {_e}")
+
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{resolved.stem}_DETECTED.jpg"'
+    return Response(content=rendered, media_type="image/jpeg", headers=headers)
 
 
 @router.get("/api/timeline_frame")

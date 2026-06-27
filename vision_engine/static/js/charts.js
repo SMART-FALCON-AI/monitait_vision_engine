@@ -11,7 +11,7 @@ let _insightConfidenceChart = null;
 let _insightConfClassChart = null;
 let _insightCameraScatter = null;
 let _insightCameraScatterEncoder = null;  // 3.25.13: kept (unused) to avoid touching unrelated old refs.
-let _insightAxis = 'time';   // 3.25.13 — current X-axis mode for the merged scatter + strips.
+let _insightAxis = 'encoder';   // 3.26.0 — default to encoder (was 'time'); operators on roll-based lines care about position more than wall-clock.
 let _ejectionProcBar = null;
 let _ejectionProcPie = null;
 let _ejectionTimeline = null;
@@ -50,11 +50,49 @@ const _INSIGHT_PALETTE = [
     '#14b8a6', '#f97316', '#6366f1', '#84cc16', '#06b6d4', '#a855f7'
 ];
 
-// Stable color per class name (hash → palette index) so the same class keeps
-// its color across charts and refreshes.
+// 4.0.26 — class → color override populated from the AI Trainer's category
+// palette so chart dots match the same colour an operator sees inside the
+// LSF annotate modal and the trainer's own categories tab. Keys are
+// case-insensitive (matched by lower-cased category_name). Falls back to
+// the hash palette below when a class is not in the trainer or trainer
+// hasn't been reached yet.
+let _trainerClassColor = new Map();
+// Fetch trainer labels once on page load + refresh after the AI Trainer
+// config is updated; results cached in-memory so per-render lookups are O(1).
+async function _loadTrainerClassColors() {
+    try {
+        const r = await fetch('/api/ai_trainer/labels', { cache: 'no-store' });
+        if (!r.ok) return;
+        const d = await r.json();
+        const next = new Map();
+        for (const lbl of (d.labels || [])) {
+            const name = String(lbl.category_name || '').trim();
+            const colour = String(lbl.color || '').trim();
+            if (!name || !colour) continue;
+            next.set(name.toLowerCase(), colour);
+        }
+        _trainerClassColor = next;
+        // Re-render whatever's currently on screen with the new colours.
+        if (typeof refreshDetectionInsights === 'function') {
+            try { refreshDetectionInsights(); } catch (e) {}
+        }
+    } catch (e) { /* trainer unreachable — just stay on the hash palette */ }
+}
+window._loadTrainerClassColors = _loadTrainerClassColors;
+document.addEventListener('DOMContentLoaded', _loadTrainerClassColors);
+
+// Stable color per class name. Prefer the AI Trainer category colour (so
+// every chart dot, region chip, and LSF label share the same hue for the
+// operator); fall back to the hash palette below for classes the trainer
+// hasn't catalogued yet.
 function _classColor(name) {
+    const s = String(name || '').trim();
+    if (s) {
+        const c = _trainerClassColor.get(s.toLowerCase());
+        if (c) return c;
+    }
     let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return _INSIGHT_PALETTE[h % _INSIGHT_PALETTE.length];
 }
 
@@ -183,50 +221,87 @@ window.refreshShipmentQualityScore = refreshShipmentQualityScore;
 
 
 // 3.21.15 — server-rendered PDF download of the score card payload.
-// Builds the URL with the same window + shipment the card is showing, opens
-// the endpoint via a hidden anchor so the browser handles Content-Disposition
-// (works in IFrames, doesn't trigger pop-up blockers).
+// 4.0.16 — rewritten with explicit error surfacing + a direct-navigation
+// fallback. The previous blob→<a>.click() path could fail silently when
+// Chrome cancelled the blob URL between createObjectURL and click (seen on
+// flaky tunnels). The fallback opens the URL in a new tab, where the server's
+// Content-Disposition: attachment header makes the browser save it the same
+// way. Every failure mode now surfaces an alert + console.error so we never
+// just "do nothing".
 async function downloadQualityReport() {
     const btn = document.getElementById('sqs-download-pdf');
     const hint = document.getElementById('sqs-download-hint');
-    if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating…'; }
+    const setBtn = (txt, disabled) => {
+        if (!btn) return;
+        btn.disabled = !!disabled;
+        btn.textContent = txt;
+    };
+    setBtn('⏳ Generating…', true);
     try {
         const win  = document.getElementById('insight-window')?.value || '24h';
         const ship = document.getElementById('insight-shipment')?.value || '';
         const params = new URLSearchParams({ window: win });
         if (ship) params.set('shipment', ship);
-        const url = `/api/shipment_quality_score/report.pdf?${params}`;
+        const url = `/api/shipment_quality_score/report.pdf?${params.toString()}`;
+        console.info('[PDF] fetching', url);
 
-        // Probe first so we can surface a 503 (reportlab missing) inline
-        // instead of showing the user a raw error PDF.
-        const head = await fetch(url, { method: 'GET' });
-        if (!head.ok) {
-            const detail = await head.json().catch(() => ({}));
-            const msg = detail.hint
-                ? `PDF lib missing — run on server:\n${detail.hint}`
-                : `Report failed: HTTP ${head.status}`;
-            alert(msg);
+        // GET probes the endpoint AND streams the PDF body in one call. If the
+        // response is non-OK (503 reportlab missing, 500 backend error) we
+        // surface the server's JSON `hint` field inline.
+        let resp;
+        try {
+            resp = await fetch(url, { method: 'GET', cache: 'no-store' });
+        } catch (netErr) {
+            console.error('[PDF] network error:', netErr);
+            alert(`Network error fetching PDF:\n${netErr.message || netErr}\n\nCheck that you're logged into MVE and the host is reachable.`);
             return;
         }
-        const blob = await head.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        // Browser also honors server Content-Disposition; setting download
-        // gives a sensible fallback name if the server omits it.
+        if (!resp.ok) {
+            let detail = {};
+            try { detail = await resp.json(); } catch (_) { /* not JSON */ }
+            console.error('[PDF] HTTP', resp.status, detail);
+            alert(detail.hint
+                ? `PDF library missing on the server — install it with:\n\n${detail.hint}`
+                : `Report failed: HTTP ${resp.status} ${resp.statusText || ''}\nURL: ${url}`);
+            return;
+        }
+        const blob = await resp.blob();
+        if (!blob || !blob.size) {
+            console.error('[PDF] empty blob, blob.size=', blob && blob.size);
+            alert('Server returned an empty PDF. Check the MVE container logs for an error.');
+            return;
+        }
+        console.info('[PDF] received', blob.size, 'bytes type=', blob.type);
+        // 4.0.16 — primary path: blob URL + <a download>. Wrap in try so we
+        // can fall back to direct-navigation if the browser refuses the blob.
         const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
-        a.download = `quality_${ship || 'all'}_${win}_${stamp}.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 4000);
-        if (hint) hint.textContent = 'downloaded ✓';
+        const fname = `quality_${ship || 'all'}_${win}_${stamp}.pdf`;
+        try {
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = fname;
+            a.rel = 'noopener';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                try { a.remove(); } catch (_) {}
+                URL.revokeObjectURL(blobUrl);
+            }, 4000);
+        } catch (downloadErr) {
+            // Fallback: open the URL itself; server's Content-Disposition
+            // tells the browser to download.
+            console.warn('[PDF] blob download failed, falling back to direct navigation:', downloadErr);
+            window.open(url, '_blank', 'noopener');
+        }
+        if (hint) hint.textContent = '✓ downloaded';
         setTimeout(() => { if (hint) hint.textContent = 'uses current window + shipment'; }, 3000);
     } catch (e) {
-        console.error('downloadQualityReport failed:', e);
+        console.error('[PDF] downloadQualityReport failed:', e);
         alert('Report generation failed: ' + (e.message || e));
     } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '📄 Download PDF'; }
+        setBtn('📄 Download PDF', false);
     }
 }
 window.downloadQualityReport = downloadQualityReport;
@@ -300,6 +375,372 @@ async function calibrateShipmentScore() {
     }
 }
 window.calibrateShipmentScore = calibrateShipmentScore;
+
+// 4.0.28 — Process-tab manual override for score_scale_factor. Reads the
+// current value into the input field on page load + POST handler on Set.
+async function _loadScoreScaleFactorIntoUI() {
+    try {
+        const r = await fetch('/api/score_scale_factor', { cache: 'no-store' });
+        if (!r.ok) return;
+        const d = await r.json();
+        const v = Number(d.score_scale_factor);
+        const inp = document.getElementById('score-scale-factor-input');
+        const cur = document.getElementById('score-scale-current');
+        if (Number.isFinite(v) && inp) inp.value = String(v);
+        if (cur) cur.textContent = 'current: ' + (Number.isFinite(v) ? v : '?');
+    } catch (e) { /* leave defaults */ }
+}
+window._loadScoreScaleFactorIntoUI = _loadScoreScaleFactorIntoUI;
+document.addEventListener('DOMContentLoaded', _loadScoreScaleFactorIntoUI);
+
+async function setScoreScaleFactor() {
+    const respEl = document.getElementById('config-score_scale_factor-response');
+    const inp    = document.getElementById('score-scale-factor-input');
+    const cur    = document.getElementById('score-scale-current');
+    if (!inp) return;
+    const raw = (inp.value || '').trim();
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0) {
+        if (respEl) {
+            respEl.textContent = 'Error: must be a positive number';
+            respEl.className = 'control-response error';
+        }
+        return;
+    }
+    try {
+        const r = await fetch('/api/score_scale_factor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ score_scale_factor: v }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            if (respEl) {
+                respEl.textContent = 'Error: ' + (d.error || ('HTTP ' + r.status));
+                respEl.className = 'control-response error';
+            }
+            return;
+        }
+        const saved = Number(d.score_scale_factor);
+        if (respEl) {
+            respEl.textContent = 'OK: score_scale_factor = ' + saved;
+            respEl.className = 'control-response success';
+            setTimeout(() => { respEl.textContent = ''; respEl.className = 'control-response'; }, 3000);
+        }
+        if (cur) cur.textContent = 'current: ' + saved;
+        // Nudge any Charts-tab cards that read the score to refresh.
+        if (typeof refreshShipmentQualityScore === 'function') {
+            setTimeout(refreshShipmentQualityScore, 300);
+        }
+        if (typeof refreshQualityCharts === 'function') {
+            setTimeout(refreshQualityCharts, 400);
+        }
+    } catch (e) {
+        if (respEl) {
+            respEl.textContent = 'Error: ' + (e.message || e);
+            respEl.className = 'control-response error';
+        }
+    }
+}
+window.setScoreScaleFactor = setScoreScaleFactor;
+
+// 4.0.32 — Process tab Colour Target editor. Reads /api/color_target on
+// page load + after Save; writes back with the row inputs.
+async function _loadColorTargetIntoUI() {
+    try {
+        const r = await fetch('/api/color_target', { cache: 'no-store' });
+        if (!r.ok) return;
+        const d = await r.json();
+        const tgt = (d && d.color_target) || {};
+        const wrap = document.getElementById('color-target-rows');
+        if (!wrap) return;
+        wrap.innerHTML = '';
+        const keys = Object.keys(tgt).sort((a,b) => Number(a) - Number(b));
+        if (keys.length === 0) {
+            // Seed with a couple of empty rows so the operator has somewhere to type.
+            _appendColorTargetRow(1, '', '', '');
+            _appendColorTargetRow(2, '', '', '');
+        } else {
+            for (const cid of keys) {
+                const v = tgt[cid] || {};
+                _appendColorTargetRow(cid, v.L, v.a, v.b);
+            }
+        }
+    } catch (e) { /* leave UI as-is */ }
+}
+window._loadColorTargetIntoUI = _loadColorTargetIntoUI;
+document.addEventListener('DOMContentLoaded', _loadColorTargetIntoUI);
+
+function _appendColorTargetRow(cam, L, a, b) {
+    const wrap = document.getElementById('color-target-rows');
+    if (!wrap) return;
+    const row = document.createElement('div');
+    row.className = 'color-target-row';
+    row.style.cssText = 'display:flex; gap:8px; align-items:center;';
+    row.innerHTML = `
+        <span style="color:var(--text-secondary); min-width:55px; font-size:12px;">Camera</span>
+        <input type="number" class="color-target-cam"  value="${cam}"               min="1" max="64" step="1" style="width:55px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+        <span style="color:var(--text-secondary); font-size:12px;">L*</span>
+        <input type="number" class="color-target-L"    value="${L == null ? '' : L}" min="0" max="100" step="0.1" style="width:75px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+        <span style="color:var(--text-secondary); font-size:12px;">a*</span>
+        <input type="number" class="color-target-a"    value="${a == null ? '' : a}" min="-128" max="127" step="0.1" style="width:75px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+        <span style="color:var(--text-secondary); font-size:12px;">b*</span>
+        <input type="number" class="color-target-b"    value="${b == null ? '' : b}" min="-128" max="127" step="0.1" style="width:75px; padding:3px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+        <button onclick="this.parentElement.remove()" style="background:rgba(239,68,68,0.25); color:#fca5a5; border:1px solid rgba(239,68,68,0.5); padding:3px 8px; border-radius:4px; cursor:pointer; font-size:11px;">remove</button>
+    `;
+    wrap.appendChild(row);
+}
+
+function addColorTargetRow() {
+    const rows = document.querySelectorAll('#color-target-rows .color-target-row');
+    let nextCam = 1;
+    rows.forEach(r => {
+        const c = parseInt(r.querySelector('.color-target-cam').value, 10) || 0;
+        if (c >= nextCam) nextCam = c + 1;
+    });
+    _appendColorTargetRow(nextCam, '', '', '');
+}
+window.addColorTargetRow = addColorTargetRow;
+
+async function saveColorTarget() {
+    const respEl = document.getElementById('config-color_target-response');
+    const out = {};
+    const rows = document.querySelectorAll('#color-target-rows .color-target-row');
+    for (const row of rows) {
+        const cam = parseInt(row.querySelector('.color-target-cam').value, 10);
+        const L = parseFloat(row.querySelector('.color-target-L').value);
+        const a = parseFloat(row.querySelector('.color-target-a').value);
+        const b = parseFloat(row.querySelector('.color-target-b').value);
+        if (!Number.isFinite(cam) || cam < 1) continue;
+        if (!Number.isFinite(L) && !Number.isFinite(a) && !Number.isFinite(b)) continue;
+        out[String(cam)] = {
+            L: Number.isFinite(L) ? L : 0,
+            a: Number.isFinite(a) ? a : 0,
+            b: Number.isFinite(b) ? b : 0,
+        };
+    }
+    try {
+        const r = await fetch('/api/color_target', {
+            method: 'POST', headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ color_target: out }),
+        });
+        const d = await r.json();
+        if (!r.ok) {
+            if (respEl) { respEl.textContent = 'Error: ' + (d.error || 'HTTP ' + r.status); respEl.className = 'control-response error'; }
+            return;
+        }
+        if (respEl) {
+            const n = Object.keys(d.color_target || {}).length;
+            respEl.textContent = `OK: saved ${n} camera target${n === 1 ? '' : 's'}.`;
+            respEl.className = 'control-response success';
+            setTimeout(() => { respEl.textContent = ''; respEl.className = 'control-response'; }, 3000);
+        }
+        if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+    } catch (e) {
+        if (respEl) { respEl.textContent = 'Error: ' + (e.message || e); respEl.className = 'control-response error'; }
+    }
+}
+window.saveColorTarget = saveColorTarget;
+
+// 4.0.30 — operator clicks one of the heatmap baseline toggle buttons.
+// 4.0.32 adds:
+//   - shipment_start: if "All shipments" is selected, auto-pick the
+//     current active shipment from /api/status. Friendlier default than
+//     forcing the operator to find the dropdown.
+//   - reference_frame: if no reference is set yet, enter PICK MODE so the
+//     next chart click captures the position. Clicking the button when a
+//     reference IS set just activates the mode (no pick needed).
+async function setHeatmapBaseline(mode) {
+    const VALID = ['camera', 'shipment_start', 'target', 'reference_frame'];
+    if (!VALID.includes(mode)) return;
+
+    if (mode === 'shipment_start') {
+        const shipSel = document.getElementById('insight-shipment');
+        if (shipSel && !shipSel.value) {
+            // Try to auto-select the current shipment.
+            fetch('/api/status').then(r => r.json()).then(s => {
+                const cur = s && s.shipment;
+                if (cur && cur !== 'no_shipment') {
+                    shipSel.value = cur;
+                    localStorage.setItem('mve_heatmap_baseline', mode);
+                    if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+                } else {
+                    alert('No active shipment — pick a specific shipment from the Shipment dropdown first.');
+                }
+            }).catch(() => {
+                alert('Could not read current shipment. Pick one from the Shipment dropdown.');
+            });
+            return;
+        }
+    }
+
+    if (mode === 'target') {
+        // 4.0.32 — friendly hint when target hasn't been configured yet.
+        // We can't tell from JS alone, so fire a HEAD on /api/color_target.
+        try {
+            const r = await fetch('/api/color_target', { cache: 'no-store' });
+            const d = await r.json();
+            const tgt = (d && d.color_target) || {};
+            if (Object.keys(tgt).length === 0) {
+                alert('No colour target configured. Set per-camera L*a*b* values in Process tab → 🎨 Colour Target, then come back and pick this mode.');
+                return;
+            }
+        } catch (e) { /* fall through and try anyway */ }
+        // Has targets — proceed normally.
+        localStorage.setItem('mve_heatmap_baseline', mode);
+        if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+        return;
+    }
+
+    if (mode === 'reference_frame') {
+        // 4.0.42 — ALWAYS enter pick mode on a Reference click. The earlier
+        // "already set, just activate" shortcut skipped pick mode when a
+        // reference existed, leaving _pickingBaseline=false. The chart's
+        // onClick then ran openFrameInAnnotator (els is always non-empty
+        // with `nearest, intersect:false` so any click finds a dot). With
+        // every Reference click entering pick mode, the operator can RE-pick
+        // any time, and onClick always returns early via _onBaselinePickClick.
+        window._pickingBaseline = true;
+        const hint = document.getElementById('hm-pick-hint');
+        if (hint) {
+            hint.style.display = 'inline';
+            hint.textContent = '🎯 Click anywhere on the chart to set the colour reference point';
+        }
+        const sc = document.getElementById('insight-camera-scatter');
+        if (sc) sc.style.cursor = 'crosshair';
+        return;
+    }
+
+    localStorage.setItem('mve_heatmap_baseline', mode);
+    if (typeof refreshDetectionInsights === 'function') {
+        refreshDetectionInsights();
+    }
+}
+window.setHeatmapBaseline = setHeatmapBaseline;
+
+// 4.0.34 — Phase filter (heatmap-only). `phase=""` means "All phases".
+// Sticky in localStorage; one refetch on change so the heatmap repaints.
+function setHeatmapPhase(phase) {
+    const v = (phase == null) ? '' : String(phase);
+    localStorage.setItem('mve_heatmap_phase', v);
+    if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+}
+window.setHeatmapPhase = setHeatmapPhase;
+
+// 4.0.35 — bucket count is shared across the colour heatmap, quality strip
+// and ejection strip so the three rows line up visually. Sticky in
+// localStorage. Re-renders all three (refreshAdvancedCharts orchestrates
+// the heatmap + scatter; the strip loaders are called from there too).
+function setBucketCount(value) {
+    let n = parseInt(value, 10);
+    if (!Number.isFinite(n) || n <= 0) n = 48;
+    n = Math.max(4, Math.min(192, n));
+    localStorage.setItem('mve_bucket_count', String(n));
+    const el = document.getElementById('hm-bucket-count');
+    if (el && parseInt(el.value, 10) !== n) el.value = String(n);
+    if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+}
+window.setBucketCount = setBucketCount;
+
+// 4.0.38 — 4.0.36's sticky-legend layer was over-complication. Source of
+// truth for "is this class visible" is now ONLY the Process tab "Show"
+// checkbox (which 4.0.37 wires through to the chart scatter via a server
+// filter). Chart.js's default per-session legend click still works for
+// ad-hoc hiding but is intentionally NOT sticky.
+
+// 4.0.35 — hydrate the bucket-count input from localStorage on first DOM
+// ready so the control reflects the persisted choice before the first
+// chart render.
+(function _hydrateChartToolbar() {
+    try {
+        const apply = () => {
+            const bkEl = document.getElementById('hm-bucket-count');
+            const v = parseInt(localStorage.getItem('mve_bucket_count') || '', 10);
+            if (bkEl && Number.isFinite(v) && v > 0) bkEl.value = String(v);
+        };
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', apply, { once: true });
+        } else {
+            apply();
+        }
+    } catch (e) { /* non-fatal */ }
+})();
+
+// 4.0.34 — rebuild the phase button row from the available phases. Always
+// emits the leading "All" button (id `hm-phase-all`, already in the DOM from
+// status.html); the rest are appended dynamically with ids `hm-phase-<v>`.
+function _renderPhaseButtons(available, activePhase) {
+    const wrap = document.getElementById('hm-phase-buttons');
+    if (!wrap) return;
+    const sel = (localStorage.getItem('mve_heatmap_phase') || '');
+    // Drop everything except the "All" button — we'll re-append the rest.
+    const allBtn = document.getElementById('hm-phase-all');
+    wrap.innerHTML = '';
+    if (allBtn) wrap.appendChild(allBtn);
+    const setBtnActive = (btn, isActive) => {
+        if (!btn) return;
+        btn.style.background = isActive
+            ? 'linear-gradient(135deg,#10b981,#047857)'
+            : 'rgba(51,65,85,0.5)';
+        btn.style.color = isActive ? '#fff' : '#cbd5e1';
+    };
+    setBtnActive(allBtn, sel === '');
+    for (const ph of (available || [])) {
+        if (!ph && ph !== 0) continue;
+        const id = 'hm-phase-' + String(ph);
+        const btn = document.createElement('button');
+        btn.id = id;
+        btn.textContent = 'p' + ph;
+        btn.title = 'Show colour data only from phase ' + ph + '.';
+        btn.style.cssText = 'border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;';
+        btn.onclick = () => setHeatmapPhase(ph);
+        setBtnActive(btn, String(sel) === String(ph));
+        wrap.appendChild(btn);
+    }
+    // If the localStorage phase isn't in the available list anymore (e.g. data
+    // window scrolled past it), silently reset to 'All' so we never freeze on
+    // an empty heatmap. Doesn't refetch — the current render is already 'all'.
+    if (sel && !(available || []).map(String).includes(String(sel))) {
+        localStorage.setItem('mve_heatmap_phase', '');
+        setBtnActive(allBtn, true);
+    }
+}
+window._renderPhaseButtons = _renderPhaseButtons;
+
+// 4.0.32 — fired by the chart's onClick when pick mode is on. Posts the
+// click X (encoder count or epoch-ms) plus a ±5% window to the backend so
+// the next chart load can compute the reference baseline from frames near
+// that point. Exits pick mode + activates `reference_frame` automatically.
+function _onBaselinePickClick(chart, evt, axisMode) {
+    if (!chart || !chart.scales || !chart.scales.x) return;
+    const xScale = chart.scales.x;
+    let pixelX = (evt && (evt.x != null ? evt.x : evt.offsetX));
+    if (typeof pixelX !== 'number') return;
+    const xVal = xScale.getValueForPixel(pixelX);
+    const range = (xScale.max - xScale.min) || 1;
+    const win = Math.abs(range * 0.05);   // ±5% of visible range
+    const axis = (axisMode === 'encoder') ? 'encoder' : 'time';
+    fetch('/api/color_reference_position', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ axis, value: xVal, window: win }),
+    }).then(r => r.json()).then(d => {
+        window._pickingBaseline = false;
+        const hint = document.getElementById('hm-pick-hint');
+        if (hint) hint.style.display = 'none';
+        const sc = document.getElementById('insight-camera-scatter');
+        if (sc) sc.style.cursor = 'default';
+        if (d && d.status === 'ok') {
+            localStorage.setItem('mve_heatmap_baseline', 'reference_frame');
+            if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+        } else {
+            alert('Could not save reference: ' + (d && d.error || 'unknown error'));
+        }
+    }).catch(e => {
+        alert('Network error setting reference: ' + (e.message || e));
+        window._pickingBaseline = false;
+    });
+}
 
 
 // 3.21.16 — Quality drift / trend chart under the score card.
@@ -404,6 +845,11 @@ window.refreshShipmentQualityTrend = refreshShipmentQualityTrend;
 
 
 async function refreshDetectionInsights() {
+    // 4.0.47 — show the global loading badge for the umbrella refresh path
+    // too. This is the function clicked by the Refresh button + tab switch,
+    // so the operator gets immediate visual feedback any time data starts
+    // re-fetching, not only inside refreshAdvancedCharts.
+    if (typeof mveLoaderBegin === 'function') mveLoaderBegin('Loading charts…');
     const windowSel = document.getElementById('insight-window');
     const window = windowSel ? windowSel.value : '24h';
     const emptyEl = document.getElementById('insight-empty');
@@ -540,17 +986,112 @@ async function refreshDetectionInsights() {
 // Advanced charts: object size distribution, confidence over time, camera
 // scatter — all from /api/detection_charts, scoped by window + shipment.
 // ---------------------------------------------------------------------------
+// 4.0.46 — global safety net. A single document-level mousemove listener
+// hides the chart hover preview the instant the cursor is NOT directly over
+// the scatter canvas. No debounce, no Chart.js coupling, no stale-event
+// problem. Runs in addition to the canvas-level mouseleave + Chart.js
+// external tooltip hide paths so even if one of those misses, this catches.
+(function _wireGlobalHoverHide() {
+    if (typeof document === 'undefined' || document._mveHoverHideWired) return;
+    document._mveHoverHideWired = true;
+    document.addEventListener('mousemove', (event) => {
+        const preview = document.getElementById('chart-image-preview');
+        if (!preview || preview.style.display === 'none') return;
+        const scatter = document.getElementById('insight-camera-scatter');
+        if (!scatter) return;
+        const cursorEl = document.elementFromPoint(event.clientX, event.clientY);
+        if (cursorEl !== scatter) {
+            preview.style.display = 'none';
+        }
+    });
+})();
+
+// 4.0.42 — tiny reference-counted loading badge. Shows in the top-right of
+// the viewport while ANY chart fetch is in flight. Multiple concurrent
+// fetches stack via the counter so the badge stays visible until they all
+// resolve. Self-injecting (no HTML changes needed). Style is a small dark
+// pill with a CSS-only spinner so there's no extra network request just to
+// show "loading".
+let _mveLoadInFlight = 0;
+function _ensureGlobalLoader() {
+    if (document.getElementById('mve-global-loader')) return;
+    const style = document.createElement('style');
+    style.textContent = '@keyframes mve-spin{to{transform:rotate(360deg)}}';
+    document.head.appendChild(style);
+    const el = document.createElement('div');
+    el.id = 'mve-global-loader';
+    // 4.0.47 — much more visible. Pinned to TOP-CENTER, bigger text, bright
+    // gradient background. Earlier corner badge was too small to notice on
+    // a fast fetch.
+    el.style.cssText = 'position:fixed;top:62px;left:50%;transform:translateX(-50%);'
+        + 'z-index:999999;display:none;padding:8px 18px;'
+        + 'background:linear-gradient(135deg,#1e3a8a,#3b82f6);'
+        + 'border:1px solid rgba(96,165,250,0.7);border-radius:8px;'
+        + 'color:#f1f5f9;font-size:13px;font-weight:600;'
+        + 'align-items:center;gap:10px;'
+        + 'box-shadow:0 8px 24px rgba(0,0,0,0.55)';
+    el.innerHTML = '<span style="width:16px;height:16px;border:3px solid '
+        + 'rgba(241,245,249,0.35);border-top-color:#f1f5f9;border-radius:50%;'
+        + 'animation:mve-spin 0.7s linear infinite;display:inline-block"></span>'
+        + ' <span id="mve-global-loader-text">Loading…</span>';
+    if (document.body) document.body.appendChild(el);
+    else document.addEventListener('DOMContentLoaded', () => document.body.appendChild(el), { once: true });
+}
+function mveLoaderBegin(label) {
+    _ensureGlobalLoader();
+    _mveLoadInFlight++;
+    const el = document.getElementById('mve-global-loader');
+    if (el) {
+        el.style.display = 'inline-flex';
+        el._shownAt = Date.now();
+        const txt = document.getElementById('mve-global-loader-text');
+        if (txt && label) txt.textContent = String(label);
+    }
+}
+function mveLoaderEnd() {
+    _mveLoadInFlight = Math.max(0, _mveLoadInFlight - 1);
+    if (_mveLoadInFlight === 0) {
+        const el = document.getElementById('mve-global-loader');
+        if (!el) return;
+        // 4.0.47 — keep the badge visible for at least 1000ms so the operator
+        // actually sees it even when the fetch completes in <100ms. Earlier
+        // 400ms was too short to notice on cached fetches.
+        const MIN_MS = 1000;
+        const remaining = (el._shownAt) ? MIN_MS - (Date.now() - el._shownAt) : 0;
+        const hide = () => { if (_mveLoadInFlight === 0) el.style.display = 'none'; };
+        if (remaining > 0) setTimeout(hide, remaining); else hide();
+    }
+}
+window.mveLoaderBegin = mveLoaderBegin;
+window.mveLoaderEnd   = mveLoaderEnd;
+
 async function refreshAdvancedCharts() {
     const window = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
     let data;
+    mveLoaderBegin('Loading charts…');
     try {
+        // 4.0.30 — tell the server which heatmap baseline mode is active so
+        // it only computes that one (saves SQL for unused modes). Falls back
+        // to `camera` if nothing's been stored yet.
+        const baseline = localStorage.getItem('mve_heatmap_baseline') || 'camera';
+        // 4.0.34 — phase filter is heatmap-only. Empty string = all phases.
+        const phase = localStorage.getItem('mve_heatmap_phase') || '';
+        // 4.0.35 — single bucket count drives heatmap + quality + ejection strips.
+        const bins = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
         const r = await fetch('/api/detection_charts?window=' + encodeURIComponent(window) +
                               '&shipment=' + encodeURIComponent(shipment) +
-                              '&min_conf=' + minConf);
+                              '&min_conf=' + minConf +
+                              '&baseline=' + encodeURIComponent(baseline) +
+                              '&phase=' + encodeURIComponent(phase) +
+                              '&bins=' + bins);
         data = await r.json();
-    } catch (e) { console.error('detection_charts fetch failed:', e); return; }
+    } catch (e) {
+        console.error('detection_charts fetch failed:', e);
+        mveLoaderEnd();
+        return;
+    }
 
     // Populate shipment dropdown once (preserve current selection)
     const shipSel = document.getElementById('insight-shipment');
@@ -641,17 +1182,236 @@ async function refreshAdvancedCharts() {
         const points = axisMode === 'encoder'
             ? (data.camera_scatter_encoder || [])
             : (scatter || []);
+        // 4.0.24 — Camera Y-axis order matches the dashboard timeline grid.
+        // Single source of truth: timeline_config.camera_order +
+        // .custom_camera_order, computed server-side and surfaced as
+        // data.camera_y_order = [5, 1, 6, 2, 4, 3]. We plot each point's y
+        // as the INDEX into this array (display position), and the Y-axis
+        // tick callback maps the index BACK to the actual camera ID for
+        // display. So if the operator set custom = "5,1,6,2,4,3", the
+        // top-to-bottom Y labels read 5, 1, 6, 2, 4, 3 — same as the
+        // timeline grid columns. Any camera that appears in the data but
+        // not in the order list lands at the end (server appended).
+        const camOrder = Array.isArray(data.camera_y_order) ? data.camera_y_order : [];
+        const idxByCam = new Map(camOrder.map((cid, i) => [cid, i]));
+        const camByIdx = new Map(camOrder.map((cid, i) => [i, cid]));
+        const _camToIdx = (cid) => idxByCam.has(cid) ? idxByCam.get(cid) : cid;
         const byClass = {};
         points.forEach(p => {
             if (!_isShown(p.cls)) return;
             (byClass[p.cls] = byClass[p.cls] || []).push({
-                x: p.x, y: p.y, r: 3 + (p.r || 0) * 9, conf: p.r, cls: p.cls, img: p.img, ship: p.ship
+                x: p.x, y: _camToIdx(p.y), cam_id: p.y,
+                r: 3 + (p.r || 0) * 9, conf: p.r, cls: p.cls, img: p.img, ship: p.ship
             });
         });
         const datasets = Object.keys(byClass).map(cls => ({
             label: cls, data: byClass[cls],
             backgroundColor: _classColor(cls) + 'cc', borderColor: _classColor(cls)
         }));
+        // 4.0.44 — title + legend rendered as HTML siblings ABOVE the canvas
+        // so the colour heatmap (which paints inside chartArea) can never
+        // reach them. Clicking a legend swatch still toggles the matching
+        // dataset via Chart.js's setDatasetVisibility.
+        try {
+            const _titleEl = document.getElementById('insight-scatter-title');
+            if (_titleEl) {
+                _titleEl.textContent = (axisMode === 'time')
+                    ? 'Camera × time — hover for image, click dot to open the exact frame'
+                    : 'Camera × encoder (roll position) — hover for image, click dot for the exact frame';
+            }
+            const _legendEl = document.getElementById('insight-scatter-legend');
+            if (_legendEl) {
+                _legendEl.innerHTML = datasets.map((ds, i) => {
+                    const swatch = String(_classColor(ds.label) || '#3b82f6');
+                    const label  = String(ds.label || '').replace(/[<>&]/g, '');
+                    return `<span data-ds-idx="${i}" style="display:inline-flex; align-items:center; gap:4px; cursor:pointer; user-select:none;"><span style="display:inline-block; width:12px; height:12px; background:${swatch}; border-radius:2px;"></span>${label}</span>`;
+                }).join('');
+                _legendEl.querySelectorAll('[data-ds-idx]').forEach(el => {
+                    el.onclick = () => {
+                        const idx = parseInt(el.getAttribute('data-ds-idx'), 10);
+                        const ch = _insightCameraScatter;
+                        if (!ch || !Number.isFinite(idx)) return;
+                        const vis = ch.isDatasetVisible(idx);
+                        ch.setDatasetVisibility(idx, !vis);
+                        ch.update();
+                        el.style.opacity = vis ? '0.4' : '1';
+                        el.style.textDecoration = vis ? 'line-through' : 'none';
+                    };
+                });
+            }
+        } catch (_e) { /* legend render is non-fatal */ }
+        // 4.0.38 — no UI hint about which classes are filtered server-side via
+        // Process tab Show. The operator already knows what they toggled off
+        // in Process tab; surfacing it on the Charts toolbar was noise (the
+        // list balloons when math inference creates hundreds of synthetic
+        // feature classes). Remove any leftover chip from prior sessions.
+        try {
+            const stale = document.getElementById('hm-process-hidden');
+            if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
+        } catch (_e) { /* non-fatal */ }
+
+        // 4.0.29 — color-drift heatmap rendered as the chart's BACKGROUND so
+        // scatter dots overlay on top. Aggregation comes from the backend
+        // (timeline.py:detection_charts), binned to N cells per camera by
+        // encoder. Cell colour = HSL hue mapped from |delta_e| (mean E − the
+        // camera's median E across the window): green at 0, yellow around 4,
+        // red ≥ 8. Only painted on the encoder axis — time axis doesn't have
+        // a sensible encoder→bin mapping. Plugin uses Chart.js's
+        // beforeDatasetsDraw hook so rectangles fill chartArea BEFORE the
+        // bubble dots render, matching the user's "background colour,
+        // foreground dots" sketch from the design discussion.
+        // 4.0.30 — baseline mode determines what we subtract from each cell's
+        // mean E to get the ΔE the heatmap colours by. Backend computes ONLY
+        // the active mode (saves SQL) and tells us via `color_baseline_modes`
+        // which OTHER modes have data available right now, so we can enable
+        // /disable the toggle buttons. `color_baseline` is a flat
+        // `{cam_id: {E, L, a, b}}` map for the selected mode.
+        const _ALL_BASELINES = ['camera', 'shipment_start', 'target', 'reference_frame'];
+        const _availableBaselineModes = new Set(data.color_baseline_modes || ['camera']);
+        const _activeBaselineMode = data.color_baseline_mode || 'camera';
+        const _activeBaselineMap  = data.color_baseline || {};
+        // 4.0.32 — track whether a reference is set so the Reference button
+        // can skip pick mode next time.
+        window._referenceIsSet = _availableBaselineModes.has('reference_frame');
+        const _refPos = data.color_reference_position || null;
+        for (const mode of _ALL_BASELINES) {
+            const el = document.getElementById('hm-baseline-' + mode);
+            if (!el) continue;
+            const avail = _availableBaselineModes.has(mode);
+            const active = (mode === _activeBaselineMode);
+            // 4.0.32 — never set el.disabled. The onClick handler is what
+            // enters pick-mode / auto-selects shipment / shows a helpful hint
+            // for unconfigured modes. If we disable the button at the DOM
+            // level the click never fires and the operator can't get OUT of
+            // the disabled state. Visual muting (opacity) still tells the
+            // operator it isn't currently active.
+            el.style.cursor = 'pointer';
+            el.style.opacity = avail ? '1' : '0.6';
+            el.style.background = active
+                ? 'linear-gradient(135deg,#10b981,#047857)'
+                : 'rgba(51,65,85,0.5)';
+            el.style.color = active ? '#fff' : '#cbd5e1';
+        }
+
+        // 4.0.34 — render the phase toggle buttons from the discovered list.
+        // Buttons: always 'All', then one per phase from `phases_available`.
+        // Active selection comes from localStorage (sticky across reloads).
+        _renderPhaseButtons(
+            Array.isArray(data.phases_available) ? data.phases_available : [],
+            (typeof data.phase === 'string') ? data.phase : '',
+        );
+
+        // 4.0.29c — pick the heatmap variant that matches the current axis.
+        // Backend returns BOTH binned-by-encoder and binned-by-time forms so
+        // the background paints in both modes. Time mode is what shows up
+        // when the line is stopped (encoder collapsed to a single value)
+        // but the operator still wants to see colour drift over time.
+        const _hmRaw = (axisMode === 'encoder')
+            ? (data.color_heatmap || {})
+            : (data.color_heatmap_time || {});
+        const heatmapCells = Array.isArray(_hmRaw.cells) ? _hmRaw.cells : [];
+        const heatmapMin = (axisMode === 'encoder')
+            ? (_hmRaw.enc_min != null ? Number(_hmRaw.enc_min) : null)
+            : (_hmRaw.t_min   != null ? Number(_hmRaw.t_min)   : null);
+        const heatmapMax = (axisMode === 'encoder')
+            ? (_hmRaw.enc_max != null ? Number(_hmRaw.enc_max) : null)
+            : (_hmRaw.t_max   != null ? Number(_hmRaw.t_max)   : null);
+        // Alias kept so the rest of the plugin body reads cleanly. These are
+        // X-axis values in whichever unit the active axis uses (encoder counts
+        // OR epoch-millis), so the binning math is identical.
+        const heatmapEncMin = heatmapMin, heatmapEncMax = heatmapMax;
+        const heatmapBins = Math.max(1, Number(_hmRaw.n_bins) || 32);
+        const heatmapBoundsCollapsed = (heatmapEncMin != null && heatmapEncMax != null &&
+                                        heatmapEncMax === heatmapEncMin);
+        const heatmapActive = (
+            heatmapCells.length > 0 &&
+            heatmapEncMin != null && heatmapEncMax != null
+        );
+        const _heatmapPlugins = heatmapActive ? [{
+            id: 'colorHeatmap',
+            beforeDatasetsDraw(chart) {
+                const ctx = chart.ctx;
+                const xScale = chart.scales && chart.scales.x;
+                const yScale = chart.scales && chart.scales.y;
+                if (!ctx || !xScale || !yScale) return;
+                const ca = chart.chartArea;
+                const binWidth = (heatmapEncMax - heatmapEncMin) / heatmapBins;
+                ctx.save();
+                for (const cell of heatmapCells) {
+                    const idx = idxByCam.has(cell.cam) ? idxByCam.get(cell.cam) : null;
+                    if (idx == null) continue;
+                    let x, y, w, h;
+                    if (heatmapBoundsCollapsed || binWidth <= 0) {
+                        // Single-bin fallback: paint the whole chart-area row
+                        // for this camera. Useful when line is stopped.
+                        x = ca ? ca.left : 0;
+                        w = ca ? (ca.right - ca.left) : chart.width;
+                    } else {
+                        const encL = heatmapEncMin + cell.bin * binWidth;
+                        const encR = heatmapEncMin + (cell.bin + 1) * binWidth;
+                        const xL = xScale.getPixelForValue(encL);
+                        const xR = xScale.getPixelForValue(encR);
+                        x = Math.min(xL, xR);
+                        w = Math.abs(xR - xL);
+                    }
+                    const yT = yScale.getPixelForValue(idx - 0.5);
+                    const yB = yScale.getPixelForValue(idx + 0.5);
+                    y = Math.min(yT, yB);
+                    h = Math.abs(yB - yT);
+                    // Clamp to chartArea so we don't paint over axis ticks
+                    if (ca) {
+                        if (x + w < ca.left || x > ca.right || y + h < ca.top || y > ca.bottom) continue;
+                    }
+                    // 4.0.30 — ΔE against the server-computed baseline for the
+                    // active mode. Bands aligned to industrial CIELAB tolerances:
+                    // ≤2 green, ≤5 yellow, ≤10 orange, >10 red.
+                    const base = _activeBaselineMap[String(cell.cam)];
+                    const cellE = Number(cell.E) || 0;
+                    const de = (base && Number.isFinite(base.E))
+                        ? Math.abs(cellE - Number(base.E))
+                        : Math.abs(Number(cell.delta_e) || 0);
+                    let hue;
+                    if (de <= 2)       hue = 120;          // green
+                    else if (de <= 5)  hue = 60;           // yellow
+                    else if (de <= 10) hue = 30;           // orange
+                    else               hue = 0;            // red
+                    ctx.fillStyle = `hsla(${hue}, 65%, 45%, 0.35)`;
+                    ctx.fillRect(x, y, w, h);
+                    // 4.0.38 — thin dark stroke so each cell is visually
+                    // distinct from its neighbours. Without this, adjacent
+                    // cells with similar dE blend into wide bands and the
+                    // operator can't see that the bucket count matches the
+                    // quality / ejection strips below.
+                    ctx.strokeStyle = 'rgba(15, 23, 42, 0.55)';
+                    ctx.lineWidth = 0.5;
+                    ctx.strokeRect(x + 0.25, y + 0.25, w - 0.5, h - 0.5);
+                }
+                // 4.0.32 — vertical marker at the operator-picked reference
+                // point. Only painted when the axis matches what was picked
+                // (encoder marker on encoder axis, time marker on time axis).
+                if (_refPos && _refPos.axis === axisMode &&
+                    Number.isFinite(Number(_refPos.value))) {
+                    const refX = xScale.getPixelForValue(Number(_refPos.value));
+                    const ca = chart.chartArea;
+                    if (refX >= ca.left && refX <= ca.right) {
+                        ctx.save();
+                        ctx.strokeStyle = 'rgba(245, 158, 11, 0.95)';
+                        ctx.lineWidth = 2;
+                        ctx.setLineDash([5, 4]);
+                        ctx.beginPath();
+                        ctx.moveTo(refX, ca.top);
+                        ctx.lineTo(refX, ca.bottom);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = 'rgba(245, 158, 11, 0.95)';
+                        ctx.font = '10px sans-serif';
+                        ctx.fillText('🖼 baseline', Math.min(refX + 4, ca.right - 60), ca.top + 12);
+                        ctx.restore();
+                    }
+                }
+                ctx.restore();
+            }
+        }] : [];
         const xScaleCfg = axisMode === 'time'
             ? { type: 'linear', min: _scatterXMin, max: _scatterXMax,
                 ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) },
@@ -666,20 +1426,47 @@ async function refreshAdvancedCharts() {
         _insightCameraScatter = new Chart(scCtx, {
             type: 'bubble',
             data: { datasets },
+            plugins: _heatmapPlugins,
             options: {
                 responsive: true, maintainAspectRatio: false,
+                // 4.0.5 — explicit interaction config so the external tooltip
+                // fires on hover-near-dot (Chart.js bubble default `intersect:true`
+                // can miss small bubbles when the cursor sits just outside the
+                // hit-circle). `mode:'nearest'` + `intersect:false` = "find the
+                // closest point and treat as hovered" even when not strictly inside.
+                interaction: { mode: 'nearest', intersect: false, axis: 'xy' },
+                hover:       { mode: 'nearest', intersect: false, axis: 'xy' },
+                // 4.0.44 — chart-wide layout padding kept at zero; the title
+                // and legend live OUTSIDE the canvas now (as HTML siblings
+                // above the canvas) so the colour heatmap can't reach them.
                 plugins: {
-                    legend: { display: true, labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 } },
-                    title: { display: true, text: titleText, color: '#cbd5e1', font: { size: 13 } },
+                    legend: { display: false },
+                    title:  { display: false },
                     tooltip: { enabled: false, external: _scatterImageTooltip }
                 },
                 onClick: (evt, els, chart) => {
+                    // 4.0.32 — if the operator is in baseline-pick mode, the
+                    // next click sets the reference point instead of opening
+                    // the annotate modal. Ignores the dot hit-test so the
+                    // operator can pick ANY spot, not just where a dot is.
+                    // 4.0.42 — also treat "pick hint is visible" as pick mode.
+                    // Belt-and-suspenders against any path that displays the
+                    // hint without setting the global flag (or vice-versa).
+                    const hintEl = document.getElementById('hm-pick-hint');
+                    const hintVisible = hintEl && hintEl.style.display !== 'none' && hintEl.offsetParent !== null;
+                    if (window._pickingBaseline || hintVisible) {
+                        _onBaselinePickClick(chart, evt, axisMode);
+                        return;
+                    }
                     if (!els || !els.length) return;
                     const dp = chart.data.datasets[els[0].datasetIndex].data[els[0].index];
                     if (!dp) return;
                     const cls = (chart.data.datasets[els[0].datasetIndex].label) || dp.cls || '';
+                    // 4.0.2 — clicking a chart dot goes STRAIGHT to the LSF editor
+                    // instead of the read-only image drawer. Operator can correct boxes
+                    // and ship to the trainer in two clicks, no intermediate viewer.
                     if (axisMode === 'time') {
-                        openDefectDrawerForFrame({
+                        openFrameInAnnotator({
                             image_path: dp.img, shipment: dp.ship, t: dp.x,
                             cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
                         });
@@ -691,16 +1478,32 @@ async function refreshAdvancedCharts() {
                             const m = fn.match(/^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/);
                             if (m) t = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
                         } catch (e) {}
-                        openDefectDrawerForFrame({
+                        // 4.0.24 — `dp.y` is the display index now; use
+                        // `dp.cam_id` for the real camera ID we carry alongside.
+                        openFrameInAnnotator({
                             image_path: dp.img, shipment: dp.ship, t: t,
                             cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
-                            encoder: dp.x, camera_index: dp.y,
+                            encoder: dp.x, camera_index: (dp.cam_id != null ? dp.cam_id : dp.y),
                         });
                     }
                 },
                 scales: {
                     x: xScaleCfg,
-                    y: { title: { display: true, text: 'Camera', color: '#94a3b8' }, ticks: { color: '#94a3b8', stepSize: 1, precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } }
+                    // 4.0.24 — tick callback maps the plotted Y (display index)
+                    // back to the actual camera ID for axis labels, so the axis
+                    // reads the operator's configured order (e.g. 5, 1, 6, 2,
+                    // 4, 3) instead of the bare numeric sort 1, 2, 3, 4, 5, 6.
+                    y: {
+                        title: { display: true, text: 'Camera', color: '#94a3b8' },
+                        ticks: {
+                            color: '#94a3b8', stepSize: 1, precision: 0,
+                            callback: (v) => {
+                                const cid = camByIdx.get(v);
+                                return (cid != null) ? String(cid) : String(v);
+                            }
+                        },
+                        grid: { color: 'rgba(148,163,184,0.1)' }
+                    }
                 },
                 // Align the merged strip wrap (which contains quality + ejection strips)
                 // to the scatter's chartArea on every render + resize.
@@ -708,7 +1511,13 @@ async function refreshAdvancedCharts() {
                 onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-strip-wrap'), 0); }
             }
         });
+        // 4.0.7 — direct mousemove hover-preview, independent of Chart.js's
+        // external tooltip plugin (which wasn't firing reliably).
+        _attachHoverPreview(scCtx, () => _insightCameraScatter);
     }
+    // 4.0.42 — hide the loading badge now that the scatter + heatmap have
+    // been built. Paired with mveLoaderBegin() at the top of this function.
+    mveLoaderEnd();
 }
 
 // 3.25.13 — toggle the merged scatter's X-axis between time and encoder.
@@ -1198,26 +2007,32 @@ async function refreshQualityCharts() {
 // Operator drill-down (3.21.0):
 //   • hover a scatter dot  -> floating thumbnail of THAT exact annotated frame
 //   • click a class/bar/pie -> side drawer with the last 24 thumbnails of that class
-// Image URL: /api/raw_image/<path> (image_path stored on the row, stripping the
-// "raw_images/" prefix). Drawer uses /api/recent_detections.
+// Image URLs (4.0.0):
+//   raw       — /api/raw_image/<path>            (file on disk; one per frame)
+//   annotated — /api/render_detected/<raw_path>  (rendered on demand from
+//               inference_results.detections; Redis-cached; no disk file)
+// The detection pipeline no longer writes _DETECTED.jpg as of 4.0.0; legacy
+// _DETECTED.jpg URLs still resolve through the render endpoint's fallback.
 // ---------------------------------------------------------------------------
 function _imgUrlFromPath(p) {
     if (!p) return null;
     return '/api/raw_image/' + encodeURI(String(p).replace(/^raw_images\//, ''));
 }
-// Both URLs (annotated + raw) for any chart data point or drawer item.
-// Annotated lives at raw_images/<frame_id>_DETECTED.jpg; raw lives at
-// raw_images/<ship>/<YYYY-MM-DD_HH>/<frame_id>.jpg — same frame_id, derived.
+// Both URLs for any chart data point or drawer item.
+//   `ann`  → render-on-demand annotated view (same raw under the hood)
+//   `raw`  → bare raw frame
 function _imgUrlsFor(pt) {
     if (!pt || !pt.img) return { ann: null, raw: null };
-    const ann = _imgUrlFromPath(pt.img);
-    const fname = (String(pt.img).split('/').pop() || '').replace(/_DETECTED\.jpg$/, '.jpg');
-    const m = fname.match(/^(\d{4}-\d{2}-\d{2})-(\d{2})-/);
-    let raw = null;
-    if (m && pt.ship) {
-        const chunk = m[1] + '_' + m[2];
-        raw = '/api/raw_image/' + encodeURI(pt.ship + '/' + chunk + '/' + fname);
-    }
+    // Strip both the `raw_images/` prefix and the legacy `_DETECTED.jpg` suffix
+    // — the render endpoint expects a RAW path; the pipeline-stored
+    // image_path may still carry `_DETECTED.jpg` from older inference_results
+    // rows written before 4.0.0.
+    const relRaw = String(pt.img)
+        .replace(/^raw_images\//, '')
+        .replace(/_DETECTED\.jpg$/, '.jpg');
+    const ann = '/api/render_detected/' + encodeURI(relRaw);
+    // The raw URL is the same path through /api/raw_image/.
+    const raw = '/api/raw_image/' + encodeURI(relRaw);
     return { ann, raw };
 }
 // Attach Panzoom + wheel-to-zoom on an <img> already in the DOM. Reuses the
@@ -1242,28 +2057,347 @@ function _attachZoom(imgEl) {
     } catch (e) { /* Panzoom not yet loaded — no-op */ }
 }
 // Chart.js v4 "external" tooltip handler — shared by both camera scatters.
-function _scatterImageTooltip(ctx) {
-    const tt = ctx.tooltip;
+// 4.0.7 — direct mousemove preview handler. Replaces the Chart.js external
+// tooltip path, which wasn't firing reliably across builds. Called by a
+// `mousemove` listener attached to the scatter canvas in the chart-build code.
+
+// 4.0.15 — operator-chosen hover preview size (Charts tab top toolbar).
+// Persisted in localStorage so the choice survives page reloads. Anything
+// that touches `.style.display = 'block'` on the preview re-applies the
+// dimensions so the size sticks across re-renders.
+const _HOVER_SIZES = {
+    small:  { w: 420,  h: 280 },
+    medium: { w: 640,  h: 420 },
+    large:  { w: 900,  h: 580 },
+    xlarge: { w: 1200, h: 780 },
+};
+function _getHoverPreviewSize() {
+    const k = localStorage.getItem('mve_hover_size') || 'medium';
+    return _HOVER_SIZES[k] || _HOVER_SIZES.medium;
+}
+function _applyHoverPreviewSize() {
     const el = document.getElementById('chart-image-preview');
     if (!el) return;
-    if (!tt || tt.opacity === 0 || !tt.dataPoints || !tt.dataPoints.length) {
+    const img = el.querySelector('img');
+    const sz = _getHoverPreviewSize();
+    if (img) {
+        img.style.width  = sz.w + 'px';
+        img.style.height = sz.h + 'px';
+    }
+}
+function setHoverPreviewSize(key) {
+    if (!_HOVER_SIZES[key]) key = 'medium';
+    localStorage.setItem('mve_hover_size', key);
+    _applyHoverPreviewSize();
+}
+window.setHoverPreviewSize = setHoverPreviewSize;
+// Sync the <select> to the stored choice + apply dims, on first paint.
+document.addEventListener('DOMContentLoaded', () => {
+    const sel = document.getElementById('hover-preview-size');
+    const k = localStorage.getItem('mve_hover_size') || 'medium';
+    if (sel) sel.value = k;
+    _applyHoverPreviewSize();
+});
+
+// 4.0.19 — Charts tab reading order, per user preference:
+//   1. Detection Insights header + quality score card + trend row
+//   2. Score per shipment   (moved up from below; currently #quality-charts-panel)
+//   3. Camera × encoder scatter
+//   4. Bar + Pie (detection by class, distribution)
+//   5. Secondary diagnostics + timeline + size + confidence + confidence-class
+//   6. Ejection Insights + Production KPIs (unchanged at bottom)
+// Inner reordering (3-4-5) is done via CSS `order:` on the existing
+// #insight-charts grid items in status.html. This function only handles the
+// outer rearrangement: moving #quality-charts-panel BACK into
+// #detection-insight-panel right after #sqs-trend-row, so it ends up between
+// the quality-score card and the inner charts.
+function _reorderChartsTab() {
+    try {
+        const trend  = document.getElementById('sqs-trend-row');
+        const sScore = document.getElementById('quality-charts-panel');
+        if (trend && sScore && trend.parentNode) {
+            // insertBefore(node, sibling) — if sibling is null it appends; nextSibling
+            // is the element right after trend, which is what we want.
+            trend.parentNode.insertBefore(sScore, trend.nextSibling);
+        }
+    } catch (e) { /* never block page load on reorder errors */ }
+}
+document.addEventListener('DOMContentLoaded', _reorderChartsTab);
+
+function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
+    const el = document.getElementById('chart-image-preview');
+    if (!el) return;
+    _applyHoverPreviewSize();
+    const urls = _imgUrlsFor(pt);
+    const img = el.querySelector('img');
+    const cap = el.querySelector('.cap');
+    const target = urls.ann || urls.raw;
+    // 4.0.8 — make the preview VISIBLE first, then start the image load.
+    el.style.display = 'block';
+    const cls = datasetLabel || pt.cls || '';
+    const conf = ((pt.conf || 0) * 100).toFixed(0);
+    const metaTxt = `${cls} • cam ${pt.y != null ? pt.y : '?'} • conf ${conf}%`;
+    if (img && target) {
+        if (img.dataset.src !== target) {
+            // 4.0.10 — surface a loading state during the network round-trip so
+            // operators on slow remote links don't see a black box.
+            img.dataset.src = target;
+            // Hide the broken-image icon while we wait by removing src first,
+            // then setting the new one on a microtask. Browsers paint a fresh
+            // empty img between these steps (no broken-link glyph).
+            img.removeAttribute('src');
+            img.style.opacity = '0.3';
+            if (cap) cap.textContent = '⏳ loading…  ' + metaTxt;
+            const settle = () => {
+                img.style.opacity = '1';
+                if (cap) cap.textContent = `${metaTxt}   (click to edit in ai-trainer)`;
+            };
+            img.onload  = settle;
+            img.onerror = function() {
+                if (urls.raw && img.src !== urls.raw) {
+                    // Fall back to raw and let onload settle.
+                    img.src = urls.raw;
+                } else {
+                    img.style.opacity = '0.3';
+                    if (cap) cap.textContent = '✗ image unavailable  ' + metaTxt;
+                    img.onerror = null;
+                }
+            };
+            // Start the load on the next tick so the empty paint above lands first.
+            setTimeout(() => { img.src = target; }, 0);
+        } else {
+            // Already this target — keep showing it; update caption only.
+            if (cap) cap.textContent = `${metaTxt}   (click to edit in ai-trainer)`;
+        }
+    } else if (img && !target) {
+        img.removeAttribute('src'); img.dataset.src = ''; img.style.opacity = '1';
+        if (cap) cap.textContent = `${cls} • cam ${pt.y != null ? pt.y : '?'}   (no image_path on this point)`;
+    }
+    // 4.0.8 — viewport-clamped positioning.
+    const pw = el.offsetWidth  || 432;
+    const ph = el.offsetHeight || 320;
+    const vw = window.innerWidth  || 1920;
+    const vh = window.innerHeight || 1080;
+    let left = mouseX + 14;
+    if (left + pw > vw - 8) left = Math.max(8, mouseX - pw - 14);
+    let top = mouseY - Math.round(ph / 2);
+    if (top + ph > vh - 8) top = Math.max(8, vh - ph - 8);
+    if (top < 8) top = 8;
+    el.style.left = left + 'px';
+    el.style.top  = top + 'px';
+}
+
+// 4.0.8 — bullet-proof nearest-point lookup. Iterates every drawn element and
+// computes a CSS-pixel-space distance to the cursor. Reliable even when
+// Chart.js's `getElementsAtEventForMode` returns empty (which it does for some
+// dense scatters and for cursors hovering between bubble centres).
+function _nearestPointPx(chart, mouseX, mouseY) {
+    if (!chart || !chart.canvas) return null;
+    const rect = chart.canvas.getBoundingClientRect();
+    const lx = mouseX - rect.left;
+    const ly = mouseY - rect.top;
+    let best = null;
+    let bestD = Infinity;
+    const datasets = chart.data.datasets || [];
+    for (let dsIdx = 0; dsIdx < datasets.length; dsIdx++) {
+        const meta = chart.getDatasetMeta && chart.getDatasetMeta(dsIdx);
+        if (!meta || meta.hidden) continue;
+        const els = meta.data || [];
+        for (let i = 0; i < els.length; i++) {
+            const el = els[i];
+            if (!el || el.x == null || el.y == null) continue;
+            const dx = el.x - lx;
+            const dy = el.y - ly;
+            const d = dx * dx + dy * dy;
+            if (d < bestD) { bestD = d; best = { datasetIndex: dsIdx, index: i, dist: Math.sqrt(d) }; }
+        }
+    }
+    return best;
+}
+
+function _attachHoverPreview(canvasEl, getChart) {
+    if (!canvasEl || canvasEl._hoverPreviewWired) return;
+    canvasEl._hoverPreviewWired = true;
+    // 4.0.10 — tiny debounce so the preview only re-renders ~10× per second.
+    // On slow links this stops queued requests from piling up as the cursor
+    // sweeps across dense scatters.
+    let _hoverPending = null;
+    canvasEl.addEventListener('mousemove', (event) => {
+        const ev = event;
+        if (_hoverPending) return;
+        _hoverPending = setTimeout(() => {
+            _hoverPending = null;
+            _runHoverPreview(ev, getChart);
+        }, 80);
+    });
+    canvasEl.addEventListener('mouseleave', () => {
+        // 4.0.45 — cancel any queued mousemove timer too. Without this, a
+        // pending _runHoverPreview fires ~80ms AFTER the cursor leaves the
+        // canvas with stale (in-bounds) event coords and the preview
+        // re-appears even though the cursor is now on a different chart.
+        if (_hoverPending) { clearTimeout(_hoverPending); _hoverPending = null; }
+        const el = document.getElementById('chart-image-preview');
+        if (el) el.style.display = 'none';
+    });
+    canvasEl._runHoverPreview = (ev) => _runHoverPreview(ev, getChart);
+}
+
+function _runHoverPreview(event, getChart) {
+        // 4.0.40 — when the operator is in baseline-pick mode the entire
+        // hover preview must stay hidden so they can SEE where to click.
+        // The Chart.js external tooltip (_scatterImageTooltip) is already
+        // guarded the same way; this path is the manual mousemove handler
+        // and was the one still painting the preview during pick mode.
+        if (window._pickingBaseline) {
+            const el = document.getElementById('chart-image-preview');
+            if (el) el.style.display = 'none';
+            return;
+        }
+        const chart = getChart();
+        if (!chart) return;
+        // 4.0.44 — hide the preview if the cursor is outside the colour-cell
+        // plot area (chartArea). The canvas extends above and below the
+        // axis ticks; mouseleave only fires when leaving the FULL canvas,
+        // so without this check the preview stayed visible while the cursor
+        // was on the legend / axis / padding.
+        // 4.0.45 — also confirm the cursor is currently OVER the scatter
+        // canvas at the time this runs (debounced mousemove can fire 80ms
+        // after the cursor has already moved to a different chart). Uses
+        // document.elementFromPoint so we don't rely on the stale event.
+        try {
+            const ca = chart.chartArea;
+            const rect = chart.canvas.getBoundingClientRect();
+            const lx = event.clientX - rect.left;
+            const ly = event.clientY - rect.top;
+            const cursorEl = document.elementFromPoint(event.clientX, event.clientY);
+            const stillOnCanvas = cursorEl === chart.canvas;
+            const outOfChartArea = ca && (lx < ca.left || lx > ca.right || ly < ca.top || ly > ca.bottom);
+            if (!stillOnCanvas || outOfChartArea) {
+                const el = document.getElementById('chart-image-preview');
+                if (el) el.style.display = 'none';
+                return;
+            }
+        } catch (_e) { /* defensive — fall through to existing logic */ }
+        // 1. Try Chart.js's own picker first (cheap, usually correct).
+        let pick = null;
+        try {
+            const points = chart.getElementsAtEventForMode(event, 'nearest', { intersect: false }, false);
+            if (points && points.length) pick = points[0];
+        } catch (e) { /* fall through */ }
+        // 2. Fallback to manual nearest in pixel space. Tighter cap (60 px)
+        //    so the preview doesn't appear when cursor is clearly between dots.
+        if (!pick) {
+            const near = _nearestPointPx(chart, event.clientX, event.clientY);
+            if (near && near.dist <= 60) pick = near;
+        }
+        if (!pick) {
+            const el = document.getElementById('chart-image-preview');
+            if (el) el.style.display = 'none';
+            return;
+        }
+        const ds = chart.data.datasets[pick.datasetIndex] || {};
+        const dp = (ds.data && ds.data[pick.index]) || {};
+        // 4.0.9 — anchor the preview to the DOT'S screen position, not the
+        // cursor's. Stops the preview from "floating" when cursor drifts off
+        // the scatter while the manual-nearest fallback keeps a stale dot pick.
+        let anchorX = event.clientX;
+        let anchorY = event.clientY;
+        try {
+            const meta = chart.getDatasetMeta(pick.datasetIndex);
+            const dotEl = meta && meta.data && meta.data[pick.index];
+            const rect = chart.canvas.getBoundingClientRect();
+            if (dotEl && dotEl.x != null && dotEl.y != null && rect) {
+                anchorX = rect.left + dotEl.x;
+                anchorY = rect.top  + dotEl.y;
+            }
+        } catch (e) { /* fall back to cursor coords */ }
+        _showHoverPreview(dp, ds.label, anchorX, anchorY);
+}
+
+function _scatterImageTooltip(ctx) {
+    // 4.0.6 — bullet-proof hover preview:
+    //   * Don't gate on tt.opacity — some Chart.js builds keep it at 0 when
+    //     using an external handler, which was hiding our preview even when
+    //     dataPoints were present.
+    //   * If dataPoints are missing, leave preview alone (don't re-hide it
+    //     during mouseout transitions — that caused flicker on dense scatters).
+    //   * If pt.img is missing, surface that in the caption instead of failing
+    //     silently so the operator knows WHY no preview.
+    // 4.0.38 — also suppress the preview entirely while the operator is in
+    // baseline-pick mode. The 420x280 preview floats next to the cursor and
+    // visually obscures the spot the operator is trying to aim at — even with
+    // pointer-events:none making clicks pass through, the operator can't SEE
+    // where to click. Hiding the preview in pick mode unblocks the flow.
+    const el = document.getElementById('chart-image-preview');
+    if (!el) return;
+    if (window._pickingBaseline) {
+        el.style.display = 'none'; return;
+    }
+    const tt = ctx && ctx.tooltip;
+    if (!tt || !tt.dataPoints || !tt.dataPoints.length) {
+        el.style.display = 'none'; return;
+    }
+    // 4.0.46 — Chart.js signals "hide" by setting opacity=0 but leaves the
+    // last dataPoints populated. The dataPoints check above doesn't catch
+    // that path; without this opacity gate the preview stayed visible after
+    // the cursor left the chart even though Chart.js had already retired
+    // the tooltip. Earlier comment said "don't gate on opacity"; that was
+    // for the show path. Hiding on opacity=0 is correct.
+    if (tt.opacity === 0) {
         el.style.display = 'none'; return;
     }
     const dp = tt.dataPoints[0];
-    const pt = dp.raw || {};
-    const urls = _imgUrlsFor(pt);
-    if (!urls.ann && !urls.raw) { el.style.display = 'none'; return; }
-    const imgs = el.querySelectorAll('img');
-    const cap = el.querySelector('.cap');
-    // imgs[0] = raw, imgs[1] = annotated
-    if (imgs[0] && urls.raw && imgs[0].dataset.src !== urls.raw) { imgs[0].dataset.src = urls.raw; imgs[0].src = urls.raw; }
-    if (imgs[1] && urls.ann && imgs[1].dataset.src !== urls.ann) { imgs[1].dataset.src = urls.ann; imgs[1].src = urls.ann; }
+    const pt = (dp && dp.raw) || {};
     const cls = (dp.dataset && dp.dataset.label) || pt.cls || '';
     const conf = ((pt.conf || 0) * 100).toFixed(0);
-    cap.textContent = cls + ' • cam ' + pt.y + ' • conf ' + conf + '%   (raw | annotated — click for big view)';
+    const img = el.querySelector('img');
+    const cap = el.querySelector('.cap');
+    const urls = _imgUrlsFor(pt);
+    const target = urls.ann || urls.raw;
+    if (img) {
+        if (target && img.dataset.src !== target) {
+            img.dataset.src = target;
+            img.src = target;
+            img.onerror = function() {
+                if (urls.raw && img.src !== urls.raw) {
+                    img.src = urls.raw;
+                    img.onerror = null;
+                }
+            };
+        } else if (!target) {
+            img.removeAttribute('src');
+            img.dataset.src = '';
+        }
+    }
+    if (cap) {
+        const meta = cls + ' • cam ' + (pt.y != null ? pt.y : '?') + ' • conf ' + conf + '%';
+        cap.textContent = target
+            ? meta + '   (click to edit in ai-trainer)'
+            : meta + '   (no image_path on this point)';
+    }
+    // Position next to the cursor. Use clientX/Y when caret values aren't set
+    // (Chart.js drops them on some hover modes).
+    // 4.0.39 — viewport clamp (mirrors the logic in _showHoverPreview at
+    // line ~2050). Without it, when the cursor sits near the right or bottom
+    // edge of the chart the preview lands off-canvas in the corner of the
+    // viewport. With it the preview flips to the left of the cursor and
+    // pins to the visible viewport box, never drifting into the corner.
     const box = ctx.chart.canvas.getBoundingClientRect();
-    el.style.left = (box.left + window.pageXOffset + tt.caretX + 14) + 'px';
-    el.style.top  = Math.max(8, (box.top + window.pageYOffset + tt.caretY - 120)) + 'px';
+    const cx = (tt.caretX != null) ? tt.caretX : 0;
+    const cy = (tt.caretY != null) ? tt.caretY : 0;
+    const mouseX = box.left + cx;
+    const mouseY = box.top  + cy;
+    const pw = el.offsetWidth  || 432;
+    const ph = el.offsetHeight || 320;
+    const vw = window.innerWidth  || 1920;
+    const vh = window.innerHeight || 1080;
+    let left = mouseX + 14;
+    if (left + pw > vw - 8) left = Math.max(8, mouseX - pw - 14);
+    let top = mouseY - Math.round(ph / 2);
+    if (top + ph > vh - 8) top = Math.max(8, vh - ph - 8);
+    if (top < 8) top = 8;
+    el.style.left = left + 'px';
+    el.style.top  = top + 'px';
     el.style.display = 'block';
 }
 // Click handler factory for bar/pie/pareto: drills into the drawer.
@@ -1302,7 +2436,7 @@ function _renderDefectView(urls) {
         const wrap = document.createElement('div');
         wrap.style.cssText = 'flex:1 1 0; overflow:hidden; background:#000; position:relative; display:flex; align-items:center; justify-content:center; min-width:0; min-height:0;';
         if (!url) {
-            wrap.innerHTML = '<div style="color:#64748b; font-size:13px; padding:24px;">(no ' + kind + ' image available)</div>';
+            wrap.innerHTML = '<div style="color: var(--text-secondary); font-size:13px; padding:24px;">(no ' + kind + ' image available)</div>';
         } else {
             const img = document.createElement('img');
             img.src = url; img.loading = 'eager';
@@ -1318,8 +2452,8 @@ function _renderDefectView(urls) {
                 ph.style.cssText = 'color:#94a3b8; font-size:13px; text-align:center; padding:24px; max-width:80%; line-height:1.5;';
                 ph.innerHTML = '<div style="font-size:32px; opacity:0.4; margin-bottom:8px;">🗑️</div>' +
                                '<div><b>Image not available</b></div>' +
-                               '<div style="font-size:11px; color:#64748b; margin-top:4px;">The ' + kind + ' jpg was pruned by the disk-retention policy (chart records outlive raw-image chunks).</div>' +
-                               '<div style="font-size:10px; color:#475569; margin-top:6px; word-break:break-all;">' + url + '</div>';
+                               '<div style="font-size:11px; color: var(--text-secondary); margin-top:4px;">The ' + kind + ' jpg was pruned by the disk-retention policy (chart records outlive raw-image chunks).</div>' +
+                               '<div style="font-size:10px; color: var(--text-secondary); margin-top:6px; word-break:break-all;">' + url + '</div>';
                 wrap.appendChild(ph);
             }, { once: true });
             const lbl = document.createElement('div');
@@ -1349,6 +2483,9 @@ function _highlightViewToggle() {
 function openDefectDrawerForFrame(item) {
     // item: {image_path, shipment, t, classes:[...], best_confidence, cls}
     _currentDefectItem = item || null;
+    // 3.26.0 — mirror to window so cross-script consumers (annotate.js) can read
+    // the current frame without depending on the `let` binding's script-scope.
+    window._currentDefectItem = _currentDefectItem;
     const drawer = document.getElementById('defect-drawer');
     const body   = document.getElementById('defect-drawer-body');
     const empty  = document.getElementById('defect-drawer-empty');
@@ -1573,7 +2710,9 @@ async function _loadEjectionAxis(axis, win) {
     const legend = document.getElementById(legendId);
     if (!strip) return;
     try {
-        const r = await fetch(`/api/quality/ejection_axis?axis=${axis}&window=${encodeURIComponent(win)}&buckets=48`);
+        // 4.0.35 — bucket count synced with colour heatmap.
+        const _bk = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
+        const r = await fetch(`/api/quality/ejection_axis?axis=${axis}&window=${encodeURIComponent(win)}&buckets=${_bk}`);
         const d = await r.json();
         const cells = d.buckets || [];
         if (!cells.length) {
@@ -1627,7 +2766,9 @@ async function _loadQualityHeatmap(axis, win) {
     const axisEl  = document.getElementById(axisId);
     if (!strip) return;
     try {
-        const r = await fetch(`/api/quality/heatmap?axis=${axis}&window=${encodeURIComponent(win)}&buckets=48`);
+        // 4.0.35 — bucket count synced with colour heatmap.
+        const _bk = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
+        const r = await fetch(`/api/quality/heatmap?axis=${axis}&window=${encodeURIComponent(win)}&buckets=${_bk}`);
         const d = await r.json();
         const cells = d.buckets || [];
         if (!cells.length) {

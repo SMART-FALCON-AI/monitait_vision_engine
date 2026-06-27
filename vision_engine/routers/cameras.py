@@ -321,6 +321,22 @@ async def update_camera_config(camera_id: int, request: Request):
             cam.auto_exposure = bool(body['auto_exposure'])
             updated.append('auto_exposure')
 
+        # 4.0.15 — Per-camera pixel-to-millimetre calibration. Accepts a
+        # positive float (e.g. 6.4 means 6.4 image pixels = 1 mm IRL) or
+        # null/empty to clear. Used by the LSF modal + defect drawer + charts
+        # to display bbox dimensions and areas in mm/mm² instead of px/px².
+        if 'px_per_mm' in body:
+            try:
+                v = body['px_per_mm']
+                if v in (None, "", "null"):
+                    cam.px_per_mm = None
+                else:
+                    f = float(v)
+                    cam.px_per_mm = f if f > 0 else None
+                updated.append('px_per_mm')
+            except (TypeError, ValueError):
+                pass
+
         # Auto-save to disk so settings persist across restarts
         if updated:
             try:

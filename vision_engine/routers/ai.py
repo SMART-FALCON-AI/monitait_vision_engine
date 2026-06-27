@@ -25,16 +25,44 @@ router = APIRouter()
 # AI MODEL CONFIGURATION HELPERS
 # =============================================================================
 
+# 3.26.4 — AI models are now DB-backed (service_config["ai_models"]) instead of
+# Redis-only. Survives `docker compose down` / `--force-recreate` / host reboot.
+# Redis is kept as a hot read cache so other modules that still poke `r.get("ai_models")`
+# directly (config_routes.py) keep working until they're migrated.
 def _get_ai_models_from_redis():
-    """Load all AI models from Redis. Returns dict: {"models": {...}, "active": "name"}."""
+    """Load all AI models. DB-first; Redis cache; legacy single-key migration.
+
+    Returns dict: {"models": {...}, "active": "name"}.
+    Function name retained for back-compat with existing call sites.
+    """
+    # 1) DB-backed config (the new source of truth as of 3.26.4)
+    try:
+        from config import load_service_config
+        svc = load_service_config() or {}
+        d = svc.get("ai_models")
+        if isinstance(d, dict) and isinstance(d.get("models"), dict) and d["models"]:
+            # Warm Redis cache so any non-migrated reader sees the same data.
+            try:
+                r = Redis("redis", 6379, db=REDIS_DB)
+                r.set("ai_models", json.dumps(d))
+            except Exception:
+                pass
+            return d
+    except Exception as e:
+        logger.debug(f"ai_models DB read failed (will fall back to Redis): {e}")
+
+    # 2) Redis fallback (covers pre-3.26.4 installs that only wrote to Redis).
+    #    On a successful read we ALSO write to the DB so the migration is complete
+    #    on the very next save — no manual step required.
     try:
         r = Redis("redis", 6379, db=REDIS_DB)
         raw = r.get("ai_models")
         if raw:
             data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
             if "models" in data:
+                _persist_ai_models_to_db(data)
                 return data
-        # Migration: check legacy single-model keys
+        # 3) Legacy single-model keys (pre-3.21.x)
         legacy_model = r.get("ai_model")
         legacy_key = r.get("ai_api_key")
         if legacy_model and legacy_key:
@@ -43,27 +71,53 @@ def _get_ai_models_from_redis():
             name = provider.capitalize()
             data = {"models": {name: {"provider": provider, "api_key": api_key}}, "active": name}
             r.set("ai_models", json.dumps(data))
+            _persist_ai_models_to_db(data)
             return data
     except Exception as e:
-        logger.warning(f"Failed to load AI models from Redis: {e}")
+        logger.warning(f"Failed to load AI models from Redis fallback: {e}")
     return {"models": {}, "active": None}
 
 
+def _persist_ai_models_to_db(data):
+    """Write `data` to service_config['ai_models']. Internal helper used by both
+    the explicit save path and the Redis→DB migration in _get_ai_models_from_redis."""
+    try:
+        from config import load_service_config, save_service_config
+        svc = load_service_config() or {}
+        svc["ai_models"] = data
+        save_service_config(svc)
+    except Exception as e:
+        logger.warning(f"Failed to persist ai_models to DB: {e}")
+
+
 def _save_ai_models_to_redis(data):
-    """Save all AI models to Redis."""
+    """Save all AI models. 3.26.4 — DB is the source of truth; Redis is the hot cache.
+
+    Both writes happen on every save. If Redis is down, the DB write still succeeds
+    and the config survives restart; if DB is down, Redis still has the live value
+    until the next restart (existing pre-3.26.4 behaviour).
+    """
+    db_ok = False
+    redis_ok = False
+    # 1) DB write (primary)
+    try:
+        _persist_ai_models_to_db(data)
+        db_ok = True
+    except Exception as e:
+        logger.error(f"Failed to save AI models to DB: {e}")
+    # 2) Redis write (hot cache + legacy keys for ai_query consumers)
     try:
         r = Redis("redis", 6379, db=REDIS_DB)
         r.set("ai_models", json.dumps(data))
-        # Also set legacy keys for backward compatibility with ai_query
         active_name = data.get("active")
         if active_name and active_name in data.get("models", {}):
             m = data["models"][active_name]
             r.set("ai_model", m["provider"])
             r.set("ai_api_key", m["api_key"])
-        return True
+        redis_ok = True
     except Exception as e:
-        logger.error(f"Failed to save AI models to Redis: {e}")
-        return False
+        logger.warning(f"Failed to save AI models to Redis cache: {e}")
+    return db_ok or redis_ok
 
 
 # =============================================================================

@@ -391,6 +391,16 @@ function updateObjectsList() {
         const isColorE = !!audioSettings.colorEObjects?.[objectName];          // 3.22.2 — track CIELAB ΔE drift over time
         const isArea   = !!audioSettings.areaObjects?.[objectName];            // 3.22.3 — show bbox-area percentiles
         const severity = audioSettings.severityObjects?.[objectName] ?? 0;  // 3.21.12 — per-class severity (0–100, defect impact weight)
+        // 4.0.26 — per-class semantic ROLE. Replaces the global
+        // `parent_object_list` text-box with a per-card dropdown.
+        //   context (default) — informational only, severity allowed but default 0
+        //   defect            — counted in OK/NG + quality score
+        //   parent            — defines the inspection region; severity disabled (always 0)
+        //   marker            — encoder-axis landmark (e.g. stitch = roll boundary)
+        // Backend will derive the active parent list from any class with
+        // role==='parent', falling back to `_root` (whole frame) if none.
+        const role = audioSettings.roleObjects?.[objectName] || 'context';
+        const sevDisabled = role === 'parent';
         const baseline = audioSettings.confBaselines?.[objectName];          // 3.21.12 — read-only baseline {p50,p95} (auto-learned)
         const drift    = audioSettings.colorDrift?.[objectName];             // 3.22.2 — read-only ΔE drift {p5_de, p50_de, p95_de, by_camera}
         const areaSt   = audioSettings.areaStats?.[objectName];              // 3.22.3 — read-only bbox area stats {p5, p50, p95, by_camera}
@@ -435,16 +445,25 @@ function updateObjectsList() {
                 </label>
             </div>
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;">
-                <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;">Min conf:</span>
+                <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;" title="Semantic role of this class.&#10;&#10;Context — informational only, no special wiring.&#10;Defect — counted in OK/NG and weighted into the quality score by Severity.&#10;Parent — marks the inspection region (the physical product). When at least one class has role=Parent, frames are only scored if a parent is detected; if none of the configured classes are Parent, the whole frame (_root) is the parent.&#10;Marker — landmark on the encoder axis (e.g. a stitch marks roll boundaries). Surfaces on the encoder strip for spatial reference, doesn't affect scoring.">Role:</span>
+                <select onchange="updateObjectRole('${safeName}', this.value)"
+                    style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; cursor: pointer;"
+                    title="Role of this class in the system.">
+                    <option value="context" ${role==='context'?'selected':''}>📋 Context</option>
+                    <option value="defect"  ${role==='defect' ?'selected':''}>⚠️ Defect</option>
+                    <option value="parent"  ${role==='parent' ?'selected':''}>🌳 Parent</option>
+                    <option value="marker"  ${role==='marker' ?'selected':''}>📍 Marker</option>
+                </select>
+                <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; margin-left: 6px;">Min conf:</span>
                 <input type="number" value="${confidence}" min="0" max="100" step="1"
                     onchange="updateObjectConfidence('${safeName}', this.value)"
                     style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;">
                 <span style="font-size: 12px; color: var(--text-secondary);">%</span>
-                <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; margin-left: 6px;" title="Severity weight 0–100. Used to compute defect impact score (severity × confidence × area). Higher = this class hurts shipment quality more.">Severity:</span>
-                <input type="number" value="${severity}" min="0" max="100" step="1"
+                <span style="font-size: 12px; color: ${sevDisabled?'rgba(148,163,184,0.4)':'var(--text-secondary)'}; white-space: nowrap; margin-left: 6px;" title="Severity weight 0–100. Used to compute defect impact score (severity × confidence × area). Higher = this class hurts shipment quality more. Disabled when role=Parent because parents define the inspection area, not a defect impact.">Severity:</span>
+                <input type="number" value="${severity}" min="0" max="100" step="1" ${sevDisabled?'disabled':''}
                     onchange="updateObjectSeverity('${safeName}', this.value)"
-                    style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;"
-                    title="Per-class defect impact weight (0=cosmetic, 100=critical)">
+                    style="width: 55px; padding: 3px 5px; background: ${sevDisabled?'rgba(30,41,59,0.25)':'rgba(30,41,59,0.6)'}; color: ${sevDisabled?'rgba(148,163,184,0.4)':'var(--text-primary)'}; border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center; cursor: ${sevDisabled?'not-allowed':'auto'};"
+                    title="${sevDisabled?'Disabled: role=Parent defines inspection area, not impact':'Per-class defect impact weight (0=cosmetic, 100=critical)'}">
             </div>
             ${baseline ? `<div style="display:flex; align-items:center; gap:4px; font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.4); border-radius: 3px;">
                 <span style="flex:1;">📊 normal conf: ${baseline.p5 !== undefined ? `${(baseline.p5*100).toFixed(0)} · <b>${(baseline.p50*100).toFixed(0)}</b> · ${(baseline.p95*100).toFixed(0)}% (p5–p50–p95)` : `${(baseline.p50*100).toFixed(0)}–${(baseline.p95*100).toFixed(0)}% (p50–p95)`} · n=${baseline.n||0}</span>
@@ -499,6 +518,7 @@ async function syncObjectAudioToServer(objectName) {
         beep: !!audioSettings.enabledObjects[objectName],
         min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100,  // UI uses 0-100, server uses 0-1
         severity: audioSettings.severityObjects?.[objectName] ?? 0,  // 3.21.12 — 0-100, per-class impact weight
+        role:    audioSettings.roleObjects?.[objectName] || 'context', // 4.0.26 — context | defect | parent | marker
         color_e: !!audioSettings.colorEObjects?.[objectName],         // 3.22.2 — track CIELAB ΔE drift over time
         area:    !!audioSettings.areaObjects?.[objectName],           // 3.22.3 — show bbox-area percentiles on the card
     };
@@ -545,6 +565,26 @@ function updateObjectSeverity(objectName, value) {
 }
 window.updateObjectSeverity = updateObjectSeverity;
 
+// 4.0.26 — Update per-class semantic role.
+// On change, re-render the cards so the severity input disables/enables to
+// match the new role (Parent disables severity; everything else enables it).
+// Setting role=Parent also forces severity to 0 so the impact-score numbers
+// stay clean even if the operator had set a non-zero severity earlier.
+function updateObjectRole(objectName, value) {
+    const VALID = ['context', 'defect', 'parent', 'marker'];
+    const role = VALID.includes(value) ? value : 'context';
+    if (!audioSettings.roleObjects) audioSettings.roleObjects = {};
+    audioSettings.roleObjects[objectName] = role;
+    if (role === 'parent') {
+        if (!audioSettings.severityObjects) audioSettings.severityObjects = {};
+        audioSettings.severityObjects[objectName] = 0;
+    }
+    saveAudioSettings();
+    syncObjectAudioToServer(objectName);
+    if (typeof updateObjectsList === 'function') updateObjectsList();
+}
+window.updateObjectRole = updateObjectRole;
+
 // On page load, pull server-side audio_settings so the UI matches what
 // services/* actually uses (localStorage may be stale across browsers).
 async function loadAudioSettingsFromServer() {
@@ -561,6 +601,11 @@ async function loadAudioSettingsFromServer() {
             if (s.beep !== undefined)    audioSettings.enabledObjects[k] = !!s.beep;
             if (s.min_confidence !== undefined) audioSettings.objectConfidence[k] = Math.round(s.min_confidence * 100);
             if (s.severity !== undefined) audioSettings.severityObjects[k] = parseInt(s.severity, 10) || 0;
+            // 4.0.26 — per-class semantic role (context | defect | parent | marker)
+            if (s.role !== undefined) {
+                if (!audioSettings.roleObjects) audioSettings.roleObjects = {};
+                audioSettings.roleObjects[k] = String(s.role);
+            }
             // 3.22.2 — per-class ColorE (CIELAB ΔE tracking) toggle
             if (s.color_e !== undefined) {
                 if (!audioSettings.colorEObjects) audioSettings.colorEObjects = {};
@@ -769,7 +814,7 @@ function _renderSeveritySuggestions(rows, procRows) {
         }).join('');
         return `
             <div style="margin-bottom:8px; font-size:11px; color:#a7f3d0; font-weight:600; letter-spacing:0.4px; text-transform:uppercase;">${title}</div>
-            <table style="width:100%; border-collapse:collapse; margin-bottom:14px;">${header}${body}</table>`;
+            <table style="width:100%; border-collapse:collapse; margin-bottom:14px; color: var(--text-primary);">${header}${body}</table>`;
     }
     el.innerHTML =
         _section(`Detection classes (${rows.length})`, rows, 'class') +
@@ -1467,6 +1512,16 @@ function testAudio() {
 
 // Tab switching functionality
 function switchTab(tabName) {
+    // 4.0.16 — kill any stuck floating UI from the OUTGOING tab before swapping.
+    // Specifically the Charts hover preview (z-index 999998): if the operator
+    // clicks a tab button while the preview is up, `mouseleave` on the chart
+    // canvas never fires, so the floating thumbnail stays painted on top of
+    // every subsequent tab.
+    try {
+        const hov = document.getElementById('chart-image-preview');
+        if (hov) hov.style.display = 'none';
+    } catch (e) { /* never block tab-switch on UI-cleanup errors */ }
+
     // Hide all tab contents
     const tabContents = document.querySelectorAll('.tab-content');
     tabContents.forEach(tab => tab.classList.remove('active'));
@@ -1996,12 +2051,21 @@ function cancelEditShipment() {
 }
 
 // 3.25.0 — call /api/shipments/next_code and stuff the result into the input.
-// Format: yyyymmddXXX where XXX is the chronological seq for today.
+// Format: yymmddXXYYZZZ — XX = state index, YY = pipeline index, ZZZ = chronological seq.
+// 4.0.38 — pass the operator's LOCAL date as a query param. MVE containers run
+// in UTC; in Iran (+0330) that means between local 00:00 and UTC midnight the
+// dice would generate yesterday's prefix. With local_date sent from the
+// browser, the backend honours the operator's calendar, not the container's.
 async function generateShipmentCode() {
     const shipmentInput = document.getElementById('shipment-input');
     if (!shipmentInput) return;
     try {
-        const r = await fetch('/api/shipments/next_code');
+        const now = new Date();
+        const yy = String(now.getFullYear() % 100).padStart(2, '0');
+        const mm = String(now.getMonth() + 1).padStart(2, '0');
+        const dd = String(now.getDate()).padStart(2, '0');
+        const localDate = `${yy}${mm}${dd}`;
+        const r = await fetch('/api/shipments/next_code?local_date=' + encodeURIComponent(localDate));
         if (!r.ok) {
             alert('Generator failed (HTTP ' + r.status + ')');
             return;
@@ -2225,7 +2289,7 @@ function renderAIModelsList(data) {
     const container = document.getElementById('ai-models-list');
     const modelNames = Object.keys(data.models || {});
     if (modelNames.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-style: italic;">No models configured. Add one below.</span>';
+        container.innerHTML = '<span style="color: var(--text-secondary); font-style: italic;">No models configured. Add one below.</span>';
         return;
     }
     container.innerHTML = '';
@@ -2350,7 +2414,7 @@ function renderDBProfilesList(data) {
     const container = document.getElementById('db-profiles-list');
     const names = Object.keys(data.profiles || {});
     if (names.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-style: italic;">No profiles configured. Add one below.</span>';
+        container.innerHTML = '<span style="color: var(--text-secondary); font-style: italic;">No profiles configured. Add one below.</span>';
         return;
     }
     container.innerHTML = '';

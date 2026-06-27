@@ -2,7 +2,15 @@
 @font-face { font-family: 'Vazir'; src: url('/static/fonts/Vazir.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: 'Badr'; src: url('/static/fonts/Badr.ttf') format('truetype'); font-display: swap; }
 
+/* 4.0.17 — tell the browser this site is dark-themed so Chrome's
+   "Force dark mode" / Auto Dark Mode extensions DON'T invert our text.
+   Without this declaration Chrome saw our light text (#f8fafc, #94a3b8)
+   and inverted it to near-black, breaking CPU/RAM/Disk labels, the
+   `.control-label` "File:" caption, AI Severity rows, and many other
+   inline-styled greys. `color-scheme: dark` is the standard signal
+   that overrides force-dark-mode for the whole document. */
 :root {
+    color-scheme: dark;
     --primary-color: #3b82f6;
     --primary-hover: #2563eb;
     --secondary-color: #06b6d4;
@@ -21,8 +29,96 @@
     --shadow-lg: 0 10px 20px rgba(0, 0, 0, 0.2);
 }
 
-body, button, input, select, textarea, option {
+body, button, input, select, textarea, option, label {
     font-family: 'Inter', 'Vazir', 'Badr', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* 4.0.18 — when the dashboard is in Persian, push Vazir to the FRONT of the
+   font stack so EVERY element (including buttons / inputs / inline-styled
+   spans) uses the proper Persian face. Inter doesn't ship Persian glyphs,
+   so without an explicit override the browser only falls back to Vazir for
+   Persian characters — Latin characters and digits stay in Inter, which
+   looks mismatched. !important wins over inline `font-family` styles too.
+   Same idea for `:lang(fa)` as a catch-all when the lang attribute is set
+   on a descendant rather than <html>. */
+html[lang="fa"], html[lang="fa"] body, html[lang="fa"] button,
+html[lang="fa"] input, html[lang="fa"] select, html[lang="fa"] textarea,
+html[lang="fa"] option, html[lang="fa"] label, html[lang="fa"] *,
+:lang(fa) {
+    font-family: 'Vazir', 'Inter', 'Badr', ui-sans-serif, system-ui, sans-serif !important;
+}
+
+/* 4.0.15 — keep <label> readable in dark theme; the earlier 4.0.1 catch-all
+   that also forced <strong>/<b>/<em>/<i> to inherit was rolling some
+   colored UI elements back to plain text — removed. */
+label { color: var(--text-primary); }
+
+/* 4.0.19 — defensive: anything inside .container that has NO explicit color
+   gets the dashboard's primary text colour. Some browsers (Chrome with
+   force-dark, certain extensions, certain Safari modes) refuse to inherit
+   body color into <span>/<small>/<i> children of <div> when there's no
+   explicit color anywhere up the chain — even with color-scheme: dark
+   declared. `:where()` wraps the selector so the whole rule has ZERO
+   specificity: any other class with a color set (.info-tooltip-sm blue,
+   --text-secondary spans, .status-circle, severity tier colours, etc.)
+   still wins, and inline `style="color: …"` always wins. This is a
+   floor, not a ceiling. */
+:where(.container, .container span, .container small, .container div,
+       .container h1, .container h2, .container h3, .container h4,
+       .container h5, .container h6, .container li, .container td, .container th) {
+    color: var(--text-primary);
+}
+
+/* 4.0.25 — LSF dark-mode skin. LSF 1.4.0 ships only a light theme (white
+   bg, dark text). When embedded inside our dark dashboard the contrast
+   is jarring AND text-only regions (region list, "No Region selected"
+   placeholder, etc.) end up unreadable because their default `color:
+   inherit` cascades from our off-white body. So we re-skin LSF: force a
+   dark background on the panel, force text to our primary off-white,
+   and re-paint inputs/buttons with the dashboard's slate palette. The
+   image canvas itself is a <canvas> element — CSS can't change pixel
+   content — so the actual frame stays as-is. The previous `color: initial
+   !important` override that made the LABELS PALETTE at the bottom legible
+   on LSF's white background is no longer needed: in dark mode the palette
+   chips' own background colours (per-class hue) give the labels enough
+   contrast on the dark surrounding panel. */
+#label-studio {
+    background: #0f172a !important;
+    color: var(--text-primary) !important;
+}
+#label-studio *:not(canvas):not(img):not(svg):not(svg *) {
+    color: var(--text-primary) !important;
+    border-color: rgba(51, 65, 85, 0.5) !important;
+}
+/* Panels / sidebars / region list rows / context menus — repaint LSF's
+   default white surfaces to our slate background so the off-white text
+   reads. Element-level rules are kept loose (no class names — we don't
+   want to chase LSF's internal CSS module names). */
+#label-studio :where(div, section, aside, nav, ul, li, tbody, tr, td, th) {
+    background-color: transparent !important;
+}
+/* Inputs / textareas / selects get the dashboard's input look. */
+#label-studio :where(input, textarea, select) {
+    background: rgba(30, 41, 59, 0.6) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid rgba(51, 65, 85, 0.6) !important;
+}
+/* Buttons in LSF's toolbar — give them the dashboard's secondary button
+   look so they pop against the dark surface but don't outshout the
+   primary Save/Submit actions in our modal HEADER. */
+#label-studio button {
+    background: rgba(51, 65, 85, 0.6) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid rgba(71, 85, 105, 0.6) !important;
+}
+#label-studio button:hover {
+    background: rgba(71, 85, 105, 0.75) !important;
+}
+/* SVG / canvas inside LSF — leave its viewport drawing alone. Image
+   canvas content is pixel data, not CSS-affected; this just keeps any
+   SVG icons readable without inverting them. */
+#label-studio svg, #label-studio canvas {
+    filter: none !important;
 }
 
 body {

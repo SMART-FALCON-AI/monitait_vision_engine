@@ -1182,25 +1182,15 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
         if _watcher:
             _watcher.latest_frame_id = frame_id
 
-        # Save annotated image with bounding boxes.
-        # 3.21.26 — draw_filters owns the audio_settings read. Just ask
-        # `should_draw_class(name)` — no params, no caller-side config to
-        # forget. One source of truth.
+        # 4.0.0 — no more `_DETECTED.jpg` writes. The detections JSON on the
+        # inference_results row is the only source of truth; the viewer renders
+        # boxes on demand via GET /api/render_detected/<path>. Saves ~50% disk
+        # across the fleet and removes any risk of stale/out-of-sync annotated
+        # files. Operators get the same image (rendered <1ms after first cache
+        # warm-up) and editing is now the default UX (no separate ✏️ Annotate
+        # button needed).
         if yolo_res and len(yolo_res) > 0:
-            from services.render import draw_detection_on
-            from services.draw_filters import should_draw_class
-            annotated_image = image.copy()
-            kv_y = 4
-            for det in yolo_res:
-                _nm = det.get("name") if isinstance(det, dict) else None
-                if not should_draw_class(_nm):
-                    continue
-                kv_y = draw_detection_on(annotated_image, det, kv_y=kv_y, bbox_thickness=3)
-
-            # Save annotated image with _DETECTED suffix
-            annotated_path = os.path.join("raw_images", f"{frame_id}_DETECTED.jpg")
-            cv2.imwrite(annotated_path, annotated_image)
-            logger.info(f"Saved annotated image: {annotated_path} with {len(yolo_res)} detections (model: {model_name_used})")
+            logger.info(f"Frame {frame_id}: {len(yolo_res)} detections recorded (model: {model_name_used}); annotated image will render on demand")
 
             # Attach camera ID to each detection for per-camera procedure filtering
             try:
@@ -1350,9 +1340,109 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
                         continue
                     filtered.append(d)
                 if filtered:
+                    # 4.0.27 — Color metric per frame. Append a synthetic
+                    # `_color` entry with the mean CIELAB L*a*b* + E so the
+                    # chart-tab background heatmap can show colour drift
+                    # per (camera, encoder bin) without an extra inference
+                    # pass. Phase index is parsed from frame_id (format
+                    # `<ts>_p<idx>_<cam>`) so the renderer can split phases
+                    # (lighting differs per phase so absolute Lab values do too).
+                    #
+                    # Region of measurement:
+                    #   • If any class is configured with role="parent" AND
+                    #     a detection of that class lands in this frame,
+                    #     measure on the LARGEST parent bbox. The parent
+                    #     class represents the physical product, so its
+                    #     bbox is the inspection region for colour drift.
+                    #   • Otherwise fall back to the whole frame (_root).
+                    #
+                    # Source noted on the entry (`source`: "parent" or
+                    # "_root") so the chart can label what's being measured.
+                    # Cheap: cv2.cvtColor + cv2.mean is ~1 ms on 1280x720.
+                    try:
+                        import re as _re_color
+                        phase_idx = 0
+                        _pm = _re_color.search(r'_p(\d+)_\d+$', frame_id)
+                        if _pm:
+                            phase_idx = int(_pm.group(1))
+
+                        # Pick parent class names (role=parent) and find
+                        # the largest matching detection on this frame.
+                        parent_classes = {
+                            cls for cls, cfg in (audio_map or {}).items()
+                            if isinstance(cfg, dict) and cfg.get("role") == "parent"
+                        }
+                        parent_det = None
+                        if parent_classes:
+                            parent_candidates = [
+                                d for d in filtered
+                                if isinstance(d, dict) and d.get("name") in parent_classes
+                            ]
+                            if parent_candidates:
+                                def _bbox_area(d):
+                                    return max(0.0, (d.get("xmax", 0) - d.get("xmin", 0))) * \
+                                           max(0.0, (d.get("ymax", 0) - d.get("ymin", 0)))
+                                parent_det = max(parent_candidates, key=_bbox_area)
+
+                        H, W = image.shape[:2]
+                        if parent_det is not None:
+                            xmin = int(max(0, min(W, parent_det.get("xmin", 0))))
+                            ymin = int(max(0, min(H, parent_det.get("ymin", 0))))
+                            xmax = int(max(0, min(W, parent_det.get("xmax", W))))
+                            ymax = int(max(0, min(H, parent_det.get("ymax", H))))
+                            if xmax > xmin and ymax > ymin:
+                                region = image[ymin:ymax, xmin:xmax]
+                                source = "parent"
+                                parent_name = str(parent_det.get("name") or "")
+                                bbox = (xmin, ymin, xmax, ymax)
+                            else:
+                                region = image; source = "_root"
+                                parent_name = ""; bbox = (0, 0, W, H)
+                        else:
+                            region = image; source = "_root"
+                            parent_name = ""; bbox = (0, 0, W, H)
+
+                        # OpenCV BGR→LAB: L in 0..255 (L*255/100), a/b in
+                        # 0..255 (offset by +128). Convert back to CIE scale.
+                        lab_img = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
+                        L_mean, a_mean, b_mean, _ = cv2.mean(lab_img)
+                        L_cie = float(L_mean) * 100.0 / 255.0
+                        a_cie = float(a_mean) - 128.0
+                        b_cie = float(b_mean) - 128.0
+                        E_cie = (L_cie ** 2 + a_cie ** 2 + b_cie ** 2) ** 0.5
+                        filtered.append({
+                            "name": "_color",
+                            "L": round(L_cie, 2),
+                            "a": round(a_cie, 2),
+                            "b": round(b_cie, 2),
+                            "E": round(E_cie, 2),
+                            "phase": phase_idx,
+                            "source": source,                # "parent" | "_root"
+                            "parent_class": parent_name,     # name of the parent class used, or ""
+                            "confidence": 1.0,
+                            "xmin": bbox[0], "ymin": bbox[1],
+                            "xmax": bbox[2], "ymax": bbox[3],
+                        })
+                    except Exception as _ce:
+                        logger.debug(f"color metric compute failed for {frame_id}: {_ce}")
+                    # 4.0.0 — `annotated_path` (the on-disk _DETECTED.jpg) no longer
+                    # exists because the pipeline doesn't write a separate annotated
+                    # file. We persist the RAW path instead; the viewer renders the
+                    # boxes on demand from this row's `detections` JSON via
+                    # `/api/render_detected/<raw_path>`. Keeping the `_DETECTED.jpg`
+                    # suffix in the DB would also work (the render endpoint strips
+                    # it), but the raw path is the canonical resource going forward.
+                    # 4.0.23 — removed Redis SETNX dedupe added in 4.0.22.
+                    # The dedupe was masking the real bug (multi-phase capture
+                    # filename collision in watcher.py), and now that paths
+                    # carry the phase index there's no path-level collision to
+                    # dedupe against. Any further duplicate writes will be
+                    # visible in DB so we can diagnose them instead of silently
+                    # dropping data.
+                    raw_image_path = os.path.join("raw_images", f"{frame_id}.jpg")
                     write_inference_to_db(
                         shipment=shipment_str,
-                        image_path=annotated_path,
+                        image_path=raw_image_path,
                         detections=filtered,
                         inference_time_ms=inference_time_ms,
                         model_used=model_name_used,

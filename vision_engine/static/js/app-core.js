@@ -154,9 +154,12 @@ function startStatusStream() {
             _lastSSETime = Date.now();
             const data = JSON.parse(event.data);
 
-            // Debug: Log detection events
-            if (data.detection_event) {
-                console.log('[SSE] Detection event received:', data.detection_event);
+            // 4.0.7 — removed per-event console.log. At 45 FPS this was flooding
+            // the console with hundreds of thousands of messages per shift,
+            // which DevTools' message buffer eventually chokes on. Re-enable
+            // with `?debug=sse` if needed:
+            if (data.detection_event && /(\?|&)debug=sse(\b|&)/.test(location.search)) {
+                console.log('[SSE] Detection event:', data.detection_event);
             }
 
             updateStatusUI(data);
@@ -382,20 +385,25 @@ function fetchConfig() {
         .then(response => response.json())
         .then(data => {
             // Update counter service configuration inputs with current values
+            // 4.0.7 — wrap every DOM-input setter in a null-safe helper. Some of
+            // these inputs only exist on certain tabs; setting `.value` on a
+            // null element threw "Cannot set properties of null" which then
+            // aborted the rest of the config load.
+            const _setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
             if (data.ejector) {
-                document.getElementById('ejector-enabled-input').value = data.ejector.enabled ? 'true' : 'false';
-                document.getElementById('ejector-offset-input').value = data.ejector.offset || 0;
-                document.getElementById('ejector-delay-input').value = data.ejector.delay || 0;
-                document.getElementById('ejector-duration-input').value = data.ejector.duration || 0.4;
-                document.getElementById('ejector-poll-input').value = data.ejector.poll_interval || 0.03;
+                _setVal('ejector-enabled-input', data.ejector.enabled ? 'true' : 'false');
+                _setVal('ejector-offset-input',  data.ejector.offset || 0);
+                _setVal('ejector-delay-input',   data.ejector.delay || 0);
+                _setVal('ejector-duration-input',data.ejector.duration || 0.4);
+                _setVal('ejector-poll-input',    data.ejector.poll_interval || 0.03);
             }
             if (data.capture) {
-                document.getElementById('capture-mode-input').value = data.capture.mode || 'single';
+                _setVal('capture-mode-input', data.capture.mode || 'single');
             }
             // Image processing configuration
             if (data.image_processing) {
-                document.getElementById('parent-object-list-input').value = (data.image_processing.parent_object_list || []).join(',');
-                document.getElementById('remove-raw-image-input').value = data.image_processing.remove_raw_image_when_dm_decoded ? 'true' : 'false';
+                _setVal('parent-object-list-input', (data.image_processing.parent_object_list || []).join(','));
+                _setVal('remove-raw-image-input',  data.image_processing.remove_raw_image_when_dm_decoded ? 'true' : 'false');
             }
             // DataMatrix configuration
             if (data.datamatrix) {
@@ -588,7 +596,7 @@ function updateAPITypeFields() {
         fetchGradioModels();
         // Show helper text
         const responseDiv = document.getElementById('config-yolo_url-response');
-        responseDiv.innerHTML = '<span style="color: #0c5460;">💡 HuggingFace Space URL set - click "Set URL" to apply</span>';
+        responseDiv.innerHTML = '<span style="color: var(--secondary-color);">💡 HuggingFace Space URL set - click "Set URL" to apply</span>';
     } else {
         urlLabel.textContent = 'YOLO Inference URL';
         urlInput.value = 'http://yolo_inference:4442/v1/object-detection/yolov5s/detect/';
@@ -660,7 +668,8 @@ async function loadAiTrainerConfig() {
         const k = document.getElementById('ai-trainer-api-key-input');
         const e = document.getElementById('ai-trainer-email-input');      // 3.24.8
         const p = document.getElementById('ai-trainer-password-input');   // 3.24.8
-        if (u && d.url) u.value = d.url;
+        // 3.26.0 — show base_url (canonical); fall back to legacy `url`.
+        if (u && (d.base_url || d.url)) u.value = d.base_url || d.url;
         if (t && d.task_id) t.value = d.task_id;
         if (e && d.email) e.value = d.email;
         if (k) k.placeholder = d.has_api_key
@@ -679,7 +688,8 @@ async function saveAiTrainerConfig() {
     const e = (document.getElementById('ai-trainer-email-input')?.value || '').trim();   // 3.24.8
     const p = document.getElementById('ai-trainer-password-input')?.value || '';          // 3.24.8
     const resp = document.getElementById('ai-trainer-response');
-    const body = { url: u, task_id: t, email: e };
+    // 3.26.0 — send base_url; backend keeps url as derived alias for legacy callers.
+    const body = { base_url: u, task_id: t, email: e };
     // Only send api_key/password when the operator actually typed something.
     // Blank means "keep existing" because the GET hides the saved value.
     if (k.length > 0) body.api_key = k;
@@ -1366,7 +1376,7 @@ async function fetchCameraStatus() {
         grid.innerHTML = `
             <div class="camera-loading" style="color: #dc3545;">
                 ⚠️ Could not load camera status<br>
-                <small style="color: #666;">${error.message}</small>
+                <small style="color: var(--text-secondary);">${error.message}</small>
             </div>
         `;
     }
@@ -1542,6 +1552,14 @@ function createCameraCard(cameraId, camera) {
                         <span style="font-size:11px;color:var(--text-secondary);">Use camera firmware AE</span>
                     </label>
                 </div>
+                <div class="camera-config-item">
+                    <label><span data-i18n="pixels_per_mm">Pixels per mm</span> ${tip((window.t && window.t('tip_pixels_per_mm')) || 'Camera calibration: how many image pixels equal 1 mm in the real world. Enter once per camera; defect dimensions and areas downstream will be shown in mm / mm² instead of px / px². Leave blank to keep raw pixel values. Example: if a 100 mm reference bar measures 640 px wide on the frame, enter 6.4.')}</label>
+                    <input type="number" id="cam-cfg-px-per-mm-${cameraId}" value="${config.px_per_mm != null ? config.px_per_mm : ''}" min="0" step="0.01" placeholder="e.g. 6.40"
+                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()">
+                    <span id="cam-cfg-px-per-mm-hint-${cameraId}" style="font-size:10px;color:var(--text-secondary);display:block;margin-top:2px;">
+                        ${config.px_per_mm ? `1 px ≈ ${(1 / config.px_per_mm).toFixed(3)} mm` : ((window.t && window.t('not_calibrated')) || 'not calibrated')}
+                    </span>
+                </div>
             </div>
             <div class="camera-roi-section" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #333;">
                 <div style="display: flex; align-items: center; margin-bottom: 8px;">
@@ -1671,6 +1689,13 @@ async function applyCameraConfig(cameraId) {
         // connect time AND any per-state exposure override from State.exposure.
         const autoExpEl = document.getElementById(`cam-cfg-auto-exposure-${cameraId}`);
         if (autoExpEl) config.auto_exposure = !!autoExpEl.checked;
+
+        // 4.0.15 — per-camera pixel-to-mm calibration. Blank → null (clears it).
+        const pxMmEl = document.getElementById(`cam-cfg-px-per-mm-${cameraId}`);
+        if (pxMmEl) {
+            const v = pxMmEl.value.trim();
+            config.px_per_mm = v === '' ? null : parseFloat(v);
+        }
 
         const response = await fetch(`/api/camera/${cameraId}/config`, {
             method: 'POST',
@@ -1962,7 +1987,7 @@ function renderStatesList(states) {
     const stateNames = Object.keys(states);
 
     if (stateNames.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-style: italic;">No states configured</span>';
+        container.innerHTML = '<span style="color: var(--text-secondary); font-style: italic;">No states configured</span>';
         return;
     }
 
@@ -2083,7 +2108,7 @@ function addPhaseRow(idx, lightMode, delay, cameras, steps = 1, analog = -1) {
 
     div.innerHTML = `
         <div>
-            <label style="font-size: 10px; color: #666;">Light Mode ${tip('Which lights to turn on/off during this capture phase.')}</label>
+            <label style="font-size: 10px; color: var(--text-secondary);">Light Mode ${tip('Which lights to turn on/off during this capture phase.')}</label>
             <select class="control-input phase-light" style="margin: 0; padding: 4px; font-size: 12px;">
                 <option value="U_ON_B_OFF" ${lightMode === 'U_ON_B_OFF' ? 'selected' : ''}>U On, B Off</option>
                 <option value="U_OFF_B_ON" ${lightMode === 'U_OFF_B_ON' ? 'selected' : ''}>U Off, B On</option>
@@ -2092,19 +2117,19 @@ function addPhaseRow(idx, lightMode, delay, cameras, steps = 1, analog = -1) {
             </select>
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Delay (s) ${tip('Wait time in seconds after setting lights, before capturing.')}</label>
+            <label style="font-size: 10px; color: var(--text-secondary);">Delay (s) ${tip('Wait time in seconds after setting lights, before capturing.')}</label>
             <input type="number" class="control-input phase-delay" value="${delay}" min="0" step="0.01" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Cameras ${tip('Comma-separated camera IDs to capture in this phase.')}</label>
+            <label style="font-size: 10px; color: var(--text-secondary);">Cameras ${tip('Comma-separated camera IDs to capture in this phase.')}</label>
             <input type="text" class="control-input phase-cameras" value="${camerasStr}" placeholder="1,2,3,4" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Steps (-1=loop) ${tip('Capture every N encoder steps. -1 = continuous capture loop.')}</label>
+            <label style="font-size: 10px; color: var(--text-secondary);">Steps (-1=loop) ${tip('Capture every N encoder steps. -1 = continuous capture loop.')}</label>
             <input type="number" class="control-input phase-steps" value="${steps}" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <div>
-            <label style="font-size: 10px; color: #666;">Analog (-1=off) ${tip('Analog sensor threshold. -1 = disabled. N = trigger when value >= N.')}</label>
+            <label style="font-size: 10px; color: var(--text-secondary);">Analog (-1=off) ${tip('Analog sensor threshold. -1 = disabled. N = trigger when value >= N.')}</label>
             <input type="number" class="control-input phase-analog" value="${analog}" min="-1" step="1" style="margin: 0; padding: 4px; font-size: 12px;">
         </div>
         <button class="camera-btn camera-btn-danger" onclick="removePhase('${idx}')" style="padding: 4px 8px; font-size: 11px;">✕</button>
@@ -2471,7 +2496,7 @@ function renderPipelinesList(pipelines, currentPipeline) {
     const pipelineNames = Object.keys(pipelines);
 
     if (pipelineNames.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-style: italic;">No pipelines configured</span>';
+        container.innerHTML = '<span style="color: var(--text-secondary); font-style: italic;">No pipelines configured</span>';
         return;
     }
 
@@ -2504,7 +2529,7 @@ function renderModelsList(models) {
     const modelIds = Object.keys(models);
 
     if (modelIds.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-style: italic;">No models configured</span>';
+        container.innerHTML = '<span style="color: var(--text-secondary); font-style: italic;">No models configured</span>';
         return;
     }
 
@@ -2537,7 +2562,7 @@ function renderModelsChecklist(models) {
     const modelIds = Object.keys(models);
 
     if (modelIds.length === 0) {
-        container.innerHTML = '<span style="color: #666; font-style: italic;">No models available</span>';
+        container.innerHTML = '<span style="color: var(--text-secondary); font-style: italic;">No models available</span>';
         return;
     }
 
@@ -2838,7 +2863,7 @@ async function scanForCameras() {
             if (result.cameras && result.cameras.length > 0) {
                 displayDiscoveredCameras(result.cameras);
             } else {
-                camerasContainer.innerHTML = '<p style="color: #666; text-align: center; padding: 20px;">No cameras found on this network. Check if cameras are powered on and connected to the network.</p>';
+                camerasContainer.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 20px;">No cameras found on this network. Check if cameras are powered on and connected to the network.</p>';
             }
         } else {
             statusContainer.innerHTML = `<div class="discovery-status error">❌ Error: ${result.error || 'Scan failed'}</div>`;
@@ -2859,7 +2884,7 @@ function displayDiscoveredCameras(cameras) {
     container.innerHTML = '<div class="discovered-cameras-list">' + cameras.map((cam, idx) => {
         const pathsHtml = cam.paths.map((p, pidx) => `
             <div style="margin-top: 10px; padding: 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 4px;">
-                <div style="font-size: 11px; color: #666; font-family: monospace; margin-bottom: 5px;">Path ${pidx + 1}: ${p.path}</div>
+                <div style="font-size: 11px; color: var(--text-secondary); font-family: monospace; margin-bottom: 5px;">Path ${pidx + 1}: ${p.path}</div>
                 <div style="display: flex; gap: 10px; align-items: center;">
                     <input type="text" id="camera-${idx}-path-${pidx}-username" placeholder="Username" value="admin" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 120px;">
                     <input type="password" id="camera-${idx}-path-${pidx}-password" placeholder="Password" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 120px;">
@@ -2874,7 +2899,7 @@ function displayDiscoveredCameras(cameras) {
             <div class="discovered-camera-item" id="discovered-camera-${idx}" style="display: block; grid-template-columns: none;">
                 <div style="margin-bottom: 10px;">
                     <div class="discovered-camera-ip">📹 ${cam.ip} (${cam.protocol}:${cam.port})</div>
-                    <div style="font-size: 12px; color: #666; margin-top: 5px;">Found ${cam.paths.length} possible camera path(s) - test each with credentials:</div>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-top: 5px;">Found ${cam.paths.length} possible camera path(s) - test each with credentials:</div>
                 </div>
                 ${pathsHtml}
             </div>

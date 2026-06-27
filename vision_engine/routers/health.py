@@ -79,10 +79,10 @@ async def config_db_status():
 
 
 @router.get("/api/shipments/next_code")
-async def next_shipment_code(request: Request):
-    """3.25.12 — generate the next shipment ID in the format `yyyymmddXXYYZZZ`:
+async def next_shipment_code(request: Request, local_date: str = ""):
+    """4.0.9 — shortened format `yymmddXXYYZZZ` (13 chars, was 15):
 
-      * yyyymmdd  — date
+      * yymmdd    — date (2-digit year)
       * XX        — 2-digit ID of the currently-active capture state
                     (alphabetical index across all defined states, padded)
       * YY        — 2-digit ID of the currently-active inference pipeline
@@ -103,8 +103,29 @@ async def next_shipment_code(request: Request):
       3) next ZZZ = max(redis, db) + 1; persist to redis with EOD expiry.
     """
     from datetime import datetime as _dt
-    today = _dt.now().strftime("%Y%m%d")
-    redis_key = f"shipment_seq:{today}"
+    # 4.0.9 — date prefix shortened to 2-digit year (yymmdd) per operator request.
+    # Redis key keeps the full year so per-day counters never collide across
+    # century boundaries even if the same yymmdd recurs in 2126.
+    # 4.0.38 — accept `local_date` (yymmdd) from the caller. MVE containers
+    # run in UTC; in Iran (+0330) the container thinks it's still yesterday
+    # for the first ~3.5h of the operator's day. When the JS sends its own
+    # local yymmdd we honour that, with strict regex validation so a bogus
+    # input can't poison Redis keys or the response prefix. Falls back to
+    # container clock for legacy callers (no param).
+    import re as _re_ld
+    _ld = str(local_date or "").strip()
+    if _ld and _re_ld.fullmatch(r"\d{6}", _ld):
+        today = _ld
+        # Reconstruct yyyymmdd from yymmdd by assuming 21xx for now (the
+        # legacy code also assumed current century). This is only used as a
+        # Redis key so a wrong century guess just means a fresh per-day
+        # counter — no data loss.
+        century = _dt.now().strftime("%Y")[:2]
+        today_full = century + _ld
+    else:
+        today = _dt.now().strftime("%y%m%d")              # 6 chars for the code
+        today_full = _dt.now().strftime("%Y%m%d")         # 8 chars for the Redis key
+    redis_key = f"shipment_seq:{today_full}"
 
     # --- A) Derive 2-digit IDs for the currently-active state + pipeline.
     state_id = 0
@@ -147,7 +168,7 @@ async def next_shipment_code(request: Request):
 
     state_id = max(0, min(99, int(state_id)))
     pipeline_id = max(0, min(99, int(pipeline_id)))
-    prefix = f"{today}{state_id:02d}{pipeline_id:02d}"  # 12-char prefix
+    prefix = f"{today}{state_id:02d}{pipeline_id:02d}"  # 10-char prefix (yymmdd + XX + YY)
 
     # --- 1) Redis counter (or 0 if unreachable / unset)
     redis_max = 0
@@ -170,7 +191,7 @@ async def next_shipment_code(request: Request):
         if conn is not None:
             try:
                 cur = conn.cursor()
-                # New format: yyyymmddXXYYZZZ — match any state/pipeline pair.
+                # 4.0.9 new format: yymmddXXYYZZZ (13 chars).
                 cur.execute(
                     """
                     SELECT MAX(CAST(RIGHT(image_path, 3) AS INTEGER))
@@ -186,7 +207,23 @@ async def next_shipment_code(request: Request):
                 row = cur.fetchone()
                 if row and row[0] is not None:
                     db_max = max(db_max, int(row[0]))
-                # Legacy: yyyymmddZZZ (11 chars).
+                # 3.25.12 format: yyyymmddXXYYZZZ (15 chars).
+                cur.execute(
+                    """
+                    SELECT MAX(CAST(RIGHT(image_path, 3) AS INTEGER))
+                    FROM (
+                      SELECT DISTINCT SPLIT_PART(image_path, '/', 1) AS image_path
+                      FROM inference_results
+                      WHERE time::date = CURRENT_DATE
+                    ) ships
+                    WHERE image_path ~ %s
+                    """,
+                    (rf'^{today_full}\d{{7}}$',),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    db_max = max(db_max, int(row[0]))
+                # 3.25.0 legacy: yyyymmddZZZ (11 chars).
                 cur.execute(
                     """
                     SELECT MAX(CAST(SUBSTRING(image_path FROM %s) AS INTEGER))
@@ -197,7 +234,7 @@ async def next_shipment_code(request: Request):
                     ) ships
                     WHERE image_path ~ %s
                     """,
-                    (rf'^{today}(\d{{3}})$', rf'^{today}\d{{3}}$'),
+                    (rf'^{today_full}(\d{{3}})$', rf'^{today_full}\d{{3}}$'),
                 )
                 row = cur.fetchone()
                 if row and row[0] is not None:
@@ -224,7 +261,7 @@ async def next_shipment_code(request: Request):
     except Exception as e:
         logger.debug(f"shipment_seq redis write failed: {e}")
 
-    code = f"{prefix}{next_num:03d}"  # yyyymmddXXYYZZZ (15 chars)
+    code = f"{prefix}{next_num:03d}"  # yymmddXXYYZZZ (13 chars)
     return JSONResponse(content={
         "code": code, "today": today,
         "state_id": state_id, "pipeline_id": pipeline_id,
@@ -399,6 +436,155 @@ async def health_check(request: Request):
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/health/watchdog  (4.0.47)
+# Frame-recency liveness check for the docker-compose healthcheck.
+#
+# /health (above) checks dependency CONNECTIVITY (redis/db/yolo all up). That
+# returns 200 even when MVE has stopped processing frames — the 2026-06-20
+# incident on khoy is the canonical case: redis/db/yolo healthy, watcher
+# alive, but the encoder USB drop killed the inference pipeline. The dashboard
+# stayed at "Last 24 hours / No data" while /health said "healthy".
+#
+# This endpoint exposes the actual frame-throughput as seen by Redis lists
+# `inf_frame_timestamps` and `cap_frame_timestamps` (populated by
+# services/detection.py:~1166 and services/watcher.py:~1310 respectively).
+# It does NOT 503 by default — measurement only, so external callers can
+# decide their own thresholds. The docker-compose healthcheck wraps this in
+# a shell that 503s when both counters are stale beyond N seconds AND the
+# operator has the line marked "running" (i.e. shipment != no_shipment).
+# Marked-stopped shipments are fine to have zero frames.
+# ---------------------------------------------------------------------------
+@router.get("/api/health/watchdog")
+async def health_watchdog(request: Request, stale_seconds: int = 120):
+    """Frame-recency liveness for docker healthcheck + external monitoring.
+
+    Returns:
+      now_ts: int — current epoch seconds (server clock)
+      last_inference_ts / last_capture_ts: float|null — newest ts in Redis
+      seconds_since_inference / seconds_since_capture: int|null — now_ts - last
+      inference_in_last_n / capture_in_last_n: int — count in last `stale_seconds`
+      shipment: str — current active shipment (so the healthcheck can ignore
+                no_shipment cases where empty is expected)
+      stalled: bool — True if shipment != no_shipment AND both counters are 0
+                in last `stale_seconds`. The compose-level healthcheck uses
+                this as its 503 gate.
+    """
+    import time as _t
+    now_ts = int(_t.time())
+    cutoff = now_ts - max(5, int(stale_seconds))
+
+    inf_last = None
+    cap_last = None
+    inf_count = 0
+    cap_count = 0
+    shipment = "no_shipment"
+    try:
+        watcher = request.app.state.watcher_instance
+        if watcher and watcher.redis_connection:
+            r = watcher.redis_connection.redis_connection
+            # Newest timestamp is at index 0 (most-recent-first LPUSH pattern
+            # used in detection.py / watcher.py — see existing usage in the
+            # SSE stream around line 638).
+            try:
+                _i0 = r.lindex("inf_frame_timestamps", 0)
+                if _i0 is not None:
+                    inf_last = float(_i0.decode() if isinstance(_i0, bytes) else _i0)
+            except Exception:
+                pass
+            try:
+                _c0 = r.lindex("cap_frame_timestamps", 0)
+                if _c0 is not None:
+                    cap_last = float(_c0.decode() if isinstance(_c0, bytes) else _c0)
+            except Exception:
+                pass
+            try:
+                ship = r.get("shipment")
+                if ship:
+                    shipment = ship.decode() if isinstance(ship, bytes) else str(ship)
+            except Exception:
+                pass
+            # Count recent frames by walking the head of the list (cheap — Redis
+            # LRANGE 0..2000 returns at worst a few thousand small strings).
+            for key, sink in (("inf_frame_timestamps", "inf"), ("cap_frame_timestamps", "cap")):
+                try:
+                    raw = r.lrange(key, 0, 2000) or []
+                    n = 0
+                    for v in raw:
+                        try:
+                            ts = float(v.decode() if isinstance(v, bytes) else v)
+                        except Exception:
+                            continue
+                        if ts >= cutoff:
+                            n += 1
+                        else:
+                            # List is newest-first so once we hit a stale ts
+                            # everything after is older too — early-out.
+                            break
+                    if sink == "inf":
+                        inf_count = n
+                    else:
+                        cap_count = n
+                except Exception:
+                    pass
+    except Exception as _e:
+        logger.debug(f"watchdog: redis read failed: {_e}")
+
+    sec_since_inf = (now_ts - int(inf_last)) if inf_last else None
+    sec_since_cap = (now_ts - int(cap_last)) if cap_last else None
+
+    # 4.0.48 — robust "stuck" definition (avoids false-positive restarts on
+    # idle lines):
+    #
+    #   stuck = captures > 0 AND inferences == 0
+    #
+    # That is the ONLY shape that means a real downstream failure (frames
+    # are being grabbed but the inference pipeline is dropping/ignoring
+    # them). Every other combination is either fine or genuinely-idle:
+    #
+    #   captures=0 inferences=0 → idle (line stopped, no parts) → NOT stalled
+    #   captures>0 inferences>0 → healthy production
+    #   captures=0 inferences>0 → impossible by construction; treat healthy
+    #
+    # Earlier rule (`inf==0 AND cap==0` triggers restart) was too eager —
+    # it would restart MVE every time the operator paused for a shift
+    # change. Restart loops on a healthy-but-idle machine waste startup
+    # time + reset shipment / in-memory state.
+    #
+    # Also still gated on shipment != "no_shipment" so a parked line stays
+    # peaceful regardless of capture/inference counts.
+    stuck_inference_broken = (cap_count > 0 and inf_count == 0)
+    stalled = bool(
+        shipment and shipment != "no_shipment"
+        and stuck_inference_broken
+    )
+
+    # Diagnostic reason string so the docker healthcheck log lines and
+    # /api/health/watchdog consumers know why (or why not).
+    if shipment in (None, "", "no_shipment"):
+        reason = "shipment-parked"
+    elif cap_count == 0 and inf_count == 0:
+        reason = "idle"           # NOT stuck — line just isn't capturing
+    elif stuck_inference_broken:
+        reason = "inference-stuck"  # frames in, no frames out → restart
+    else:
+        reason = "healthy"
+
+    return JSONResponse(content={
+        "now_ts": now_ts,
+        "stale_seconds": stale_seconds,
+        "shipment": shipment,
+        "last_inference_ts": inf_last,
+        "last_capture_ts": cap_last,
+        "seconds_since_inference": sec_since_inf,
+        "seconds_since_capture": sec_since_cap,
+        "inference_in_last_n": inf_count,
+        "capture_in_last_n": cap_count,
+        "stalled": stalled,
+        "reason": reason,
+    })
 
 
 # ---------------------------------------------------------------------------

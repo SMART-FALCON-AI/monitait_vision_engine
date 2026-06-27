@@ -7,6 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.4] - 2026-06-14
+
+### Changed — chart-dot hover preview is now one image, not two
+- The hover tooltip on the Camera × time / Camera × encoder scatter charts used to show TWO thumbnails side-by-side (raw + annotated). If either URL was slow or 404'd the operator saw a blank panel. Now it shows ONE 420×280 render-on-demand DETECTED preview. If `/api/render_detected/` fails to render, the `<img>` onerror falls back to the raw frame so the preview is never blank.
+- Caption updated: *"click to edit in Label Studio"* — explicit guidance that click goes to LSF.
+
+### Notes
+- Cache-buster bumped to `?v=4.0.4`.
+
+## [4.0.3] - 2026-06-14
+
+### Fixed — Annotate upload: trainer returns URL-list, not dicts
+- The live trainer responds to `POST /api/images/` with `["http://…/task_324/images/49810.jpg"]` — an array of URL strings whose numeric stem IS the TaskImage id. My parser only looked for `.id` on dicts and `.results[0].id` on paginated dicts. New parser:
+  - Detects `list[str]` and regex-extracts `/images/(\d+)\.jpg` from the first URL.
+  - Detects `list[dict]` with either `.id` (legacy) or `.url` (new) on the first element.
+  - Same logic for `dict` form with `.url`.
+  - Last-resort: scans the raw response text for `/images/(\d+)\.jpg`.
+- After: `image_id` is populated → annotate.js can POST annotations to `/api/annotations/` → `✓ Sent N annotations to trainer (image XXXXX)`.
+
+### Clarified — disk model + hover preview
+- **No `_DETECTED.jpg` files are stored on disk anymore.** Detection pipeline writes only the raw frame. The annotated view is rendered on demand from `inference_results.detections` JSON via `/api/render_detected/`, cached in Redis for 1h per `(path, show, mtime)`.
+- **Hover on a chart dot** shows a fast preview that uses `/api/render_detected/` for the annotated thumbnail — first render ~20ms, cached <1ms. **Click** goes into Label Studio for editing.
+- **Download (raw + DETECTED)** triggers two browser downloads; the DETECTED is rendered on demand by the same endpoint with `?download=1`.
+
+### Notes
+- Cache-buster bumped to `?v=4.0.3`.
+
+## [4.0.2] - 2026-06-14
+
+### Changed — chart-dot click opens Label Studio directly
+- Clicking a defect dot in the Camera × time / Camera × encoder scatter charts now skips the read-only image drawer and **opens the LSF editor immediately** with the raw frame loaded and the YOLO boxes pre-filled. Operator can correct boxes and ship to the trainer in two clicks (down from four: open drawer → click ✏️ Annotate → review → submit).
+- New `openFrameInAnnotator(item)` helper in `annotate.js` is the single entry point; it sets `window._currentDefectItem` and calls `openAnnotateModal()`. The old `openDefectDrawerForFrame` is unchanged and still used by Dashboard timeline tile clicks (where the operator wants the read-only viewer + render-on-demand annotated thumbnail).
+- **Render-on-demand scope clarified**: `/api/render_detected/` is for the Dashboard timeline tiles + the Download button only. Chart-dot click uses raw + LSF prefill (no render-on-demand needed).
+
+### Added — Download bundle
+- New 📥 **Download (raw + DETECTED)** button on the LSF modal toolbar. Triggers two browser downloads — `<stem>.jpg` (raw) and `<stem>_DETECTED.jpg` (render-on-demand). Each gets the `download` attribute so Chrome accepts both without prompting.
+
+### Fixed — Latency / Inf / Cap still black
+- The latency/FPS row's `<strong>`s were inheriting through a `font-size: 9px;` grid whose parent didn't pin a colour. Pinned `color: var(--text-primary)` on both the grid and every `<strong>` inside.
+- Added a global CSS fallback `label, strong, b, em, i { color: inherit }` so future `<strong>`s in the dark theme won't fall back to UA-default black.
+
+### Notes
+- Cache-buster bumped to `?v=4.0.2`.
+
+## [4.0.1] - 2026-06-14
+
+### Fixed — Dashboard counter text + Timeline-config radio labels reverted to black
+- Several counters under the live-status box (Speed, Pulses/s, Movement, Ej Queue, Ej Active, Ej Enable, Ej Offset, Downtime, Analog, Power) had no explicit `color:` set and were inheriting from somewhere that drifted to black against the dark background. Pinned every counter `<div>` + `<span>` to `color: var(--text-primary)`.
+- Timeline Configuration's *Ascending / Descending / Custom* radio labels had the same issue (bare `<label>` inheriting black). Pinned the inline style, and added a global CSS rule `label { color: var(--text-primary) }` so future labels can't regress.
+
+### Notes
+- Cache-buster bumped to `?v=4.0.1`.
+
+## [4.0.0] - 2026-06-14
+
+### Changed — render-on-demand annotated frames (one file per frame, not two)
+- **Pipeline no longer writes `<frame>_DETECTED.jpg`.** Every detected frame used to land on disk twice — raw + pre-rendered annotated. From 4.0 on, only the raw frame is persisted. The annotated view is rendered on demand from `inference_results.detections`.
+- **New endpoint `GET /api/render_detected/<path>?show=&download=`** — reads the raw JPG + the per-frame detections, draws bboxes via the existing `services.render.draw_detection_on`, returns JPEG bytes. Redis cache keyed on `(path, show, mtime)` for 1 hour — first view costs ~20 ms of OpenCV; every subsequent hit is a sub-millisecond Redis lookup.
+- **Download button** (existing PDF report uses this) and dashboard thumbnails switch transparently: `_imgUrlsFor(pt).ann` now points at `/api/render_detected/<raw_path>` instead of the disk file. Operators see no change.
+- **`?download=1`** sets `Content-Disposition: attachment; filename="<stem>_DETECTED.jpg"` so the on-demand render still saves to disk as `_DETECTED.jpg` for downstream tooling — but only when the operator actually clicks Download.
+- **Legacy URL fallback**: `/api/render_detected/<stem>_DETECTED.jpg` strips the suffix and serves the same render, so any cached link from the pre-4.0 era still works.
+
+### Disk impact
+- Across the fleet `raw_images/` was carrying ~2× the necessary bytes. Cleanup of existing `*_DETECTED.jpg` files is a follow-up — the system runs fine with them in place but reclaiming the disk requires a one-shot walk per site. Plan: run `find raw_images -name '*_DETECTED.jpg' -delete` on each site after vteam12 is verified.
+
+### Active-learning groundwork (lands in 4.1)
+- The inline LSF editor as the default drawer view (no more separate ✏️ Annotate modal click) is deferred to 4.1.0 — the existing modal stays for now so the canary is testing only the render path. Once render is verified the editor moves inline.
+
+### Notes
+- Cache-buster bumped to `?v=4.0.0`.
+
+## [3.26.4] - 2026-06-14
+
+### Changed — AI models config + active shipment now survive restart
+- **AI models** (DeepSeek/Kimi/Claude name + key + base_url + active) are now persisted to `service_config.ai_models` → TimescaleDB `mve_config_kv` + `.env.prepared_query_data` snapshot. Redis kept as a hot read cache for non-migrated readers (`config_routes.py:32`), but the source of truth is the DB. `docker compose down`, `--force-recreate`, host reboot — all preserve your AI models now.
+- **Auto-migration**: first call after upgrade copies any Redis-only data into the DB. No manual step required.
+- **Active shipment**: now persisted to `service_config.current_shipment`. On every boot, `apply_config_settings()` reads it, primes the watcher's `.shipment` attribute, warms the Redis cache, and pre-creates the `raw_images/<id>/` directory — operator never finds the line back on `no_shipment` after restart. Sentinel `"no_shipment"` is *not* restored (avoids clobbering a fresh default).
+
+## [3.26.3] - 2026-06-14
+
+### Fixed — Annotate save: "upload succeeded but no TaskImage id returned"
+- `POST /api/ai_trainer/upload` was returning the trainer's response as a truncated string (`r.text[:500]`) which couldn't be parsed for the TaskImage id. Backend now also parses the JSON and surfaces `image_id` directly. `annotate.js` reads `upData.image_id` first, then falls back to scanning `trainer_response_json`.
+
+## [3.26.2] - 2026-06-14
+
+### Fixed — Annotate modal "issue loading URL from $image value"
+- `GET /api/frame_detections` returned `image_url` as `/raw_images/<path>` which is not a route MVE serves. The correct prefix is `/api/raw_image/<path>` (the same one the defect drawer's image view uses). LSF tried to fetch the non-existent path and surfaced its generic "couldn't load $image" error.
+- Also strip the trailing `_DETECTED.jpg` from the stored `image_path` so the editor opens the RAW frame — drawing corrected boxes over YOLO's already-drawn boxes is wrong.
+
+### Notes
+- Cache-buster bumped to `?v=3.26.2`.
+
+## [3.26.1] - 2026-06-14
+
+### Changed — AI Trainer config now uses base_url
+- The Advanced → AI Trainer form field renamed **"Trainer URL"** → **"Trainer base URL"**. Operator enters just the origin (`https://ai-trainer.monitait.com`); MVE appends the right path (`/api/images/`, `/api/categories/`, `/api/annotations/`, …) per endpoint.
+- Backend `service_config.ai_trainer.base_url` is the new canonical field; legacy `url` is kept as a derived alias for any older client code. If only the legacy `url` is set (pointed at `/api/images/`), `base_url` is derived from it automatically on next read — no data migration required.
+- `_trainer_origin()` now reads `base_url` directly instead of stripping the upload URL each call.
+
+### Changed — Default scatter axis = Encoder
+- Detection Insights now defaults to 📏 **Encoder** instead of 📍 Time (operators on roll-based lines care about position more than wall-clock). Strip titles + button styling start in encoder mode; the toggle still flips both at once.
+
+### Fixed — Annotate diagnostic shows real cause of "bundle did not load"
+- The old alert only said "check /static/vendor/label-studio-1.4.0/js/main.js" which gave no actionable info. New alert lists every `<script>` tag matching `label-studio` actually present on the page, reports `typeof LabelStudio`, and tells the operator to hard-reload (the #1 cause is a status.html cached from before the 3.26.0 deploy that introduced the LSF `<script>` tag).
+- The "No frame selected" bug from 3.26.0 (cross-script `let` binding not visible to annotate.js) was already fixed in the canary build; this release just bumps the cache-buster so browsers actually fetch the fix.
+
+### Notes
+- **Cache-buster bumped to `?v=3.26.1` on every custom JS script tag** — this is the version you'll see when the change reaches your browser. From now on every meaningful UX change ships with a fresh `?v=` so the operator can confirm the new code is live.
+
+## [3.26.0] - 2026-06-13
+
+### Added — In-line annotation with the SAME editor as ai-trainer.monitait.com
+- New ✏️ **Annotate** button on the defect drawer opens a full-screen modal containing **Label Studio Frontend 1.4.0** — byte-identical to the editor on ai-trainer.monitait.com (same npm package and version, confirmed against the trainer source in `monitait_all_services_deployment/singularity/rutilea_singularity_trainer_frontend/package.json:12`).
+- **Self-hosted** at `/static/vendor/label-studio-1.4.0/{js,css}/main.{js,css}` (~2 MB JS + ~565 KB CSS). Air-gapped factories run identically — no CDN dependency.
+- **Categories fetched live** from the trainer on every modal-open via new `GET /api/ai_trainer/labels` (proxies `GET /api/categories/?task=<id>` using the existing JWT flow). The LSF `<RectangleLabels>` config + Label `value` strings match the trainer's own `Training.vue:621` (`"${category_name} - ${id}"`).
+- **Pre-fill from YOLO** — new `GET /api/frame_detections?image_path=<rel>` returns the stored detection list for one frame; the JS converts pixel `xmin/ymin/xmax/ymax` → LSF percentages and feeds them in as the initial annotation result. Operator sees every box on first paint.
+- **MVE class ↔ trainer category mapping**, persisted in `service_config.ai_trainer.class_map`. First time a frame contains an unmapped MVE class, an inline yellow panel asks the operator to pick the trainer category once; after Save, future frames pre-fill silently. Endpoints: `GET/POST /api/ai_trainer/class_map`.
+- **Save flow** = `submitAnnotations()` → uploads the raw frame via existing `/api/ai_trainer/upload` → receives `TaskImage.id` → POSTs the corrected box list to `POST /api/ai_trainer/annotate`, which proxies to the trainer's `POST /api/annotations/` (shape matches `AnnotationCreateUpdateSerializer` in the trainer's `serializers.py:144` — `bbox`/`normalized_percent_points`/`area`/`image_id`/`category_id`/`task_id`/`ignore=true`/`is_crowd=false`/`segmentation=[]`).
+- Companion proxies for completeness: `PUT /api/ai_trainer/annotate/{id}`, `DELETE /api/ai_trainer/annotate/{id}`.
+
+### Notes
+- Cache-buster bumped to `?v=3.26.0` on every custom JS script tag.
+- Bundle gets fetched once, cached by the browser per `?v=` string; subsequent version bumps don't re-download LSF unless the file path changes (it doesn't — only `?v=` on `status.html`'s reference does).
+
 ## [3.25.13] - 2026-06-13
 
 ### Changed — merged Time + Encoder scatters into one with a toggle

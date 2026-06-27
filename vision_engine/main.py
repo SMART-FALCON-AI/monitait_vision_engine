@@ -203,6 +203,38 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
         STORE_ANNOTATION_ENABLED = config["store_annotation"].get("enabled", STORE_ANNOTATION_ENABLED)
         settings_applied["store_annotation"] = True
 
+    # 3.26.4 — restore the active shipment ID on boot. config_routes.py writes
+    # service_config["current_shipment"] every time the operator changes it; here
+    # we prime the watcher AND Redis cache so the operator never "loses" the
+    # active shipment after `docker compose down` / restart. Only restore real
+    # shipments — skip the sentinel "no_shipment" to avoid clobbering a fresh
+    # default.
+    # 4.0.17 — always emit a diagnostic line so we can tell from the boot log
+    # whether the restore ran, what value it saw, and why it was skipped if so.
+    # Without this, "no_shipment after restart" investigations have nothing to
+    # grep for in the logs.
+    cur_ship = str(config.get("current_shipment") or "").strip()
+    if not cur_ship:
+        logger.info("[SHIPMENT-RESTORE] no current_shipment in saved config — staying at default 'no_shipment'")
+    elif cur_ship == "no_shipment":
+        logger.info("[SHIPMENT-RESTORE] saved config explicitly says 'no_shipment' — not restoring")
+    elif watcher_inst is None:
+        logger.warning(f"[SHIPMENT-RESTORE] cannot restore '{cur_ship}' — watcher_instance is None at apply-config time")
+    else:
+        try:
+            watcher_inst.shipment = cur_ship
+            from redis import Redis as _R
+            _r = _R("redis", 6379, db=REDIS_DB)
+            _r.set("shipment", cur_ship)
+            # Make sure the directory exists so the very first capture after boot
+            # doesn't fail on missing parent path.
+            import os as _os
+            _os.makedirs(f"raw_images/{cur_ship}", exist_ok=True)
+            settings_applied["current_shipment"] = cur_ship
+            logger.info(f"[SHIPMENT-RESTORE] restored active shipment from service_config: {cur_ship}")
+        except Exception as _e:
+            logger.warning(f"[SHIPMENT-RESTORE] failed to restore current_shipment on boot: {_e}")
+
     # Apply timeline configuration (stored at root level, not in service_config)
     if full_data and "timeline_config" in full_data:
         app.state.timeline_config = full_data["timeline_config"]
