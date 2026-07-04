@@ -1260,17 +1260,40 @@ class ArduinoSocket:
                     capture_timestamp = time.time()
                     d = str(datetime.now()).replace('.', "-").replace(':', "-").replace(' ', "-")
                     frames = []
+                    # 4.0.49 — TRUST self.shipment as the source of truth.
+                    # The previous code re-read shipment from Redis on EVERY
+                    # frame and reset to "no_shipment" if Redis returned None
+                    # OR any exception fired. Combined with redis.conf
+                    # `--maxmemory-policy allkeys-lru` (set in docker-compose),
+                    # the `shipment` key got LRU-evicted under memory pressure
+                    # (`dms` list alone holds 38k items, and INFO stats
+                    # confirms evicted_keys>0 in production). The watcher then
+                    # silently flipped self.shipment to "no_shipment", frames
+                    # landed in raw_images/no_shipment/..., and the
+                    # persistence file was never re-written — so the operator
+                    # would lose the shipment without any visible cause until
+                    # they noticed and re-set it.
+                    #
+                    # self.shipment is already kept in sync by:
+                    #   - main.py [SHIPMENT-RESTORE] on boot from persistence
+                    #   - routers/config_routes.py update_config which sets
+                    #     watcher.shipment = shipment_id when the operator
+                    #     POSTs /api/config
+                    # so there is no reason to re-read Redis here. Drop it.
                     try:
-                        self.shipment = self.redis_connection.get_redis("shipment")
-                        self.shipment = self.shipment.decode('utf-8') if self.shipment else "no_shipment"
-                        # Time-chunked subdirectory (NVR approach): raw_images/SHIPMENT/YYYY-MM-DD_HH/
                         hour_chunk = datetime.now().strftime("%Y-%m-%d_%H")
                         chunk_dir = os.path.join("raw_images", self.shipment, hour_chunk)
                         os.makedirs(chunk_dir, exist_ok=True)
                         if self.shipment != self.old_shipment:
                             self.old_shipment = self.shipment
                     except Exception as e:
-                        self.shipment = "no_shipment"
+                        # Don't reset self.shipment on failure here — that's
+                        # exactly the bug we just removed. Log and continue
+                        # with whatever shipment we already had.
+                        logger.warning(
+                            f"capture chunk_dir prep failed "
+                            f"(shipment={self.shipment!r}): {e}"
+                        )
                         hour_chunk = datetime.now().strftime("%Y-%m-%d_%H")
 
                     # Execute capture based on StateManager configuration
