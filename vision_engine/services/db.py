@@ -23,8 +23,11 @@ def get_db_connection():
     if db_connection_pool is None:
         try:
             from psycopg2 import pool
+            # 4.0.50 — pool ceiling raised from 10 → 20 to accommodate the
+            # multi-thread DB writer pool + concurrent chart/API reads
+            # without any one path starving another for a connection.
             db_connection_pool = pool.SimpleConnectionPool(
-                1, 10,
+                1, 20,
                 host=POSTGRES_HOST,
                 port=POSTGRES_PORT,
                 database=POSTGRES_DB,
@@ -75,9 +78,55 @@ def _db_writer_loop():
             logger.error(f"DB writer loop error: {e}")
 
 
-# Start the background writer thread
-_db_writer_thread = threading.Thread(target=_db_writer_loop, daemon=True, name="db-writer")
-_db_writer_thread.start()
+# 4.0.51 — DB writer pool, adaptive.
+#
+# History: 4.0.50 hard-started 6 threads at module import time. Combined
+# with the disk-writer overshoot, this was one of the two regressions
+# that caused the drop storm on khoy — 6 threads competing at boot with
+# capture/inference for a small connection pool + CPU. Rolled back.
+#
+# New shape: start with 2 threads (matches the pre-4.0.50 behaviour of
+# effectively 1 producer + 1 committer worth of throughput) and expose
+# `add_db_writers(count)` so the autoscaler in main.py can add more
+# ONLY when both signals fire:
+#     - DB queue depth over threshold (real backpressure)
+#     - CPU headroom available (psutil.cpu_percent < CAP)
+# That guardrail (added in main.py `_autoscaler`) is what makes this
+# non-regressive on small-core hosts.
+_db_writers_count = 0
+_db_writers_lock = threading.Lock()
+
+
+def add_db_writers(count: int):
+    """Add DB writer threads. Thread-safe, callable at any time by the
+    main.py autoscaler. `count` is the NUMBER TO ADD, not the target total.
+
+    Capped internally at 12 total to avoid exhausting the Postgres pool
+    (psycopg2 SimpleConnectionPool has maxconn=20 in 4.0.50; leave 8
+    headroom for API-side query paths).
+    """
+    global _db_writers_count
+    if count <= 0:
+        return
+    with _db_writers_lock:
+        current = _db_writers_count
+        max_total = 12
+        add = min(count, max_total - current)
+        if add <= 0:
+            return
+        for _i in range(add):
+            _t = threading.Thread(
+                target=_db_writer_loop,
+                daemon=True,
+                name=f"db-writer-{current + _i + 1}",
+            )
+            _t.start()
+        _db_writers_count += add
+        logger.info(f"[DBWriters] +{add} threads, total now {_db_writers_count}")
+
+
+# Bootstrap: start conservative. Autoscaler decides the rest.
+add_db_writers(2)
 
 
 def write_inference_to_db(shipment, image_path, detections, inference_time_ms,

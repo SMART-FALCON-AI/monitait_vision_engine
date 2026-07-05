@@ -564,6 +564,7 @@ async function setHeatmapBaseline(mode) {
                     shipSel.value = cur;
                     localStorage.setItem('mve_heatmap_baseline', mode);
                     if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+                    _kickAnomalyBaseline('shipment_start', {});
                 } else {
                     alert('No active shipment — pick a specific shipment from the Shipment dropdown first.');
                 }
@@ -614,6 +615,13 @@ async function setHeatmapBaseline(mode) {
     localStorage.setItem('mve_heatmap_baseline', mode);
     if (typeof refreshDetectionInsights === 'function') {
         refreshDetectionInsights();
+    }
+    // 4.0.50 — Fire the anomaly-baseline rebuild for the same mode so a
+    // single mode click drives both models. `target` and `reference_frame`
+    // are handled elsewhere (target is colour-only; reference_frame fires
+    // from _onBaselinePickClick when the operator finishes picking).
+    if (mode === 'camera' || mode === 'shipment_start') {
+        _kickAnomalyBaseline(mode, {});
     }
 }
 window.setHeatmapBaseline = setHeatmapBaseline;
@@ -733,6 +741,14 @@ function _onBaselinePickClick(chart, evt, axisMode) {
         if (d && d.status === 'ok') {
             localStorage.setItem('mve_heatmap_baseline', 'reference_frame');
             if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+            // 4.0.50 — unified reference-frames pool: the same clicked position
+            // that just rebuilt the colour baseline ALSO rebuilds the anomaly
+            // worker's baseline against the same frames. Non-blocking — the
+            // colour heatmap doesn't have to wait on the anomaly memory-bank
+            // build (which can take a few seconds for 50 frames).
+            _kickAnomalyBaseline('reference_frame', {
+                axis: axis, value: xVal, window_pct: 0.05,
+            });
         } else {
             alert('Could not save reference: ' + (d && d.error || 'unknown error'));
         }
@@ -741,6 +757,47 @@ function _onBaselinePickClick(chart, evt, axisMode) {
         window._pickingBaseline = false;
     });
 }
+
+// 4.0.50 — Fire-and-forget anomaly baseline rebuild. Called from the colour
+// baseline set paths (reference pick + shipment_start switch + camera-mode
+// switch) so a single operator gesture drives both models. Deliberately
+// non-blocking: the colour heatmap redraws immediately, the anomaly bank
+// finishes building a beat later, and any error is surfaced only on the
+// small status chip near the base-mode buttons (not as a blocking alert).
+function _kickAnomalyBaseline(mode, extras) {
+    try {
+        const body = Object.assign({
+            mode: mode,
+            phase: (localStorage.getItem('mve_heatmap_phase') || '0'),
+            camera_id: '_global',
+        }, extras || {});
+        fetch('/api/anomaly/build-baseline', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        }).then(r => r.json()).then(d => {
+            const chip = document.getElementById('hm-anomaly-baseline-chip');
+            if (!chip) return;
+            if (d && d.success) {
+                chip.textContent = `anomaly baseline: ${mode} · ${d.n_frames} frames · just now`;
+                chip.style.color = '#a7f3d0';
+            } else if (d && d.skipped) {
+                chip.textContent = `anomaly baseline: ${d.skipped}`;
+                chip.style.color = '#94a3b8';
+            } else {
+                chip.textContent = `anomaly baseline: failed (${(d && d.error) || 'unknown'})`;
+                chip.style.color = '#fca5a5';
+            }
+        }).catch(e => {
+            const chip = document.getElementById('hm-anomaly-baseline-chip');
+            if (chip) {
+                chip.textContent = `anomaly baseline: network error`;
+                chip.style.color = '#fca5a5';
+            }
+        });
+    } catch (e) { /* never let anomaly plumbing break colour path */ }
+}
+window._kickAnomalyBaseline = _kickAnomalyBaseline;
 
 
 // 3.21.16 — Quality drift / trend chart under the score card.

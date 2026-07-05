@@ -299,6 +299,24 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
             if cam is not None:
                 # Camera exists - apply config to existing camera
                 apply_camera_config_from_saved(cam, cam_config)
+                # 4.0.50 — refresh camera_metadata so the operator's persisted
+                # `name`, `type`, `model`, `serial` beat the boot loop's default
+                # ("USB Camera N", type=usb). Without this, a Basler that was
+                # auto-detected + type-tagged as "pro" in watcher.py's boot
+                # loop stays as "Basler Camera N" instead of the friendlier
+                # persisted name like "Basler daA1280-54um (24613703)".
+                if not hasattr(watcher_inst, 'camera_metadata'):
+                    watcher_inst.camera_metadata = {}
+                _cur_meta = dict(watcher_inst.camera_metadata.get(cam_id, {}))
+                _cur_meta["name"] = cam_config.get("name") or _cur_meta.get("name")
+                _cur_meta["type"] = cam_config.get("type") or _cur_meta.get("type") or "usb"
+                if cam_config.get("model"):
+                    _cur_meta["model"] = cam_config["model"]
+                if cam_config.get("serial"):
+                    _cur_meta["serial"] = cam_config["serial"]
+                if cam_config.get("source"):
+                    _cur_meta["source"] = cam_config["source"]
+                watcher_inst.camera_metadata[cam_id] = _cur_meta
                 cameras_loaded += 1
                 logger.info(f"  Updated existing camera {cam_id}: {cam_config.get('name', f'Camera {cam_id}')}")
             elif cam_type == "ip":
@@ -344,6 +362,50 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
 
                 except Exception as e:
                     logger.error(f"  ✗ Failed to initialize camera {cam_id}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+
+            elif cam_type == "pro":
+                # 4.0.50 — Industrial ("pro") camera boot restore. Basler is the
+                # first backend; Allied Vision / IDS / FLIR would slot in the
+                # same way. The `basler://<serial>` URI is routed by
+                # CameraBuffer.__new__ into BaslerBuffer in services/camera.py.
+                cam_url = cam_config.get("source") or cam_config.get("url")
+                cam_name = cam_config.get("name", f"Pro Camera {cam_id}")
+                if not cam_url:
+                    logger.warning(f"  Skipping pro camera {cam_name}: missing source")
+                    continue
+                try:
+                    logger.info(f"  Initializing pro camera {cam_id}: {cam_name} @ {cam_url}")
+                    cam = CameraBuffer(
+                        cam_url,
+                        exposure=cam_config.get("exposure", 5000),
+                        gain=cam_config.get("gain", 0),
+                        fps=cam_config.get("fps", 30),
+                        roi_config=cam_config if cam_config.get("roi_enabled") else None,
+                        auto_exposure=cam_config.get("auto_exposure", False),
+                    )
+                    watcher_inst.cameras[cam_id] = cam
+                    while len(watcher_inst.camera_paths) < cam_id:
+                        watcher_inst.camera_paths.append(None)
+                    if cam_id > len(watcher_inst.camera_paths):
+                        watcher_inst.camera_paths.append(cam_url)
+                    else:
+                        watcher_inst.camera_paths[cam_id - 1] = cam_url
+                    if not hasattr(watcher_inst, 'camera_metadata'):
+                        watcher_inst.camera_metadata = {}
+                    watcher_inst.camera_metadata[cam_id] = {
+                        "name":   cam_name,
+                        "type":   "pro",
+                        "model":  cam_config.get("model"),
+                        "serial": cam_config.get("serial"),
+                        "source": cam_url,
+                    }
+                    apply_camera_config_from_saved(cam, cam_config)
+                    cameras_loaded += 1
+                    logger.info(f"  ✓ Pro camera {cam_id} initialized: {cam_name} (success={cam.success})")
+                except Exception as e:
+                    logger.error(f"  ✗ Failed to initialize pro camera {cam_id}: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
 
@@ -464,6 +526,7 @@ from routers.ai_trainer import router as ai_trainer_router
 from routers.commands import router as commands_router
 from routers.websocket import router as ws_router
 from routers.notifications import router as notifications_router  # 3.24.0
+from routers.anomaly import router as anomaly_router  # 4.0.50 — anomaly baseline plumbing
 
 app.include_router(health_router)
 app.include_router(cameras_router)
@@ -475,6 +538,7 @@ app.include_router(config_router)
 app.include_router(ai_router)
 app.include_router(ai_trainer_router)  # 3.21.22 — AI Trainer integration
 app.include_router(notifications_router)  # 3.24.0 — Telegram + AI usage
+app.include_router(anomaly_router)  # 4.0.50 — /api/anomaly/{build-baseline,baseline}
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 
@@ -912,7 +976,10 @@ logger.info(f"{INFERENCE_WORKERS} inference worker thread(s) started")
 # =============================================================================
 # Autoscaler — monitors queue pressure every 5 min, scales workers dynamically
 # =============================================================================
-AUTOSCALE_INTERVAL = 30    # seconds between checks
+AUTOSCALE_INTERVAL = 10    # 4.0.50 — was 30s; a 24-core box's disk queue can
+                           # fill in <5s at 70+ fps, so 30s reaction guarantees
+                           # a spike-to-CRITICAL every burst. 10s cuts that
+                           # window to a single tick while keeping load nil.
 MAX_DISK_WRITERS = _max_disk_writers
 MAX_INFERENCE_WORKERS = _max_inference_workers
 MIN_INFERENCE_WORKERS = INFERENCE_WORKERS  # baseline — never go below startup count
@@ -929,6 +996,35 @@ def _autoscaler():
     global INFERENCE_WORKERS, _ok_streak
     import services.watcher as _watcher_mod
     from services.watcher import _disk_queue, add_disk_writers
+    # 4.0.51 — DB writer scaling now driven from here too. The db module
+    # bootstraps 2 threads at import and exposes add_db_writers(count)
+    # for the same growth pattern the disk pool uses.
+    from services import db as _db_mod
+    from services.db import _db_queue, add_db_writers
+    try:
+        import psutil as _ps
+    except Exception:
+        _ps = None
+    # 4.0.51 — never add writer threads (disk OR db) when CPU is already
+    # above this threshold. Contention on a CPU-bound workload cannot be
+    # cured by adding more threads — the queue drains at the same rate
+    # AND every additional thread makes latency worse for the rest of
+    # the pipeline (inference, ejector, HTTP). This is the guard that
+    # would have prevented the 4.0.50 khoy regression.
+    CPU_HEADROOM_CEIL = 75.0  # percent, box-wide
+
+    def _cpu_ok(scale_reason: str) -> bool:
+        """Return True if we have CPU headroom to add more threads."""
+        if _ps is None:
+            return True   # unknown → don't refuse scale-up
+        pct = _ps.cpu_percent(interval=None)
+        if pct >= CPU_HEADROOM_CEIL:
+            logger.warning(
+                f"[Autoscaler] SKIP {scale_reason} scale-up — CPU at {pct:.0f}% "
+                f">= {CPU_HEADROOM_CEIL:.0f}%. More threads would worsen contention."
+            )
+            return False
+        return True
 
     # First check after 30s (let system warm up), then every AUTOSCALE_INTERVAL
     time.sleep(30)
@@ -938,6 +1034,11 @@ def _autoscaler():
             disk_qsize = _disk_queue.qsize()
             disk_pct = (disk_qsize / _disk_queue.maxsize * 100) if _disk_queue.maxsize else 0
             disk_count = _watcher_mod._disk_writers_count  # read live value from module
+
+            # 4.0.51 — DB queue pressure, same shape.
+            db_qsize = _db_queue.qsize()
+            db_pct = (db_qsize / _db_queue.maxsize * 100) if _db_queue.maxsize else 0
+            db_count = _db_mod._db_writers_count
 
             # ── Measure inference queue pressure (hot=RAM, cold=disk) ──
             inf_hot = _watcher_mod._hot_queue.qsize() if _watcher_mod._hot_queue else 0
@@ -979,23 +1080,43 @@ def _autoscaler():
 
             logger.info(
                 f"[Autoscaler] Disk: {disk_qsize}/{_disk_queue.maxsize} ({disk_pct:.0f}%) [{disk_level}] | "
+                f"DB: {db_qsize}/{_db_queue.maxsize} ({db_pct:.0f}%) | "
                 f"Inf: hot={inf_hot} cold={inf_cold} [{inf_level}] | "
-                f"Workers: {disk_count} disk, {INFERENCE_WORKERS} inference"
+                f"Workers: {disk_count} disk, {db_count} db, {INFERENCE_WORKERS} inference"
             )
 
-            # ── Scale disk writers ──
-            if disk_level == "CRITICAL" and disk_count < MAX_DISK_WRITERS:
+            # ── Scale disk writers (gated on CPU headroom in 4.0.51) ──
+            if disk_level == "CRITICAL" and disk_count < MAX_DISK_WRITERS and _cpu_ok("disk"):
                 # Quadruple: add 3× current (so total = 4× current)
                 add = min(disk_count * 3, MAX_DISK_WRITERS - disk_count)
                 if add > 0:
                     add_disk_writers(add)
                     logger.warning(f"[Autoscaler] CRITICAL disk — scaled {disk_count} -> {_watcher_mod._disk_writers_count}")
-            elif disk_level == "WARNING" and disk_count < MAX_DISK_WRITERS:
+            elif disk_level == "WARNING" and disk_count < MAX_DISK_WRITERS and _cpu_ok("disk"):
                 # Double: add current count (so total = 2× current)
                 add = min(disk_count, MAX_DISK_WRITERS - disk_count)
                 if add > 0:
                     add_disk_writers(add)
                     logger.warning(f"[Autoscaler] WARNING disk — scaled {disk_count} -> {_watcher_mod._disk_writers_count}")
+
+            # 4.0.51 — Scale DB writers (same shape as disk, same gate)
+            MAX_DB_WRITERS = 12  # matches add_db_writers' internal cap
+            if db_pct > 25 and db_count < MAX_DB_WRITERS and _cpu_ok("db"):
+                add = min(db_count * 3, MAX_DB_WRITERS - db_count)
+                if add > 0:
+                    add_db_writers(add)
+                    logger.warning(
+                        f"[Autoscaler] CRITICAL db queue {db_pct:.0f}% — "
+                        f"scaled {db_count} -> {_db_mod._db_writers_count}"
+                    )
+            elif db_pct > 5 and db_count < MAX_DB_WRITERS and _cpu_ok("db"):
+                add = min(db_count, MAX_DB_WRITERS - db_count)
+                if add > 0:
+                    add_db_writers(add)
+                    logger.warning(
+                        f"[Autoscaler] WARNING db queue {db_pct:.0f}% — "
+                        f"scaled {db_count} -> {_db_mod._db_writers_count}"
+                    )
 
             # ── Scale inference workers (up AND down) ──
             if inf_level == "CRITICAL":

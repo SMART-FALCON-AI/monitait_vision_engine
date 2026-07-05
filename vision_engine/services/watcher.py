@@ -498,10 +498,23 @@ class ArduinoSocket:
                 self.cameras[idx] = cam
                 logger.info(f"Camera {idx} initialized: {cam_path} (success={cam.success})")
 
-                # Store metadata for USB cameras
+                # 4.0.50 — infer type + a smart default name from the source
+                # URI. UVC = /dev/video*, IP = rtsp/http, pro = basler://.
+                # apply_saved_config_at_startup will later override the name
+                # with whatever the operator persisted, so this default is
+                # only visible until the config-restore step runs.
+                if isinstance(cam_path, str) and cam_path.startswith("basler://"):
+                    _t = "pro"
+                    _default_name = f"Basler Camera {idx}"
+                elif isinstance(cam_path, str) and cam_path.startswith(("rtsp://", "http://", "https://")):
+                    _t = "ip"
+                    _default_name = f"IP Camera {idx}"
+                else:
+                    _t = "usb"
+                    _default_name = f"USB Camera {idx}"
                 self.camera_metadata[idx] = {
-                    "name": f"USB Camera {idx}",
-                    "type": "usb",
+                    "name": _default_name,
+                    "type": _t,
                     "path": cam_path,
                     "source": cam_path
                 }
@@ -528,7 +541,18 @@ class ArduinoSocket:
 
         # Note: Service config is now loaded via apply_saved_config_at_startup() after watcher init
 
-        # Start disk writer threads — conservative initial count, autoscaler ramps up
+        # 4.0.51 — REVERTED 4.0.50's aggressive initial count. That regression
+        # caused a 362-drops-in-60s spike on khoy where each cv2.imwrite
+        # thread contended for the same CPU. Kiancord shared the fate.
+        # Rationale for the small-and-adaptive default:
+        #   - "cams × 2" ignored the actual CPU capacity of the host. A
+        #     3-cam machine on a 4-core box got 8 threads instantly,
+        #     saturating cores before a single frame arrived.
+        #   - Threads are cheap when IDLE but expensive when CONTENDING.
+        #     Boot-time contention is pure loss.
+        # Start conservatively; the autoscaler (in main.py) ramps only when
+        # the queue actually backs up AND CPU headroom permits (4.0.51 new
+        # gate — see main.py `_autoscaler`).
         add_disk_writers(max(2, len(self.cameras)))
 
         # Turn off lights at startup to ensure known state
@@ -579,7 +603,21 @@ class ArduinoSocket:
         unchanged = []
 
         # Check for removed cameras (device node gone)
+        # 4.0.50 — rescan is a UVC (V4L2) hot-plug helper. It MUST NOT touch
+        # cameras that live outside /dev/video* — that includes IP cameras
+        # (rtsp://, http(s)://) and "pro" industrial cameras (basler://).
+        # Before 4.0.50 this loop happily deleted the Basler entry on every
+        # UI refresh because "basler://…" isn't in the V4L2 device list, and
+        # then the persisted config re-loaded it minutes later — cycling
+        # forever.
+        NON_UVC_PREFIXES = ("basler://", "rtsp://", "http://", "https://")
         for path, cam_id in list(existing_paths.items()):
+            # Skip anything that isn't a /dev/video* path. IP / pro cameras
+            # have their own reconnect logic inside CameraBuffer /
+            # BaslerBuffer.
+            if isinstance(path, str) and path.startswith(NON_UVC_PREFIXES):
+                unchanged.append({"id": cam_id, "path": path})
+                continue
             if path not in current_devices:
                 # Device disappeared — stop and remove
                 cam = self.cameras.get(cam_id)

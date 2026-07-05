@@ -30,6 +30,11 @@ def detect_video_devices() -> List[str]:
 
     Returns a sorted list of video device paths like ['/dev/video0', '/dev/video2', '/dev/video4'].
     Only even-numbered devices are returned as odd numbers are typically metadata devices.
+
+    NOTE: This function only sees UVC / V4L2 cameras. Basler USB3 Vision
+    cameras (and other industrial "pro" cameras) do NOT register as
+    /dev/video* — they need their own SDK to enumerate. See
+    detect_pro_cameras() below.
     """
     import glob
     video_devices = []
@@ -51,6 +56,29 @@ def detect_video_devices() -> List[str]:
     # Sort by device number and return just the paths
     video_devices.sort(key=lambda x: x[0])
     return [path for _, path in video_devices]
+
+
+def detect_pro_cameras() -> List[Dict[str, Any]]:
+    """Auto-detect all industrial ("pro") cameras attached to the host.
+
+    Currently only Basler USB3 Vision (via services.basler_camera). As new
+    industrial vendors are added (Allied Vision, IDS, FLIR/Teledyne), each
+    ships an enumeration function and this aggregator concatenates them so
+    the UI sees a single unified "pro" camera list.
+
+    Each entry is: {source, serial, model, vendor, device_class, type: 'pro'}.
+    Returns [] when no drivers are installed or no devices are present —
+    never raises, so it's safe to call at module load time.
+    """
+    results: List[Dict[str, Any]] = []
+    try:
+        from services.basler_camera import detect_basler_cameras
+        results.extend(detect_basler_cameras())
+    except Exception as e:
+        logger.debug(f"Basler enumeration skipped: {e}")
+    # Future: Allied Vision (VimbaX), IDS (peak), FLIR/Teledyne (Spinnaker)
+    # would append here.
+    return results
 
 
 def scan_network_for_camera_devices(subnet: str = None) -> List[Dict[str, Any]]:
@@ -278,14 +306,19 @@ def test_camera_stream(url: str, timeout: float = 2.0) -> bool:
 
 
 def get_all_cameras() -> List[str]:
-    """Get all available USB cameras (auto-detected or from environment variables).
+    """Get all available auto-discoverable camera sources (USB + pro).
 
-    Returns list of USB camera sources that exist as devices.
-    Note: IP cameras are now loaded from the unified "cameras" configuration.
+    Returns a list of camera source strings — /dev/videoN for UVC + basler://SN
+    for Basler etc. IP cameras are still stored in the "cameras" config table
+    and re-added by the operator, not auto-detected on the local host.
 
-    Priority:
-    1. If environment variables (CAM_X_PATH) are set, use those
-    2. Otherwise, auto-detect USB cameras from /dev/video*
+    Priority for UVC (V4L2) sources:
+      1. If environment variables (CAM_X_PATH) are set, use those
+      2. Otherwise, auto-detect from /dev/video*
+
+    Pro cameras (Basler etc.) are always auto-enumerated via their vendor
+    SDKs (Pylon in Basler's case) and appended at the end so operator's
+    UVC ordering is preserved.
     """
     all_cameras = []
 
@@ -306,6 +339,18 @@ def get_all_cameras() -> List[str]:
             if os.path.exists(cam_path):
                 all_cameras.append(cam_path)
                 logger.info(f"Auto-detected USB camera: {cam_path}")
+
+    # 4.0.50 — append auto-detected "pro" cameras (Basler etc.) after UVC.
+    # `type: "pro"` is a first-class camera category alongside "usb" and "ip"
+    # so future non-Basler industrial vendors slot in with no schema change.
+    for pro in detect_pro_cameras():
+        src = pro.get("source")
+        if src:
+            all_cameras.append(src)
+            logger.info(
+                f"Auto-detected pro camera: {pro.get('model')} "
+                f"(serial={pro.get('serial')}) → {src}"
+            )
 
     # Remove duplicates while preserving order
     seen = set()
@@ -352,6 +397,15 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         # Also include type from metadata if available
         if "type" in meta:
             config["type"] = meta["type"]
+        # 4.0.50 — pro-camera identity (model + serial). Without this, every
+        # auto-save (Save All Configuration, camera edit, AI-model change,
+        # state change) would strip model/serial from the persisted config
+        # and next boot would show `Basler Camera 3` instead of the friendly
+        # `Basler daA1280-54um (24613703)`.
+        if meta.get("model"):
+            config["model"] = meta["model"]
+        if meta.get("serial"):
+            config["serial"] = meta["serial"]
 
     # Add camera source (URL/path)
     if hasattr(cam, 'source'):
@@ -360,6 +414,11 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         if "type" not in config:
             if isinstance(cam.source, str) and cam.source.startswith(("rtsp://", "http://", "https://")):
                 config["type"] = "ip"
+            elif isinstance(cam.source, str) and cam.source.startswith("basler://"):
+                # 4.0.50 — recognise Basler / pro-camera URIs so a save without
+                # metadata (rare edge case) still tags the entry correctly and
+                # boot-restore picks the "pro" branch.
+                config["type"] = "pro"
             else:
                 config["type"] = "usb"
 
@@ -472,7 +531,44 @@ def format_relative_time(timestamp):
         return f"{int(diff/3600)} hours ago"
 
 
+def open_camera_source(source, **kwargs):
+    """Factory: return the right buffer class for this source URI.
+
+    Preserves the existing `CameraBuffer(...)` call convention that watcher.py
+    and routers/cameras.py already use. The change: if `source` starts with
+    `basler://` we hand off to services.basler_camera.BaslerBuffer, which
+    exposes the same public interface (frame/success/stop/_saved_props/roi_*
+    /read/release). Callers cannot tell which backend they got.
+
+    Rest of the codebase should migrate to calling this factory instead of
+    instantiating CameraBuffer directly, but CameraBuffer(source=...) is kept
+    fully backwards-compatible via the dispatch in __new__ below.
+    """
+    # 4.0.50 — "pro" camera dispatch. Anything that is not UVC (/dev/videoX)
+    # or IP (rtsp://, http(s)://) is routed to its vendor-specific backend.
+    from services import basler_camera as _basler
+    if _basler.is_basler_source(source):
+        return _basler.BaslerBuffer(source, **kwargs)
+    # Otherwise fall through to the classic UVC/IP CameraBuffer.
+    return CameraBuffer(source, **kwargs)
+
+
 class CameraBuffer:
+    def __new__(cls, source, *args, **kwargs):
+        """Route to BaslerBuffer when the URI says so.
+
+        Preserves the existing `CameraBuffer(source, exposure=...)` call
+        sites transparently — no need to change every caller to use the
+        factory. If the source is a basler:// URI, __new__ returns a
+        BaslerBuffer instance and __init__ below is skipped by Python
+        because the returned instance's type is not a CameraBuffer subclass.
+        """
+        # 4.0.50 — transparent Basler dispatch. See open_camera_source() docstring.
+        from services import basler_camera as _basler
+        if _basler.is_basler_source(source):
+            return _basler.BaslerBuffer(source, *args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, source, exposure=100, gain=100, brightness=100,
                  contrast=0, saturation=50, fps=10, roi_config=None,
                  auto_exposure=False) -> None:
@@ -484,9 +580,23 @@ class CameraBuffer:
         `fps` still apply. Use this for venues where lighting changes a lot and a
         per-state exposure override (state_machine.State.exposure) isn't enough.
         """
+        # If we somehow ended up here for a basler:// source (shouldn't
+        # happen thanks to __new__), reroute proactively so we don't crash.
+        try:
+            from services.basler_camera import is_basler_source
+            if is_basler_source(source):
+                logger.warning("CameraBuffer.__init__ reached with basler:// source; expected __new__ to route. Ignoring init.")
+                return
+        except Exception:
+            pass
+
         self.source = source
         self.auto_exposure = bool(auto_exposure)
         self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
+        # 4.0.50 — expose is_pro_camera on classic UVC/IP buffers too so
+        # downstream code can uniformly check `if getattr(cam, 'is_pro_camera', False)`
+        # without needing to import BaslerBuffer to distinguish types.
+        self.is_pro_camera = False
 
         # Initialize camera with appropriate backend
         if self.is_ip_camera:

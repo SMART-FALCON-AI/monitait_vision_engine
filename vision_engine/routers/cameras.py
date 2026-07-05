@@ -7,7 +7,8 @@ from config import (load_data_file, save_data_file, load_service_config, save_se
 from routers.config_routes import build_current_service_config
 from services.camera import (CameraBuffer, scan_network_for_cameras, scan_network_for_camera_devices,
                              test_camera_stream, get_camera_config_for_save, apply_camera_config_from_saved,
-                             format_relative_time, IP_CAMERA_USER, IP_CAMERA_PASS)
+                             format_relative_time, IP_CAMERA_USER, IP_CAMERA_PASS,
+                             detect_pro_cameras)
 from services.state_machine import State
 from services.render import draw_detection_on
 import asyncio
@@ -180,8 +181,14 @@ async def get_cameras_status(request: Request):
         if hasattr(watcher, 'camera_metadata') and cam_id in watcher.camera_metadata:
             metadata = watcher.camera_metadata[cam_id]
 
-        # For USB cameras, verify device node still exists
-        is_usb = metadata.get("type", "usb") == "usb"
+        # 4.0.50 — camera type dispatch. USB = /dev/video* (V4L2), IP = rtsp://
+        # or http(s)://, pro = basler://<serial> (industrial). USB is the only
+        # type that has a filesystem-visible device node, so device_exists
+        # applies to USB alone. IP and pro use their own reconnect + health
+        # signals via `cam.success`.
+        cam_type = metadata.get("type", "usb")
+        is_usb = cam_type == "usb"
+        is_pro = cam_type == "pro" or bool(getattr(cam, 'is_pro_camera', False))
         device_exists = os.path.exists(cam_path) if is_usb and cam_path != "unknown" else True
         is_connected = cam is not None and getattr(cam, 'success', False) and device_exists
 
@@ -189,7 +196,7 @@ async def get_cameras_status(request: Request):
             "id": cam_id,
             "path": cam_path,
             "name": metadata.get("name", f"Camera {cam_id}"),
-            "type": metadata.get("type", "usb"),
+            "type": cam_type,
             "connected": is_connected,
             "running": cam is not None and not getattr(cam, 'stop', True),
             "device_exists": device_exists,
@@ -200,30 +207,70 @@ async def get_cameras_status(request: Request):
             cam_info["ip"] = metadata.get("ip")
             cam_info["camera_path"] = metadata.get("path")
 
+        # 4.0.50 — pro-camera identity (model + serial) surfaces in the UI so
+        # operators know which Basler / vendor unit is which without opening
+        # each card.
+        if is_pro:
+            cam_info["model"]  = metadata.get("model")
+            cam_info["serial"] = metadata.get("serial")
+
         if cam is not None and hasattr(cam, 'camera'):
             try:
-                # Use _saved_props (user-configured values) when available;
-                # fall back to live camera.get() for props not in _saved_props
                 saved = getattr(cam, '_saved_props', {})
-                def _get(prop):
-                    if prop in saved:
-                        return int(saved[prop])
-                    return int(cam.camera.get(prop))
-                cam_info["config"] = {
-                    "fps": _get(cv2.CAP_PROP_FPS),
-                    "width": int(cam.camera.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                    "height": int(cam.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                    "exposure": _get(cv2.CAP_PROP_EXPOSURE),
-                    "gain": _get(cv2.CAP_PROP_GAIN),
-                    "brightness": _get(cv2.CAP_PROP_BRIGHTNESS),
-                    "contrast": _get(cv2.CAP_PROP_CONTRAST),
-                    "saturation": _get(cv2.CAP_PROP_SATURATION),
-                    "roi_enabled": getattr(cam, 'roi_enabled', False),
-                    "roi_xmin": getattr(cam, 'roi_xmin', 0),
-                    "roi_ymin": getattr(cam, 'roi_ymin', 0),
-                    "roi_xmax": getattr(cam, 'roi_xmax', 1280),
-                    "roi_ymax": getattr(cam, 'roi_ymax', 720),
-                }
+                if is_pro:
+                    # 4.0.50 — pro-camera config comes ENTIRELY from _saved_props.
+                    # cam.camera is a pylon.InstantCamera which has no cv2.get()
+                    # method, so the UVC path below would crash. Read directly
+                    # from _saved_props which BaslerBuffer keeps in sync with the
+                    # actual NodeMap values.
+                    _fps  = int(saved.get(cv2.CAP_PROP_FPS, 30))
+                    _exp  = int(saved.get(cv2.CAP_PROP_EXPOSURE, 5000))
+                    _gain = int(saved.get(cv2.CAP_PROP_GAIN, 0))
+                    _br   = int(saved.get(cv2.CAP_PROP_BRIGHTNESS, 0))
+                    _con  = int(saved.get(cv2.CAP_PROP_CONTRAST, 0))
+                    _sat  = int(saved.get(cv2.CAP_PROP_SATURATION, 0))
+                    _frame = getattr(cam, 'frame', None)
+                    if _frame is not None and hasattr(_frame, 'shape'):
+                        _h, _w = _frame.shape[:2]
+                    else:
+                        _h, _w = 720, 1280
+                    cam_info["config"] = {
+                        "fps": _fps,
+                        "width": _w,
+                        "height": _h,
+                        "exposure": _exp,
+                        "gain": _gain,
+                        "brightness": _br,
+                        "contrast": _con,
+                        "saturation": _sat,
+                        "roi_enabled": getattr(cam, 'roi_enabled', False),
+                        "roi_xmin": getattr(cam, 'roi_xmin', 0),
+                        "roi_ymin": getattr(cam, 'roi_ymin', 0),
+                        "roi_xmax": getattr(cam, 'roi_xmax', 1280),
+                        "roi_ymax": getattr(cam, 'roi_ymax', 720),
+                        "pixel_format": saved.get("basler.pixel_format"),
+                    }
+                else:
+                    # Existing UVC / IP path — untouched.
+                    def _get(prop):
+                        if prop in saved:
+                            return int(saved[prop])
+                        return int(cam.camera.get(prop))
+                    cam_info["config"] = {
+                        "fps": _get(cv2.CAP_PROP_FPS),
+                        "width": int(cam.camera.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                        "height": int(cam.camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                        "exposure": _get(cv2.CAP_PROP_EXPOSURE),
+                        "gain": _get(cv2.CAP_PROP_GAIN),
+                        "brightness": _get(cv2.CAP_PROP_BRIGHTNESS),
+                        "contrast": _get(cv2.CAP_PROP_CONTRAST),
+                        "saturation": _get(cv2.CAP_PROP_SATURATION),
+                        "roi_enabled": getattr(cam, 'roi_enabled', False),
+                        "roi_xmin": getattr(cam, 'roi_xmin', 0),
+                        "roi_ymin": getattr(cam, 'roi_ymin', 0),
+                        "roi_xmax": getattr(cam, 'roi_xmax', 1280),
+                        "roi_ymax": getattr(cam, 'roi_ymax', 720),
+                    }
             except:
                 cam_info["config"] = {}
         cameras.append(cam_info)
@@ -624,6 +671,204 @@ async def discover_cameras(request: Request, body: CameraDiscoveryRequest):
             "success": False,
             "error": str(e),
             "cameras": []
+        }, status_code=500)
+
+
+# =============================================================================
+# 4.0.50 — Pro-camera (Basler USB3 Vision, etc.) discovery + save
+#
+# Mirrors the IP-camera discovery / save pattern. `type: "pro"` is a first-
+# class camera category alongside "usb" and "ip" so future non-Basler
+# industrial vendors slot in without any schema change.
+# =============================================================================
+
+@router.get("/api/cameras/discover-pro")
+async def discover_pro_cameras(request: Request):
+    """Enumerate industrial ("pro") cameras attached to the host.
+
+    Currently returns Basler USB3 Vision cameras (via pypylon). The endpoint
+    is safe to call even when Pylon isn't installed or no Basler is
+    attached — you get an empty list, not an error, so the UI can just say
+    "no pro cameras detected".
+
+    Response:
+      {
+        "success": true,
+        "cameras": [
+          {
+            "source": "basler://12345678",
+            "serial": "12345678",
+            "model":  "acA640-90uc",
+            "vendor": "Basler AG",
+            "device_class": "BaslerUsb",
+            "type":   "pro"
+          },
+          ...
+        ],
+        "count": N
+      }
+    """
+    try:
+        found = detect_pro_cameras()
+        # Annotate whether each device is already saved so the UI can grey
+        # out "add" for cameras that are already configured.
+        try:
+            svc_cfg = load_service_config() or {}
+            saved_sources = {
+                (cam or {}).get("source")
+                for cam in (svc_cfg.get("cameras") or {}).values()
+            }
+        except Exception:
+            saved_sources = set()
+        for f in found:
+            f["already_saved"] = f.get("source") in saved_sources
+        return JSONResponse(content={
+            "success": True,
+            "cameras": found,
+            "count":   len(found),
+        })
+    except Exception as e:
+        logger.error(f"Pro camera discovery failed: {e}")
+        return JSONResponse(content={
+            "success": False,
+            "error":   str(e),
+            "cameras": [],
+        }, status_code=500)
+
+
+@router.post("/api/cameras/save-pro")
+async def save_pro_camera(request: Request):
+    """Persist a discovered pro camera into service_config.cameras.
+
+    Body:
+      {
+        "source": "basler://12345678",   # required
+        "name":   "Basler acA640-90uc",  # optional; defaults to model+serial
+        "model":  "acA640-90uc",         # optional; passed through for display
+        "serial": "12345678",            # optional; parsed from source if missing
+        "exposure": 5000,                # µs, Basler-native units (V1 default)
+        "gain":     0,                   # dB
+        "fps":      30
+      }
+
+    Returns the same shape as /api/cameras/save so the existing UI code can
+    reuse its success handling.
+    """
+    from services.basler_camera import BASLER_SOURCE_PREFIX, is_basler_source
+    try:
+        body = await request.json()
+        source = str(body.get("source") or "").strip()
+        if not source:
+            return JSONResponse(content={"success": False, "error": "source is required"}, status_code=400)
+        # For now the only pro backend is Basler. Accept any basler:// URI;
+        # future backends (allied://, ids://, flir://) route to their own
+        # save-* endpoints so payload shapes stay explicit.
+        if not is_basler_source(source):
+            return JSONResponse(content={
+                "success": False,
+                "error":   f"Unsupported pro-camera source: {source}",
+            }, status_code=400)
+
+        serial = body.get("serial") or source.replace(BASLER_SOURCE_PREFIX, "")
+        model  = body.get("model") or "Basler USB3"
+        camera_name = body.get("name") or f"{model} ({serial})"
+
+        # Same runtime-preserving config load pattern the IP save uses.
+        config = build_current_service_config(request.app.state) or {}
+        if "cameras" not in config:
+            config["cameras"] = {}
+
+        # Match on source so a re-add updates in-place rather than making
+        # duplicate entries.
+        existing_id = None
+        for cam_id, cam_config in config["cameras"].items():
+            if cam_config.get("source") == source:
+                existing_id = cam_id
+                break
+        if existing_id:
+            camera_id = existing_id
+        else:
+            existing_ids = [int(k) for k in config["cameras"].keys() if k.isdigit()]
+            camera_id = str(max(existing_ids) + 1) if existing_ids else "1"
+
+        camera_entry = {
+            "name":       camera_name,
+            "source":     source,
+            "type":       "pro",
+            "model":      model,
+            "serial":     serial,
+            "roi_enabled": False,
+            "roi_xmin":    0,
+            "roi_ymin":    0,
+            "roi_xmax":    1280,
+            "roi_ymax":    720,
+            "exposure":    int(body.get("exposure", 5000)),   # µs (Basler unit)
+            "gain":        int(body.get("gain", 0)),          # dB
+            "brightness":  0,   # UVC-only knob; kept for schema parity
+            "contrast":    0,
+            "saturation":  0,
+            "fps":         int(body.get("fps", 30)),
+            "enabled":     True,
+        }
+
+        config["cameras"][camera_id] = camera_entry
+        logger.info(
+            f"{'Updated' if existing_id else 'Added'} pro camera "
+            f"{camera_id}: {camera_name} ({source})"
+        )
+
+        if not save_service_config(config):
+            return JSONResponse(content={
+                "success": False,
+                "error":   "save_service_config failed",
+            }, status_code=500)
+
+        # Hot-add to the running watcher so the operator sees the feed
+        # immediately, no restart needed. Same pattern the IP-save uses.
+        watcher = request.app.state.watcher_instance
+        cam_id_int = int(camera_id)
+        if watcher is not None and cam_id_int not in watcher.cameras:
+            try:
+                # CameraBuffer.__new__ dispatches to BaslerBuffer for
+                # basler:// sources — see services/camera.py.
+                cam = CameraBuffer(
+                    source,
+                    exposure=camera_entry["exposure"],
+                    gain=camera_entry["gain"],
+                    fps=camera_entry["fps"],
+                )
+                watcher.cameras[cam_id_int] = cam
+                watcher.camera_metadata[cam_id_int] = {
+                    "name":   camera_name,
+                    "type":   "pro",
+                    "model":  model,
+                    "serial": serial,
+                    "source": source,
+                }
+                while len(watcher.camera_paths) < cam_id_int:
+                    watcher.camera_paths.append("")
+                if cam_id_int <= len(watcher.camera_paths):
+                    watcher.camera_paths[cam_id_int - 1] = source
+                else:
+                    watcher.camera_paths.append(source)
+                logger.info(f"Hot-added pro camera {cam_id_int} to watcher: {source}")
+            except Exception as e:
+                logger.warning(
+                    f"Pro camera saved but hot-add failed: {e}. Restart to apply."
+                )
+
+        return JSONResponse(content={
+            "success":        True,
+            "message":        f"Camera '{camera_name}' saved as Camera {camera_id}",
+            "camera":         camera_entry,
+            "camera_id":      camera_id,
+            "total_cameras":  len(config["cameras"]),
+        })
+    except Exception as e:
+        logger.error(f"save_pro_camera failed: {e}")
+        return JSONResponse(content={
+            "success": False,
+            "error":   str(e),
         }, status_code=500)
 
 
