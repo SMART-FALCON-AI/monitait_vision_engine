@@ -11,6 +11,15 @@ services:
       - ./VERSION:/code/VERSION:ro
       - ./vision_engine:/code  # 3.21.9 — bind-mount source so scp -> live update (no rebuild)
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
+      # 4.0.64 — cold-queue disk overflow. Previously MVE wrote frame
+      # batches to /tmp/cold_queue INSIDE the container's writable overlay
+      # layer, which meant the queue silently grew inside Docker's storage
+      # driver, invisible from `df` on the host, until it ate the entire
+      # disk (vteam12 hit 97 GB with no operator warning). Bind-mounting
+      # it to a named host directory makes the growth visible to `df` and
+      # `du`, lets ops rotate/archive it, and keeps it OUT of the container
+      # overlay so `docker system df` stops lying about disk usage.
+      - ${DATA_ROOT:-.}/cold_queue:/tmp/cold_queue
       - ./volumes/weights:/weights
       - /dev:/dev  # Linux: serial (/dev/ttyUSB*), cameras (/dev/video*), barcode scanner (/dev/input/*)
     ports:
@@ -23,6 +32,13 @@ services:
       # Web server configuration
       - WEB_SERVER_PORT=5050
       - WEB_SERVER_HOST=0.0.0.0
+      # 4.0.64 — Cold-queue safety caps. Both are enforced by
+      # services.watcher.ColdDiskQueue. The BYTES cap evicts oldest-first
+      # on every put() so we cannot overshoot; the MAX_AGE_SECONDS drives
+      # a periodic janitor that also expires stale batches even below the
+      # cap. Defaults chosen conservatively — bump for a bigger disk.
+      - COLD_QUEUE_MAX_BYTES=${COLD_QUEUE_MAX_BYTES:-5368709120}   # 5 GB
+      - COLD_QUEUE_MAX_AGE_SECONDS=${COLD_QUEUE_MAX_AGE_SECONDS:-600}
       # Note: All settings (infrastructure, serial port, ejector, capture, cameras, image processing, etc.)
       #       are configured via the web interface at http://localhost:5050/status
       #       and saved to .env.prepared_query_data for persistence
@@ -129,8 +145,19 @@ services:
     environment:
       - MATH_TILES_X=${MATH_TILES_X:-1}
       - MATH_TILES_Y=${MATH_TILES_Y:-1}
-      - MATH_BANDS=${MATH_BANDS:-8}
-      - MATH_FFT_TOP_K=${MATH_FFT_TOP_K:-3}
+      # v4.0.68 — MATH_BANDS default 8 → 1 and MATH_FFT_TOP_K default 3 → 1.
+      # Prior defaults emitted ~200 features per frame per camera (8 bands × 4
+      # metrics per band × direction + 3 FFT peaks × 3 axes) which downstream
+      # amplified into ~200 DB writes + ~200 disk writes + ~200 audio-queue
+      # pushes PER frame. On vteam12's shipment workload this saturated the
+      # RTX 3050 GPU and forced uvicorn workers to compete with detection
+      # callback threads for CPU — the dashboard stopped responding under
+      # steady-state capture. 1 band + 1 FFT peak cuts per-frame output to
+      # ~15 features (still enough for anomaly QC) and keeps the pipeline
+      # inside the machine's real capacity. Operators who need finer
+      # granularity can raise via env var at deploy time.
+      - MATH_BANDS=${MATH_BANDS:-1}
+      - MATH_FFT_TOP_K=${MATH_FFT_TOP_K:-1}
       - MATH_FLAT_FIELD_ENABLE=${MATH_FLAT_FIELD_ENABLE:-false}
     networks:
       - main_network
@@ -147,6 +174,47 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # Anomaly Inference Service — pixel-stat baseline anomaly detection.
+  # Same URL shape as yolo/math: MVE talks to it as one more inference
+  # source per frame. Each detection comes back as a class="anomaly" bbox
+  # with confidence, flowing through the standard detection pipeline
+  # (Process tab Show / min_confidence / Severity all apply automatically).
+  # Baselines are per (camera × phase × mode) — same mode keys as the
+  # colour heatmap (camera / shipment_start / target / reference_frame).
+  anomaly_inference:
+    container_name: "monitait_anomaly_inference"
+    image: anomaly_inference
+    build: "./anomaly_inference"
+    # 1 worker for V1 — baseline cache is per-process; running >1 uvicorn
+    # worker would split the in-memory baseline cache across processes.
+    # Lazy-load-from-disk-on-miss in main.py also recovers, but 1 worker
+    # makes "build baseline → immediately detect" the same-process path.
+    command: "uvicorn main:app --host 0.0.0.0 --port 4444 --workers ${ANOMALY_WORKERS:-1}"
+    expose:
+      - 4444
+    volumes:
+      - ./anomaly_inference:/code
+      - ${DATA_ROOT:-.}/volumes/anomaly_baselines:/baselines
+    environment:
+      - ANOMALY_Z_THRESHOLD=${ANOMALY_Z_THRESHOLD:-3.0}
+      - ANOMALY_WORK_W=${ANOMALY_WORK_W:-320}
+      - ANOMALY_WORK_H=${ANOMALY_WORK_H:-180}
+      - ANOMALY_MIN_AREA_WORK=${ANOMALY_MIN_AREA_WORK:-60}
+      - ANOMALY_MAX_BBOXES=${ANOMALY_MAX_BBOXES:-32}
+    networks:
+      - main_network
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "2"
+    restart: "always"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:4444/v1/anomaly-detection/anomaly_v1/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # TimescaleDB PostgreSQL Database
   timescaledb:
