@@ -36,6 +36,19 @@ USING_GPU = False
 _cp = None
 _device_env = os.getenv("MATH_DEVICE", "auto").lower()
 
+# v4.0.69 — channel enable/cap knobs.
+#
+# _spacing_anomalies and _blobs are per-scene-loop channels: they emit ONE
+# detection per detected feature (per gap-anomaly / per blob region). On busy
+# textures a single frame can emit 200+ detections between the two, which
+# then floods MVE's audio/DB/disk pipeline downstream and pins CPU (each
+# detection triggers per-class audio config lookup, DB row queue, disk write,
+# Redis publish). Env-var-gate them so a deployment can opt out or cap the
+# per-channel loop.
+_MATH_SPACING_ENABLE = os.getenv("MATH_SPACING_ENABLE", "true").lower() == "true"
+_MATH_BLOBS_ENABLE   = os.getenv("MATH_BLOBS_ENABLE",   "true").lower() == "true"
+_MATH_LOCAL_TOPK     = max(0, int(os.getenv("MATH_LOCAL_TOPK", "8")))
+
 if _device_env == "cpu":
     xp = np
     ximg = _np_ndimage
@@ -190,10 +203,12 @@ class MathWorker:
         dets += self._fft_2d(L100, w, h)
         dets += self._band_stats(L100, a_ch, b_ch, w, h)
         dets += self._residuals(L100, w, h)
-        dets += self._spacing_anomalies(L100, w, h)
+        if _MATH_SPACING_ENABLE:
+            dets += self._spacing_anomalies(L100, w, h)
         dets += self._gradient(L100, w, h)
         dets += self._morphology(L100, w, h)
-        dets += self._blobs(L100, w, h)
+        if _MATH_BLOBS_ENABLE:
+            dets += self._blobs(L100, w, h)
 
         if self.tiles_x > 1 or self.tiles_y > 1:
             dets += self._tile_channels(L100, w, h)
@@ -523,10 +538,16 @@ class MathWorker:
             if med <= 0:
                 return 0.0
             z = np.abs(gaps / med - 1.0)
-            # Localized anomalies: one detection per gap with z > noise floor.
-            for i, g in enumerate(gaps):
-                if z[i] < 0.15:
-                    continue
+            # v4.0.69 — cap to top-K by z-score. Prior code emitted ONE detection
+            # per gap-with-anomaly; on textured scenes this blew up to 50-100 per
+            # signal and flooded MVE's per-detection pipeline downstream.
+            anom_idx = np.where(z >= 0.15)[0]
+            if _MATH_LOCAL_TOPK > 0 and anom_idx.size > _MATH_LOCAL_TOPK:
+                # Keep the K most anomalous gaps.
+                order = anom_idx[np.argsort(-z[anom_idx])][:_MATH_LOCAL_TOPK]
+            else:
+                order = anom_idx
+            for i in order:
                 start = int(peaks[i])
                 end = int(peaks[i + 1])
                 x1, y1, x2, y2 = bbox_fn(start, end)
@@ -612,8 +633,11 @@ class MathWorker:
             if n == 0:
                 continue
             objs = _np_ndimage.find_objects(lbl)
-            # Filter and emit.
             min_area = max(16, (w * h) // 10000)
+            # v4.0.69 — collect candidates first, then keep top-K by confidence.
+            # Prior code emitted every blob >= min_area; on noisy backgrounds
+            # this reached 40+ per polarity and pumped MVE downstream to death.
+            candidates: List[Dict[str, Any]] = []
             for i, sl in enumerate(objs):
                 if sl is None:
                     continue
@@ -628,7 +652,11 @@ class MathWorker:
                     conf = _clip01(1.0 - mean_L_region / 100.0)
                 else:
                     conf = _clip01(mean_L_region / 100.0)
-                dets.append(_det(name, conf, x0, y0, x1, y1, self.C_BLOB))
+                candidates.append(_det(name, conf, x0, y0, x1, y1, self.C_BLOB))
+            if _MATH_LOCAL_TOPK > 0 and len(candidates) > _MATH_LOCAL_TOPK:
+                candidates.sort(key=lambda d: d.get("confidence", 0.0), reverse=True)
+                candidates = candidates[:_MATH_LOCAL_TOPK]
+            dets.extend(candidates)
         return dets
 
     def _tile_channels(self, L, w, h) -> List[Dict[str, Any]]:

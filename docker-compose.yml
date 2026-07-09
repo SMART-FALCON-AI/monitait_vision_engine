@@ -159,6 +159,17 @@ services:
       - MATH_BANDS=${MATH_BANDS:-1}
       - MATH_FFT_TOP_K=${MATH_FFT_TOP_K:-1}
       - MATH_FLAT_FIELD_ENABLE=${MATH_FLAT_FIELD_ENABLE:-false}
+      # v4.0.69 — spacing_anomalies + blobs are per-scene loops. On busy
+      # textures a single frame emitted 100+ localized detections between
+      # them (row_spacing_anomaly, col_spacing_anomaly, blob_brightness,
+      # blob_darkness), and each downstream became a per-detection audio
+      # lookup + DB row + disk write + Redis publish in MVE. Turning them
+      # OFF by default keeps the math channel bounded; deployments that
+      # actually inspect fabric/weft/blob geometry can flip them back to
+      # `true` (and raise MATH_LOCAL_TOPK to cap the per-signal loop).
+      - MATH_SPACING_ENABLE=${MATH_SPACING_ENABLE:-false}
+      - MATH_BLOBS_ENABLE=${MATH_BLOBS_ENABLE:-false}
+      - MATH_LOCAL_TOPK=${MATH_LOCAL_TOPK:-8}
     networks:
       - main_network
     logging:
