@@ -1,6 +1,10 @@
 // Update UI with status data (used by SSE stream)
 function updateStatusUI(data) {
     document.getElementById('encoder-value').textContent = data.encoder_value || 0;
+    // 4.0.54 — Length = encoder_value - shipment_start_encoder. Server clamps
+    // to 0 when shipment is inactive so this line stays simple.
+    const _lengthEl = document.getElementById('length-value');
+    if (_lengthEl) _lengthEl.textContent = data.length || 0;
     document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
     document.getElementById('pps-value').textContent = data.pps || 0;
     document.getElementById('ok-counter').textContent = data.ok_counter || 0;

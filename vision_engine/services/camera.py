@@ -25,6 +25,117 @@ CAM_3_PATH = os.environ.get("CAM_3_PATH", "")
 CAM_4_PATH = os.environ.get("CAM_4_PATH", "")
 
 
+# ---------------------------------------------------------------------------
+# 4.0.54 — Self-healing V4L2 path recovery.
+#
+# Problem observed on kiancord: MVE addresses cameras by /dev/videoN which
+# is NOT stable across USB re-enumeration. When one physical camera drops
+# and re-attaches (bad cable / hub renegotiation / firmware watchdog), the
+# kernel reassigns node numbers — the surviving cameras keep their old
+# numbers, the flaky one lands on a NEW pair (e.g. video10/11 → video11/12).
+# The saved config still points at the OLD path, so cv2.VideoCapture opens
+# a metadata sibling or a vanished node, grab() returns nothing forever,
+# and the existing reconnect loop at buffer() line ~766 spins on the same
+# broken path indefinitely.
+#
+# Recovery strategy (kept minimal, ships with no image rebuild required):
+#   1. Track which V4L2 paths are currently bound by a live CameraBuffer
+#      in a module-level set so the resolver never steals another cam's
+#      device node.
+#   2. After N consecutive reconnect cycles yield zero valid frames, probe
+#      the unclaimed EVEN /dev/videoN nodes — the first one that opens AND
+#      delivers a frame with non-zero geometry within ~2s replaces the
+#      stale source. Metadata siblings (odd nodes by convention, or nodes
+#      that open but never yield a valid frame) are filtered by the probe.
+#   3. On self.stop / release, the path is unregistered so a future rebind
+#      can reclaim it.
+#
+# This is a per-instance heal, not a global rescan — each broken camera
+# fixes itself independently and other cams keep serving frames the whole
+# time. If no replacement is found, the existing reconnect loop continues
+# unchanged, so the failure mode is at worst identical to today's.
+# ---------------------------------------------------------------------------
+_V4L_BINDINGS_LOCK = threading.Lock()
+_V4L_BOUND_PATHS: set = set()
+
+
+def _register_v4l_binding(path: str) -> None:
+    """Record that ``path`` is currently held by a CameraBuffer.
+    The resolver skips bound paths so it never steals another cam's node.
+    Safe to call with any path — no-op for non-/dev/video sources."""
+    if not path or not path.startswith('/dev/video'):
+        return
+    with _V4L_BINDINGS_LOCK:
+        _V4L_BOUND_PATHS.add(path)
+
+
+def _unregister_v4l_binding(path: str) -> None:
+    """Drop ``path`` from the bound set (e.g. on release, restart, self-heal)."""
+    if not path:
+        return
+    with _V4L_BINDINGS_LOCK:
+        _V4L_BOUND_PATHS.discard(path)
+
+
+def _probe_v4l_capture_capable(path: str, timeout_s: float = 2.0) -> bool:
+    """Return True iff ``path`` opens and delivers a frame with non-zero
+    geometry within ``timeout_s``. Filters out metadata siblings (open OK
+    but read() returns success=False forever) and unpowered / wedged nodes.
+    Never raises; always releases the temporary handle."""
+    cap = None
+    try:
+        cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+        if not cap.isOpened():
+            return False
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            ok, frame = cap.read()
+            if ok and frame is not None and getattr(frame, 'size', 0) > 0:
+                shape = getattr(frame, 'shape', None)
+                if shape and len(shape) >= 2 and shape[0] > 0 and shape[1] > 0:
+                    return True
+            time.sleep(0.05)
+        return False
+    except Exception:
+        return False
+    finally:
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+
+def _find_replacement_v4l_path(current_path: str) -> Optional[str]:
+    """Look for an unclaimed /dev/videoN node that actually delivers frames.
+    Prefers EVEN-numbered nodes (metadata siblings are conventionally odd),
+    then falls back to odd nodes if no even candidate probes green (covers
+    the case where a hot-replug landed the capture endpoint on an odd
+    index, as observed on kiancord where cam moved from video10 → video11).
+    Returns the replacement path, or None if nothing works."""
+    import glob
+    even_candidates: List[tuple] = []
+    odd_candidates: List[tuple] = []
+    with _V4L_BINDINGS_LOCK:
+        bound_snapshot = set(_V4L_BOUND_PATHS)
+    for p in glob.glob('/dev/video*'):
+        try:
+            n = int(p.replace('/dev/video', ''))
+        except ValueError:
+            continue
+        if p == current_path:
+            continue
+        if p in bound_snapshot:
+            continue
+        (even_candidates if n % 2 == 0 else odd_candidates).append((n, p))
+    even_candidates.sort()
+    odd_candidates.sort()
+    for _, p in even_candidates + odd_candidates:
+        if _probe_v4l_capture_capable(p, timeout_s=2.0):
+            return p
+    return None
+
+
 def detect_video_devices() -> List[str]:
     """Auto-detect available video devices from /dev/video* (even numbers only).
 
@@ -593,6 +704,10 @@ class CameraBuffer:
         self.source = source
         self.auto_exposure = bool(auto_exposure)
         self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
+        # 4.0.54 — register this V4L2 path so the self-heal resolver never
+        # picks it as a "replacement" for another cam's stuck source.
+        # No-op for RTSP/HTTP sources.
+        _register_v4l_binding(source)
         # 4.0.50 — expose is_pro_camera on classic UVC/IP buffers too so
         # downstream code can uniformly check `if getattr(cam, 'is_pro_camera', False)`
         # without needing to import BaslerBuffer to distinguish types.
@@ -728,6 +843,13 @@ class CameraBuffer:
     def buffer(self):
         failure_count = 0
         max_failures = 100  # Reconnect after 100 consecutive failures
+        # 4.0.54 — after this many blind reconnect cycles (each = max_failures
+        # blank reads + one release/reopen on the same path) we assume the
+        # source path itself is stale (e.g. UVC re-enumeration renumbered the
+        # device or MVE captured a metadata sibling). At that point, try to
+        # resolve a working alternate node instead of spinning forever.
+        stale_reconnect_cycles = 0
+        STALE_CYCLES_BEFORE_HEAL = 3
 
         while True:
             try:
@@ -747,6 +869,11 @@ class CameraBuffer:
                         self.frame = frame
                         self.success = success
                         failure_count = 0  # Reset counter on successful read
+                        # 4.0.54 — a run of successful reads means the current
+                        # source is delivering; clear the stale-cycle budget so
+                        # a future drift episode gets the full 3-cycle grace
+                        # before the resolver kicks in.
+                        stale_reconnect_cycles = 0
                 else:
                     self.success = success
                     failure_count += 1
@@ -757,6 +884,26 @@ class CameraBuffer:
                         try:
                             self.camera.release()
                             time.sleep(1)  # Brief pause before reconnecting
+
+                            # 4.0.54 — self-heal stale /dev/videoN. If reopening
+                            # the same USB path hasn't helped after
+                            # STALE_CYCLES_BEFORE_HEAL rounds, probe unclaimed
+                            # video nodes for one that actually delivers frames
+                            # and switch self.source. Scoped to USB — RTSP/HTTP
+                            # keeps the old blind-retry behaviour.
+                            if not self.is_ip_camera:
+                                stale_reconnect_cycles += 1
+                                if stale_reconnect_cycles >= STALE_CYCLES_BEFORE_HEAL:
+                                    replacement = _find_replacement_v4l_path(self.source)
+                                    if replacement:
+                                        logger.warning(
+                                            f"Stale V4L2 path detected — swapping {self.source} → {replacement} "
+                                            f"(after {stale_reconnect_cycles} blind reconnect cycles)"
+                                        )
+                                        _unregister_v4l_binding(self.source)
+                                        self.source = replacement
+                                        _register_v4l_binding(self.source)
+                                        stale_reconnect_cycles = 0
 
                             # Reinitialize camera
                             if self.is_ip_camera:

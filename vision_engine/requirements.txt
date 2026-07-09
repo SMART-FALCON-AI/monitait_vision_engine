@@ -56,3 +56,14 @@ reportlab>=4.0.0,<5.0.0
 # apt-get install of the Basler .deb is needed. Import is lazy in
 # services/basler_camera.py so hosts without a Basler still boot.
 pypylon>=3.0
+
+# 4.0.52 — libjpeg-turbo for the three MVE JPEG hotspots
+# (capture-loop encode, disk-writer encode, timeline-thumbnail encode).
+# ~3× faster than cv2.imencode (stock libjpeg) on x86 with SSE2/AVX2.
+# simplejpeg ships pre-built manylinux wheels that BUNDLE libjpeg-turbo,
+# so no apt package is needed. PyTurboJPEG (source-only, requires
+# libturbojpeg0 + a working build environment) is kept as a fallback
+# for hosts where simplejpeg somehow can't install.
+# services/jpeg_codec.py falls back to cv2 if neither is available, so
+# no site is bricked by a partial upgrade.
+simplejpeg>=1.9.0

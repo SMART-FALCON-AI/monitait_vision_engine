@@ -208,6 +208,16 @@ def save_data_file(data):
         logger.debug(f"DB save skipped: {e}")
 
     # 2) File snapshot (always)
+    # 4.0.57 — atomic write. Prior code opened DATA_FILE in 'w' (truncating
+    # it immediately) then json.dump'd — a crash between the truncate and the
+    # dump would leave the persistence file empty or partially written and
+    # the next MVE boot would fall back to defaults (losing camera config,
+    # active shipment, etc.). Fix: write the full serialized payload to a
+    # sibling temp file, fsync it to force the kernel to flush the bytes,
+    # then os.replace() into place — POSIX guarantees replace is atomic on
+    # the same filesystem, so a reader/next-boot sees either the OLD file
+    # in full or the NEW file in full, never a truncated in-between state.
+    # The .backup copy is retained as an out-of-band recovery aid.
     file_ok = False
     try:
         if os.path.exists(DATA_FILE):
@@ -217,8 +227,15 @@ def save_data_file(data):
             with open(backup_file, 'w') as f:
                 f.write(backup_data)
 
-        with open(DATA_FILE, 'w') as f:
+        tmp_file = f"{DATA_FILE}.tmp"
+        with open(tmp_file, 'w') as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass  # fsync unsupported on some filesystems — best-effort
+        os.replace(tmp_file, DATA_FILE)
         file_ok = True
         if db_ok:
             logger.info(f"Data saved (DB + file snapshot at {DATA_FILE})")
@@ -226,6 +243,13 @@ def save_data_file(data):
             logger.info(f"Data saved (file only at {DATA_FILE} — DB unreachable)")
     except Exception as e:
         logger.error(f"Error saving data file: {e}")
+        # Clean up any dangling temp file so the next call starts from a
+        # clean slate. Don't let cleanup errors mask the original failure.
+        try:
+            if os.path.exists(f"{DATA_FILE}.tmp"):
+                os.remove(f"{DATA_FILE}.tmp")
+        except Exception:
+            pass
 
     return db_ok or file_ok
 

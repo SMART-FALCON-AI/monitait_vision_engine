@@ -1229,8 +1229,20 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             score_scale_factor = float(_svc.get("score_scale_factor") or 1.0)
         except (TypeError, ValueError):
             score_scale_factor = 1.0
+        # 4.0.61 — dual scoring. The RELATIVE score uses the operator-calibrated
+        # score_scale_factor and is what "matches your fleet's own baseline";
+        # the ABSOLUTE score uses a fixed unity coefficient and shows the raw
+        # severity×confidence impact without any calibration knob, so a site
+        # that hasn't been calibrated (or slid out of calibration) still has
+        # a defensible number to look at. UI renders BOTH side-by-side so the
+        # operator never has to click "Calibrate" just to get a number.
         impact_per_unit_scaled = impact_per_unit * score_scale_factor
-        score = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit_scaled))))
+        score_relative = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit_scaled))))
+        score_absolute = max(0.0, min(100.0, 100.0 * (1.0 - min(1.0, impact_per_unit))))
+        # Historical field `score` = the relative one, to preserve every
+        # existing consumer (PDF report, quality strip, top-N leaderboard,
+        # thresholds against release/re-inspect gates).
+        score = score_relative
 
         if score >= QUALITY_RELEASE_SCORE:
             verdict = "RELEASE"
@@ -1271,6 +1283,13 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         return {
             "shipment": shipment, "window": window,
             "score": round(score, 1),
+            # 4.0.61 — dual-mode scoring exposed on the payload so the UI can
+            # render both without a second endpoint. See the score calc above
+            # for the definition of each; `score` stays as the relative one
+            # for backwards compat with the PDF / strip / leaderboard readers.
+            "score_absolute": round(score_absolute, 1),
+            "score_relative": round(score_relative, 1),
+            "score_scale_factor": round(score_scale_factor, 4),
             "verdict": verdict,
             "thresholds": {"release": QUALITY_RELEASE_SCORE, "reinspect": QUALITY_REINSPECT_SCORE},
             "impact_total": impact_total,
@@ -1401,9 +1420,80 @@ async def calibrate_score_scale(payload: dict = None):
             continue
 
     if len(ipu_list) < min_n:
+        # 4.0.61 — actionable calibration diagnostics. The old error was
+        # "Recent shipments have zero impact — nothing to calibrate against"
+        # which is symptom, not cause. Impact is
+        # `sum((severity/100) × confidence)` over detections in classes with
+        # severity>0. It goes to zero when EITHER (a) no class has severity
+        # configured, OR (b) the detected classes DO have severities but those
+        # specific defects didn't appear in the recent window. Tell the
+        # operator which one they're in and what to click.
+        try:
+            svc_diag = _lsc() or {}
+            audio_diag = svc_diag.get("audio_settings", {}) or {}
+            classes_with_sev = sorted(
+                cls for cls, meta in audio_diag.items()
+                if isinstance(meta, dict) and int(meta.get("severity", 0) or 0) > 0
+            )
+            proc_diag = svc_diag.get("ejection_procedures", []) or []
+            procs_with_sev = sorted(
+                p.get("name", "") for p in proc_diag
+                if isinstance(p, dict) and int(p.get("severity", 0) or 0) > 0 and p.get("name")
+            )
+        except Exception:
+            classes_with_sev, procs_with_sev = [], []
+        try:
+            conn2 = get_db_connection()
+            recent_classes = []
+            if conn2 is not None:
+                cur3 = conn2.cursor()
+                cur3.execute(
+                    """
+                    SELECT DISTINCT elem->>'name' AS cls, COUNT(*) AS n
+                    FROM inference_results, jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s
+                      AND COALESCE(elem->>'name','') !~ '^_'
+                    GROUP BY cls
+                    ORDER BY n DESC
+                    LIMIT 15
+                    """,
+                    [interval],
+                )
+                recent_classes = [{"class": r[0], "count": int(r[1] or 0)} for r in cur3.fetchall() if r[0]]
+                cur3.close()
+                release_db_connection(conn2)
+        except Exception:
+            recent_classes = []
+        if not classes_with_sev and not procs_with_sev:
+            headline = ("No class or ejection procedure has a severity > 0 configured — the "
+                        "quality score has nothing to weight. Set severities in Process tab "
+                        "→ per-class row → Severity, or in Ejection Procedures → Severity.")
+        else:
+            in_data = {rc["class"] for rc in recent_classes}
+            covered = [c for c in classes_with_sev if c in in_data]
+            missing = [c for c in classes_with_sev if c not in in_data]
+            if covered:
+                headline = (f"Severities are set on {len(classes_with_sev)} class(es) but only "
+                            f"{len(covered)} appeared in {window}, and their impact totals "
+                            f"were too small to calibrate against. Try a longer window "
+                            f"(e.g. 30d), or raise severities on the classes actually being "
+                            f"detected below.")
+            else:
+                headline = (f"Severities are set on {len(classes_with_sev)} class(es) "
+                            f"({', '.join(classes_with_sev[:6])}{'…' if len(classes_with_sev) > 6 else ''}) "
+                            f"but NONE of them were detected in {window}. Either extend the "
+                            f"window, or set severity on the classes currently being detected "
+                            f"(see 'top detected classes' below).")
         return JSONResponse(content={
-            "error": "Recent shipments have zero impact — nothing to calibrate against.",
-            "shipments_with_impact": len(ipu_list),
+            "error": headline,
+            "diagnostic": {
+                "window": window,
+                "shipments_found": len(ships),
+                "shipments_with_impact": len(ipu_list),
+                "classes_with_severity": classes_with_sev,
+                "procedures_with_severity": procs_with_sev,
+                "top_detected_classes_in_window": recent_classes,
+            },
         }, status_code=400)
 
     ipu_list.sort()
@@ -1994,22 +2084,33 @@ async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
         # for any shipment whose last activity was older than 24h, leaving the
         # bar chart with invisible bars and X-axis labels for shipments that
         # never seemed to "load".
+        # 4.0.63 — expose Absolute + Relative + raw impact_per_unit per
+        # shipment so the frontend can render TWO bars side-by-side:
+        # (1) absolute (context-free) and (2) window-relative (rescaled so
+        # the currently visible shipments show as much visual difference as
+        # possible). Absolute is stable, Relative highlights small deltas
+        # between shipments in the selected window without needing the
+        # operator to hit "Calibrate".
         for ship, first_t, last_t, n_rows in rows:
             try:
                 qp = _compute_quality_payload(shipment=ship, window=window)
                 out.append({
                     "shipment": ship,
-                    "score":   qp.get("score") if qp else None,
-                    "verdict": qp.get("verdict") if qp else None,
-                    "rows":    int(n_rows or 0),
+                    "score":            qp.get("score") if qp else None,
+                    "score_absolute":   qp.get("score_absolute") if qp else None,
+                    "score_relative":   qp.get("score_relative") if qp else None,
+                    "impact_per_unit":  qp.get("impact_per_unit") if qp else None,
+                    "verdict":          qp.get("verdict") if qp else None,
+                    "rows":             int(n_rows or 0),
                     "first_t": first_t.isoformat() if first_t else None,
                     "last_t":  last_t.isoformat()  if last_t  else None,
                     "top_defects": [d.get("class") for d in (qp.get("top_defects") or [])][:3] if qp else [],
                 })
             except Exception:
                 out.append({
-                    "shipment": ship, "score": None, "verdict": None,
-                    "rows": int(n_rows or 0), "top_defects": [],
+                    "shipment": ship, "score": None, "score_absolute": None,
+                    "score_relative": None, "impact_per_unit": None,
+                    "verdict": None, "rows": int(n_rows or 0), "top_defects": [],
                 })
     except Exception as e:
         logger.warning(f"quality/shipments failed: {e}")
@@ -3775,11 +3876,21 @@ async def recent_detections(request: Request, window: str = "24h", shipment: str
 
 
 @router.get("/api/export_csv")
-async def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
+async def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, unwind: bool = False):
     """Stream a CSV export of stored detections for a shipment+window (3.21.3).
 
     One row per detection (inference_results expanded). Honors the Charts tab's
     window + shipment + min_conf selectors (3.21.10). Filename: detections_<shipment>_<window>.csv.
+
+    4.0.59:
+      * New ``length`` column = ``encoder_value - min(encoder_value in this shipment)``
+        so each row shows how far the belt had moved when that detection was
+        captured, in encoder counts.
+      * New ``unwind`` query flag: for roll-unwinding lines the operator
+        thinks of the SHIPMENT-END as position 0 and earlier detections as
+        further along the roll. Setting ``unwind=true`` reports
+        ``length = max(encoder) - encoder`` per row instead — same magnitude,
+        inverted direction.
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
@@ -3804,6 +3915,31 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
             _audio = _svc.get("audio_settings", {}) or {}
             sev_map = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
 
+            # 4.0.59 — pre-query min/max encoder for the selected window so the
+            # length column can be computed per row without holding all rows in
+            # memory. The MIN is the shipment-start anchor (equivalent to
+            # watcher.shipment_start_encoder for the CURRENT shipment, but this
+            # works for HISTORICAL shipments too because it's derived from the
+            # data). MAX is only used in unwind mode. Runs on the same cursor
+            # connection but a separate short-lived cursor so it doesn't
+            # interfere with the streaming server-side cursor below.
+            enc_min = 0
+            enc_max = 0
+            try:
+                with conn.cursor() as _mcur:
+                    _mcur.execute(
+                        f"""SELECT MIN(encoder_value), MAX(encoder_value)
+                            FROM inference_results
+                            WHERE time > NOW() - INTERVAL %s {ship_clause}""",
+                        params,
+                    )
+                    _row = _mcur.fetchone()
+                    if _row:
+                        enc_min = int(_row[0]) if _row[0] is not None else 0
+                        enc_max = int(_row[1]) if _row[1] is not None else 0
+            except Exception as _me:
+                logger.debug(f"export_csv min/max encoder probe failed: {_me}")
+
             cur = conn.cursor(name="export_csv_cursor")  # server-side cursor (streaming, low RAM)
             cur.itersize = 500
             cur.execute(
@@ -3816,8 +3952,9 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
             )
             buf = _io.StringIO()
             writer = _csv.writer(buf)
+            # 4.0.59 — added "length" between encoder and camera.
             writer.writerow([
-                "time", "shipment", "encoder", "camera", "class", "confidence",
+                "time", "shipment", "encoder", "length", "camera", "class", "confidence",
                 "severity", "impact",                                  # 3.21.12
                 "xmin", "ymin", "xmax", "ymax", "image_path",
                 "inference_time_ms", "model_used",
@@ -3828,6 +3965,16 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
                 ts = t.strftime("%Y-%m-%d %H:%M:%S.%f") if t else ""
                 if not dets:
                     continue
+                # 4.0.59 — compute length per row. Wind (default) = distance
+                # travelled from the shipment start (min encoder). Unwind =
+                # distance remaining before the end (max encoder − now), the
+                # right mental model for a roll being unwound from full.
+                if enc is None:
+                    length_val = ""
+                elif unwind:
+                    length_val = int(enc_max - int(enc))
+                else:
+                    length_val = int(int(enc) - enc_min)
                 for d in dets:
                     if not isinstance(d, dict):
                         continue
@@ -3844,6 +3991,7 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
                     impact = round((sev / 100.0) * conf_f, 3)  # 3.21.12 — defect impact
                     writer.writerow([
                         ts, ship or "", enc if enc is not None else "",
+                        length_val,
                         d.get("_cam", ""), cls,
                         d.get("confidence", ""),
                         sev, impact,
@@ -3862,7 +4010,10 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
 
     import re as _re
     safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", shipment) if shipment else "all"
-    fname = f"detections_{safe_ship}_{window}.csv"
+    # 4.0.59 — include direction hint in filename so unwind exports are
+    # visibly distinct from wind exports on disk.
+    _dir_tag = "_unwind" if unwind else ""
+    fname = f"detections_{safe_ship}_{window}{_dir_tag}.csv"
     return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 

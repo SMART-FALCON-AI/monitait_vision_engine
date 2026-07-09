@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from config import (
     load_data_file, save_data_file, load_service_config, save_service_config,
@@ -294,7 +294,7 @@ async def get_config(request: Request):
 
 
 @router.post("/api/config")
-async def update_config(request: Request, config_data: Dict[str, Any]):
+async def update_config(request: Request, config_data: Dict[str, Any], background_tasks: BackgroundTasks = None):
     """Update counter service configuration at runtime.
 
     Supported keys:
@@ -495,32 +495,71 @@ async def update_config(request: Request, config_data: Dict[str, Any]):
         # Shipment ID
         if "shipment" in config_data:
             shipment_id = str(config_data["shipment"]).strip() or "no_shipment"
-            # 3.26.4 — dual-write: Redis (hot read for the watcher loop) + DB
-            # (so the active shipment survives `docker compose down` / restart).
-            # On boot, main.py reads service_config["current_shipment"] and primes
-            # the watcher AND Redis cache, so the operator never loses the active
-            # shipment unless they explicitly clear it to "no_shipment".
+            # 4.0.60 — REORDERED. Previously this handler did the persistence
+            # (save_service_config → JSON read + DB round-trip + file copy +
+            # fsync + os.replace) BEFORE flipping `watcher.shipment`, all on
+            # the FastAPI event loop. That produced two bad symptoms:
+            #   (a) Every other endpoint (SSE, dashboard polls, CSV export)
+            #       stalled while the disk write ran — the operator saw the
+            #       whole UI freeze after scanning.
+            #   (b) During that window Redis said NEW while `watcher.shipment`
+            #       said OLD, so detections landed with the new tag but the
+            #       status endpoint reported the old shipment — a torn state
+            #       that made CSV rows disagree with what the UI just showed.
+            # New order: (1) mutate in-memory watcher, (2) set Redis (single
+            # fast RTT), (3) offload persistence to BackgroundTasks so the
+            # response returns immediately and other requests don't block.
+            watcher = request.app.state.watcher_instance
+            # Capture the new baseline encoder ONLY on actual change so
+            # re-POSTing the same shipment (dashboard drift refresh) doesn't
+            # zero the Length tile mid-shipment.
+            new_start_encoder = None
+            if watcher and shipment_id != getattr(watcher, "shipment", None):
+                new_start_encoder = int(getattr(watcher, "encoder_value", 0) or 0)
+                watcher.shipment_start_encoder = new_start_encoder
+                logger.info(
+                    f"Shipment start encoder: {new_start_encoder} "
+                    f"(API set shipment → {shipment_id})"
+                )
+            # (1) live in-memory FIRST — the detection loop and /api/status
+            # read this, so setting it here makes the change visible to the
+            # very next frame before we touch anything slower.
+            if watcher:
+                watcher.shipment = shipment_id
+            # (2) Redis — one round-trip, keeps cross-process consumers in
+            # sync. Failure here is logged but non-fatal: the in-memory flip
+            # above already made the change visible to the running pipeline.
             try:
                 r = Redis("redis", 6379, db=config.REDIS_DB)
                 r.set("shipment", shipment_id)
             except Exception as e:
                 logger.warning(f"Failed to set shipment in Redis: {e}")
-            try:
-                from config import load_service_config, save_service_config
-                _svc = load_service_config() or {}
-                _svc["current_shipment"] = shipment_id
-                save_service_config(_svc)
-            except Exception as e:
-                logger.warning(f"Failed to persist current_shipment to DB: {e}")
-            watcher = request.app.state.watcher_instance
-            if watcher:
-                watcher.shipment = shipment_id
-            # Create shipment directory
-            try:
-                import os
-                os.makedirs(f"raw_images/{shipment_id}", exist_ok=True)
-            except Exception as e:
-                logger.warning(f"Failed to create shipment directory: {e}")
+            # (3) persistence — offloaded so the operator's POST returns
+            # immediately. On boot main.py reads service_config to prime
+            # watcher + Redis, so the persistence still restores across
+            # `docker compose down` / restart — it just doesn't block the
+            # request thread anymore.
+            def _persist_shipment(sid: str, sse: "int | None"):
+                try:
+                    from config import load_service_config, save_service_config
+                    _svc = load_service_config() or {}
+                    _svc["current_shipment"] = sid
+                    if sse is not None:
+                        _svc["shipment_start_encoder"] = sse
+                    save_service_config(_svc)
+                except Exception as _pe:
+                    logger.warning(f"Failed to persist current_shipment to DB: {_pe}")
+                try:
+                    import os as _os
+                    _os.makedirs(f"raw_images/{sid}", exist_ok=True)
+                except Exception as _me:
+                    logger.warning(f"Failed to create shipment directory: {_me}")
+            if background_tasks is not None:
+                background_tasks.add_task(_persist_shipment, shipment_id, new_start_encoder)
+            else:
+                # BackgroundTasks unavailable (should not happen in normal
+                # FastAPI request context; kept as defensive fallback).
+                _persist_shipment(shipment_id, new_start_encoder)
             updated["shipment"] = shipment_id
             logger.info(f"Updated shipment ID to {shipment_id}")
 

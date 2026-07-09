@@ -107,6 +107,15 @@ class ColdDiskQueue:
     globbing the entire directory on every get() call.  Thread-safe: the lock
     protects both the index and the filesystem read/delete so no two threads can
     race for the same file.
+
+    4.0.64 — SIZE-BOUNDED. Previously the queue was unbounded on disk; when the
+    inference pipeline couldn't keep up, this directory could grow into the
+    tens or hundreds of GBs and eventually take the whole disk down. On
+    vteam12 this ate 97GB and killed the container. Now the queue tracks its
+    on-disk byte total and evicts oldest-first whenever it exceeds the cap
+    (COLD_QUEUE_MAX_BYTES env var, default 5 GB). Periodic staleness sweep
+    (COLD_QUEUE_MAX_AGE_SECONDS env var, default 600s) runs from a background
+    thread every 5 min so stale frames don't accumulate even below the cap.
     """
 
     def __init__(self, directory="cold_queue"):
@@ -116,8 +125,50 @@ class ColdDiskQueue:
         # Build in-memory index from any leftover files (sorted = FIFO order)
         existing = sorted(_glob_mod.glob(os.path.join(self._dir, '*.pkl')))
         self._index = collections.deque(existing)   # deque of full paths, FIFO order
+        # 4.0.64 — track on-disk bytes for the size cap. Compute once at boot
+        # from leftover files then maintain incrementally on put/get/evict.
+        self._bytes = 0
+        for p in existing:
+            try:
+                self._bytes += os.path.getsize(p)
+            except OSError:
+                pass
+        try:
+            self._max_bytes = int(os.environ.get("COLD_QUEUE_MAX_BYTES", 5 * 1024 * 1024 * 1024))
+        except (TypeError, ValueError):
+            self._max_bytes = 5 * 1024 * 1024 * 1024   # 5 GB
+        try:
+            self._max_age_s = int(os.environ.get("COLD_QUEUE_MAX_AGE_SECONDS", 600))
+        except (TypeError, ValueError):
+            self._max_age_s = 600
         if self._index:
-            logger.info(f"Cold queue: {len(self._index)} leftover frames from previous run")
+            logger.info(
+                f"Cold queue: {len(self._index)} leftover frames "
+                f"({self._bytes / (1024**3):.2f} GB) from previous run"
+                f"; cap={self._max_bytes / (1024**3):.1f} GB, "
+                f"stale-age={self._max_age_s}s"
+            )
+
+    def _evict_to_cap_locked(self):
+        """Called with self._lock held. Drops oldest files until under cap."""
+        evicted = 0
+        while self._bytes > self._max_bytes and self._index:
+            oldest = self._index.popleft()
+            try:
+                self._bytes -= os.path.getsize(oldest)
+            except OSError:
+                pass
+            try:
+                os.remove(oldest)
+            except OSError:
+                pass
+            evicted += 1
+        if evicted:
+            logger.warning(
+                f"Cold queue: evicted {evicted} oldest frame batches to stay "
+                f"under {self._max_bytes / (1024**3):.1f} GB cap "
+                f"(now {self._bytes / (1024**3):.2f} GB, {len(self._index)} batches)"
+            )
 
     def put(self, item):
         """Serialize frame batch to disk. Never fails (unless disk is full)."""
@@ -129,6 +180,12 @@ class ColdDiskQueue:
                 pickle.dump(item, f, protocol=pickle.HIGHEST_PROTOCOL)
             with self._lock:
                 self._index.append(path)
+                try:
+                    self._bytes += os.path.getsize(path)
+                except OSError:
+                    pass
+                # 4.0.64 — enforce cap on every put so we never overshoot.
+                self._evict_to_cap_locked()
         except Exception as e:
             logger.error(f"Cold queue write failed: {e}")
 
@@ -141,6 +198,14 @@ class ColdDiskQueue:
             if not self._index:
                 return None
             path = self._index.popleft()
+            # 4.0.64 — decrement byte accounting on successful pop. Even if
+            # the read below fails, the file gets removed, so we account here.
+            try:
+                self._bytes -= os.path.getsize(path)
+                if self._bytes < 0:
+                    self._bytes = 0
+            except OSError:
+                pass
 
         # Read + delete outside the lock (I/O can be slow)
         try:
@@ -161,34 +226,89 @@ class ColdDiskQueue:
         with self._lock:
             return len(self._index)
 
-    def flush_stale(self, max_age_seconds=600):
+    def size_bytes(self):
+        """4.0.64 — expose on-disk byte total so /api/status can show it."""
+        with self._lock:
+            return int(self._bytes)
+
+    def flush_stale(self, max_age_seconds=None):
         """Remove all files older than max_age_seconds from the queue.
 
-        Called at startup to clear leftover frames that are too old to be useful.
+        Called at startup AND periodically from a background sweep thread.
+        Defaults to the instance's max_age_s (env-configurable).
+
+        4.0.66 — SNAPSHOT the index under the lock, then do all disk I/O
+        (getsize + remove) OUTSIDE the lock. Previously we held _lock for
+        the whole scan, which meant every put() call from detection worker
+        threads at 100 Hz blocked for as long as flush took — on vteam12
+        with thousands of stale files, that was several seconds. Meanwhile
+        anyone else calling size_bytes() / qsize() (including /api/cold_queue)
+        also blocked, freezing uvicorn's event loop. Same pattern as get()
+        (I/O outside the lock).
         """
+        if max_age_seconds is None:
+            max_age_seconds = self._max_age_s
         now = time.time()
         flushed = 0
+        freed_bytes = 0
         with self._lock:
-            remaining = collections.deque()
-            for path in self._index:
-                # Extract enqueue timestamp from filename: <timestamp>_<encoder>.pkl
-                try:
-                    fname = os.path.basename(path)
-                    ts = float(fname.split('_')[0])
-                    if now - ts > max_age_seconds:
-                        try:
-                            os.remove(path)
-                        except Exception:
-                            pass
-                        flushed += 1
-                        continue
-                except (ValueError, IndexError):
-                    pass
-                remaining.append(path)
+            paths_snapshot = list(self._index)
+        stale_paths = set()
+        remaining = collections.deque()
+        for path in paths_snapshot:
+            try:
+                fname = os.path.basename(path)
+                ts = float(fname.split('_')[0])
+                if now - ts > max_age_seconds:
+                    try:
+                        freed_bytes += os.path.getsize(path)
+                    except OSError:
+                        pass
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    stale_paths.add(path)
+                    flushed += 1
+                    continue
+            except (ValueError, IndexError):
+                pass
+            remaining.append(path)
+        # Re-acquire the lock briefly to reconcile with any concurrent put()
+        # calls that ran while we were doing disk I/O. Preserve every entry
+        # they added; drop the stale entries we identified above.
+        with self._lock:
+            snapshot_set = set(paths_snapshot)
+            live_new = [p for p in self._index if p not in snapshot_set]
             self._index = remaining
+            for p in live_new:
+                self._index.append(p)
+            self._bytes -= freed_bytes
+            if self._bytes < 0:
+                self._bytes = 0
         if flushed:
-            logger.info(f"Cold queue: flushed {flushed} stale frames (>{max_age_seconds}s old)")
+            logger.info(
+                f"Cold queue: flushed {flushed} stale frames "
+                f"(>{max_age_seconds}s old, freed {freed_bytes / (1024**2):.1f} MB)"
+            )
         return flushed
+
+    def start_janitor(self, interval_s=300):
+        """4.0.64 — start a background thread that runs flush_stale() every
+        `interval_s` seconds so stale frames don't accumulate between reboots.
+        No-op if already started. Daemon thread, safe to leak on shutdown."""
+        if getattr(self, "_janitor_started", False):
+            return
+        self._janitor_started = True
+        def _loop():
+            while True:
+                try:
+                    time.sleep(interval_s)
+                    self.flush_stale()
+                except Exception as _e:
+                    logger.error(f"Cold queue janitor: {_e}")
+        threading.Thread(target=_loop, daemon=True, name="cold-queue-janitor").start()
+        logger.info(f"Cold queue janitor started (interval {interval_s}s)")
 
 
 class InferenceQueueFacade:
@@ -317,13 +437,22 @@ def _ensure_disk_space(write_dir):
             break
 
 def _disk_writer_loop():
-    """Background thread: checks disk space (NVR-style), then writes image."""
+    """Background thread: checks disk space (NVR-style), then writes image.
+
+    4.0.52 — uses services.jpeg_codec.imwrite_jpeg, which encodes via
+    libjpeg-turbo when available (~3× faster on modern x86). Falls back
+    to cv2.imwrite when the library is missing. The encode is the CPU
+    hotspot on this thread pool — replacing it lets the same # of workers
+    absorb 3× the framerate before the queue backs up.
+    """
+    from services.jpeg_codec import imwrite_jpeg
     while True:
         try:
             path, frame = _disk_queue.get()
             # Ensure disk has space before writing (deletes oldest chunks if full)
             _ensure_disk_space(os.path.dirname(path))
-            cv2.imwrite(path, frame)
+            if not imwrite_jpeg(path, frame, quality=cfg.RAW_IMAGE_JPEG_QUALITY if hasattr(cfg, 'RAW_IMAGE_JPEG_QUALITY') else 85):
+                logger.debug(f"jpeg_codec.imwrite_jpeg returned False for {path}")
         except Exception as e:
             logger.error(f"Disk write error: {e}")
 
@@ -403,6 +532,12 @@ class ArduinoSocket:
         self.redis_connection = RedisConnection(cfg.REDIS_HOST, cfg.REDIS_PORT)
         self.last_encoder_value = 0
         self.encoder_value = 0
+        # 4.0.54 — Length tracking. Snapshot of encoder_value at the moment a
+        # new shipment starts. Dashboard "Length" tile shows the delta
+        # (encoder_value - shipment_start_encoder), i.e. how far the conveyor
+        # has moved since this shipment began. Persisted alongside
+        # current_shipment so it survives restart. Zero on "no_shipment".
+        self.shipment_start_encoder = 0
         self.health_check = False
         self.is_moving = False
         self.step = 15
@@ -918,7 +1053,35 @@ class ArduinoSocket:
                             new_shipment = barcode_buffer.strip()
                             logger.info(f"Barcode scanned: {new_shipment}")
 
-                            # Update shipment
+                            # 4.0.54 — snapshot current encoder as the shipment's
+                            # start position so the dashboard Length tile can
+                            # show belt-travelled-since-shipment-began. Only
+                            # captured when this is a NEW shipment.
+                            #
+                            # 4.0.60 — REORDERED to match the /api/config path:
+                            # (1) mutate in-memory + Redis FIRST so the very next
+                            #     captured frame sees the new shipment,
+                            # (2) persist to disk (save_service_config → full
+                            #     JSON read + DB write + fsync + os.replace) on
+                            #     a background thread so the scanner select()
+                            #     loop resumes immediately and a fast follow-up
+                            #     scan can't miss key events.
+                            # Additionally the persistence now includes
+                            # `current_shipment` — previously the barcode path
+                            # only saved shipment_start_encoder, so a reboot
+                            # after a barcode scan would silently revert to
+                            # whatever the last API-set shipment was. This
+                            # matches the API path exactly for cross-restart
+                            # durability.
+                            is_new_shipment = new_shipment != self.shipment
+                            if is_new_shipment:
+                                self.shipment_start_encoder = int(self.encoder_value or 0)
+                                logger.info(
+                                    f"Shipment start encoder: {self.shipment_start_encoder} "
+                                    f"(barcode scan → {new_shipment})"
+                                )
+
+                            # (1) live in-memory FIRST — detection loop + status
                             self.shipment = new_shipment
                             if self.redis_connection:
                                 try:
@@ -926,11 +1089,34 @@ class ArduinoSocket:
                                 except Exception as e:
                                     logger.warning(f"Failed to set shipment in Redis: {e}")
 
-                            # Create directory for shipment
-                            try:
-                                os.makedirs(f"raw_images/{new_shipment}", exist_ok=True)
-                            except Exception as e:
-                                logger.warning(f"Failed to create shipment directory: {e}")
+                            # (2) persistence off the scanner thread so the
+                            # select() loop returns to reading key events
+                            # immediately. Daemon thread — process shutdown
+                            # doesn't wait for it. Snapshot the values into
+                            # locals so the thread sees the correct captures
+                            # even if a follow-up scan mutates them.
+                            _snap_ship = new_shipment
+                            _snap_sse = self.shipment_start_encoder if is_new_shipment else None
+                            def _persist_barcode_shipment(sid, sse):
+                                try:
+                                    from config import load_service_config, save_service_config
+                                    _svc = load_service_config() or {}
+                                    _svc["current_shipment"] = sid
+                                    if sse is not None:
+                                        _svc["shipment_start_encoder"] = sse
+                                    save_service_config(_svc)
+                                except Exception as _pe:
+                                    logger.warning(f"Failed to persist barcode-scanned shipment: {_pe}")
+                                try:
+                                    os.makedirs(f"raw_images/{sid}", exist_ok=True)
+                                except Exception as _me:
+                                    logger.warning(f"Failed to create shipment directory: {_me}")
+                            threading.Thread(
+                                target=_persist_barcode_shipment,
+                                args=(_snap_ship, _snap_sse),
+                                daemon=True,
+                                name=f"barcode-persist-{_snap_ship}",
+                            ).start()
 
                         barcode_buffer = ""
                     elif code in KEY_MAP:
@@ -1410,9 +1596,13 @@ class ArduinoSocket:
                         d_path = f"{self.shipment}/{hour_chunk}/{d}_p{phase_idx}_{camera_index}"
                         name = os.path.join("raw_images", f"{d_path}.jpg")
 
-                        # Encode to JPEG in memory (fast ~2-5ms, avoids disk round-trip for inference)
-                        ok, encoded = cv2.imencode('.jpg', grabbed)
-                        jpeg_bytes = encoded.tobytes() if ok else None
+                        # 4.0.52 — Encode via services.jpeg_codec (libjpeg-turbo
+                        # when available). Same bytes, ~3× faster than cv2.imencode.
+                        # This is the highest-frequency encode call in MVE — runs
+                        # once per frame per camera, so replacing it is the biggest
+                        # single CPU win the 4.0.52 change delivers.
+                        from services.jpeg_codec import encode_jpeg as _enc_jpeg
+                        jpeg_bytes = _enc_jpeg(grabbed, quality=85)
 
                         # Queue raw numpy for async disk archival (non-blocking, drop if full)
                         try:
@@ -1650,8 +1840,17 @@ class ArduinoSocket:
                                 stream_image = np.concatenate((stream_image, frame_red_image), axis=1) if stream_image is not None else frame_red_image
 
                         # Check if we should remove the raw image
+                        # 4.0.57 — tolerate a missing file. Earlier code would
+                        # crash the whole stream_results loop with
+                        # FileNotFoundError if the raw jpg was already removed
+                        # (concurrent cleanup, failed prior write, log-rotation).
                         if remove_raw_image:
-                            os.remove(os.path.join("raw_images", f"{stream_path}.jpg"))
+                            try:
+                                os.remove(os.path.join("raw_images", f"{stream_path}.jpg"))
+                            except FileNotFoundError:
+                                pass  # already gone — no-op, don't kill the loop
+                            except OSError as _rm_err:
+                                logger.warning(f"Failed to remove raw image {stream_path}.jpg: {_rm_err}")
 
                         stream_image = np.concatenate((stream_image, stream_frame[1]), axis=1) if stream_image is not None else stream_frame[1]
 
@@ -1713,9 +1912,25 @@ class ArduinoSocket:
         logger.info("Production metrics database writer started")
         write_interval = 60  # Write every 60 seconds
 
+        # 4.0.57 — chunked interruptible sleep. Original code slept 60s in one
+        # call, so shutdown (self.stop_thread = True) blocked up to 60s
+        # waiting for this thread to exit — user-visible shutdown latency on
+        # every restart. The 1s check keeps the interval semantics identical
+        # (writes still happen every 60s) but shortens worst-case shutdown
+        # wait from 60s to ~1s.
+        def _interruptible_sleep(total: int) -> bool:
+            """Sleep up to `total` seconds, returning early if stop_thread flips.
+            Returns True iff we exited due to shutdown."""
+            for _ in range(total):
+                if self.stop_thread:
+                    return True
+                time.sleep(1)
+            return self.stop_thread
+
         while not self.stop_thread:
             try:
-                time.sleep(write_interval)
+                if _interruptible_sleep(write_interval):
+                    break
 
                 # Write current production metrics to database
                 write_production_metrics_to_db(
@@ -1729,4 +1944,5 @@ class ArduinoSocket:
 
             except Exception as e:
                 logger.error(f"Error writing production metrics to database: {e}")
-                time.sleep(5)  # Wait before retrying
+                if _interruptible_sleep(5):
+                    break

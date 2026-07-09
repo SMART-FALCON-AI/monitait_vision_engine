@@ -270,6 +270,17 @@ class BaslerBuffer:
         pylon, genicam = _import_pylon()
         failure_count = 0
         max_failures = 100
+        # 4.0.66 — Exponential-backoff reconnect state. Prior code called
+        # _reconnect() (which invokes tl_factory.EnumerateDevices — a
+        # synchronous USB bus scan holding the Python GIL) every time
+        # failure_count hit 100. With the previous 100µs sleep at the end
+        # of this loop and a fast-fail RetrieveResult, failure_count hit
+        # 100 in tens of milliseconds → reconnect firehose → GIL held
+        # continuously → uvicorn event loop starved. Now: wait between
+        # reconnects (2s → 4s → 8s → 16s → 30s cap) so the loop actually
+        # releases the GIL for a while between C++ calls.
+        reconnect_backoff = 2.0
+        RECONNECT_BACKOFF_CAP = 30.0
 
         while not self.stop:
             try:
@@ -320,16 +331,33 @@ class BaslerBuffer:
 
                 if failure_count >= max_failures:
                     logger.warning(
-                        f"Basler: {failure_count} consecutive failures — reconnecting"
+                        f"Basler: {failure_count} consecutive failures — "
+                        f"reconnecting (backoff {reconnect_backoff:.0f}s)"
                     )
+                    # 4.0.66 — sleep BEFORE the reconnect call so the GIL is
+                    # released for `reconnect_backoff` seconds before we make
+                    # the next GIL-holding EnumerateDevices() call. This is
+                    # what lets uvicorn service /health and /api/status while
+                    # the Basler is misbehaving.
+                    time.sleep(reconnect_backoff)
                     try:
                         self._reconnect()
                         failure_count = 0
+                        reconnect_backoff = 2.0   # reset backoff on success
                     except Exception as e:
                         logger.error(f"Basler reconnect failed: {e}")
-                        time.sleep(5)
+                        # Grow backoff for next attempt; hard-cap so we always
+                        # keep trying after the flaky device recovers.
+                        reconnect_backoff = min(
+                            reconnect_backoff * 2, RECONNECT_BACKOFF_CAP
+                        )
 
-                time.sleep(0.0001)
+                # 4.0.66 — was 0.0001s (100µs) — effectively a busy loop that
+                # kept the GIL nearly continuously and caused failure_count to
+                # hit max_failures within ~10ms whenever RetrieveResult was
+                # returning invalid results fast. 5ms gives the Python GIL a
+                # real chance to switch threads and lets uvicorn breathe.
+                time.sleep(0.005)
             except Exception as e:
                 logger.error(f"Basler buffer error: {e}")
                 time.sleep(0.1)

@@ -90,10 +90,31 @@ def _auto_register_classes(yolo_res):
     (services/draw_filters.py) without classes silently disappearing —
     every detected class becomes visible IN THE UI (just unticked), so
     the operator can find and enable it.
+
+    4.0.67 — FAST PATH: check the CACHED audio_settings map (5s TTL) first.
+    If every class in yolo_res is already known, we return without touching
+    the disk at all. Prior code called cfg.load_service_config() on EVERY
+    frame batch — a full JSON parse of .env.prepared_query_data per frame.
+    Under math_inference's 200+ features/frame, that was hundreds of file
+    reads/sec on vteam12, saturating the fs cache and starving uvicorn.
+    We only pay the load_service_config cost when we detect a truly new
+    class (rare after the first minute of a shipment).
     """
     if not yolo_res:
         return
     try:
+        cached_aud = _get_audio_settings_map() or {}
+        # Fast path: nothing new → skip all disk I/O.
+        needs_write = False
+        for det in yolo_res:
+            if not isinstance(det, dict):
+                continue
+            nm = det.get("name")
+            if nm and nm not in cached_aud:
+                needs_write = True
+                break
+        if not needs_write:
+            return
         svc = cfg.load_service_config() or {}
         aud = svc.get("audio_settings", {}) or {}
         new_names = set()
@@ -599,7 +620,16 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None, d_p
 
         # Quality slider controls JPEG compression only (lower = smaller/faster)
         jpeg_q = max(30, min(95, quality))
-        _, jpeg = cv2.imencode('.jpg', image_to_encode, [cv2.IMWRITE_JPEG_QUALITY, jpeg_q])
+        # 4.0.52 — libjpeg-turbo when available. Timeline thumbnails are the
+        # second-hottest encode path (fires once per Store-enabled defect
+        # frame). Same JPEG bytes downstream.
+        from services.jpeg_codec import encode_jpeg as _enc_jpeg
+        _jpeg_bytes = _enc_jpeg(image_to_encode, quality=jpeg_q)
+        # Preserve the existing (ndarray-like) `jpeg` variable used
+        # downstream by wrapping the bytes with numpy.frombuffer so any
+        # code that already calls .tobytes() or slices still works.
+        import numpy as _np
+        jpeg = _np.frombuffer(_jpeg_bytes, dtype=_np.uint8) if _jpeg_bytes else _np.zeros(0, dtype=_np.uint8)
 
         redis_client = _get_timeline_redis()
 
@@ -866,15 +896,46 @@ def nest_objects(yolo_results, custom_parent_list=None, overlap_threshold=0.6):
             - 'confidence': The confidence score of the detection.
 
         custom_parent_list (list): List of object names considered as parents.
-                                   If None, uses global cfg.PARENT_OBJECT_LIST.
+                                   If None, derives from per-class audio_settings
+                                   role=parent (4.0.58 unified path). If audio
+                                   settings can't be loaded or no class is
+                                   flagged parent, falls back to cfg.PARENT_OBJECT_LIST
+                                   for backwards compat.
 
     Returns:
         dict: Nested structure of objects with parents ("box", "pack") and their children.
                If no parents found, all objects are nested under a single virtual "_root" parent.
     """
     try:
-        # Use global cfg.PARENT_OBJECT_LIST if no custom list provided
-        parent_list = custom_parent_list if custom_parent_list is not None else cfg.PARENT_OBJECT_LIST
+        # 4.0.58 — parent list is derived from the per-class ROLE dropdown
+        # (role=parent) that lives in the Process tab.
+        # 4.0.67 — FIX: use the CACHED audio_settings map instead of
+        # cfg.load_service_config() on every frame batch. Prior code did a
+        # full JSON file read + parse of `.env.prepared_query_data` per
+        # detection frame → under high FPS + math_inference feature spew,
+        # that was hundreds of file reads/sec, which starved MVE's uvicorn
+        # for CPU + fs cache and made the dashboard unresponsive on vteam12.
+        # `_get_audio_settings_map()` refreshes every 5s (see _STORE_TTL),
+        # so operator changes still take effect quickly.
+        if custom_parent_list is not None:
+            parent_list = custom_parent_list
+        else:
+            parent_list = None
+            try:
+                audio_map = _get_audio_settings_map() or {}
+                role_parents = [
+                    cls for cls, cfg_row in audio_map.items()
+                    if isinstance(cfg_row, dict) and cfg_row.get("role") == "parent"
+                ]
+                # Empty list is INTENTIONAL — operator hasn't flagged anything
+                # as parent, so nothing should count as a parent → everything
+                # nests under synthetic _root (the "no parents" branch below).
+                if audio_map:
+                    parent_list = role_parents
+            except Exception as _pe:
+                logger.debug(f"nest_objects: audio_settings load failed, using cfg fallback: {_pe}")
+            if parent_list is None:
+                parent_list = cfg.PARENT_OBJECT_LIST
         # Filter out empty strings from parent list
         effective_parent_list = [p for p in parent_list if p.strip()]
 
@@ -1115,6 +1176,28 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
         frame_id, jpeg_bytes = frame
         frame_path = os.path.join("raw_images", f"{frame_id}.jpg")
 
+        # 4.0.60 — Snapshot the shipment ONCE at the top of the frame's processing
+        # window. Previously this function read the shipment twice (Redis at
+        # ~1361 for the DB row, and _watcher.shipment at ~1571 for the audio
+        # queue message), which produced a torn state at every shipment
+        # boundary: the CSV row could say NEW while the audio queue said OLD
+        # for the same physical frame. Reading once and threading the value
+        # through both writes eliminates that window per-frame regardless of
+        # how the shipment was set (API vs barcode) and regardless of Redis
+        # eviction. Preference is the in-memory `_watcher.shipment` (source
+        # of truth for this MVE process) with Redis as fallback only if the
+        # watcher is unavailable (e.g. rare boot race).
+        capture_shipment = "no_shipment"
+        try:
+            if _watcher is not None and getattr(_watcher, "shipment", None):
+                capture_shipment = str(_watcher.shipment)
+            else:
+                _r_val = _get_timeline_redis().get("shipment")
+                if isinstance(_r_val, bytes) and _r_val:
+                    capture_shipment = _r_val.decode('utf-8')
+        except Exception:
+            pass
+
         if jpeg_bytes is not None:
             # In-memory path: decode JPEG bytes directly (no disk I/O)
             img_array = np.frombuffer(jpeg_bytes, dtype=np.uint8)
@@ -1318,12 +1401,10 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             # pass the filter, skip the DB write entirely.
             try:
                 inference_time_ms = int(processing_time * 1000)
-                # Get shipment from Redis (works across processes, unlike watcher object)
-                try:
-                    shipment_val = _get_timeline_redis().get("shipment")
-                    shipment_str = shipment_val.decode('utf-8') if isinstance(shipment_val, bytes) and shipment_val else "no_shipment"
-                except Exception:
-                    shipment_str = "no_shipment"
+                # 4.0.60 — use the capture-time shipment snapshot instead of a
+                # fresh Redis read, so the DB row and the audio queue for
+                # this frame always agree.
+                shipment_str = capture_shipment
 
                 store_map = _get_store_objects_map()
                 audio_map = _get_audio_settings_map()
@@ -1531,7 +1612,7 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             "dms": frame_data[4:],
             "priority": frame_data[3],
             "detection" : frame_data[2],
-            "shipment": _watcher.shipment
+            "shipment": capture_shipment  # 4.0.60 — same snapshot as the DB row above
         }
 
         return queue_message, frame_data

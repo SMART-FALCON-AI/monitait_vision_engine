@@ -140,7 +140,8 @@ async function refreshShipmentQualityScore() {
         data = await r.json();
     } catch (e) { console.error('shipment_quality_score fetch failed:', e); return; }
 
-    const scoreEl   = document.getElementById('sqs-score');
+    const scoreEl   = document.getElementById('sqs-score');       // Relative
+    const scoreAbsEl = document.getElementById('sqs-score-abs');    // 4.0.61 Absolute
     const verdictEl = document.getElementById('sqs-verdict');
     const normNoteEl= document.getElementById('sqs-norm-note');
     const lengthEl  = document.getElementById('sqs-length');
@@ -157,6 +158,7 @@ async function refreshShipmentQualityScore() {
 
     if (score === null || score === undefined) {
         if (scoreEl)   scoreEl.textContent   = '—';
+        if (scoreAbsEl) scoreAbsEl.textContent = '—';
         if (verdictEl) { verdictEl.textContent = 'NO DATA'; verdictEl.style.background = 'rgba(51,65,85,0.6)'; verdictEl.style.color = 'var(--text-primary)'; }
         if (normNoteEl) normNoteEl.textContent = '—';
         if (lengthEl)  lengthEl.textContent  = '—';
@@ -169,7 +171,15 @@ async function refreshShipmentQualityScore() {
         return;
     }
 
+    // 4.0.61 — dual scoring: Absolute has no calibration knob so it's stable
+    // across time / sites; Relative uses the calibrated score_scale_factor.
+    // Fall back gracefully if the older API version doesn't emit `score_absolute`.
     if (scoreEl) scoreEl.textContent = score.toFixed(1);
+    if (scoreAbsEl) {
+        const abs = (data.score_absolute !== undefined && data.score_absolute !== null)
+            ? data.score_absolute : score;
+        scoreAbsEl.textContent = Number(abs).toFixed(1);
+    }
 
     // Verdict color: green RELEASE / amber RE-INSPECT / red HOLD
     let bg = 'rgba(51,65,85,0.6)', fg = 'var(--text-primary)';
@@ -901,12 +911,30 @@ async function refreshShipmentQualityTrend() {
 window.refreshShipmentQualityTrend = refreshShipmentQualityTrend;
 
 
+// 4.0.53 — chart-tab-active check. Used to gate the "Loading charts…" badge
+// so it never appears on Dashboard / Cameras / etc. even if a stale interval
+// fires refreshDetectionInsights() or refreshAdvancedCharts() while the
+// operator is looking at a different tab. The Charts tab container id is
+// legacy "tab-grafana" — Charts tab .tab-content wrapper.
+function _chartsTabActive() {
+    const el = document.getElementById('tab-grafana');
+    return !!(el && el.classList.contains('active'));
+}
+
+
 async function refreshDetectionInsights() {
-    // 4.0.47 — show the global loading badge for the umbrella refresh path
-    // too. This is the function clicked by the Refresh button + tab switch,
-    // so the operator gets immediate visual feedback any time data starts
-    // re-fetching, not only inside refreshAdvancedCharts.
-    if (typeof mveLoaderBegin === 'function') mveLoaderBegin('Loading charts…');
+    // 4.0.53 — Two bugs fixed:
+    //  (a) The umbrella function called mveLoaderBegin but never a matching
+    //      mveLoaderEnd on the success path (falls off at line 1040), so
+    //      _mveLoadInFlight climbed by 1 every refresh — spinner circled
+    //      forever. Wrap the whole body in try/finally.
+    //  (b) The loader is a fixed-position badge, so a fetch fired while the
+    //      operator was on Charts persisted visually after they switched to
+    //      Dashboard. Gate the loader with _chartsTabActive() so it only
+    //      appears/hides in the Charts tab context (id="tab-grafana").
+    const _showedLoader = _chartsTabActive();
+    if (_showedLoader && typeof mveLoaderBegin === 'function') mveLoaderBegin('Loading charts…');
+    try {
     const windowSel = document.getElementById('insight-window');
     const window = windowSel ? windowSel.value : '24h';
     const emptyEl = document.getElementById('insight-empty');
@@ -927,7 +955,7 @@ async function refreshDetectionInsights() {
         data = await r.json();
     } catch (e) {
         console.error('detection_stats fetch failed:', e);
-        return;
+        return;  // finally-block hides the loader
     }
 
     const byClass = data.by_class || {};
@@ -1037,6 +1065,12 @@ async function refreshDetectionInsights() {
     // The three richer charts come from /api/detection_charts (size, confidence,
     // camera scatter) and honor the shipment filter. Fetched separately.
     refreshAdvancedCharts();
+    } finally {
+        // 4.0.53 — Always balance the mveLoaderBegin from the top so the
+        // spinner can't circle forever if a fetch throws or an early-return
+        // path is taken (empty result, missing DOM element, etc.).
+        if (_showedLoader && typeof mveLoaderEnd === 'function') mveLoaderEnd();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,7 +1161,10 @@ async function refreshAdvancedCharts() {
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
     let data;
-    mveLoaderBegin('Loading charts…');
+    // 4.0.53 — gate the loader to the Charts tab so the badge can't leak
+    // into other tabs. The paired mveLoaderEnd calls below check the same flag.
+    const _showedLoader = _chartsTabActive();
+    if (_showedLoader) mveLoaderBegin('Loading charts…');
     try {
         // 4.0.30 — tell the server which heatmap baseline mode is active so
         // it only computes that one (saves SQL for unused modes). Falls back
@@ -1146,7 +1183,7 @@ async function refreshAdvancedCharts() {
         data = await r.json();
     } catch (e) {
         console.error('detection_charts fetch failed:', e);
-        mveLoaderEnd();
+        if (_showedLoader) mveLoaderEnd();
         return;
     }
 
@@ -1574,7 +1611,7 @@ async function refreshAdvancedCharts() {
     }
     // 4.0.42 — hide the loading badge now that the scatter + heatmap have
     // been built. Paired with mveLoaderBegin() at the top of this function.
-    mveLoaderEnd();
+    if (_showedLoader) mveLoaderEnd();
 }
 
 // 3.25.13 — toggle the merged scatter's X-axis between time and encoder.
@@ -2709,25 +2746,70 @@ async function _loadQualityShipmentsChart() {
         const d = await r.json();
         const rows = (d.shipments || []).slice().reverse();  // oldest left → newest right
         const labels = rows.map(s => s.shipment);
-        const data   = rows.map(s => s.score != null ? s.score : 0);
-        const colors = rows.map(s => _verdictColor(s.verdict));
+
+        // 4.0.63 — TWO bars per shipment:
+        //   (a) Absolute score — 100 × (1 − impact_per_unit) — comparable across
+        //       time and sites, doesn't move because you calibrated the fleet.
+        //   (b) Window-relative score — rescaled so the RANGE of the currently
+        //       visible shipments spans the full 0-100 axis, i.e. the worst
+        //       shipment in this window → 0 and the best → 100. Operator asked
+        //       for this specifically because when every absolute score sits at
+        //       99-100 (a well-behaved fleet), all bars look identical and
+        //       there is nothing to compare. Relative expands whatever spread
+        //       exists in the window so subtle drift becomes visible.
+        //
+        // Rescale math: shift-and-scale by the OBSERVED spread of absolute
+        // scores in the chart. When every shipment has the same absolute
+        // score (spread == 0), we short-circuit to 100 across the board (no
+        // meaningful differences to highlight — flat is the correct render).
+        const absVals   = rows.map(s => (s.score_absolute != null ? s.score_absolute
+                                       : (s.score != null ? s.score : 0)));
+        const validAbs  = absVals.filter(v => v != null && !isNaN(v));
+        const absMin    = validAbs.length ? Math.min(...validAbs) : 0;
+        const absMax    = validAbs.length ? Math.max(...validAbs) : 100;
+        const absSpread = absMax - absMin;
+        const relData = absVals.map(v => {
+            if (v == null || isNaN(v)) return 0;
+            if (absSpread < 1e-9) return 100;  // all identical → flat max
+            return Number((((v - absMin) / absSpread) * 100).toFixed(1));
+        });
+
+        const colors   = rows.map(s => _verdictColor(s.verdict));
+        const relColor = 'rgba(59,130,246,0.55)';  // steel blue for relative bar
+
         if (_qualityShipmentsChart) _qualityShipmentsChart.destroy();
         _qualityShipmentsChart = new Chart(canvas, {
             type: 'bar',
-            data: { labels, datasets: [{ data, backgroundColor: colors,
-                borderColor: colors.map(c => c.replace('0.7', '1')), borderWidth: 1 }] },
+            data: {
+                labels,
+                datasets: [
+                    { label: 'Absolute', data: absVals,
+                      backgroundColor: colors,
+                      borderColor: colors.map(c => String(c).replace('0.7', '1')),
+                      borderWidth: 1, order: 1 },
+                    { label: 'Relative (window)', data: relData,
+                      backgroundColor: relColor,
+                      borderColor: 'rgba(59,130,246,1)', borderWidth: 1, order: 1 },
+                ],
+            },
             options: {
                 responsive: true, maintainAspectRatio: false,
                 plugins: {
-                    legend: { display: false },
+                    legend: {
+                        display: true,
+                        position: 'top',
+                        labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 },
+                    },
                     tooltip: {
                         callbacks: {
                             title: (items) => items[0].label,
                             label:  (item) => {
                                 const r = rows[item.dataIndex];
                                 const tops = (r.top_defects || []).join(', ');
+                                const abs = r.score_absolute ?? r.score;
                                 return [
-                                    `Score: ${r.score ?? '—'}`,
+                                    `Absolute: ${abs != null ? Number(abs).toFixed(1) : '—'}`,
+                                    `Relative (this window): ${relData[item.dataIndex]}`,
                                     `Verdict: ${r.verdict || '—'}`,
                                     `Detections: ${r.rows || 0}`,
                                     tops ? `Top defects: ${tops}` : '',
@@ -3048,9 +3130,13 @@ function exportInsightCSV() {
     const ship = document.getElementById('insight-shipment')?.value || '';
     // 3.21.10: honor the min_conf slider too so the CSV matches what the charts show.
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
+    // 4.0.59: unwind checkbox → inverts the length column (max_encoder − encoder)
+    // so unwind lines read "meters left to unwind" from full-roll = 0.
+    const unwind = document.getElementById('insight-unwind')?.checked ? 'true' : 'false';
     const url = '/api/export_csv?window=' + encodeURIComponent(win) +
                 '&shipment=' + encodeURIComponent(ship) +
-                '&min_conf=' + minConf;
+                '&min_conf=' + minConf +
+                '&unwind=' + unwind;
     // navigate via hidden anchor so the browser handles the download with the
     // Content-Disposition filename (instead of trying to render in a new tab)
     const a = document.createElement('a');

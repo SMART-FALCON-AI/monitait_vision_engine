@@ -1551,6 +1551,16 @@ function switchTab(tabName) {
     if (typeof loadIframeForTab === 'function') {
         loadIframeForTab(tabName);
     }
+
+    // 4.0.53 — force-hide the "Loading charts…" badge when leaving the
+    // Charts tab so a mid-fetch spinner from refreshDetectionInsights /
+    // refreshAdvancedCharts cannot bleed into Dashboard / Cameras / etc.
+    // Paired with the tab-active gate in charts.js so the badge stays out
+    // until the operator returns to Charts.
+    if (tabName !== 'grafana') {
+        const _loader = document.getElementById('mve-global-loader');
+        if (_loader) _loader.style.display = 'none';
+    }
 }
 
 // Restore last selected tab on page load (skip iframe tabs to prevent blocking)

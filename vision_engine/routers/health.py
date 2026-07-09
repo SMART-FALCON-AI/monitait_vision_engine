@@ -46,6 +46,24 @@ router = APIRouter()
 _session = requests.Session()
 
 
+# 4.0.64 — helpers for /api/status cold_queue fields. Lazy-imported so this
+# module doesn't force watcher import order at boot.
+def _cold_queue_bytes() -> int:
+    try:
+        from services.watcher import _cold_queue_disk
+        return int(_cold_queue_disk.size_bytes())
+    except Exception:
+        return 0
+
+
+def _cold_queue_count() -> int:
+    try:
+        from services.watcher import _cold_queue_disk
+        return int(_cold_queue_disk.qsize())
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # GET /health
 # ---------------------------------------------------------------------------
@@ -320,7 +338,10 @@ async def health_check(request: Request):
                     base_url = active_inference_url.split('/api/')[0] if '/api/' in active_inference_url else active_inference_url.rsplit('/', 1)[0]
                     health_url = f"{base_url}/api/health"
 
-                    health_response = _session.get(health_url, timeout=5)
+                    # 4.0.66 — same to_thread wrapping as the traditional-YOLO
+                    # branch below. Never call sync requests from an async handler.
+                    import asyncio as _asyncio
+                    health_response = await _asyncio.to_thread(_session.get, health_url, timeout=5)
 
                     if health_response.status_code == 200:
                         # 2. Check recent successful inference from Redis
@@ -373,7 +394,14 @@ async def health_check(request: Request):
                 # For traditional YOLO endpoint, try a quick ping
                 # Try /health first, then fall back to just checking if server responds (even 404 means it's alive)
                 health_url = active_inference_url.replace('/detect/', '/').replace('/detect', '/')
-                response = requests.get(health_url, timeout=2)
+                # 4.0.66 — `async def health_check` was blocking the uvicorn
+                # event loop on this synchronous requests.get() every call.
+                # If yolo_inference was slow (or unreachable — as on vteam12
+                # when I stopped the container), the full 2s timeout hung the
+                # loop → every OTHER endpoint stalled behind it. Offload to a
+                # worker thread. Same fix for the psycopg2.connect below.
+                import asyncio as _asyncio
+                response = await _asyncio.to_thread(_session.get, health_url, timeout=2)
                 # Any response means server is running (200, 404, etc.)
                 yolo_ok = response.status_code in [200, 404, 405]
         except Exception as e:
@@ -398,11 +426,19 @@ async def health_check(request: Request):
                 pass
 
         # Check TimescaleDB/PostgreSQL connection
+        # 4.0.66 — psycopg2.connect is a blocking C call. Running it directly
+        # in an `async def` handler stalled the uvicorn event loop for up to
+        # 2s per /health request when Postgres was slow. Offload to a worker.
         db_ok = False
         try:
-            conn = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT, database=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASSWORD, connect_timeout=2)
-            conn.close()
-            db_ok = True
+            import asyncio as _asyncio
+            def _pg_probe():
+                _c = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT,
+                                       database=POSTGRES_DB, user=POSTGRES_USER,
+                                       password=POSTGRES_PASSWORD, connect_timeout=2)
+                _c.close()
+                return True
+            db_ok = await _asyncio.to_thread(_pg_probe)
         except Exception:
             db_ok = False
 
@@ -656,22 +692,29 @@ async def root_redirect(request: Request):
 async def status_page(request: Request):
     """Serve the status page with control panel.
 
-    The HTML itself is served no-cache (always fresh), but the referenced
-    `/static/js/*.js` files are served by the StaticFiles mount which the
-    browser caches aggressively. After an MVE upgrade the fresh HTML would
-    keep loading a STALE cached JS (e.g. an audio.js without the Store
-    checkbox), which looked like "the feature didn't deploy". To fix it
-    permanently we rewrite each local static JS/CSS include to carry a
-    `?v=<app-version>` query string — the version changes every release, so
-    the browser is forced to refetch the JS whenever MVE is upgraded.
+    v4.0.70 — cache-buster is now fully dynamic. Prior code appended
+    `?v=<app-version>` only where the include had no query string; hardcoded
+    strings like `audio.js?v=4.0.67` in status.html slipped through unchanged
+    and pinned the browser to the stale JS after every version bump. Now the
+    regex STRIPS any existing `?v=...` and rewrites with the live APP_VERSION,
+    so a VERSION bump is the ONLY thing needed to bust caches. This also
+    covers vendor sub-directories (e.g. /static/vendor/label-studio-1.4.0/js/main.js)
+    that the old `/static/(js|css)/…` regex missed.
+
+    The HTML itself is served no-cache (always fresh).
     """
     import re
     try:
         with open("static/status.html", "r", encoding="utf-8") as f:
             html = f.read()
         ver = getattr(request.app, "version", None) or "dev"
-        # Append ?v=<ver> to local /static/js/*.js and /static/css/*.css includes.
-        html = re.sub(r'(/static/(?:js|css)/[\w\-./]+\.(?:js|css))"', rf'\1?v={ver}"', html)
+        # Any /static/**/*.{js,css} include — strip existing ?v=… and force the
+        # live version. Captures vendor sub-dirs, hyphens, dots in paths.
+        html = re.sub(
+            r'(/static/[^"\s?]+?\.(?:js|css))(?:\?v=[\w\.\-+]+)?',
+            rf'\1?v={ver}',
+            html,
+        )
         return HTMLResponse(content=html, headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
@@ -685,6 +728,28 @@ async def status_page(request: Request):
 # ---------------------------------------------------------------------------
 # GET /api/status - API status data
 # ---------------------------------------------------------------------------
+@router.get("/api/cold_queue")
+async def api_cold_queue(request: Request):
+    """4.0.66 — Offload the ColdDiskQueue lock-acquiring helpers to a worker
+    thread via asyncio.to_thread so the uvicorn event loop is never blocked
+    on `_cold_queue_disk._lock`. The 4.0.65 pass moved these calls OFF
+    /api/status but forgot that the dedicated endpoint still ran the sync
+    helpers on the loop thread — so any browser polling this endpoint would
+    still wedge the loop under queue-lock contention (which is heavy on
+    vteam12 because the Basler pushes 1280×960 @ 30fps and the hot queue
+    overflows into cold constantly)."""
+    try:
+        import asyncio
+        b, c = await asyncio.gather(
+            asyncio.to_thread(_cold_queue_bytes),
+            asyncio.to_thread(_cold_queue_count),
+        )
+        return JSONResponse(content={"bytes": b, "batches": c})
+    except Exception as e:
+        logger.warning(f"cold_queue status failed: {e}")
+        return JSONResponse(content={"bytes": 0, "batches": 0}, status_code=200)
+
+
 @router.get("/api/status")
 async def api_status(request: Request):
     """API endpoint for real-time status data."""
@@ -693,6 +758,42 @@ async def api_status(request: Request):
 
         return JSONResponse(content={
             "encoder_value": watcher.encoder_value if watcher else 0,
+            # 4.0.54 — Length = encoder counts since the current shipment began.
+            # RAW delta (encoder_value - shipment_start_encoder) — no clamp,
+            # so a belt reversal shows a negative value the operator can act
+            # on instead of a misleading "0". Zero when no active shipment.
+            "length": (
+                int(watcher.encoder_value or 0) - int(getattr(watcher, "shipment_start_encoder", 0) or 0)
+                if (watcher and str(getattr(watcher, "shipment", "no_shipment")) not in ("", "no_shipment"))
+                else 0
+            ),
+            # 4.0.65 — REMOVED cold_queue_bytes/batches from /api/status. Those
+            # helpers acquired the ColdDiskQueue lock, and the lock is held by
+            # `put()` (called from detection worker threads at ~100 Hz) while
+            # it does stat()/remove() disk I/O. Under high queue load /api/status
+            # ended up blocking on that lock → uvicorn event loop stalled →
+            # every other endpoint timed out → the whole UI looked dead.
+            # Diagnostic values still available on the dedicated /api/cold_queue
+            # endpoint which is polled infrequently, not on every SSE tick.
+            # 4.0.62 — surface any Pro (Basler / USB3 Vision) cameras that are
+            # persisted in config but NOT currently in the running set. The
+            # reconciler in main.py retries every 60s; the UI can badge this
+            # on the Dashboard so the operator sees "cam_3 configured but not
+            # present" instead of it silently vanishing.
+            "missing_pro_cameras": (
+                [
+                    {
+                        "cam_id": cid,
+                        "name": (cfg.get("name") if isinstance(cfg, dict) else None),
+                        "model": (cfg.get("model") if isinstance(cfg, dict) else None),
+                        "serial": (cfg.get("serial") if isinstance(cfg, dict) else None),
+                        "source": (cfg.get("source") if isinstance(cfg, dict) else None),
+                    }
+                    for cid, cfg in (getattr(watcher, "_expected_pro_cams", {}) or {}).items()
+                    if cid not in (getattr(watcher, "cameras", {}) or {})
+                ]
+                if watcher else []
+            ),
             "pps": getattr(watcher, "pulses_per_second", 0) if watcher else 0,
             "ppm": getattr(watcher, "pulses_per_minute", 0) if watcher else 0,
             "downtime_seconds": getattr(watcher, "downtime_seconds", 0) if watcher else 0,
@@ -756,8 +857,22 @@ async def status_stream(request: Request):
         _db_ok = False
         _db_check_time = 0
 
-        # Re-read inference buffers from Redis each iteration (cross-process safe)
-        while True:
+        # 4.0.66 — Create ONE Redis client for the lifetime of this SSE
+        # generator. Prior code built `Redis("redis", 6379, ...)` inside the
+        # 100ms loop and never closed it — every tick leaked a ConnectionPool
+        # object + a socket. On kiancord/khoy Python's GC reclaims them fast
+        # enough that nothing breaks. On vteam12 the Basler Convert() loop
+        # holds the GIL near-continuously, so GC never runs — abandoned pools
+        # + FDs pile up, threadpool workers wedge in socket.connect(), and
+        # every subsequent async endpoint stops responding. Same failure
+        # signature the operator reported.
+        redis_conn = Redis(
+            "redis", 6379, db=cfg_module.REDIS_DB,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+        try:
+          # Re-read inference buffers from Redis each iteration (cross-process safe)
+          while True:
             try:
                 # Periodic DB health check (every 30s)
                 if time.time() - _db_check_time > 30:
@@ -774,7 +889,6 @@ async def status_stream(request: Request):
                 inf_frame_timestamps = []
                 cap_frame_timestamps = []
                 try:
-                    redis_conn = Redis("redis", 6379, db=cfg_module.REDIS_DB)
                     times_raw = redis_conn.lrange("inference_times", 0, -1)
                     inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
                     inf_raw = redis_conn.lrange("inf_frame_timestamps", 0, -1)
@@ -794,6 +908,15 @@ async def status_stream(request: Request):
                 # Build current status data
                 current_data = {
                     "encoder_value": watcher.encoder_value if watcher else 0,
+                    # 4.0.56 — mirror the /api/status Length field on the SSE
+                    # channel too. The dashboard reads from SSE, not from
+                    # polling /api/status, so without this the Length tile
+                    # stays at its default and looks broken.
+                    "length": (
+                        int(watcher.encoder_value or 0) - int(getattr(watcher, "shipment_start_encoder", 0) or 0)
+                        if (watcher and str(getattr(watcher, "shipment", "no_shipment")) not in ("", "no_shipment"))
+                        else 0
+                    ),
                     "pps": getattr(watcher, "pulses_per_second", 0) if watcher else 0,
                     "ppm": getattr(watcher, "pulses_per_minute", 0) if watcher else 0,
                     "downtime_seconds": getattr(watcher, "downtime_seconds", 0) if watcher else 0,
@@ -892,6 +1015,16 @@ async def status_stream(request: Request):
             except Exception as e:
                 logger.error(f"SSE status stream error: {e}")
                 time.sleep(1)
+        finally:
+            # 4.0.66 — release the Redis client + its socket + connection pool
+            # when the SSE stream closes (client disconnect, container shutdown,
+            # exception unrolls). Without this the socket + pool stay pinned
+            # to the abandoned generator until GC eventually reaps them —
+            # which never happens on vteam12 while the Basler GIL storm runs.
+            try:
+                redis_conn.close()
+            except Exception:
+                pass
 
     return StreamingResponse(
         generate(),

@@ -231,6 +231,32 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
             import os as _os
             _os.makedirs(f"raw_images/{cur_ship}", exist_ok=True)
             settings_applied["current_shipment"] = cur_ship
+            # 4.0.54 — also restore the Length tile's baseline. Without this,
+            # the first render post-boot would show Length = encoder_value
+            # (since shipment_start_encoder defaults to 0), which reads as
+            # "the belt has moved by the entire lifetime encoder count for
+            # this shipment" — meaningless. If the config has no baseline
+            # (e.g. shipment predates 4.0.54), snapshot the current encoder
+            # value now so Length starts at 0 and counts forward. Persist
+            # that seed so we don't re-seed on every restart.
+            try:
+                if "shipment_start_encoder" in config:
+                    sse = int(config.get("shipment_start_encoder") or 0)
+                    watcher_inst.shipment_start_encoder = sse
+                    logger.info(f"[SHIPMENT-RESTORE] restored shipment_start_encoder: {sse}")
+                else:
+                    sse = int(getattr(watcher_inst, "encoder_value", 0) or 0)
+                    watcher_inst.shipment_start_encoder = sse
+                    try:
+                        from config import load_service_config, save_service_config
+                        _svc = load_service_config() or {}
+                        _svc["shipment_start_encoder"] = sse
+                        save_service_config(_svc)
+                    except Exception as _pe:
+                        logger.warning(f"[SHIPMENT-RESTORE] failed to persist seed shipment_start_encoder: {_pe}")
+                    logger.info(f"[SHIPMENT-RESTORE] seeded shipment_start_encoder={sse} (no prior value in config)")
+            except (TypeError, ValueError) as _e:
+                logger.warning(f"[SHIPMENT-RESTORE] shipment_start_encoder in config not an int: {_e}")
             logger.info(f"[SHIPMENT-RESTORE] restored active shipment from service_config: {cur_ship}")
         except Exception as _e:
             logger.warning(f"[SHIPMENT-RESTORE] failed to restore current_shipment on boot: {_e}")
@@ -375,6 +401,17 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
                 if not cam_url:
                     logger.warning(f"  Skipping pro camera {cam_name}: missing source")
                     continue
+                # 4.0.62 — record every persisted pro cam we're TRYING to bring
+                # up so the periodic reconciler can retry on failure. Anything
+                # left in `_expected_pro_cams` after boot but NOT in the running
+                # `cameras` set is a candidate for retry + surfaced to /api/status
+                # so the operator sees "cam_3 configured but not present" instead
+                # of it silently vanishing (which is exactly what happened on
+                # vteam12 when the Basler dart's firmware locked and pypylon
+                # returned 0 devices — no error, no log, camera just gone).
+                if not hasattr(watcher_inst, "_expected_pro_cams"):
+                    watcher_inst._expected_pro_cams = {}
+                watcher_inst._expected_pro_cams[cam_id] = dict(cam_config)
                 try:
                     logger.info(f"  Initializing pro camera {cam_id}: {cam_name} @ {cam_url}")
                     cam = CameraBuffer(
@@ -405,7 +442,17 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
                     cameras_loaded += 1
                     logger.info(f"  ✓ Pro camera {cam_id} initialized: {cam_name} (success={cam.success})")
                 except Exception as e:
-                    logger.error(f"  ✗ Failed to initialize pro camera {cam_id}: {e}")
+                    # 4.0.62 — LOUD failure. Previously this was a warning
+                    # buried in the boot log; now every retry cycle also logs
+                    # so an operator following logs can tell the camera is
+                    # actively missing (not just "was skipped once at boot").
+                    logger.error(
+                        f"  ✗ Pro camera {cam_id} ({cam_name}, serial={cam_config.get('serial')}) "
+                        f"could NOT be initialized at boot: {e}. It will be surfaced under "
+                        f"/api/status.missing_pro_cameras and retried by the reconciler every "
+                        f"60s until it appears — check that the physical device is powered "
+                        f"and reseat the USB cable if the green LED is blinking without a claim."
+                    )
                     import traceback
                     logger.error(traceback.format_exc())
 
@@ -727,8 +774,11 @@ from services.watcher import init_queues
 init_queues(_num_cameras, cfg_module.EJECTOR_OFFSET, cfg_module.EJECTOR_ENABLED)
 
 # Flush stale cold queue frames from previous run (no point processing old frames)
+# 4.0.64 — also start the periodic janitor so stale frames don't accumulate
+# between reboots. Interval and stale-age come from env vars via the queue itself.
 from services.watcher import _cold_queue_disk
-_cold_queue_disk.flush_stale(max_age_seconds=600)
+_cold_queue_disk.flush_stale()
+_cold_queue_disk.start_janitor()
 
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
@@ -1176,6 +1226,133 @@ def _autoscaler():
 
 threading.Thread(target=_autoscaler, daemon=True, name="autoscaler").start()
 logger.info(f"Autoscaler started — first check in 30s, then every {AUTOSCALE_INTERVAL}s")
+
+
+# 4.0.62 — Pro camera reconciler. On boot we record every persisted
+# `type="pro"` camera as EXPECTED (main.py:394-457). If a Basler / USB3 Vision
+# device's firmware locks (green LED blinking with no libusb claim) or the
+# container was restarted while the hub was in mid-renegotiation, pypylon
+# returns 0 devices at boot and the camera silently disappears from the running
+# set. Prior versions of MVE just swallowed that failure: the operator saw
+# cam_3 in the persisted config and the discovery panel, but /api/cameras
+# didn't have it, and there was no log after the initial WARN.
+#
+# This reconciler runs every 60s and, for every expected pro cam that ISN'T
+# currently in `watcher.cameras`, RE-runs the boot logic (CameraBuffer(basler://
+# <serial>) + apply saved props). If pypylon has recovered visibility (e.g.
+# because the operator reseated the cable), the camera reappears with zero
+# operator action. If it hasn't, the cycle logs a WARN so the operator can see
+# how long the camera has been missing.
+PRO_RECONCILE_INTERVAL = 60
+def _try_usb_soft_reset_for_serial(target_serial):
+    """4.0.62 — best-effort software recovery escalation for a wedged USB3
+    Vision device. Walk /sys/bus/usb/devices, find any Basler device (VID
+    0x2676), and toggle its `authorized` flag. This forces the kernel to
+    re-enumerate the port without a physical reseat. Recovers the softer
+    firmware-detach state (device visible on lsusb but pylon returns 0);
+    won't rescue a fully-wedged VBUS-locked state.
+
+    We match by VID rather than by serial because reading the serial from
+    sysfs requires the descriptor to be readable, which is exactly what
+    fails in the detach state.
+    """
+    try:
+        import glob as _g
+        for vpath in _g.glob("/sys/bus/usb/devices/*/idVendor"):
+            try:
+                with open(vpath) as _f:
+                    if _f.read().strip().lower() != "2676":
+                        continue
+                dev_dir = os.path.dirname(vpath)
+                port_name = os.path.basename(dev_dir)
+                auth_path = os.path.join(dev_dir, "authorized")
+                if not os.path.exists(auth_path):
+                    continue
+                logger.warning(
+                    f"[ProReconcile] Soft-reset attempt on Basler USB port "
+                    f"{port_name} (searching for serial={target_serial})"
+                )
+                with open(auth_path, "w") as _af:
+                    _af.write("0\n")
+                time.sleep(1.0)
+                with open(auth_path, "w") as _af:
+                    _af.write("1\n")
+                time.sleep(3.0)  # give the device time to re-enumerate
+                return True
+            except OSError as _oe:
+                logger.debug(f"[ProReconcile] soft-reset on {vpath}: {_oe}")
+    except Exception as _e:
+        logger.debug(f"[ProReconcile] soft-reset search failed: {_e}")
+    return False
+
+
+def _pro_camera_reconciler():
+    time.sleep(20)  # let boot finish before the first reconcile
+    consecutive_failures = {}
+    while True:
+        try:
+            expected = getattr(watcher, "_expected_pro_cams", {}) or {}
+            running_ids = set(getattr(watcher, "cameras", {}).keys())
+            missing = {cid: cfg for cid, cfg in expected.items() if cid not in running_ids}
+            if missing:
+                for cam_id, cam_config in missing.items():
+                    cam_url = cam_config.get("source") or cam_config.get("url")
+                    cam_name = cam_config.get("name", f"Pro Camera {cam_id}")
+                    if not cam_url:
+                        continue
+                    consecutive_failures[cam_id] = consecutive_failures.get(cam_id, 0) + 1
+                    logger.warning(
+                        f"[ProReconcile] cam_{cam_id} ({cam_name}, serial="
+                        f"{cam_config.get('serial')}) still missing (attempt "
+                        f"{consecutive_failures[cam_id]}) — retrying enumeration"
+                    )
+                    # After 2 failed plain retries, escalate to a soft USB
+                    # reset (authorized flag toggle) before the next attempt.
+                    # Rate-limited: only every 3rd cycle so we don't hammer
+                    # the port. Skipped entirely for non-root or when sysfs
+                    # is read-only (harmless best-effort).
+                    if (consecutive_failures[cam_id] >= 3 and
+                        consecutive_failures[cam_id] % 3 == 0):
+                        _try_usb_soft_reset_for_serial(cam_config.get("serial"))
+                    try:
+                        cam = CameraBuffer(
+                            cam_url,
+                            exposure=cam_config.get("exposure", 5000),
+                            gain=cam_config.get("gain", 0),
+                            fps=cam_config.get("fps", 30),
+                            roi_config=cam_config if cam_config.get("roi_enabled") else None,
+                            auto_exposure=cam_config.get("auto_exposure", False),
+                        )
+                        watcher.cameras[cam_id] = cam
+                        while len(watcher.camera_paths) < cam_id:
+                            watcher.camera_paths.append(None)
+                        watcher.camera_paths[cam_id - 1] = cam_url
+                        if not hasattr(watcher, 'camera_metadata'):
+                            watcher.camera_metadata = {}
+                        watcher.camera_metadata[cam_id] = {
+                            "name":   cam_name,
+                            "type":   "pro",
+                            "model":  cam_config.get("model"),
+                            "serial": cam_config.get("serial"),
+                            "source": cam_url,
+                        }
+                        apply_camera_config_from_saved(cam, cam_config)
+                        consecutive_failures.pop(cam_id, None)
+                        logger.info(
+                            f"[ProReconcile] ✓ cam_{cam_id} ({cam_name}) recovered — "
+                            f"back in the running set after "
+                            f"{consecutive_failures.get(cam_id, 0) + 1} attempts"
+                        )
+                    except Exception as _pe:
+                        # Keep the loop quiet on repeated failure — 1 WARN
+                        # above per cycle already tells the operator.
+                        logger.debug(f"[ProReconcile] cam_{cam_id} retry failed: {_pe}")
+        except Exception as e:
+            logger.error(f"[ProReconcile] loop error: {e}")
+        time.sleep(PRO_RECONCILE_INTERVAL)
+
+threading.Thread(target=_pro_camera_reconciler, daemon=True, name="pro-cam-reconciler").start()
+logger.info(f"Pro camera reconciler started — every {PRO_RECONCILE_INTERVAL}s")
 
 
 # Main thread - keep application alive
