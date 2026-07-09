@@ -100,6 +100,10 @@
                                     <div style="font-size: 10px; font-weight: 700; color: var(--text-primary);" id="encoder-value">-</div>
                                 </div>
                                 <div>
+                                    <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="length">Length</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_length">Encoder counts since the current shipment began. Zero when no active shipment. Negative if the belt is reversing.</span></span></div>
+                                    <div style="font-size: 10px; font-weight: 700; color: var(--text-primary);" id="length-value">-</div>
+                                </div>
+                                <div>
                                     <div style="font-size: 8px; color: var(--text-secondary);"><span data-i18n="speed">Speed</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_speed">Production speed in pulses per minute (PPM).</span></span></div>
                                     <div style="font-size: 9px; font-weight: 600; color: var(--text-primary);" id="speed-value">-</div>
                                 </div>
@@ -983,6 +987,10 @@
                                    style="vertical-align:middle; width:120px;">
                             <span id="insight-min-conf-val" style="font-size:12px; color:var(--text-primary); min-width:32px; display:inline-block;">0%</span>
                             <button onclick="exportInsightCSV()" title="Download all detections for the selected shipment + window as CSV" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(34,197,94,0.25); color:#86efac; border:1px solid rgba(34,197,94,0.5); border-radius:4px;">⬇ CSV</button>
+                            <label for="insight-unwind" title="Invert the length column: max_encoder − encoder → meters left to unwind (0 = full roll)" style="font-size:11px; color:var(--text-secondary); margin-left:4px; user-select:none; cursor:pointer;">
+                                <input type="checkbox" id="insight-unwind" style="vertical-align:middle; margin-right:3px;">
+                                <span data-i18n="unwind_mode">Unwind</span>
+                            </label>
                             <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;" data-i18n="hover_size">Hover size:</span>
                             <select id="hover-preview-size" onchange="setHoverPreviewSize(this.value)" title="Size of the floating image preview shown when hovering a chart dot" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
                                 <option value="small" data-i18n="size_small">Small (420×280)</option>

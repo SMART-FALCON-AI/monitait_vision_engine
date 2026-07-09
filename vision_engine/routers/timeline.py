@@ -179,7 +179,7 @@ def generate_detection_stream():
 
 
 @router.get("/api/latest_detections")
-async def get_latest_detections(request: Request):
+def get_latest_detections(request: Request):
     """Get the most recent detection events for audio notification (polling fallback)."""
     try:
         watcher = request.app.state.watcher_instance
@@ -207,7 +207,7 @@ async def get_latest_detections(request: Request):
 
 
 @router.get("/timeline_feed")
-async def timeline_feed(request: Request):
+def timeline_feed(request: Request):
     """MJPEG stream showing camera timeline (history view).
 
     Shows a grid: columns = cameras, rows = time (newest at bottom).
@@ -332,7 +332,7 @@ def get_timeline_composite(request: Request):
 
 
 @router.get("/timeline_image")
-async def timeline_image(request: Request, page: int = 0):
+def timeline_image(request: Request, page: int = 0):
     """Get timeline frames for a specific page. Horizontal = time, vertical = cameras.
 
     Args:
@@ -556,7 +556,7 @@ async def timeline_image(request: Request, page: int = 0):
 
 
 @router.get("/api/timeline_count")
-async def timeline_count(request: Request):
+def timeline_count(request: Request):
     """Get the total number of frames and pages in the timeline (across all cameras)."""
     try:
         # Get configuration
@@ -708,7 +708,7 @@ def _compute_conf_baselines():
 
 
 @router.get("/api/conf_baselines")
-async def get_conf_baselines():
+def get_conf_baselines():
     """Per-class confidence baselines (p50, p95, n) from last 7 days of stored
     detections. Cached for 1 hour. Used by the Process tab to display a
     read-only badge under each class card showing 'normal range'."""
@@ -716,14 +716,14 @@ async def get_conf_baselines():
 
 
 @router.post("/api/conf_baselines/recompute")
-async def recompute_conf_baselines():
+def recompute_conf_baselines():
     """Force-invalidate the baseline cache (used by admin/dev tools)."""
     _baseline_cache["computed_at"] = 0.0
     return JSONResponse(content={"baselines": _compute_conf_baselines()})
 
 
 @router.get("/api/color_drift")
-async def get_color_drift(window: str = "7d"):
+def get_color_drift(window: str = "7d"):
     """3.22.4 — Per-class CIELAB color stats (absolute L*, a*, b* percentiles).
 
     Replaces the ΔE drift readout that 3.22.2 originally shipped. Absolute
@@ -884,7 +884,7 @@ async def get_color_drift(window: str = "7d"):
 
 
 @router.get("/api/area_stats")
-async def get_area_stats(window: str = "7d"):
+def get_area_stats(window: str = "7d"):
     """3.22.3 — Per-class bbox-area percentiles over the requested window.
 
     Computed straight from the stored xmin/xmax/ymin/ymax — no per-class
@@ -996,7 +996,7 @@ async def get_area_stats(window: str = "7d"):
 
 
 @router.get("/api/active_classes")
-async def get_active_classes(window: str = "1h"):
+def get_active_classes(window: str = "1h"):
     """Classes with at least one detection in the recent window — used by the
     Process tab "Show only active" filter (3.21.24).
 
@@ -1336,7 +1336,7 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
 # is ~1e-4 — the formula 100*(1-impact_per_unit) bottoms out at 99.99. The
 # operator runs this once per site; the resulting scale_factor stays in config.
 @router.post("/api/score/calibrate")
-async def calibrate_score_scale(payload: dict = None):
+def calibrate_score_scale(payload: dict = None):
     """Auto-tune `score_scale_factor` against recent shipment data.
 
     Body (all optional):
@@ -1571,7 +1571,7 @@ async def calibrate_score_scale(payload: dict = None):
 
 
 @router.get("/api/shipment_quality_score")
-async def shipment_quality_score(request: Request, shipment: str = "", window: str = "24h"):
+def shipment_quality_score(request: Request, shipment: str = "", window: str = "24h"):
     """3.21.14 — Shipment-level Quality Score with encoder-span normalization.
 
     The score is now length-aware: `impact_per_unit = impact_total / encoder_span`,
@@ -1621,7 +1621,7 @@ def _verdict_color(verdict: str):
 
 
 @router.get("/api/shipment_quality_score/report.pdf")
-async def shipment_quality_score_report(request: Request, shipment: str = "", window: str = "24h"):
+def shipment_quality_score_report(request: Request, shipment: str = "", window: str = "24h"):
     """Render the same quality-score payload as a printable PDF.
 
     Streams `application/pdf` straight from ReportLab — no temp files.
@@ -1840,7 +1840,7 @@ async def shipment_quality_score_report(request: Request, shipment: str = "", wi
 
 
 @router.get("/api/shipment_quality_score/trend")
-async def shipment_quality_score_trend(
+def shipment_quality_score_trend(
     request: Request, shipment: str = "", window: str = "24h", buckets: int = 12,
 ):
     """3.21.16 — Time-bucketed impact-per-unit timeline + drift indicator.
@@ -2037,7 +2037,7 @@ async def shipment_quality_score_trend(
 from datetime import timedelta as _td   # 3.25.4 — used by /api/quality/heatmap
 
 @router.get("/api/quality/shipments")
-async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
+def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
     """3.25.4 — recent shipments + their quality scores for a per-shipment bar chart.
 
     Returns up to `n` shipments started within `window`, each with its
@@ -2125,7 +2125,7 @@ async def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
 # 3.26.0 — single-frame detection lookup, used by the LSF annotation modal so it
 # can pre-fill EVERY box on that frame (not just the dot the operator clicked).
 @router.get("/api/frame_detections")
-async def frame_detections(image_path: str = "", request: Request = None):
+def frame_detections(image_path: str = "", request: Request = None):
     """Return all stored detections for one frame.
 
     Output:
@@ -2201,7 +2201,7 @@ async def frame_detections(image_path: str = "", request: Request = None):
 
 
 @router.get("/api/quality/ejection_axis")
-async def quality_ejection_axis(
+def quality_ejection_axis(
     request: Request,
     axis: str = "time",
     window: str = "24h",
@@ -2388,7 +2388,7 @@ async def quality_ejection_axis(
 
 
 @router.get("/api/quality/heatmap")
-async def quality_heatmap(
+def quality_heatmap(
     request: Request,
     axis: str = "time",
     window: str = "24h",
@@ -2604,7 +2604,7 @@ async def quality_heatmap(
 
 
 @router.get("/api/detection_stats")
-async def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0):
+def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0):
     """Detection-quality insight for the Charts tab embedded panel.
 
     Aggregates the `inference_results` hypertable into:
@@ -2730,7 +2730,7 @@ async def detection_stats(request: Request, window: str = "1h", min_conf: float 
 
 
 @router.get("/api/detection_charts")
-async def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -3376,7 +3376,7 @@ async def detection_charts(request: Request, window: str = "24h", shipment: str 
 
 
 @router.get("/api/ejection_stats")
-async def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
+def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
     """Ejection analytics for the Charts tab (3.17.0).
 
     Reads the ejection_events table (one row per triggered procedure with
@@ -3464,7 +3464,7 @@ async def ejection_stats(request: Request, window: str = "24h", shipment: str = 
 
 
 @router.get("/api/production_stats")
-async def production_stats(request: Request, window: str = "24h", shipment: str = ""):
+def production_stats(request: Request, window: str = "24h", shipment: str = ""):
     """Line KPIs from production_metrics (3.18.0).
 
     OKC/NGC are *cumulative* hardware counters from the PLC (serial KV: OKC, NGC,
@@ -3600,7 +3600,7 @@ async def production_stats(request: Request, window: str = "24h", shipment: str 
 
 
 @router.get("/api/quality_charts")
-async def quality_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
+def quality_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
     """Defect diagnostics from inference_results (3.18.0).
 
     Single expansion pass returns:
@@ -3704,7 +3704,7 @@ async def quality_charts(request: Request, window: str = "24h", shipment: str = 
 
 
 @router.post("/api/timeline_clear")
-async def timeline_clear(request: Request):
+def timeline_clear(request: Request):
     """Clear all frames from the timeline buffer."""
     try:
         redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
@@ -3720,7 +3720,7 @@ async def timeline_clear(request: Request):
 
 
 @router.get("/api/timeline_config")
-async def get_timeline_config(request: Request):
+def get_timeline_config(request: Request):
     """Return current in-memory timeline configuration."""
     config = getattr(request.app.state, 'timeline_config', {})
     return JSONResponse(content=config)
@@ -3795,7 +3795,7 @@ async def update_timeline_config(request: Request):
 
 
 @router.get("/api/recent_detections")
-async def recent_detections(request: Request, window: str = "24h", shipment: str = "",
+def recent_detections(request: Request, window: str = "24h", shipment: str = "",
                             cls: str = "", limit: int = 24):
     """Recent stored detections + image paths for the chart click-through gallery (3.21.0).
 
@@ -3876,7 +3876,7 @@ async def recent_detections(request: Request, window: str = "24h", shipment: str
 
 
 @router.get("/api/export_csv")
-async def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, unwind: bool = False):
+def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, unwind: bool = False):
     """Stream a CSV export of stored detections for a shipment+window (3.21.3).
 
     One row per detection (inference_results expanded). Honors the Charts tab's
@@ -4019,7 +4019,7 @@ async def export_csv(request: Request, window: str = "24h", shipment: str = "", 
 
 
 @router.get("/api/raw_image/{path:path}")
-async def serve_raw_image(path: str):
+def serve_raw_image(path: str):
     """Serve a raw image file from the raw_images directory."""
     safe_path = pathlib.Path("raw_images") / path
     try:
@@ -4053,7 +4053,7 @@ async def serve_raw_image(path: str):
 # changes (mtime in key) or when a class is hidden/shown (show in key).
 # =============================================================================
 @router.get("/api/render_detected/{path:path}")
-async def render_detected(path: str, show: str = "", download: int = 0):
+def render_detected(path: str, show: str = "", download: int = 0):
     """Render the raw frame at `path` with its stored bounding boxes drawn on top.
 
     Query:
@@ -4219,7 +4219,7 @@ async def render_detected(path: str, show: str = "", download: int = 0):
 
 
 @router.get("/api/timeline_frame")
-async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int = 0, path: str = ""):
+def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int = 0, path: str = ""):
     """Serve full-res raw image with bboxes drawn from timeline detection data.
 
     If `path` is provided, look up the exact frame by d_path (stable across
@@ -4322,7 +4322,7 @@ async def timeline_frame(request: Request, cam: int = 1, col: int = 0, page: int
 
 
 @router.get("/api/timeline_meta")
-async def timeline_meta(request: Request, page: int = 0):
+def timeline_meta(request: Request, page: int = 0):
     """Get metadata for each column in the timeline composite (used by frontend click handler)."""
     try:
         try:
@@ -4446,7 +4446,7 @@ async def timeline_meta(request: Request, page: int = 0):
 
 
 @router.get("/timeline_slideshow")
-async def timeline_slideshow():
+def timeline_slideshow():
     """Timeline slideshow page with pan/zoom controls (inspired by FabriQC slideshow service)."""
     html_content = """
 <!DOCTYPE html>
@@ -4564,7 +4564,7 @@ async def timeline_slideshow():
 
 
 @router.get("/latest_detection_image")
-async def latest_detection_image():
+def latest_detection_image():
     """Serve the latest image with detection bounding boxes."""
     try:
         import glob
@@ -4592,7 +4592,7 @@ async def latest_detection_image():
 
 
 @router.get("/detection_stream")
-async def detection_stream():
+def detection_stream():
     """Serve a continuous MJPEG stream of detection results."""
     return StreamingResponse(
         generate_detection_stream(),

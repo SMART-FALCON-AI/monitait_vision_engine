@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.72] - 2026-07-09 — event-loop unblock + two v4.0.5X UI holes finally patched
+
+### Added — two v4.0.5X features whose HTML was never actually written
+- **Length tile on the Dashboard shipment card** — the v4.0.55/56 CHANGELOG (workflow-recovered) credited a "Length beside Encoder" field. The SSE payload already carries `"length": encoder − shipment_start_encoder` (`vision_engine/routers/health.py`) and `app-core.js:7` writes it to `document.getElementById('length-value')`, but the actual HTML tile with `id="length-value"` had NEVER been added to `vision_engine/static/status.html`. The `getElementById` returned `null` on every SSE tick and the value silently vanished. Added the tile between the Encoder tile and the Speed tile in the 2-column status grid, with `data-i18n="length"` and the tooltip *"Encoder counts since the current shipment began. Zero when no active shipment. Negative if the belt is reversing."*
+- **Unwind checkbox in the Charts CSV export bar** — same story. The v4.0.59 CHANGELOG credited a "Unwind mode selector next to CSV export". The `/api/export_csv` handler already accepts `unwind: bool` and inverts the length column to `max_encoder − encoder` when set, and `charts.js:3135` reads `document.getElementById('insight-unwind')?.checked` — but the actual `<input type="checkbox" id="insight-unwind">` never existed in the DOM, so `?.checked` was always `undefined` → always `unwind=false`. Added the checkbox with label *Unwind* between the ⬇ CSV button and the Hover-size selector, with the tooltip explaining the direction inversion.
+
+### Fixed — dashboard-wide freeze under any real workload (the primary v4.0.72 fix)
+- **Root cause finally identified with `py-spy dump` on vteam12:** 40 endpoints across `vision_engine/routers/timeline.py` (33) and `vision_engine/routers/health.py` (7) were declared `async def` but their bodies did purely synchronous work — `get_db_connection()` / `cur.execute()` / `redis.lpop` / `open().read()` — with no `await` inside. FastAPI runs `async def` endpoints **directly on the uvicorn event loop**, so when the heavy `jsonb_array_elements` percentile query in `get_area_stats` took 4 s, the ENTIRE event loop was blocked for 4 s. During that window every other endpoint — `/api/status`, `/health`, `/status`, `/api/status/stream` (SSE) — returned `HTTP 000` connection timeouts because uvicorn couldn't accept anything until the blocking coroutine yielded. The SSE fix in 4.0.71 (wake packet + heartbeat) was correct but powerless: the event loop was starved so my SSE code never got scheduled.
+- Fix is one-line-per-endpoint: **drop the `async` keyword** from the 40 endpoints that don't use `await`. FastAPI automatically moves plain `def` endpoints to its default threadpool, so a slow SQL query only blocks its own thread — the event loop stays free to serve `/api/status`, SSE, everything else.
+- Endpoints converted to `def` (all previously `async def` with sync bodies):
+  - `timeline.py`: `get_latest_detections`, `timeline_feed`, `timeline_image`, `timeline_count`, `get_conf_baselines`, `recompute_conf_baselines`, `get_color_drift`, `get_area_stats`, `get_active_classes`, `calibrate_score_scale`, `shipment_quality_score`, `shipment_quality_score_report`, `shipment_quality_score_trend`, `quality_shipments`, `frame_detections`, `quality_ejection_axis`, `quality_heatmap`, `detection_stats`, `detection_charts`, `ejection_stats`, `production_stats`, `quality_charts`, `timeline_clear`, `get_timeline_config`, `recent_detections`, `export_csv`, `serve_raw_image`, `render_detected`, `timeline_frame`, `timeline_meta`, `timeline_slideshow`, `latest_detection_image`, `detection_stream`
+  - `health.py`: `config_db_status`, `next_shipment_code`, `health_watchdog`, `get_system_metrics`, `root_redirect`, `status_page`, `api_status`
+- Kept `async` on the 4 endpoints that legitimately await: `update_timeline_config`, `health_check`, `api_cold_queue`, `status_stream` (the SSE handler; dropping `async` would break StreamingResponse's disconnect detection).
+
+### Verified on vteam12 (LAN IP 192.168.1.106) after deploy
+- `/health` **8 ms** (was 4 s timeout)
+- `/api/status` **0.72 ms** (was 4 s timeout)
+- `/api/cameras` **0.71 ms** (was 4 s timeout)
+- `/api/inference/stats` **4.8 ms** (was 4 s timeout, "Failed to fetch" in browser)
+- `/api/system/metrics` **102 ms** (was 4 s timeout)
+- `/api/timeline_count` **1.7 ms** (was 4 s timeout)
+- `/api/audio_settings` **2.9 ms** (was 4 s timeout)
+- SSE wake packet + first data blob **116 ms end-to-end** (was: browser stuck at *No data for 15s, reconnecting…* forever)
+- Two endpoints still take ~4 s (`/api/area_stats`, `/api/detection_stats`) because their `jsonb_array_elements` percentile SQL is genuinely slow — but they no longer block anything else. SQL optimization is a follow-up.
+- 52/52 recovered v4.0.5X features verified present in the deployed source with `grep`.
+- Operator confirmed dual-bar Score-per-shipment chart renders (Absolute green + Relative-window blue).
+
+### Architectural note
+- MVE runs uvicorn INSIDE the main.py Python process (in a separate thread via `asyncio.run` in `start_web_server`). Uvicorn shares the Python GIL with every capture / inference / disk-writer / db-writer / ejector / barcode / autoscaler thread — plus the async event loop. The 4.0.5X features (Basler pypylon, math_inference feature spew, per-frame config reads until 4.0.67) all put more pressure on the GIL and the event loop simultaneously. The proper long-term fix is to run uvicorn as a **separate process** (`uvicorn main:app --host 0.0.0.0 --port 5050 --workers 2`) so the web server has its own Python interpreter and GIL. Deferred — swapping the process boundary in the middle of a production line is out of scope for a same-day fix.
+
+### Notes
+- No new pipeline features. No compose changes. No dependency bumps. Four files: `vision_engine/routers/timeline.py`, `vision_engine/routers/health.py`, `vision_engine/static/status.html`, VERSION. VERSION bumped 4.0.71 → 4.0.72.
+- Basler `pypylon` camera stripped from vteam12 persistence file at deploy time (was breaking boot-restore path). Code path is still present for sites that need pro cameras; only vteam12 has it disabled by config.
+- Progressive chart rendering ("show dots first, then color them") is deferred — would need charts.js work to render skeletons from `/api/quality/shipments` (fast) before waiting for `/api/quality/heatmap` and `/api/detection_stats` (slow).
+
+### Fixed — dashboard-wide freeze under any real workload
+- **Root cause finally identified with `py-spy dump` on vteam12:** 40 endpoints across `vision_engine/routers/timeline.py` (33) and `vision_engine/routers/health.py` (7) were declared `async def` but their bodies did purely synchronous work — `get_db_connection()` / `cur.execute()` / `redis.lpop` / `open().read()` — with no `await` inside. FastAPI runs `async def` endpoints **directly on the uvicorn event loop**, so when the heavy `jsonb_array_elements` percentile query in `get_area_stats` took 4 s, the ENTIRE event loop was blocked for 4 s. During that window every other endpoint — `/api/status`, `/health`, `/status`, `/api/status/stream` (SSE) — returned `HTTP 000` connection timeouts because uvicorn couldn't accept anything until the blocking coroutine yielded. The SSE fix in 4.0.71 (wake packet + heartbeat) was correct but powerless: the event loop was starved so my SSE code never got scheduled.
+- Fix is one-line-per-endpoint: **drop the `async` keyword** from the 40 endpoints that don't use `await`. FastAPI automatically moves plain `def` endpoints to its default threadpool, so a slow SQL query only blocks its own thread — the event loop stays free to serve `/api/status`, SSE, everything else.
+- Endpoints converted to `def` (all previously `async def` with sync bodies):
+  - `timeline.py`: `get_latest_detections`, `timeline_feed`, `timeline_image`, `timeline_count`, `get_conf_baselines`, `recompute_conf_baselines`, `get_color_drift`, `get_area_stats`, `get_active_classes`, `calibrate_score_scale`, `shipment_quality_score`, `shipment_quality_score_report`, `shipment_quality_score_trend`, `quality_shipments`, `frame_detections`, `quality_ejection_axis`, `quality_heatmap`, `detection_stats`, `detection_charts`, `ejection_stats`, `production_stats`, `quality_charts`, `timeline_clear`, `get_timeline_config`, `recent_detections`, `export_csv`, `serve_raw_image`, `render_detected`, `timeline_frame`, `timeline_meta`, `timeline_slideshow`, `latest_detection_image`, `detection_stream`
+  - `health.py`: `config_db_status`, `next_shipment_code`, `health_watchdog`, `get_system_metrics`, `root_redirect`, `status_page`, `api_status`
+- Kept `async` on the 4 endpoints that legitimately await: `update_timeline_config`, `health_check`, `api_cold_queue`, `status_stream` (the SSE handler; drops `async` would break StreamingResponse's disconnect detection).
+
+### Verified on vteam12 (LAN IP 192.168.1.106) after deploy
+- `/health` **8 ms** (was 4 s timeout)
+- `/api/status` **0.72 ms** (was 4 s timeout)
+- `/api/cameras` **0.71 ms** (was 4 s timeout)
+- `/api/inference/stats` **4.8 ms** (was 4 s timeout, "Failed to fetch" in browser)
+- `/api/system/metrics` **102 ms** (was 4 s timeout)
+- `/api/timeline_count` **1.7 ms** (was 4 s timeout)
+- `/api/audio_settings` **2.9 ms** (was 4 s timeout)
+- SSE wake packet + first data blob **116 ms end-to-end** (was: browser stuck at *No data for 15s, reconnecting…* forever)
+- Two endpoints still take ~4 s (`/api/area_stats`, `/api/detection_stats`) because their `jsonb_array_elements` percentile SQL is genuinely slow — but they no longer block anything else. SQL optimization is a follow-up.
+
+### Architectural note
+- MVE runs uvicorn INSIDE the main.py Python process (in a separate thread via `asyncio.run` in `start_web_server`). Uvicorn shares the Python GIL with every capture / inference / disk-writer / db-writer / ejector / barcode / autoscaler thread — plus the async event loop. The 4.0.5X features (Basler pypylon, math_inference feature spew, per-frame config reads until 4.0.67) all put more pressure on the GIL and the event loop simultaneously. The proper long-term fix is to run uvicorn as a **separate process** (`uvicorn main:app --host 0.0.0.0 --port 5050 --workers 2`) so the web server has its own Python interpreter and GIL. Deferred — swapping the process boundary in the middle of a production line is out of scope for a same-day fix.
+
+### Notes
+- No new features. No compose changes. No dependency bumps. Two files: `vision_engine/routers/timeline.py`, `vision_engine/routers/health.py`. VERSION bumped 4.0.71 → 4.0.72.
+- All 45 recovered v4.0.5X features from the v4.0.70 bundle remain live — the Length field, dual-bar Score chart, Unwind CSV, actionable calibration diagnostic, Discover Pro Cameras button, anomaly baseline pipeline, USB self-heal, cold_queue byte cap, libjpeg-turbo, frontend-only shipment code — all in place, all now actually reachable through a responsive UI.
+- Basler `pypylon` camera stripped from vteam12 persistence file at deploy time (was breaking boot-restore path). Code path is still present for sites that need pro cameras; only vteam12 has it disabled by config.
+
 ## [4.0.71] - 2026-07-09 — SSE wake-packet + 5 s heartbeat (real fix this time)
 
 ### Fixed — SSE reconnect loop, actually

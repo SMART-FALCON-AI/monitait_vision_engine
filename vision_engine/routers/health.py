@@ -68,7 +68,7 @@ def _cold_queue_count() -> int:
 # GET /health
 # ---------------------------------------------------------------------------
 @router.get("/api/config/db_status")
-async def config_db_status():
+def config_db_status():
     """3.22.0 — show which storage backend is currently authoritative.
 
     Returns:
@@ -97,7 +97,7 @@ async def config_db_status():
 
 
 @router.get("/api/shipments/next_code")
-async def next_shipment_code(request: Request, local_date: str = ""):
+def next_shipment_code(request: Request, local_date: str = ""):
     """4.0.9 — shortened format `yymmddXXYYZZZ` (13 chars, was 15):
 
       * yymmdd    — date (2-digit year)
@@ -494,7 +494,7 @@ async def health_check(request: Request):
 # Marked-stopped shipments are fine to have zero frames.
 # ---------------------------------------------------------------------------
 @router.get("/api/health/watchdog")
-async def health_watchdog(request: Request, stale_seconds: int = 120):
+def health_watchdog(request: Request, stale_seconds: int = 120):
     """Frame-recency liveness for docker healthcheck + external monitoring.
 
     Returns:
@@ -627,7 +627,7 @@ async def health_watchdog(request: Request, stale_seconds: int = 120):
 # GET /api/system/metrics
 # ---------------------------------------------------------------------------
 @router.get("/api/system/metrics")
-async def get_system_metrics(request: Request):
+def get_system_metrics(request: Request):
     """Get system resource usage (CPU, RAM, Disk)."""
     try:
         # CPU usage
@@ -680,7 +680,7 @@ async def get_system_metrics(request: Request):
 # GET / - Redirect to /status
 # ---------------------------------------------------------------------------
 @router.get("/")
-async def root_redirect(request: Request):
+def root_redirect(request: Request):
     """Redirect root to status page."""
     return RedirectResponse(url="/status")
 
@@ -689,7 +689,7 @@ async def root_redirect(request: Request):
 # GET /status - Serve status HTML page
 # ---------------------------------------------------------------------------
 @router.get("/status")
-async def status_page(request: Request):
+def status_page(request: Request):
     """Serve the status page with control panel.
 
     v4.0.70 — cache-buster is now fully dynamic. Prior code appended
@@ -751,7 +751,7 @@ async def api_cold_queue(request: Request):
 
 
 @router.get("/api/status")
-async def api_status(request: Request):
+def api_status(request: Request):
     """API endpoint for real-time status data."""
     try:
         watcher = request.app.state.watcher_instance
