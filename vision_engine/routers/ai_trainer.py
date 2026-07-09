@@ -174,7 +174,7 @@ def _ensure_access_token(cfg: dict) -> tuple[Optional[str], Optional[str]]:
 
 
 @router.get("/api/ai_trainer/config")
-async def get_ai_trainer_config():
+def get_ai_trainer_config():
     """Return the base_url + task_id + boolean flags for has_api_key / has_credentials.
     Secret values (api_key, password, JWT) are never returned.
 
@@ -195,7 +195,7 @@ async def get_ai_trainer_config():
 
 
 @router.post("/api/ai_trainer/config")
-async def set_ai_trainer_config(payload: dict):
+def set_ai_trainer_config(payload: dict):
     """Persist url / task_id / api_key / email / password in service_config.ai_trainer.
 
     The api_key and password fields are optional in the payload — if omitted,
@@ -253,7 +253,7 @@ async def set_ai_trainer_config(payload: dict):
 
 
 @router.post("/api/ai_trainer/login_test")
-async def ai_trainer_login_test():
+def ai_trainer_login_test():
     """Try a fresh login using stored email+password. Reports success/failure
     without uploading anything — used by the UI to validate credentials."""
     cfg = _ai_trainer_cfg()
@@ -559,7 +559,7 @@ _LABELS_CACHE_TTL_SECONDS = 6 * 3600   # 6h soft TTL within a single container l
 
 
 @router.get("/api/ai_trainer/labels")
-async def get_trainer_labels(task_id: Optional[str] = None, force: int = 0):
+def get_trainer_labels(task_id: Optional[str] = None, force: int = 0):
     """Return the list of categories defined on the trainer for the configured
     (or overridden) task. Each item: {id, category_name, color}.
 
@@ -627,7 +627,7 @@ async def get_trainer_labels(task_id: Optional[str] = None, force: int = 0):
 
 
 @router.get("/api/ai_trainer/class_map")
-async def get_class_map():
+def get_class_map():
     """Return the operator's MVE-class → trainer-category-id mapping.
     Persisted under service_config.ai_trainer.class_map.
     """
@@ -712,7 +712,7 @@ async def update_annotation(ann_id: int, request: Request):
 
 
 @router.delete("/api/ai_trainer/annotate/{ann_id}")
-async def delete_annotation(ann_id: int):
+def delete_annotation(ann_id: int):
     """Delete an annotation by id."""
     cfg = _ai_trainer_cfg()
     access, auth_err = _ensure_access_token(cfg)

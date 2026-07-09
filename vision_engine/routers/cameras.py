@@ -33,7 +33,7 @@ class CameraDiscoveryRequest(BaseModel):
 # =============================================================================
 
 @router.get("/video_feed")
-async def video_feed(request: Request):
+def video_feed(request: Request):
     """Lightweight MJPEG stream from all cameras stacked vertically with detection overlays."""
     app_state = request.app.state
 
@@ -110,7 +110,7 @@ async def video_feed(request: Request):
 
 
 @router.get("/video_feed_detections")
-async def video_feed_detections(request: Request):
+def video_feed_detections(request: Request):
     """Video feed showing the LAST PROCESSED IMAGE with bounding boxes (Gradio inference results).
 
     This shows the actual processed images from raw_images/ directory with detections drawn on them,
@@ -164,7 +164,7 @@ async def video_feed_detections(request: Request):
 # =============================================================================
 
 @router.get("/api/cameras")
-async def get_cameras_status(request: Request):
+def get_cameras_status(request: Request):
     """Get status of all cameras (dynamically detected)."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -279,7 +279,7 @@ async def get_cameras_status(request: Request):
 
 
 @router.post("/api/cameras/rescan")
-async def rescan_cameras(request: Request):
+def rescan_cameras(request: Request):
     """Re-scan /dev/video* for USB cameras (hot-plug support).
 
     Detects newly plugged cameras and removes disconnected ones.
@@ -297,7 +297,7 @@ async def rescan_cameras(request: Request):
 
 
 @router.post("/api/camera/{camera_id}/restart")
-async def restart_camera(camera_id: int, request: Request):
+def restart_camera(camera_id: int, request: Request):
     """Restart a specific camera."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -401,7 +401,7 @@ async def update_camera_config(camera_id: int, request: Request):
 
 
 @router.get("/api/camera/{camera_id}/snapshot")
-async def get_camera_snapshot(camera_id: int, request: Request):
+def get_camera_snapshot(camera_id: int, request: Request):
     """Get current frame from a camera as JPEG."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -478,7 +478,7 @@ async def get_camera_stream(camera_id: int, request: Request):
 # =============================================================================
 
 @router.post("/api/cameras/config/save")
-async def save_all_config(request: Request):
+def save_all_config(request: Request):
     """Save all service configurations (cameras + settings) to data file."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -505,7 +505,7 @@ async def save_all_config(request: Request):
 
 
 @router.post("/api/cameras/config/load")
-async def load_all_config(request: Request):
+def load_all_config(request: Request):
     """Load all service configurations from data file and apply them."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -546,7 +546,7 @@ async def load_all_config(request: Request):
 
 
 @router.get("/api/cameras/config")
-async def get_saved_config(request: Request):
+def get_saved_config(request: Request):
     """Get the saved service configuration from data file."""
     try:
         config = load_service_config()
@@ -627,7 +627,7 @@ async def upload_config(request: Request):
 # =============================================================================
 
 @router.post("/api/cameras/discover")
-async def discover_cameras(request: Request, body: CameraDiscoveryRequest):
+def discover_cameras(request: Request, body: CameraDiscoveryRequest):
     """Quick scan to discover IP cameras on the network (no credentials needed).
 
     This scans for devices with camera ports open and returns all possible camera paths.
@@ -683,7 +683,7 @@ async def discover_cameras(request: Request, body: CameraDiscoveryRequest):
 # =============================================================================
 
 @router.get("/api/cameras/discover-pro")
-async def discover_pro_cameras(request: Request):
+def discover_pro_cameras(request: Request):
     """Enumerate industrial ("pro") cameras attached to the host.
 
     Currently returns Basler USB3 Vision cameras (via pypylon). The endpoint

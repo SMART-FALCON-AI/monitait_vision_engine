@@ -232,7 +232,7 @@ def build_current_service_config(app_state):
 # =============================================================================
 
 @router.get("/config")
-async def get_config(request: Request):
+def get_config(request: Request):
     """Get current configuration."""
     return JSONResponse(content={
         "ejector": {
@@ -294,7 +294,7 @@ async def get_config(request: Request):
 
 
 @router.post("/api/config")
-async def update_config(request: Request, config_data: Dict[str, Any], background_tasks: BackgroundTasks = None):
+def update_config(request: Request, config_data: Dict[str, Any], background_tasks: BackgroundTasks = None):
     """Update counter service configuration at runtime.
 
     Supported keys:
@@ -584,7 +584,7 @@ async def update_config(request: Request, config_data: Dict[str, Any], backgroun
 # =============================================================================
 
 @router.get("/api/encoder_calibration")
-async def get_encoder_calibration():
+def get_encoder_calibration():
     """Return the operator-set encoder unit label and units-per-meter conversion."""
     try:
         svc = load_service_config() or {}
@@ -603,7 +603,7 @@ async def get_encoder_calibration():
 # cell's ΔE relative to its camera's target colour instead of the window
 # median. Manual gold-standard for cross-shipment comparison.
 @router.get("/api/color_target")
-async def get_color_target():
+def get_color_target():
     """Return the per-camera colour target. Empty dict when nothing set."""
     try:
         svc = load_service_config() or {}
@@ -613,7 +613,7 @@ async def get_color_target():
 
 
 @router.post("/api/color_target")
-async def set_color_target(payload: Dict[str, Any]):
+def set_color_target(payload: Dict[str, Any]):
     """Set per-camera L*a*b* target.
     Body: { "color_target": { "<cam_id>": {"L": <0-100>, "a": <-128..127>, "b": <-128..127>} } }
        or to clear: { "color_target": {} }"""
@@ -654,7 +654,7 @@ async def set_color_target(payload: Dict[str, Any]):
 # vs time) + the picked value + an optional window so the baseline computation
 # can grab a small range around the click instead of a single frame.
 @router.get("/api/color_reference_position")
-async def get_color_reference_position():
+def get_color_reference_position():
     """Return the stored reference position (or null if unset)."""
     try:
         svc = load_service_config() or {}
@@ -665,7 +665,7 @@ async def get_color_reference_position():
 
 
 @router.post("/api/color_reference_position")
-async def set_color_reference_position(payload: Dict[str, Any]):
+def set_color_reference_position(payload: Dict[str, Any]):
     """Set the operator-picked baseline reference point.
     Body: {axis: "encoder"|"time", value: <float>, window: <float, optional>}
        - encoder: value is the encoder count clicked, window = +/-encoder counts
@@ -713,7 +713,7 @@ async def set_color_reference_position(payload: Dict[str, Any]):
 # auto-tuner (useful when they want a specific value, or when calibration's
 # 7-day window doesn't reflect what they want to score against).
 @router.get("/api/score_scale_factor")
-async def get_score_scale_factor():
+def get_score_scale_factor():
     """Return the current `score_scale_factor` (default 1.0)."""
     try:
         svc = load_service_config() or {}
@@ -725,7 +725,7 @@ async def get_score_scale_factor():
 
 
 @router.post("/api/score_scale_factor")
-async def set_score_scale_factor(payload: Dict[str, Any]):
+def set_score_scale_factor(payload: Dict[str, Any]):
     """Manually set `score_scale_factor`. Same bounds as the auto-calibrator
     (0.001 .. 1e9) so a typo can't poison the score for every shipment."""
     try:
@@ -748,7 +748,7 @@ async def set_score_scale_factor(payload: Dict[str, Any]):
 
 
 @router.post("/api/encoder_calibration")
-async def set_encoder_calibration(payload: Dict[str, Any]):
+def set_encoder_calibration(payload: Dict[str, Any]):
     """Set the encoder calibration (unit label + units-per-meter)."""
     try:
         svc = load_service_config() or {}
@@ -837,7 +837,7 @@ def _write_env_var(path, key, value):
 
 
 @router.get("/api/data_root")
-async def get_data_root():
+def get_data_root():
     """Read DATA_ROOT from the compose .env file. Default = /mnt/SSD-RESERVE."""
     env_path = _compose_env_path()
     current = None
@@ -852,7 +852,7 @@ async def get_data_root():
 
 
 @router.post("/api/data_root")
-async def set_data_root(request: Request, body: Dict[str, Any]):
+def set_data_root(request: Request, body: Dict[str, Any]):
     """Set DATA_ROOT in the compose .env file. Validates path + writability."""
     new_path = (body.get("path") or "").strip()
     if not new_path:
@@ -893,7 +893,7 @@ async def set_data_root(request: Request, body: Dict[str, Any]):
 # =============================================================================
 
 @router.get("/api/data-file")
-async def get_data_file(request: Request):
+def get_data_file(request: Request):
     """Get the contents of the DATA_FILE (prepared_query_data)."""
     try:
         with open(DATA_FILE, "r") as f:
@@ -911,7 +911,7 @@ async def get_data_file(request: Request):
 
 
 @router.post("/api/data-file")
-async def update_data_file(request: Request, data: Dict[str, Any]):
+def update_data_file(request: Request, data: Dict[str, Any]):
     """Update the DATA_FILE content and reload prepared_query_data.
 
     Expected body:
@@ -967,7 +967,7 @@ async def update_data_file(request: Request, data: Dict[str, Any]):
 # =============================================================================
 
 @router.post("/api/save_service_config")
-async def api_save_service_config(request: Request):
+def api_save_service_config(request: Request):
     """Save current service configuration to file."""
     try:
         # Build current config from runtime state (preserves unsaved changes)
@@ -984,7 +984,7 @@ async def api_save_service_config(request: Request):
 
 
 @router.post("/api/save_data_file")
-async def api_save_data_file(request: Request):
+def api_save_data_file(request: Request):
     """Save current data file (same as service config)."""
     try:
         # Build current config from runtime state (preserves unsaved changes)
@@ -1001,7 +1001,7 @@ async def api_save_data_file(request: Request):
 
 
 @router.post("/api/load_service_config")
-async def api_load_service_config(request: Request):
+def api_load_service_config(request: Request):
     """Load service configuration from file (triggers page reload on client)."""
     try:
         svc_config = load_service_config()
@@ -1015,7 +1015,7 @@ async def api_load_service_config(request: Request):
 
 
 @router.get("/api/export_service_config")
-async def api_export_service_config(request: Request):
+def api_export_service_config(request: Request):
     """Export the COMPLETE configuration as a downloadable JSON file.
 
     Previously this dumped only `service_config` (via load_service_config), which
@@ -1062,7 +1062,7 @@ async def api_export_service_config(request: Request):
 # Persisted under service_config["store_objects"] so it survives restarts.
 
 @router.get("/api/store_objects")
-async def api_get_store_objects():
+def api_get_store_objects():
     """Return the per-class store flags (server-side source of truth)."""
     try:
         svc = load_service_config() or {}
@@ -1086,7 +1086,7 @@ async def api_get_store_objects():
 # narrate=false, beep=false, min_confidence=0.01).
 
 @router.get("/api/audio_settings")
-async def api_get_audio_settings():
+def api_get_audio_settings():
     """Return per-class audio/display settings (server-side source of truth)."""
     try:
         svc = load_service_config() or {}
@@ -1097,7 +1097,7 @@ async def api_get_audio_settings():
 
 
 @router.post("/api/audio_settings")
-async def api_set_audio_settings(payload: Dict[str, Any]):
+def api_set_audio_settings(payload: Dict[str, Any]):
     """Update per-class audio settings. Accepts either:
        - {"class_name": "DIE_LINE", "show": true, "narrate": false, "beep": true, "min_confidence": 0.5}
          (single-class partial update — only provided fields are changed)
@@ -1190,7 +1190,7 @@ async def api_set_audio_settings(payload: Dict[str, Any]):
 
 
 @router.post("/api/store_objects")
-async def api_set_store_objects(payload: Dict[str, Any]):
+def api_set_store_objects(payload: Dict[str, Any]):
     """Toggle/set per-class store flag. Accepts either:
        - {"class_name": "DIE_LINE", "store": true}  (single-class update)
        - {"store_objects": {"DIE_LINE": true, "HOLE": false, ...}}  (bulk set)

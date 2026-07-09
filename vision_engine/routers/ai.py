@@ -125,7 +125,7 @@ def _save_ai_models_to_redis(data):
 # =============================================================================
 
 @router.get("/api/ai_config")
-async def get_ai_config():
+def get_ai_config():
     """Get all configured AI models and active model."""
     try:
         data = _get_ai_models_from_redis()
@@ -148,7 +148,7 @@ async def get_ai_config():
 
 
 @router.post("/api/ai_config")
-async def save_ai_config(config: Dict[str, Any]):
+def save_ai_config(config: Dict[str, Any]):
     """Save/update an AI model configuration.
 
     3.21.23 — new optional fields:
@@ -197,7 +197,7 @@ async def save_ai_config(config: Dict[str, Any]):
 
 
 @router.post("/api/ai_config/activate")
-async def activate_ai_model(config: Dict[str, Any]):
+def activate_ai_model(config: Dict[str, Any]):
     """Activate a specific AI model by name."""
     try:
         name = config.get("name", "").strip()
@@ -220,7 +220,7 @@ async def activate_ai_model(config: Dict[str, Any]):
 
 
 @router.delete("/api/ai_config/{model_name}")
-async def delete_ai_model(model_name: str):
+def delete_ai_model(model_name: str):
     """Delete an AI model configuration."""
     try:
         data = _get_ai_models_from_redis()
@@ -311,7 +311,7 @@ def _reconnect_db_pool():
 # =============================================================================
 
 @router.get("/api/db_config")
-async def get_db_config():
+def get_db_config():
     """Get all configured database profiles and active profile."""
     try:
         data = _get_db_profiles_from_redis()
@@ -334,7 +334,7 @@ async def get_db_config():
 
 
 @router.post("/api/db_config")
-async def save_db_config(config: Dict[str, Any]):
+def save_db_config(config: Dict[str, Any]):
     """Save/update a database profile."""
     try:
         name = config.get("name", "").strip()
@@ -368,7 +368,7 @@ async def save_db_config(config: Dict[str, Any]):
 
 
 @router.post("/api/db_config/activate")
-async def activate_db_profile(config: Dict[str, Any]):
+def activate_db_profile(config: Dict[str, Any]):
     """Activate a database profile and reconnect."""
     try:
         name = config.get("name", "").strip()
@@ -392,7 +392,7 @@ async def activate_db_profile(config: Dict[str, Any]):
 
 
 @router.delete("/api/db_config/{profile_name}")
-async def delete_db_profile(profile_name: str):
+def delete_db_profile(profile_name: str):
     """Delete a database profile."""
     try:
         data = _get_db_profiles_from_redis()
@@ -1838,7 +1838,7 @@ async def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
 
 
 @router.post("/api/apply_severities")
-async def apply_severities(payload: Dict[str, Any]):
+def apply_severities(payload: Dict[str, Any]):
     """Bulk-apply suggested severity values to service_config.audio_settings.
     Payload: {"updates": [{"class": "...", "severity": N}, ...]}.
     Returns how many rows were updated."""
@@ -1878,7 +1878,7 @@ async def apply_severities(payload: Dict[str, Any]):
 # and procedures (config.procedures); each goes to its own writer so the
 # config file's procedure list is updated in-place without touching other fields.
 @router.post("/api/apply_procedure_severities")
-async def apply_procedure_severities(payload: Dict[str, Any]):
+def apply_procedure_severities(payload: Dict[str, Any]):
     """Bulk-apply suggested severity values to service_config.procedures.
     Payload: {"updates": [{"procedure": "<name>", "severity": N}, ...]}.
     Returns how many procedures were updated."""

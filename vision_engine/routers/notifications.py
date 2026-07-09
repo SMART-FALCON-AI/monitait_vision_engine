@@ -76,7 +76,7 @@ def _mask_token(t: Optional[str]) -> str:
 
 
 @router.get("/api/notifications/config")
-async def get_notifications_config():
+def get_notifications_config():
     """Return the notification config with bot tokens MASKED.
     The full token is only visible to scheduled jobs and test-send (server-side)."""
     cfg = _get_config()
@@ -96,7 +96,7 @@ async def get_notifications_config():
 
 
 @router.post("/api/notifications/config")
-async def post_notifications_config(payload: Dict[str, Any]):
+def post_notifications_config(payload: Dict[str, Any]):
     """Update notification config.
 
     Payload accepts:
@@ -153,7 +153,7 @@ async def post_notifications_config(payload: Dict[str, Any]):
 
 
 @router.post("/api/notifications/test_send")
-async def test_send(payload: Dict[str, Any]):
+def test_send(payload: Dict[str, Any]):
     """Send a tiny test message to the configured chat to validate token+chat_id."""
     cfg = _get_config()
     channel = "telegram"  # 3.24.4 — only one supported channel
@@ -207,7 +207,7 @@ async def send_now(payload: Dict[str, Any], request: Request):
 
 
 @router.get("/api/notifications/log")
-async def notifications_log(limit: int = 50):
+def notifications_log(limit: int = 50):
     """Recent notification audit rows. Powers the log table on the
     Advanced → Notifications panel."""
     from services.messaging import recent_log
@@ -217,7 +217,7 @@ async def notifications_log(limit: int = 50):
 # ---------- AI usage admin ----------
 
 @router.get("/api/ai_usage/summary")
-async def ai_usage_summary(window: str = "30d"):
+def ai_usage_summary(window: str = "30d"):
     """Roll-up of AI usage for the billing dashboard."""
     from services.ai_usage import summary as _sum
     return JSONResponse(content=_sum(window))

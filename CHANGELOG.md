@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.73] - 2026-07-09 — extend the async→sync unblock to the remaining 10 router files
+
+### Fixed — shipment-save button, camera discovery, AI-config save, everything POST-based
+- v4.0.72 converted `async def` → `def` on 40 endpoints in `timeline.py` + `health.py`, but the other 10 router files still had 76 more `async def` endpoints doing sync work — `config_routes.py` (22), `cameras.py` (11), `ai.py` (10), `inference.py` (10), `states.py` (7), `notifications.py` (5), `ai_trainer.py` (6), `anomaly.py` (2), `procedures.py` (2), `commands.py` (1). Any one of them could re-freeze the event loop the moment the browser hit it — which is exactly what happened when the operator clicked the shipment-save pencil and got a silent timeout: `POST /api/config` (`update_config` in `config_routes.py:297`) was `async def` running the persistence-file write on the event loop.
+- Bulk-converted the remaining 76 endpoints across those 10 files. Kept `async` on endpoints that legitimately use `await` (WebSocket handshakes in `websocket.py`, request-body reads that use `await request.json()`, and the 4 handlers already whitelisted in 4.0.72).
+- Verified on vteam12 (LAN IP 192.168.1.106) after restart:
+  - **Shipment save POST /api/config → HTTP 200 in 1.36 ms** (was: silent timeout, operator's *"i can't set the shipment id, the save button doesn't work"*)
+  - `/api/inference/stats`, `/api/audio_settings`, `/api/states`, `/api/cameras` all sub-10 ms
+  - `/api/system/metrics` 102 ms (unchanged — the metrics collection is genuinely slow but no longer blocks anything)
+  - `/api/quality/heatmap` still ~4 s (heavy `jsonb_array_elements` SQL — same as `/api/area_stats` and `/api/detection_stats`; SQL optimization is a separate follow-up)
+  - SSE wake packet + first data blob instant
+  - Cache-buster now serves `?v=4.0.73` — browsers get fresh JS on next reload without manual Ctrl+Shift+R
+
+### Note on MVE restart requirement
+- The dynamic cache-buster route reads `APP_VERSION` from the FastAPI app, which is loaded at module import time from the `VERSION` file. Bumping `VERSION` on disk without restarting MVE means the served HTML still injects the old `?v=…` — browsers keep loading the previous JS. **Every VERSION bump now requires `docker restart monitait_vision_engine`** even when only static HTML changed. Documented in memory as [[always-version-every-edit]].
+
+### Notes
+- Combined 4.0.72 + 4.0.73 fix: **116 endpoints moved off the event loop** across all 13 router files. The event loop now handles only the truly-async work (WebSockets, SSE stream, `await request.json()` body reads).
+- No compose / dependency changes. 11 files: `VERSION` + the 10 router files.
+- Deferred to a follow-up: (a) SQL optimization for the ~4 s `/api/quality/heatmap`, `/api/area_stats`, `/api/detection_stats`; (b) progressive chart loading (operator asked for *"gradually load Camera × Encoder data starting from latest to oldest"*).
+
 ## [4.0.72] - 2026-07-09 — event-loop unblock + two v4.0.5X UI holes finally patched
 
 ### Added — two v4.0.5X features whose HTML was never actually written

@@ -25,7 +25,7 @@ router = APIRouter()
 
 
 @router.get("/api/inference/stats")
-async def get_inference_stats(request: Request):
+def get_inference_stats(request: Request):
     """Get inference performance statistics."""
     watcher = request.app.state.watcher_instance
     pm = request.app.state.pipeline_manager
@@ -114,7 +114,7 @@ async def get_inference_stats(request: Request):
 
 
 @router.get("/api/model_classes")
-async def get_model_classes(request: Request):
+def get_model_classes(request: Request):
     """Get the list of object class names from the active inference model."""
     pm = request.app.state.pipeline_manager
     classes = []
@@ -139,7 +139,7 @@ async def get_model_classes(request: Request):
 
 
 @router.get("/api/inference")
-async def get_inference_config():
+def get_inference_config():
     """Get inference module configuration (fast endpoint for UI)."""
     try:
         svc_config = load_service_config()
@@ -157,7 +157,7 @@ async def get_inference_config():
 # ===== PIPELINE MANAGEMENT ENDPOINTS =====
 
 @router.get("/api/pipelines")
-async def get_pipelines(request: Request):
+def get_pipelines(request: Request):
     """Get all pipelines and models configuration."""
     pm = request.app.state.pipeline_manager
     if pm is None:
@@ -167,7 +167,7 @@ async def get_pipelines(request: Request):
 
 
 @router.get("/api/pipelines/current")
-async def get_current_pipeline(request: Request):
+def get_current_pipeline(request: Request):
     """Get the currently active pipeline."""
     pm = request.app.state.pipeline_manager
     if pm is None:
@@ -182,7 +182,7 @@ async def get_current_pipeline(request: Request):
 
 
 @router.post("/api/pipelines/activate/{pipeline_name}")
-async def activate_pipeline(pipeline_name: str, request: Request):
+def activate_pipeline(pipeline_name: str, request: Request):
     """Set the active pipeline by name."""
     pm = request.app.state.pipeline_manager
     if pm is None:
@@ -239,7 +239,7 @@ async def create_or_update_pipeline(request: Request):
 
 
 @router.delete("/api/pipelines/{pipeline_name}")
-async def delete_pipeline(pipeline_name: str, request: Request):
+def delete_pipeline(pipeline_name: str, request: Request):
     """Delete a pipeline."""
     pm = request.app.state.pipeline_manager
     if pm is None:
@@ -260,7 +260,7 @@ async def delete_pipeline(pipeline_name: str, request: Request):
 
 
 @router.get("/api/models")
-async def get_models(request: Request):
+def get_models(request: Request):
     """Get all available inference models."""
     pm = request.app.state.pipeline_manager
     if pm is None:
@@ -309,7 +309,7 @@ async def create_or_update_model(request: Request):
 
 
 @router.delete("/api/models/{model_id}")
-async def delete_model(model_id: str, request: Request):
+def delete_model(model_id: str, request: Request):
     """Delete an inference model."""
     pm = request.app.state.pipeline_manager
     if pm is None:
@@ -330,7 +330,7 @@ async def delete_model(model_id: str, request: Request):
 
 
 @router.get("/api/gradio/models")
-async def get_gradio_models(url: str):
+def get_gradio_models(url: str):
     """Fetch available models from a Gradio/FastAPI endpoint (HuggingFace Spaces compatible)."""
     try:
         base_url = url.rstrip('/')

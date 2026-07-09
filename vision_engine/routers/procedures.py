@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 @router.get("/api/procedures")
-async def get_procedures(request: Request):
+def get_procedures(request: Request):
     """Get current ejection procedures."""
     config = getattr(request.app.state, 'timeline_config', {})
     return {'procedures': config.get('procedures', [])}
@@ -76,7 +76,7 @@ async def set_color_reference(class_name: str, request: Request):
 
 
 @router.get("/api/color-reference/{class_name}")
-async def get_color_ref_endpoint(class_name: str, mode: str = "fixed"):
+def get_color_ref_endpoint(class_name: str, mode: str = "fixed"):
     """Get current color reference. Query: ?mode=fixed|previous|running_avg"""
     try:
         from services.detection import get_color_reference

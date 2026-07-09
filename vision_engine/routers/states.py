@@ -9,7 +9,7 @@ router = APIRouter()
 
 
 @router.get("/api/states")
-async def get_states(request: Request):
+def get_states(request: Request):
     """Get all configured states and current state status."""
     sm = request.app.state.state_manager
     if sm is None:
@@ -18,7 +18,7 @@ async def get_states(request: Request):
 
 
 @router.get("/api/states/{state_name}")
-async def get_state(request: Request, state_name: str):
+def get_state(request: Request, state_name: str):
     """Get a specific state configuration."""
     sm = request.app.state.state_manager
     if sm is None:
@@ -83,7 +83,7 @@ async def create_or_update_state(request: Request):
 
 
 @router.delete("/api/states/{state_name}")
-async def delete_state(request: Request, state_name: str):
+def delete_state(request: Request, state_name: str):
     """Delete a state configuration."""
     sm = request.app.state.state_manager
     if sm is None:
@@ -110,7 +110,7 @@ async def delete_state(request: Request, state_name: str):
 
 
 @router.post("/api/states/{state_name}/activate")
-async def activate_state(request: Request, state_name: str):
+def activate_state(request: Request, state_name: str):
     """Activate a specific state as the current state."""
     sm = request.app.state.state_manager
     if sm is None:
@@ -138,7 +138,7 @@ async def activate_state(request: Request, state_name: str):
 
 
 @router.post("/api/states/trigger-capture")
-async def trigger_capture(request: Request):
+def trigger_capture(request: Request):
     """Manually trigger a capture cycle."""
     sm = request.app.state.state_manager
     if sm is None:
@@ -159,7 +159,7 @@ async def trigger_capture(request: Request):
 
 
 @router.post("/api/states/save")
-async def save_states(request: Request):
+def save_states(request: Request):
     """Save all states to the main config file (.env.prepared)."""
     sm = request.app.state.state_manager
     if sm is None:
@@ -185,7 +185,7 @@ async def save_states(request: Request):
 
 
 @router.post("/api/states/load")
-async def load_states(request: Request):
+def load_states(request: Request):
     """Load states from the main config file (.env.prepared)."""
     sm = request.app.state.state_manager
     if sm is None:

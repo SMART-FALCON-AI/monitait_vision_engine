@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.post("/{command}")
-async def send_command(command: str, request: Request, value: Optional[int] = None):
+def send_command(command: str, request: Request, value: Optional[int] = None):
     """Send command to watcher device.
 
     Examples:

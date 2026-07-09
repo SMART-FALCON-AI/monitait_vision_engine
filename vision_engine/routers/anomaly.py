@@ -336,7 +336,7 @@ class BuildBaselineRequest(BaseModel):
 
 
 @router.post("/api/anomaly/build-baseline")
-async def build_baseline(request: Request, body: BuildBaselineRequest):
+def build_baseline(request: Request, body: BuildBaselineRequest):
     """Build the anomaly worker's baseline from raw frames on disk.
 
     Frame source is picked by `mode` (same picker the colour heatmap uses).
@@ -410,7 +410,7 @@ async def build_baseline(request: Request, body: BuildBaselineRequest):
 
 
 @router.get("/api/anomaly/baseline")
-async def get_baseline(request: Request):
+def get_baseline(request: Request):
     """Return the persisted anomaly-baseline metadata + a live worker health
     probe. The frontend uses this to render "Anomaly baseline: reference_frame
     · 48 frames · 3m ago" next to the Charts-tab base-mode buttons."""
