@@ -26,8 +26,20 @@ def get_db_connection():
             # 4.0.50 — pool ceiling raised from 10 → 20 to accommodate the
             # multi-thread DB writer pool + concurrent chart/API reads
             # without any one path starving another for a connection.
+            # 4.0.74 — raised again 20 → 40. After v4.0.72+73 moved 116 endpoints
+            # off the async event loop into FastAPI's threadpool, many more
+            # queries can now run truly concurrently — a dashboard with several
+            # tabs open plus the DB writer pool (cap=12) plus the SSE stream's
+            # 30-s DB probe can easily peg 20 connections. Symptom the operator
+            # saw: `Failed to get database connection: connection pool
+            # exhausted` in the logs, then a browser `Failed to fetch` alert
+            # on the shipment-save POST because save_data_file couldn't reach
+            # the DB to persist the change (fell back to file-only write, but
+            # under enough contention the whole POST timed out at the browser).
+            # Postgres default max_connections is 100 so 40 leaves plenty of
+            # headroom for other services + external tooling.
             db_connection_pool = pool.SimpleConnectionPool(
-                1, 20,
+                1, 40,
                 host=POSTGRES_HOST,
                 port=POSTGRES_PORT,
                 database=POSTGRES_DB,

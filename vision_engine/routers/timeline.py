@@ -2730,7 +2730,7 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
 
 
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -2743,6 +2743,18 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
       - camera_scatter:   up to N points {x: epoch_ms, y: cam, r: conf, cls: name}
                           for the camera×time bubble chart (dot size = confidence)
 
+    v4.0.74 — accepts optional `since_ms` + `until_ms` (millisecond unix
+    timestamps) as an alternative to the `window` string. When both are
+    provided the time filter becomes `time >= TO_TIMESTAMP(since_ms/1000)
+    AND time < TO_TIMESTAMP(until_ms/1000)` — exact epoch-anchored slice.
+    Used by the Charts tab's progressive bucket-by-bucket loader so a 24h
+    view can render as 48 × 30-minute-bucket requests instead of one big
+    query, letting the operator see dots/colours appear continuously from
+    newest bucket to oldest instead of staring at "Loading charts…" for
+    the full 4-8 s scan. Bucket resolution for the returned time_bucket()
+    aggregation defaults to 1 minute in bucket-slice mode (the whole slice
+    is ≤ 1 h anyway — no need for coarser buckets inside it).
+
     All aggregation runs over a capped recent slice (LIMIT 20000 rows) so a huge
     hypertable can't make this slow. Reads from inference_results, so it reflects
     only Store=ON classes. Returns a well-formed empty payload on any error.
@@ -2754,6 +2766,19 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         "7d":  ("7 days",   "6 hours"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
+
+    # v4.0.74 — bucket-slice mode. When since_ms + until_ms are both provided
+    # the request describes a specific epoch-anchored slice. Swap the time
+    # predicate + parameter shape so the SAME downstream aggregation code
+    # runs against `time >= to_timestamp(%s) AND time < to_timestamp(%s)`
+    # instead of `time > NOW() - INTERVAL %s`. Keeps every field the client
+    # already reads (camera_scatter, camera_scatter_encoder, camera_y_order,
+    # color_baseline, phases_available, …) in place — only the WHERE clause
+    # differs. `bucket` shrinks to 1 minute so the tiny slice still splits
+    # into readable time_bucket rows if the client happens to use them.
+    _use_slice = bool(since_ms) and bool(until_ms) and int(until_ms) > int(since_ms)
+    if _use_slice:
+        bucket = "1 minute"
     empty = {"shipments": [], "size_over_time": [], "confidence_over_time": [],
              "confidence_by_class": {"buckets": [], "series": {}},
              "camera_scatter": [], "camera_scatter_encoder": [],
@@ -2862,10 +2887,15 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # don't get swamped by dominant ones (weft_up). Up to 750 newest dots PER
         # CLASS, capped at 6000 total across classes.
         cur.execute(
+            # v4.0.74 — slice-mode uses since_ms/until_ms for a narrow
+            # epoch-anchored time predicate; the classic mode keeps the
+            # `time > NOW() - INTERVAL %s` shape. Both branches feed the
+            # SAME downstream aggregation so shape of returned rows is
+            # identical. Base params re-ordered per branch to match.
             f"""
             WITH recent AS (
                 SELECT time, shipment, detections, image_path FROM inference_results
-                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                 ORDER BY time DESC
             ),
             exploded AS (
@@ -2890,7 +2920,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             ORDER BY t DESC
             LIMIT 6000
             """,
-            base_params + _parent_filter_args,
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args),
         )
         camera_scatter = [
             {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
@@ -2905,7 +2935,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             f"""
             WITH recent AS (
                 SELECT time, shipment, detections, image_path, encoder_value FROM inference_results
-                WHERE time > NOW() - INTERVAL %s {ship_clause}
+                WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                   AND encoder_value IS NOT NULL
                 ORDER BY time DESC
             ),
@@ -2930,13 +2960,33 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             WHERE rn <= 750
             LIMIT 6000
             """,
-            base_params + _parent_filter_args,
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args),
         )
         camera_scatter_encoder = [
             {"x": int(enc or 0), "y": cam, "cls": cls,
              "r": round((conf or 0), 3), "img": img, "ship": ship}
             for enc, cam, cls, conf, img, ship in cur.fetchall()
         ]
+
+        # v4.0.74 — scatter_only short-circuit. When the client is polling
+        # bucket-by-bucket for progressive scatter fill (see charts.js
+        # `_progressiveBucketLoad`), the OTHER heavy queries below (size
+        # percentiles, confidence bands, color baseline, ejection strips,
+        # phase enumeration) already ran on the initial '1h' full render
+        # and their DOM stays as-is — refetching them on every bucket would
+        # burn 3-5x the DB time for no visible change. Return just the
+        # scatter arrays here.
+        if int(scatter_only or 0):
+            cur.close()
+            return JSONResponse(content={
+                "camera_scatter": camera_scatter,
+                "camera_scatter_encoder": camera_scatter_encoder,
+                "camera_y_order": [],  # order was set on the initial render; keep as-is
+                "window": window,
+                "since_ms": int(since_ms) if _use_slice else 0,
+                "until_ms": int(until_ms) if _use_slice else 0,
+                "shipment": shipment,
+            })
 
         # --- confidence by class over time (one line per class) ---
         cur.execute(

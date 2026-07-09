@@ -1156,7 +1156,286 @@ function mveLoaderEnd() {
 window.mveLoaderBegin = mveLoaderBegin;
 window.mveLoaderEnd   = mveLoaderEnd;
 
+// v4.0.74 — Progressive Camera × Encoder loading, bucket-by-bucket.
+//
+// Operator's mental model: dots appear once and STAY. New (older) dots are
+// ADDED, one time-bucket at a time, starting from the most recent bucket and
+// walking back to the oldest bucket in the selected window.
+//
+// Implementation:
+//   1. Initial render: fetch `/api/detection_charts?window=X` where X is the
+//      first (newest) bucket. The initial fetch is a normal
+//      `_refreshAdvancedChartsCore` so it also paints size / confidence /
+//      heatmap / ejection etc. against that first-bucket data, and hides
+//      the "Loading charts…" spinner as soon as it finishes.
+//   2. Progressive fill: iterate bucket-by-bucket going backward. Each
+//      iteration fetches `/api/detection_charts?since_ms=X&until_ms=Y&scatter_only=1`
+//      — the server short-circuits to only run the two scatter SQL queries
+//      (skipping the expensive size/conf/heatmap/ejection queries that were
+//      already rendered from the first bucket), and returns just
+//      `camera_scatter` + `camera_scatter_encoder`. Client dedups against
+//      keys already on the chart and appends only truly-new points via
+//      Chart.js's `dataset.data.push()` + `chart.update('none')`. No loader
+//      spinner, no destroy — the scatter grows continuously.
+//   3. Bucket size = target window / bins (bins from Charts-tab local storage,
+//      default 48). So 24h target with 48 bins → 30 minutes per bucket → 48
+//      requests each ~200-500 ms → dots keep appearing for ~10-20 seconds
+//      instead of the user staring at a spinner for 4-8 seconds and then
+//      seeing everything at once.
+//
+// Skip the bucket-by-bucket ladder when the operator has already scoped the
+// query narrowly (window === '1h' → no benefit; specific shipment → a single
+// query is already narrow enough).
+// v4.0.74 — Progressive Camera × Encoder loading, bucket-by-bucket.
+// Initial render at '1h' paints all charts (size, confidence, scatter,
+// heatmap, ejection). Then iterate wider buckets using server's
+// since_ms/until_ms/scatter_only param path, appending only NEW points
+// to the existing scatter chart via chart.update('none'). Skip iteration
+// when the operator has narrowed the view (window='1h' or a specific
+// shipment).
 async function refreshAdvancedCharts() {
+    const winSel = document.getElementById('insight-window');
+    const target = (winSel && winSel.value) || '24h';
+    const shipment = document.getElementById('insight-shipment')?.value || '';
+    const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
+
+    _progressiveScatterSeen = new Set();
+
+    if (target === '1h' || !!shipment) {
+        return _refreshAdvancedChartsCore();
+    }
+
+    const targetMs = _windowToMs(target);
+    const bins = Math.max(4, parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48);
+    const bucketMs = Math.max(60 * 1000, Math.floor(targetMs / bins));
+    const nowMs = Date.now();
+
+    const origValue = winSel.value;
+    winSel.value = (bucketMs <= 3600 * 1000) ? '1h' : (bucketMs <= 6 * 3600 * 1000) ? '6h' : '24h';
+    try {
+        await _refreshAdvancedChartsCore();
+    } catch (e) {
+        console.warn('[progressive] initial render failed:', e);
+    } finally {
+        winSel.value = origValue;
+    }
+
+    if (_insightCameraScatter) {
+        for (const ds of (_insightCameraScatter.data.datasets || [])) {
+            for (const p of (ds.data || [])) {
+                _progressiveScatterSeen.add(_scatterPointKey(p, ds.label));
+            }
+        }
+    }
+
+    const initialBackMs = (winSel.value === '6h') ? 6 * 3600 * 1000 : (winSel.value === '24h') ? 24 * 3600 * 1000 : 3600 * 1000;
+    let endMs = nowMs - initialBackMs;
+    const stopMs = nowMs - targetMs;
+    let bucketCount = 0;
+    const MAX_BUCKETS = Math.min(bins, 24);
+    while (endMs > stopMs && bucketCount < MAX_BUCKETS) {
+        if ((winSel.value || '24h') !== target) break;
+        const sinceMs = Math.max(stopMs, endMs - bucketMs);
+        await _extendScatterFromBucket(sinceMs, endMs, shipment, minConf);
+        endMs = sinceMs;
+        bucketCount++;
+    }
+}
+window.refreshAdvancedCharts = refreshAdvancedCharts;
+
+// v4.0.74 — animate the scatter's growth from newest → oldest so the operator
+// sees dots progressively appear. All data was already fetched by the Core
+// render above; this just re-orders the visual reveal.
+let _scatterAnimTicket = 0;
+function _animateScatterAppearance() {
+    if (!_insightCameraScatter) return;
+    const chart = _insightCameraScatter;
+    const dsCount = (chart.data.datasets || []).length;
+    if (dsCount === 0) return;
+
+    // Snapshot every point together with its dataset index. Skip animation
+    // entirely for tiny scatters — the pop-in effect would be noise for a
+    // dozen dots.
+    const allPoints = [];
+    for (let i = 0; i < dsCount; i++) {
+        const ds = chart.data.datasets[i];
+        for (const p of (ds.data || [])) {
+            allPoints.push({ dsIdx: i, point: p });
+        }
+    }
+    if (allPoints.length < 30) return;
+
+    // Sort newest→oldest. Time-axis x is epoch ms; encoder-axis x is the
+    // raw encoder value — both increase over time, so higher x = newer.
+    allPoints.sort((a, b) => (b.point.x || 0) - (a.point.x || 0));
+
+    // Clear every dataset's data — chart stays alive, axes/legend intact.
+    for (let i = 0; i < dsCount; i++) {
+        chart.data.datasets[i].data = [];
+    }
+    chart.update('none');
+
+    // Progressive fill: ~15 chunks over ~3 seconds. Cheap: no DB, no fetch.
+    const CHUNKS = 15;
+    const TOTAL_MS = 3000;
+    const chunkSize = Math.max(3, Math.ceil(allPoints.length / CHUNKS));
+    const delayMs = Math.floor(TOTAL_MS / CHUNKS);
+
+    // Each animation is tagged with a monotonic ticket. If refreshAdvancedCharts
+    // fires again before this animation finishes (operator changed window /
+    // shipment / min_conf), the ticket bumps and the older loop bails out
+    // instead of interleaving with the newer render's dots.
+    _scatterAnimTicket += 1;
+    const myTicket = _scatterAnimTicket;
+
+    let idx = 0;
+    function _pump() {
+        if (myTicket !== _scatterAnimTicket) return;   // superseded
+        if (!_insightCameraScatter) return;            // chart destroyed
+        const chart = _insightCameraScatter;
+        const end = Math.min(idx + chunkSize, allPoints.length);
+        for (let i = idx; i < end; i++) {
+            const { dsIdx, point } = allPoints[i];
+            const ds = chart.data.datasets[dsIdx];
+            if (ds && ds.data) ds.data.push(point);
+        }
+        chart.update('none');
+        idx = end;
+        if (idx < allPoints.length) {
+            setTimeout(_pump, delayMs);
+        }
+    }
+    setTimeout(_pump, 60);  // brief empty flash so the reveal is visible
+}
+
+// Convert a window string ('24h', '7d', ...) to milliseconds.
+function _windowToMs(w) {
+    const m = String(w || '').match(/^(\d+)\s*([mhdw])$/i);
+    if (!m) return 24 * 3600 * 1000;
+    const n = parseInt(m[1], 10);
+    const u = m[2].toLowerCase();
+    if (u === 'm') return n * 60 * 1000;
+    if (u === 'h') return n * 3600 * 1000;
+    if (u === 'd') return n * 86400 * 1000;
+    if (u === 'w') return n * 7 * 86400 * 1000;
+    return 24 * 3600 * 1000;
+}
+
+// Progressive-load bookkeeping.
+// Global Set of scatter-point keys already visible on the chart, so that
+// subsequent wider-window fetches only APPEND net-new points instead of
+// double-plotting the same detection.
+let _progressiveScatterSeen = new Set();
+
+function _scatterPointKey(p, cls) {
+    // Deterministic identity from operator-visible coordinates + class + image
+    // path (the image path is the unique per-detection anchor produced by
+    // detection.py — server never mints the same one twice). Falls back to
+    // best-available fields when older detection_charts payloads omit them.
+    const _cls = cls || p.cls || '';
+    return String(p.x) + '|' + String(p.y ?? p.cam_id ?? '') + '|' + _cls + '|' + String(p.img || '');
+}
+
+// For a selected target window, return the ordered list of wider-than-1h
+// windows to load progressively. Excludes '1h' itself (already loaded in
+// Phase 1) and stops at the operator's target.
+//
+// v4.0.74-bucket: finer rungs so the operator sees dots grow every ~500 ms
+// instead of leaping in one jump from 1h → 24h. Each rung's fetch fires
+// against the DB with the same base cost as a wider one (server still scans
+// inference_results with a time>NOW()-INTERVAL predicate), so the total wall
+// time to reach the target IS longer than a single big query — but the
+// operator sees continuous forward progress on the scatter, which is what
+// they asked for ("bucket by bucket").
+function _progressiveLadder(target) {
+    // Rungs are ordered smallest→largest and are POWERS of the 30-min
+    // dashboard bucket size (48 buckets over 24 h → 30 min each).
+    const rungs = ['2h', '4h', '6h', '12h', '24h', '48h', '7d', '30d'];
+    const idx = rungs.indexOf(target);
+    if (idx < 0) return ['6h', target]; // custom window — do at least one intermediate step
+    return rungs.slice(0, idx + 1);
+}
+
+// v4.0.74 — silently fetch one time-bucket via `since_ms`/`until_ms` and
+// append only NEW points to the existing `_insightCameraScatter`. Server
+// short-circuits (`scatter_only=1`) so it skips the heavy size / confidence /
+// heatmap / ejection queries — only the two stratified scatter queries
+// run against the bucket's narrow slice. No loader spinner. No touch of
+// the other charts. Uses the exact same downstream extend logic so the
+// dedup + dataset-append behaviour is identical to the window-based path.
+async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
+    if (!_insightCameraScatter) return;
+    let data;
+    try {
+        const r = await fetch('/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
+                              '&until_ms=' + Math.floor(untilMs) +
+                              '&shipment=' + encodeURIComponent(shipment) +
+                              '&min_conf=' + minConf +
+                              '&scatter_only=1');
+        data = await r.json();
+    } catch (e) {
+        console.warn('[progressive] bucket fetch failed [' + new Date(sinceMs).toISOString() + ' → ' + new Date(untilMs).toISOString() + ']:', e);
+        return;
+    }
+
+    const axisMode = (_insightAxis === 'encoder') ? 'encoder' : 'time';
+    const points = axisMode === 'encoder'
+        ? (data.camera_scatter_encoder || [])
+        : (data.camera_scatter || []);
+    if (!Array.isArray(points) || points.length === 0) return;
+
+    // Reuse the same y-axis mapping the Core renderer built for '1h' — camera
+    // display order came from data.camera_y_order there. If a wider window
+    // surfaces a camera that wasn't in the '1h' data, fall back to plotting
+    // by raw cam id (Chart.js scales handle it, just no reordered position).
+    const camOrder = Array.isArray(data.camera_y_order) ? data.camera_y_order : [];
+    const idxByCam = new Map(camOrder.map(function (cid, i) { return [cid, i]; }));
+    const _camToIdx = function (cid) { return idxByCam.has(cid) ? idxByCam.get(cid) : cid; };
+
+    const dsByLabel = new Map();
+    (_insightCameraScatter.data.datasets || []).forEach(function (ds) {
+        dsByLabel.set(ds.label, ds);
+    });
+
+    let addedCount = 0;
+    for (const p of points) {
+        const cls = p.cls;
+        if (typeof _isShown === 'function' && !_isShown(cls)) continue;
+        const built = {
+            x: p.x,
+            y: _camToIdx(p.y),
+            cam_id: p.y,
+            r: 3 + (p.r || 0) * 9,
+            conf: p.r,
+            cls: cls,
+            img: p.img,
+            ship: p.ship
+        };
+        const key = _scatterPointKey(built, cls);
+        if (_progressiveScatterSeen.has(key)) continue;
+        _progressiveScatterSeen.add(key);
+
+        let ds = dsByLabel.get(cls);
+        if (!ds) {
+            ds = {
+                label: cls,
+                data: [],
+                backgroundColor: (typeof _classColor === 'function' ? _classColor(cls) : '#888') + 'cc',
+                borderColor:     (typeof _classColor === 'function' ? _classColor(cls) : '#888')
+            };
+            _insightCameraScatter.data.datasets.push(ds);
+            dsByLabel.set(cls, ds);
+        }
+        ds.data.push(built);
+        addedCount++;
+    }
+    if (addedCount > 0) {
+        _insightCameraScatter.update('none'); // no animation — feels instant
+        console.log('[progressive] window=' + win + ': added ' + addedCount + ' new points');
+    }
+}
+
+async function _refreshAdvancedChartsCore() {
     const window = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;

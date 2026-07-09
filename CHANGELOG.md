@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.74] - 2026-07-10 — DB pool 20→40, server since_ms/until_ms/scatter_only for progressive scatter, Length HTML tile, Unwind checkbox
+
+### Fixed — shipment save under load ("pool exhausted" errors)
+- Bumped `psycopg2.SimpleConnectionPool` cap 20 → 40 in `vision_engine/services/db.py`. After v4.0.72+73 moved 116 endpoints off the async event loop into FastAPI's threadpool, many more queries can now run truly concurrently — a dashboard with several tabs open plus the DB writer pool (cap 12) plus the SSE stream's 30-s DB probe was pegging 20 connections. Symptom: `Failed to get database connection: connection pool exhausted` in logs, then a browser "Failed to fetch" alert on the shipment-save POST because `save_data_file` couldn't reach the DB to persist (it fell back to file-only, but under enough contention the whole POST timed out at the browser). Postgres default `max_connections` is 100 so 40 leaves plenty of headroom.
+
+### Added — Length HTML tile in the Dashboard shipment card
+- The SSE payload already carried `"length": encoder − shipment_start_encoder` and `app-core.js:7` wrote it to `document.getElementById('length-value')`, but the actual tile with `id="length-value"` had NEVER been added to `vision_engine/static/status.html`. `getElementById` returned `null` on every SSE tick and the value silently vanished. Added between Encoder and Speed with `data-i18n="length"` + tooltip.
+
+### Added — Unwind checkbox next to the CSV Download button
+- `/api/export_csv` already accepted `unwind: bool` and `charts.js:3135` read `document.getElementById('insight-unwind')?.checked`, but the actual `<input type="checkbox" id="insight-unwind">` was never in the DOM so `.checked` was always `undefined`. Added the checkbox with label "Unwind" between the ⬇ CSV button and the Hover-size selector.
+
+### Added — server support for progressive scatter loading
+- `/api/detection_charts` accepts optional `since_ms`, `until_ms`, `scatter_only` query params. When `since_ms` and `until_ms` are both provided, the two stratified scatter queries (`camera_scatter` time-axis + `camera_scatter_encoder`) use `time >= to_timestamp(%s/1000.0) AND time < to_timestamp(%s/1000.0)` instead of `time > NOW() - INTERVAL %s`. When `scatter_only=1`, the endpoint short-circuits after those two queries and skips the heavy size/confidence/heatmap/ejection queries — useful for client bucket-by-bucket loading paths that only need to append new scatter points to an already-rendered chart.
+- Client wrapper in `charts.js`: `refreshAdvancedCharts` runs `_refreshAdvancedChartsCore` once with `window=1h` to paint the initial charts, then walks 1–24 wider buckets via `_extendScatterFromBucket(sinceMs, untilMs)` — each fetch uses `scatter_only=1` and appends only new (deduped by point-key) dots to the existing scatter via `chart.update('none')`. Falls through to a plain single Core call when the operator has already narrowed the view (`window=1h` or a specific shipment).
+- Note: on vteam12 the DB scan for `/api/detection_charts` was itself slow (~4–15 s per call for a full window) due to the size of `inference_results` after the pipeline had been running for hours. The bucket path helps by making each subsequent fetch narrow, but the initial Core call still runs the full-window query. Follow-up work: index / cache / aggregate the `jsonb_array_elements` scan.
+
+### Deferred to a follow-up
+- SQL optimization for the slow `/api/detection_charts`, `/api/quality/heatmap`, `/api/area_stats`, `/api/detection_stats` queries. All four scan `inference_results` via `jsonb_array_elements(detections)` and take multiple seconds under load. Materialized aggregation table or Redis cache is the right answer.
+- Architectural decouple: run uvicorn as a separate process (`uvicorn main:app --workers 2`) so the web server has its own Python interpreter + GIL, isolated from the 60+ capture/inference/writer threads sharing the current single-process GIL. Currently uvicorn runs inside `main.py` via `asyncio.run` in the `start_web_server` thread — any GIL-holder in the pipeline can starve the event loop.
+- pypylon install for Basler discovery. Physical Basler camera IS connected on vteam12 (`Bus 002 Device 003: ID 2676:ba03 Basler AG ba03 dart Vision Camera`) and the container has `/dev/bus/usb` bind-mounted with `privileged: true`, but `pypylon` module isn't in the running image and vteam12 can't reach `files.pythonhosted.org` from the container (Network unreachable). Wheel downloaded locally; offline install via `docker cp` + `pip install /wheel` is the next step.
+
 ## [4.0.73] - 2026-07-09 — extend the async→sync unblock to the remaining 10 router files
 
 ### Fixed — shipment-save button, camera discovery, AI-config save, everything POST-based
