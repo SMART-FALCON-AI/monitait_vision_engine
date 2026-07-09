@@ -853,9 +853,29 @@ async def status_stream(request: Request):
     watcher = request.app.state.watcher_instance
 
     def generate():
+        # v4.0.71 — SSE now emits a wake packet BEFORE any sync I/O and a
+        # periodic heartbeat inside the loop. The SSE code itself barely
+        # changed from v3.11.1, but its ENVIRONMENT did — pypylon (4.0.50)
+        # holds the GIL in Convert(), math_inference (4.0.5X) floods Redis
+        # `dms` with 200 detections/frame, and psycopg2.connect(timeout=2)
+        # runs BEFORE the first yield on iter 1. Under vteam12's steady-state
+        # load, those combine to push the first yield past the browser's 15 s
+        # SSE-idle watchdog — the client closes and reconnects in a tight
+        # loop with the dashboard pinned to "No data for 15s". Two fixes:
+        #   (a) yield a wake packet as the FIRST line of the generator, before
+        #       DB probe, before Redis reads — proves the pipe is open;
+        #   (b) heartbeat every 5 s inside the loop even if `data_json`
+        #       matches the previous tick, so the client watchdog never trips.
+        yield 'data: {"wake":true}\n\n'
+
         last_data = None
         _db_ok = False
-        _db_check_time = 0
+        # v4.0.71 — was `_db_check_time = 0` which forced the 2 s
+        # psycopg2.connect probe on iter 1 BEFORE the first yield. Now
+        # initialised to the current wall clock so the first probe runs
+        # 30 s in, well after the wake packet and initial data yield.
+        _db_check_time = time.time()
+        _last_yield = time.time()
 
         # 4.0.66 — Create ONE Redis client for the lifetime of this SSE
         # generator. Prior code built `Redis("redis", 6379, ...)` inside the
@@ -1005,11 +1025,22 @@ async def status_stream(request: Request):
                 except Exception as e:
                     logger.error(f"[SSE] Error reading detection events from Redis: {e}")
 
-                # Send data if changed or if there's a detection event
+                # v4.0.71 — yield when data changes, when there's a detection
+                # event, OR every 5 s regardless (heartbeat). Without the
+                # heartbeat, steady-state periods where nothing changes for
+                # 15 s trip the browser's SSE-idle watchdog and force a
+                # reconnect loop — the "No data for 15s, reconnecting..."
+                # error the operator saw in the console. 5 s < 15 s watchdog
+                # with generous margin, and 5 s of stale data is invisible
+                # in a dashboard that only refreshes counters that change.
                 data_json = json.dumps(current_data)
-                if data_json != last_data or current_data["detection_event"]:
+                _now_yield = time.time()
+                if (data_json != last_data
+                        or current_data["detection_event"]
+                        or _now_yield - _last_yield >= 5.0):
                     yield f"data: {data_json}\n\n"
                     last_data = data_json
+                    _last_yield = _now_yield
 
                 time.sleep(0.1)  # Check for changes every 100ms
             except Exception as e:

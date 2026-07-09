@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.71] - 2026-07-09 — SSE wake-packet + 5 s heartbeat (real fix this time)
+
+### Fixed — SSE reconnect loop, actually
+- The v4.0.70 CHANGELOG credited a "SSE wake-packet on connect" fix as recovered from the pre_4049 backup. Reading the actual code showed the backup DIDN'T contain that fix — `_db_check_time = 0` was still on the first line of the generator, and there was no pre-loop `yield`. So on iteration 1 the SSE generator hit `psycopg2.connect(timeout=2)` + three Redis `lrange` calls BEFORE the first `data:` line — under vteam12's steady-state load this stretched past the browser's 15 s SSE-idle watchdog and the client reconnected in a tight loop with the dashboard permanently showing *No data for 15s, reconnecting…*.
+- The SSE code itself barely changed from v3.11.1 (which the operator reported was smooth). What changed is the ENVIRONMENT: pypylon (4.0.50) holds the Python GIL inside `Convert()`, math_inference (4.0.5X series) floods `Redis dms` with ~200 detections per frame slowing every `lrange`, and the audio-settings hot path in `detection.py` was hitting `cfg.load_service_config()` on every frame (fixed in 4.0.67). Each individually would be tolerable — together they push the first SSE yield well past 15 s under any real workload.
+- Two surgical fixes in `vision_engine/routers/health.py::status_stream`:
+  - **Wake packet first** — the generator now yields `data: {"wake":true}\n\n` as its VERY FIRST line, before the DB probe, before any Redis read. Proves the pipe is open to the client immediately.
+  - **5 s heartbeat inside the loop** — the yield gate now fires when `data_json != last_data` OR when there's a detection event OR when 5 s have passed since the last yield. Previously it only yielded on data change or detection event, so a steady-state period where nothing moved for 15 s tripped the browser watchdog even though the SSE handler was fine.
+- `_db_check_time` initialised to `time.time()` (was `0`) so the 30 s DB probe fires 30 s after connect, not on iter 1.
+
+### Notes
+- No new features, no config changes, no compose changes. Single file: `vision_engine/routers/health.py`. VERSION bumped to 4.0.71. Backup pattern preserved: dynamic cache-buster from 4.0.70 still handles static asset revs automatically.
+- If SSE still shows a reconnect loop after this, the culprit is not the SSE handler — it's a downstream sync call blocking the ONLY threadpool worker serving the SSE thread (typical suspect: pypylon `Convert()` on a Basler camera bound to /dev). Diagnose with `docker exec monitait_vision_engine py-spy dump --pid 1`.
+
 ## [4.0.70] - 2026-07-09 — recovery bundle: consolidate v4.0.49–v4.0.67 features that never landed in git
 
 ### Why this bundle exists
