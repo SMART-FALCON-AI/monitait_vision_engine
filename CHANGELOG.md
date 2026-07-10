@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.77] - 2026-07-10 — revert failed v4.0.76 extension, VERSION bump for correct cache-buster
+
+### Reverted — extending cache to `/api/quality/heatmap`, `/api/area_stats`, `/api/detection_stats`
+- v4.0.76 attempted to apply the v4.0.75 TTL-cache pattern to three more slow endpoints. Two bugs landed together:
+  1. A `replace_all=true` edit for a matching return-block shape accidentally added `_endpoint_cache_put(_cache_key, …)` inside `quality_ejection_axis` too — but that function never defined `_cache_key`. `NameError` on every request → 500 → dashboard retries → sockets pile up → all cached endpoints appear to hang.
+  2. Even after that was fixed on the same version, the four cached endpoints all timed out at 60+ s on vteam12 while `/health`, `/api/status`, `POST /api/config`, `/api/inference/stats` remained sub-10 ms. The v4.0.75 shape works — under a lightly-loaded DB. Under vteam12's now-13-hour-accumulated `inference_results` volume, the `recent` CTE at the top of the scatter query (`SELECT time, shipment, detections, image_path FROM inference_results WHERE time > NOW() - INTERVAL 'X' ORDER BY time DESC` — no LIMIT) scans the whole time range before the outer LIMIT 6000 kicks in. This is the real root cause; the cache doesn't help until the query completes.
+- Rolled `vision_engine/routers/timeline.py` back to the exact v4.0.75 state (only `/api/detection_charts` cached), bumped VERSION to 4.0.77 so the cache-buster on `/status` updates (browsers auto-fetch fresh JS on next reload). Save button, dashboard endpoints and SSE all work; Charts tab still hangs on the first fetch of `/api/detection_charts` because the SQL genuinely takes > 60 s now.
+
+### Real fix (deferred to v4.0.78)
+- Add `LIMIT 50000` to the `recent AS (SELECT …)` CTE in the two scatter queries. The current outer `LIMIT 6000` after `PARTITION BY cls ORDER BY t DESC` only prunes AFTER the CTE has materialised every row in the time window. On busy sites with math_inference emitting ~15 detections × 10 FPS × 3600 s = ~540 k detection rows per hour of inference_results, the CTE materialises the full set before the outer LIMIT takes effect. Capping the CTE upfront turns the query from a full time-range scan into a bounded top-N.
+- Even better fix (v4.0.79+): TimescaleDB continuous aggregate or a Redis-side rollup that the writer service maintains — the analytical queries then read from a pre-computed table with orders-of-magnitude fewer rows.
+
 ## [4.0.75] - 2026-07-10 — 20 s in-memory TTL cache on /api/detection_charts (kills the 15 s dashboard stall)
 
 ### Fixed — `/api/detection_charts` was the ONE slow endpoint blocking everything else
