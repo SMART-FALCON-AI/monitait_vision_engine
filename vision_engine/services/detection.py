@@ -1170,7 +1170,7 @@ def check_class_counts(yolo_results, confidence_threshold=None):
 
     return all_equal
 
-def process_frame(frame, capture_mode, capture_t=None, encoder=None):
+def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed_yolo=None):
     try:
 
         frame_id, jpeg_bytes = frame
@@ -1217,11 +1217,17 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None):
             logger.error(f"Failed to decode image for {frame_id}")
             return None
 
-        # Use pipeline manager if available, otherwise fallback to legacy req_predict
+        # Use pipeline manager if available, otherwise fallback to legacy req_predict.
+        # v4.0.82 — if precomputed_yolo is supplied (batched dispatch upstream already ran
+        # yolo for this image), skip the per-image call and reuse the precomputed result.
         start_time = time.time()
         model_name_used = "unknown"
 
-        if _pipeline_manager:
+        if precomputed_yolo is not None:
+            yolo_res, model_name_used = precomputed_yolo
+            if yolo_res is None:
+                yolo_res = []
+        elif _pipeline_manager:
             yolo_res, model_name_used = _pipeline_manager.run_inference(img_bytes)
         else:
             # Fallback to legacy inference

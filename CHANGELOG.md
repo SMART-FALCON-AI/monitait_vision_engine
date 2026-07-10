@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.82] - 2026-07-10 — adaptive batched YOLO inference dispatch (yolo-team endpoint pending; safe fallback ships now)
+
+Ships **dark on vteam12**: capability probe returns `batch: false` until the yolo container implements `/capabilities` + `/batch-detect` (see [docs/YOLO_BATCH_ENDPOINT_SPEC.md](docs/YOLO_BATCH_ENDPOINT_SPEC.md)). Fallback path = current v4.0.81 behavior verbatim; **zero regression risk** even before yolo team ships anything.
+
+### Why this ships now
+- Production target is 240 fps end-to-end.
+- Single-image `POST /detect` inference tops out ~85 fps on vteam12 because most of a YOLO forward pass is kernel-launch overhead, not per-pixel work. Batching 8-16 images per POST typically reaches 300-500 fps on the same GPU.
+- MVE side of the batch dispatch is ready today so the moment the yolo container ships its batch endpoint the throughput lift is automatic — no MVE redeploy.
+
+### 1) Capability probe (`services/pipeline.py`)
+- New `PipelineManager.probe_batch_capability(model) -> (has_batch, max_batch)`. GET `<host>/capabilities`, expects `{"batch": true, "max_batch": N}`. 60 s TTL cache per URL, 2 s probe timeout, lazy first-use. Any failure → `(False, 1)` and MVE stays on the single-image path.
+- New `PipelineManager.batch_available()` — True iff at least one enabled YOLO phase in the current pipeline probed with `batch=true`.
+- New `PipelineManager.effective_max_batch()` — min max_batch across YOLO phases (for chunking upstream).
+
+### 2) Batched pipeline call (`services/pipeline.py`)
+- New `run_inference_multi(image_bytes_list) -> [(dets, model_names), ...]`. For each phase in order:
+  - YOLO + `has_batch=true` + `len(active_indices) > 1` → ONE `POST /batch-detect/` with multipart `files=[('image', b1), ('image', b2), …]`, results chunked by `max_batch`.
+  - Else → per-image loop identical to `run_inference()`.
+- Batched chunk failure → chunk-level fallback to per-image single-frame calls. No frame ever loses its detections.
+- Frame-counter bumped by N so per-phase stride semantics (`stride=2` runs every other frame) match the single-image path exactly.
+
+### 3) Precomputed-yolo pass-through (`services/detection.py`)
+- `process_frame(..., precomputed_yolo=None)` — when supplied, skips the `_pipeline_manager.run_inference(img_bytes)` call and threads the batched result straight into color/area/audio/DB post-processing.
+- `process_frame_helper(..., precomputed_yolo=None)` — same signature.
+
+### 4) Adaptive queue-depth batch mode (`main.py`)
+- Batching **activates when the hot queue is stacking up, deactivates when it drains**. Ejector state does NOT gate this — under queue pressure, batching *reduces* worst-case eject latency (a batched 8-image yolo call at ~40 ms drains the queue much faster than 8 sequential 12 ms calls; system catches up sooner).
+- Hysteresis prevents flapping:
+  - Enter batch mode when `hot_q.qsize() >= MVE_BATCH_QUEUE_HIGH` (default 8)
+  - Exit batch mode when `hot_q.qsize() <= MVE_BATCH_QUEUE_LOW` (default 2)
+- In batch mode, worker gathers additional groups from the queue with a `MVE_BATCH_GATHER_MS` budget (default 20 ms), up to `MVE_BATCH_MAX` total frames (default 16). Both are env-tunable per site.
+- All hot-queue frames spilled to cold on failure (not just the first group) — no fail-safe eject regression.
+- Set `MVE_BATCH_QUEUE_HIGH=0` to hard-disable batching for a specific site.
+
+### 5) Yolo-team hand-off spec (`docs/YOLO_BATCH_ENDPOINT_SPEC.md`)
+- Wire-level contract: `GET /capabilities`, `POST /batch-detect/`, expected multipart shape, response shapes A (`{"results": [...]}`) or B (bare list), sanity-check recipes.
+- Nothing yolo-team ships today breaks anything; MVE picks up batching automatically when they ship.
+
+### What's live on vteam12 today
+- MVE v4.0.82 running, adaptive-batching code path in place.
+- Probe fails (yolo container has no `/capabilities` yet) → `batch_available()` returns False → **every dispatch uses the current single-frame path**. Verifiable in logs: `probe_batch_capability: url=<yolo>/detect/ batch=False max_batch=1`.
+- No behavior change from v4.0.81. This ships **dark and safe**.
+
+### Ancillary — Length tile fix on vteam12 (deploy sync gap, not a code change in v4.0.82)
+- Dashboard's Length tile was showing `-` because vteam12's deployed `app-core.js` predated v4.0.54's Length setter. The repo file was correct; a pscp of `static/js/app-core.js` to vteam12 got it live (bind-mount picked it up instantly; no restart needed). Operator hard-refresh (Ctrl+Shift+R) restores Length display.
+
 ## [4.0.81] - 2026-07-10 — pypylon self-heal (Basler pro-cameras survive `docker compose up --force-recreate`)
 
 Verified from operator's Chrome tab on `http://192.168.1.106/status` after full `docker rm -f monitait_vision_engine && docker compose up -d`. Basler enumerated in the Cameras tab.

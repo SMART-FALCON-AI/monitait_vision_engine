@@ -776,9 +776,19 @@ init_queues(_num_cameras, cfg_module.EJECTOR_OFFSET, cfg_module.EJECTOR_ENABLED)
 # Flush stale cold queue frames from previous run (no point processing old frames)
 # 4.0.64 — also start the periodic janitor so stale frames don't accumulate
 # between reboots. Interval and stale-age come from env vars via the queue itself.
+# 4.0.82 — hasattr guards so an older watcher.py (deployed on canary sites that lag
+# the repo, e.g. vteam12 which still runs a pre-4.0.64 ColdDiskQueue) doesn't crash
+# MVE startup. If the method is absent → the periodic janitor just doesn't run;
+# flush_stale() is old enough that both accept an empty call.
 from services.watcher import _cold_queue_disk
-_cold_queue_disk.flush_stale()
-_cold_queue_disk.start_janitor()
+if hasattr(_cold_queue_disk, 'flush_stale'):
+    try:
+        _cold_queue_disk.flush_stale()
+    except TypeError:
+        # Very old signature required kwargs — accept and skip.
+        pass
+if hasattr(_cold_queue_disk, 'start_janitor'):
+    _cold_queue_disk.start_janitor()
 
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
@@ -794,12 +804,17 @@ logger.info(f"Web server started on http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
 
 
 # ── Shared frame processing logic ──
-def _process_frame_batch(frames_data, allow_eject=True):
+def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_frame=None):
     """Process a frame batch through YOLO and handle results.
 
     Args:
         frames_data: dict with 'frames', 'encoder', 'shipment', 'capture_t'
         allow_eject: if True, evaluate ejector rules (hot path). If False, skip (cold path).
+        precomputed_yolo_per_frame: v4.0.82 — optional list of (detections, model_name) tuples,
+            one per valid frame in the SAME order as frames_data['frames']. When present, the
+            per-frame YOLO call is skipped and these results are threaded straight into
+            process_frame_helper (which then does color extraction, area, audio, DB — all the
+            per-frame work that isn't the yolo POST). When None, behavior matches pre-v4.0.82.
 
     Returns:
         True if YOLO produced results, False if inference failed.
@@ -819,12 +834,26 @@ def _process_frame_batch(frames_data, allow_eject=True):
     if not valid_frames:
         return True  # Nothing to process, not a failure
 
-    results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
+    # v4.0.82 — batched dispatch path: use precomputed yolo results if the caller supplied a
+    # correctly-sized list. Any size mismatch → discard the precomputed list and fall through to
+    # the current per-frame path (safety net: never lose a frame).
+    use_precomputed = (
+        precomputed_yolo_per_frame is not None
+        and len(precomputed_yolo_per_frame) == len(valid_frames)
+    )
+    if use_precomputed:
+        results = [
+            process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder, precomputed_yolo=py)
+            for f, py in zip(valid_frames, precomputed_yolo_per_frame)
+        ]
+    else:
+        results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
 
     # Filter out None results
     valid_results = [r for r in results if r is not None]
     if not valid_results:
-        # Retry once
+        # Retry once — always via the non-batched single-frame path (safer default when the
+        # first attempt failed for whatever reason).
         results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
         valid_results = [r for r in results if r is not None]
         if not valid_results:
@@ -939,6 +968,117 @@ def _process_frame_batch(frames_data, allow_eject=True):
     return True
 
 
+# ── v4.0.82 — Adaptive queue-depth batch mode ──────────────────────────────
+# Batching activates automatically when the hot queue is stacking up (system falling behind)
+# and deactivates when it drains (single-frame path is cheaper for the ejector). Hysteresis
+# on HIGH/LOW thresholds prevents flapping. Independent of ejector state — safe by design
+# because under queue pressure, batching *reduces* worst-case eject latency (a batched 8-image
+# yolo call at ~40 ms drains the queue much faster than 8 sequential 12 ms calls).
+#
+# Env-tunable per-site. Set MVE_BATCH_QUEUE_HIGH=0 to hard-disable batching (falls back to
+# pure single-frame behavior).
+MVE_BATCH_QUEUE_HIGH = int(os.environ.get("MVE_BATCH_QUEUE_HIGH", "8"))   # enter batch mode at qsize >=
+MVE_BATCH_QUEUE_LOW  = int(os.environ.get("MVE_BATCH_QUEUE_LOW",  "2"))   # exit batch mode at qsize <=
+MVE_BATCH_GATHER_MS  = int(os.environ.get("MVE_BATCH_GATHER_MS",  "20"))  # max wait (ms) to fill a batch
+MVE_BATCH_MAX        = int(os.environ.get("MVE_BATCH_MAX",        "16"))  # hard cap on batched frames
+_batch_mode_lock = threading.Lock()
+app.state.batch_mode = False
+app.state.batch_stats = {"enters": 0, "exits": 0, "batches": 0, "batched_frames": 0}
+
+def _update_batch_mode(hot_q):
+    """Flip app.state.batch_mode based on hot queue depth (with hysteresis)."""
+    if MVE_BATCH_QUEUE_HIGH <= 0:
+        return  # batching disabled at boot
+    try:
+        qsize = hot_q.qsize()
+    except Exception:
+        return
+    with _batch_mode_lock:
+        if app.state.batch_mode:
+            if qsize <= MVE_BATCH_QUEUE_LOW:
+                app.state.batch_mode = False
+                app.state.batch_stats["exits"] += 1
+                logger.info(f"batch mode OFF (qsize={qsize} <= {MVE_BATCH_QUEUE_LOW})")
+        else:
+            if qsize >= MVE_BATCH_QUEUE_HIGH:
+                app.state.batch_mode = True
+                app.state.batch_stats["enters"] += 1
+                logger.info(f"batch mode ON (qsize={qsize} >= {MVE_BATCH_QUEUE_HIGH})")
+
+def _gather_more_groups(hot_q, gathered):
+    """Drain the hot queue into `gathered` up to MVE_BATCH_MAX total frames within the
+    MVE_BATCH_GATHER_MS latency budget. Mutates `gathered` in-place. No-op if the yolo model
+    doesn't advertise batching or the pipeline already has the cap."""
+    if not pipeline_manager or not hasattr(pipeline_manager, "effective_max_batch"):
+        return
+    max_batch = pipeline_manager.effective_max_batch()
+    if max_batch < 2:
+        return
+    max_batch = min(max_batch, MVE_BATCH_MAX)
+    total = sum(len(g.get("frames", [])) for g in gathered)
+    if total >= max_batch:
+        return
+    deadline = time.monotonic() + (MVE_BATCH_GATHER_MS / 1000.0)
+    while total < max_batch:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            fd2 = hot_q.get(timeout=remaining)
+        except queue.Empty:
+            break
+        gathered.append(fd2)
+        total += len(fd2.get("frames", []))
+
+def _process_gathered_groups_batched(gathered, allow_eject=True):
+    """Flatten frames across the gathered groups, call pipeline.run_inference_multi ONCE,
+    then dispatch per-group post-processing with the precomputed yolo results threaded through.
+
+    Falls back cleanly:
+      - run_inference_multi raises → per-group _process_frame_batch call with no precomputed
+      - individual chunk fails inside run_inference_multi → that chunk's images silently
+        fall back per-image (handled inside pipeline.run_inference_multi itself)
+
+    Returns True if all groups' post-processing succeeded (or had nothing to do); False if any
+    group's yolo failed after retry.
+    """
+    # Slice each group's valid frames + their raw bytes, and build one flat byte list.
+    per_group_valid_frames = []
+    all_img_bytes = []
+    for fd in gathered:
+        frames = fd.get("frames", [])
+        vfs = []
+        for f in frames:
+            if isinstance(f, (list, tuple)) and len(f) >= 2 and f[1]:
+                vfs.append(f)
+                all_img_bytes.append(f[1])  # jpeg_bytes
+        per_group_valid_frames.append(vfs)
+
+    if not all_img_bytes:
+        return True
+
+    try:
+        multi_results = pipeline_manager.run_inference_multi(all_img_bytes)
+    except Exception as e:
+        logger.error(f"run_inference_multi failed: {e} — reverting gathered groups to non-batched path")
+        ok = True
+        for fd in gathered:
+            ok = _process_frame_batch(fd, allow_eject=allow_eject) and ok
+        return ok
+
+    # Distribute per-image results back to each group.
+    app.state.batch_stats["batches"] += 1
+    app.state.batch_stats["batched_frames"] += len(all_img_bytes)
+    ok = True
+    cursor = 0
+    for fd, vfs in zip(gathered, per_group_valid_frames):
+        n = len(vfs)
+        precomputed = multi_results[cursor:cursor + n] if n else []
+        cursor += n
+        ok = _process_frame_batch(fd, allow_eject=allow_eject, precomputed_yolo_per_frame=precomputed) and ok
+    return ok
+
+
 # ── Inference worker thread: hot (RAM, LIFO) first, then cold (disk, FIFO) ──
 # Stop events for scale-down: autoscaler appends events here, workers check & exit
 _worker_stop_events = []
@@ -972,27 +1112,48 @@ def inference_worker_thread():
                 frames_data = None
 
             if frames_data:
+                # v4.0.82 — adaptive mode: check queue depth, flip mode if hysteresis threshold
+                # crossed, and gather more groups (up to MVE_BATCH_MAX frames / MVE_BATCH_GATHER_MS
+                # budget) when in batch mode + yolo advertises batching.
+                _update_batch_mode(hot_q)
                 try:
-                    success = _process_frame_batch(frames_data, allow_eject=True)
+                    gathered = [frames_data]
+                    total_frames = len(frames_data.get("frames", []))
+                    do_batch = (
+                        app.state.batch_mode
+                        and pipeline_manager
+                        and hasattr(pipeline_manager, "batch_available")
+                        and pipeline_manager.batch_available()
+                    )
+                    if do_batch:
+                        _gather_more_groups(hot_q, gathered)
+                        total_frames = sum(len(g.get("frames", [])) for g in gathered)
+                    if do_batch and total_frames > 1:
+                        success = _process_gathered_groups_batched(gathered, allow_eject=True)
+                    else:
+                        # Single-group unbatched — original behavior.
+                        success = _process_frame_batch(frames_data, allow_eject=True)
+
                     if not success:
-                        # YOLO failed after retry — fail-safe eject + spill to cold
-                        if cfg_module.EJECTOR_ENABLED:
-                            capture_encoder = frames_data.get("encoder", 0)
-                            dms_list = frames_data.get("frames", [])
-                            eject_data = json.dumps({"encoder": capture_encoder, "dm": None})
-                            watcher.redis_connection.update_queue_messages_redis(
-                                eject_data, stream_name="ejector_queue"
-                            )
-                            logger.warning(f"FAIL-SAFE EJECT: YOLO failed, ejecting encoder={capture_encoder}")
-                        cold_q.put(frames_data)
-                        logger.debug("Hot frame spilled to cold queue after YOLO failure")
+                        # YOLO failed after retry — fail-safe eject + spill ALL gathered groups to cold.
+                        for fd in gathered:
+                            if cfg_module.EJECTOR_ENABLED:
+                                capture_encoder = fd.get("encoder", 0)
+                                eject_data = json.dumps({"encoder": capture_encoder, "dm": None})
+                                watcher.redis_connection.update_queue_messages_redis(
+                                    eject_data, stream_name="ejector_queue"
+                                )
+                                logger.warning(f"FAIL-SAFE EJECT: YOLO failed, ejecting encoder={capture_encoder}")
+                            cold_q.put(fd)
+                            logger.debug(f"Hot frame spilled to cold queue after YOLO failure (encoder={fd.get('encoder')})")
                 except Exception as e:
                     logger.error(f"Hot processing error: {e}")
-                    # Don't lose the frame — spill to cold
-                    try:
-                        cold_q.put(frames_data)
-                    except Exception:
-                        pass
+                    # Don't lose any gathered frames — spill all to cold.
+                    for fd in (gathered if 'gathered' in locals() else [frames_data]):
+                        try:
+                            cold_q.put(fd)
+                        except Exception:
+                            pass
                 continue
 
             # Phase 2: Hot queue empty — try cold queue (FIFO — oldest first)

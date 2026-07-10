@@ -10,7 +10,8 @@ import json
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import cv2
@@ -181,8 +182,119 @@ class PipelineManager:
             self._http_session.mount("http://", adapter)
             self._http_session.mount("https://", adapter)
 
+        # v4.0.82 — Per-yolo-URL batch capability cache: url -> (has_batch, max_batch, probed_at_epoch).
+        # Populated lazily via GET <base>/capabilities. Missing / 404 / timeout -> (False, 1, ts).
+        # Re-probed every _BATCH_PROBE_TTL_S so a yolo container upgrade lights the batch path up
+        # automatically without an MVE restart.
+        self._batch_cache: Dict[str, Tuple[bool, int, float]] = {}
+        self._batch_cache_lock = threading.Lock()
+
         # Initialize default models and pipeline
         self._init_defaults()
+
+    # v4.0.82 batch-endpoint knobs
+    _BATCH_PROBE_TTL_S = 60.0
+    _BATCH_PROBE_TIMEOUT_S = 2.0
+    _BATCH_POST_TIMEOUT_S = 30.0  # batched yolo may take longer than single (30 vs single 10s)
+
+    def _derive_capabilities_url(self, inference_url: str) -> str:
+        """From an inference URL like http://host:port/v1/.../detect/, return http://host:port/capabilities."""
+        parts = urlsplit(inference_url)
+        return urlunsplit((parts.scheme, parts.netloc, "/capabilities", "", ""))
+
+    def _derive_batch_url(self, inference_url: str) -> str:
+        """From an inference URL ending in /detect(/), return the same URL with /detect replaced by /batch-detect."""
+        # Preserve trailing slash presence.
+        if inference_url.endswith("/detect/"):
+            return inference_url[:-len("/detect/")] + "/batch-detect/"
+        if inference_url.endswith("/detect"):
+            return inference_url[:-len("/detect")] + "/batch-detect"
+        # Fallback: last path segment substitution.
+        parts = urlsplit(inference_url)
+        path = parts.path.rstrip("/")
+        if path.endswith("/detect"):
+            new_path = path[:-len("/detect")] + "/batch-detect" + ("/" if parts.path.endswith("/") else "")
+        else:
+            new_path = parts.path + ("batch-detect" if parts.path.endswith("/") else "/batch-detect")
+        return urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
+
+    def probe_batch_capability(self, model: 'InferenceModel') -> Tuple[bool, int]:
+        """Return (has_batch, max_batch) for the given YOLO model, cached for _BATCH_PROBE_TTL_S.
+
+        Non-YOLO models always report (False, 1) — Gradio has no batch endpoint contract.
+        On any failure (timeout / non-2xx / bad JSON / missing "batch" field) → (False, 1).
+        """
+        if model.model_type != "yolo":
+            return (False, 1)
+        if not self._http_session:
+            return (False, 1)
+
+        url = model.inference_url
+        now = time.time()
+        with self._batch_cache_lock:
+            cached = self._batch_cache.get(url)
+            if cached and (now - cached[2]) < self._BATCH_PROBE_TTL_S:
+                return (cached[0], cached[1])
+
+        has_batch = False
+        max_batch = 1
+        try:
+            probe_url = self._derive_capabilities_url(url)
+            resp = self._http_session.get(probe_url, timeout=self._BATCH_PROBE_TIMEOUT_S)
+            if resp.status_code == 200:
+                body = resp.json()
+                if isinstance(body, dict):
+                    has_batch = bool(body.get("batch", False))
+                    max_batch = int(body.get("max_batch", 8)) if has_batch else 1
+                    if max_batch < 1:
+                        max_batch = 1
+        except Exception as e:
+            logger.debug(f"probe_batch_capability({url}) failed: {e} — fallback to single-frame")
+
+        with self._batch_cache_lock:
+            self._batch_cache[url] = (has_batch, max_batch, now)
+        logger.info(f"probe_batch_capability: url={url} batch={has_batch} max_batch={max_batch}")
+        return (has_batch, max_batch)
+
+    def batch_available(self) -> bool:
+        """True iff at least one YOLO phase in the current pipeline has a probed-batch-capable model.
+
+        Non-YOLO phases (e.g., Gradio) still run per-image inside run_inference_multi, but their
+        presence alone doesn't disable batching for the other phases. This method is meant as a
+        cheap gate for callers deciding whether to accumulate a batch upstream.
+        """
+        if not self.current_pipeline:
+            return False
+        for phase in self.current_pipeline.phases:
+            if not phase.enabled:
+                continue
+            model = self.models.get(phase.model_id)
+            if model is None or model.model_type != "yolo":
+                continue
+            has_batch, _ = self.probe_batch_capability(model)
+            if has_batch:
+                return True
+        return False
+
+    def effective_max_batch(self) -> int:
+        """Smallest max_batch across YOLO phases in current pipeline (or 1 if no batch-capable phase).
+
+        Non-YOLO phases don't restrict this — they'll be looped internally regardless.
+        """
+        m = None
+        if not self.current_pipeline:
+            return 1
+        for phase in self.current_pipeline.phases:
+            if not phase.enabled:
+                continue
+            model = self.models.get(phase.model_id)
+            if model is None or model.model_type != "yolo":
+                continue
+            has_batch, max_batch = self.probe_batch_capability(model)
+            if not has_batch:
+                continue
+            m = max_batch if m is None else min(m, max_batch)
+        return m if m else 1
 
     def _init_defaults(self):
         """Initialize default models and pipeline."""
@@ -431,6 +543,141 @@ class PipelineManager:
         except Exception as e:
             logger.error(f"YOLO inference error: {e}")
             return []
+
+    def _run_yolo_inference_batch(self, image_bytes_list: List[bytes], model: 'InferenceModel') -> Optional[List[List[Dict]]]:
+        """v4.0.82 — POST a batch of images to the model's /batch-detect endpoint.
+
+        Returns per-image detection lists in the same order as image_bytes_list, or None if the
+        endpoint returned a shape we can't destructure (caller then falls back per-image so no
+        detections are lost).
+        """
+        if not self._http_session:
+            return None
+        try:
+            batch_url = self._derive_batch_url(model.inference_url)
+            # Multipart with N 'image' parts. requests accepts repeated field name via list-of-tuples.
+            files = [("image", (f"img{i}.jpg", img, "image/jpeg")) for i, img in enumerate(image_bytes_list)]
+            response = self._http_session.post(batch_url, files=files, timeout=self._BATCH_POST_TIMEOUT_S)
+            response.raise_for_status()
+            body = response.json()
+            if isinstance(body, str):
+                body = json.loads(body)
+            # Accept either { "results": [ [det,...], [det,...], ... ] } or a bare list of the same shape.
+            if isinstance(body, dict) and "results" in body:
+                results = body["results"]
+            elif isinstance(body, list):
+                results = body
+            else:
+                logger.warning(f"batch YOLO returned unexpected shape (type={type(body).__name__}) — falling back per-image")
+                return None
+            if not isinstance(results, list) or len(results) != len(image_bytes_list):
+                logger.warning(f"batch YOLO length mismatch: got {len(results) if isinstance(results, list) else '?'} expected {len(image_bytes_list)} — falling back per-image")
+                return None
+            out: List[List[Dict]] = []
+            for r in results:
+                if isinstance(r, list):
+                    out.append([d for d in r if isinstance(d, dict)])
+                elif isinstance(r, dict) and "detections" in r:
+                    out.append([d for d in r.get("detections", []) if isinstance(d, dict)])
+                else:
+                    out.append([])
+            return out
+        except Exception as e:
+            logger.error(f"_run_yolo_inference_batch error: {e}")
+            return None
+
+    def run_inference_multi(self, image_bytes_list: List[bytes]) -> List[Tuple[List[Dict], str]]:
+        """v4.0.82 — Run the current pipeline over a batch of images.
+
+        For each phase in order:
+          - YOLO + probe_batch_capability returns has_batch=True + all in-stride indices > 1
+              -> ONE POST for the batch (chunked by max_batch), distribute results
+          - else -> per-image loop (identical to run_inference())
+
+        Returns:
+            list of (detections_list, models_used_str) tuples, in the same order as inputs.
+
+        Fallback behavior on any batch failure: the specific chunk falls back to per-image calls,
+        so no image is ever silently dropped.
+        """
+        N = len(image_bytes_list)
+        if N == 0:
+            return []
+        if N == 1:
+            det, name = self.run_inference(image_bytes_list[0])
+            return [(det, name)]
+        if not self.current_pipeline:
+            return [self.run_inference(b) for b in image_bytes_list]
+
+        all_dets_per_image: List[List[Dict]] = [[] for _ in range(N)]
+        models_used_per_image: List[List[str]] = [[] for _ in range(N)]
+
+        # Bump the frame counter by N so per-phase stride semantics stay consistent with the
+        # single-image path (each image counts as one frame).
+        with self.pipeline_lock:
+            fc_start = self._frame_counter
+            self._frame_counter += N
+
+        for phase in sorted(self.current_pipeline.phases, key=lambda p: p.order):
+            if not phase.enabled:
+                continue
+
+            stride = getattr(phase, "stride", 1) or 1
+            if stride > 1:
+                # Position i in the batch acts as if it were the (fc_start + i + 1)-th call.
+                active_indices = [i for i in range(N) if ((fc_start + i + 1) % stride) == 0]
+                if not active_indices:
+                    continue
+            else:
+                active_indices = list(range(N))
+
+            model = self.models.get(phase.model_id)
+            if not model:
+                logger.warning(f"Model not found for phase: {phase.model_id}")
+                continue
+
+            do_batch = False
+            max_batch = 1
+            if model.model_type == "yolo":
+                has_batch, max_batch = self.probe_batch_capability(model)
+                do_batch = has_batch and len(active_indices) > 1
+
+            if do_batch:
+                # Chunk if the active set exceeds server max_batch.
+                for chunk_start in range(0, len(active_indices), max_batch):
+                    chunk = active_indices[chunk_start:chunk_start + max_batch]
+                    images_for_chunk = [image_bytes_list[i] for i in chunk]
+                    per_image_dets = None
+                    try:
+                        per_image_dets = self._run_yolo_inference_batch(images_for_chunk, model)
+                    except Exception as e:
+                        logger.error(f"Batched YOLO exception on model {model.name}: {e}")
+                    if per_image_dets is None or len(per_image_dets) != len(chunk):
+                        # Chunk-level fallback: run each image single. Never loses detections.
+                        per_image_dets = [self._run_yolo_inference(image_bytes_list[i], model) for i in chunk]
+                    for offset, i in enumerate(chunk):
+                        dets = per_image_dets[offset] or []
+                        if dets:
+                            all_dets_per_image[i].extend(dets)
+                            if model.name not in models_used_per_image[i]:
+                                models_used_per_image[i].append(model.name)
+            else:
+                # Per-image loop — same as single-frame path.
+                for i in active_indices:
+                    try:
+                        dets = self._run_model_inference(image_bytes_list[i], model)
+                    except Exception as e:
+                        logger.error(f"Per-image inference error for model {model.name} at index {i}: {e}")
+                        dets = []
+                    if dets:
+                        all_dets_per_image[i].extend(dets)
+                        if model.name not in models_used_per_image[i]:
+                            models_used_per_image[i].append(model.name)
+
+        return [
+            (all_dets_per_image[i], ", ".join(models_used_per_image[i]) or "none")
+            for i in range(N)
+        ]
 
     def get_status(self) -> Dict[str, Any]:
         """Get current pipeline manager status."""
