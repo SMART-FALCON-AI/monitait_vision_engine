@@ -2870,6 +2870,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
                 ORDER BY time DESC
+                LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
             ),
             expanded AS (
                 SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
@@ -2951,6 +2952,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 SELECT time, shipment, detections, image_path FROM inference_results
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                 ORDER BY time DESC
+                LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
             ),
             exploded AS (
                 SELECT EXTRACT(EPOCH FROM time) * 1000 AS x_ms,
@@ -2992,6 +2994,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                   AND encoder_value IS NOT NULL
                 ORDER BY time DESC
+                LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
             ),
             exploded AS (
                 SELECT encoder_value AS enc,
@@ -3051,6 +3054,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 SELECT time, detections FROM inference_results
                 WHERE time > NOW() - INTERVAL %s {ship_clause}
                 ORDER BY time DESC
+                LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
             ),
             expanded AS (
                 SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,

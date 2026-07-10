@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.78] - 2026-07-10 — LIMIT 50000 on the recent CTEs (safety cap; does NOT fully solve the DB stall yet)
+
+### Changed — bound the `recent AS (…)` CTE in `/api/detection_charts` scatter queries
+- Added `LIMIT 50000` to the four `WITH recent AS (SELECT … FROM inference_results WHERE time > NOW() - INTERVAL %s ORDER BY time DESC),` CTEs inside `detection_charts`. Prior code let the CTE materialise the whole time range before the outer `LIMIT 6000` kicked in — a full-time-range scan on a hypertable that has grown for 13+ hours of continuous math_inference emissions. The cap turns each CTE into a bounded top-N by the primary time index, which should let the query planner short-circuit long before jsonb_array_elements explodes 15-200 detections per row.
+
+### But — `/api/detection_charts` still times out on vteam12 after this change
+- After deploying and restarting MVE, `window=1h` and `window=24h` both still time out at 30 s. `LIMIT 50000` alone is not enough on this box. The DB itself is doing something that keeps the query queued (candidates: an active TimescaleDB chunk compaction; the `inference_results` hypertable's chunk-selection heuristic; `psycopg2` pool contention against the DB writer pool). All OTHER endpoints (POST /api/config, /health, /api/status, /api/inference/stats, /api/audio_settings, /api/timeline_count) return in sub-10 ms — dashboard is fully functional; only the Charts tab hangs on first fetch.
+- Real fix candidates for v4.0.79:
+  1. Server-side `statement_timeout` on the detection_charts session so a slow query fails fast (browser sees a 500 instead of a 30-s hang), and the endpoint returns a partial payload rather than pinning a threadpool worker.
+  2. Diagnose the DB directly: `pg_stat_statements` for the actual slow query, `EXPLAIN (ANALYZE, BUFFERS)` on the CTE, chunk count on `inference_results`, whether a `CREATE INDEX CONCURRENTLY` was ever run for the `(time, shipment)` predicate.
+  3. TimescaleDB continuous aggregate — compute the buckets in a background job, read the pre-aggregated table from the endpoint. Orders-of-magnitude fewer rows scanned per request.
+  4. Retention policy — delete inference_results rows older than the longest supported window (30 d default) so the hypertable stays small.
+- What v4.0.78 IS safer for: even when it doesn't complete faster, capping the CTE at 50 000 rows prevents a runaway memory blow-up if inference_results grows further, and gives the planner cleaner cost estimates.
+
 ## [4.0.77] - 2026-07-10 — revert failed v4.0.76 extension, VERSION bump for correct cache-buster
 
 ### Reverted — extending cache to `/api/quality/heatmap`, `/api/area_stats`, `/api/detection_stats`
