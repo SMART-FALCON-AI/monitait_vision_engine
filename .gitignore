@@ -15,7 +15,12 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
+# v4.0.81 — MVE's wheels/ dir holds bind-mountable offline packages
+# (currently pypylon for Basler pro cameras). Exclude the actual .whl
+# files from git (large binaries, one per site's toolchain), but track
+# the README so a fresh clone knows what belongs here.
+wheels/*
+!wheels/README.md
 *.egg-info/
 .installed.cfg
 *.egg

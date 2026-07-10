@@ -6,10 +6,24 @@ services:
   monitait_vision_engine:
     container_name: "monitait_vision_engine"
     image: monitait/mve:latest
-    command: "python3 main.py"
+    # v4.0.81 — was `python3 main.py`. Now runs startup.sh which offline-
+    # installs any missing wheels from /wheels (currently just pypylon
+    # for Basler USB3 Vision) BEFORE exec'ing python3 main.py. The
+    # install target is the container's writable overlay, so it's lost
+    # on `docker compose up --force-recreate` — but the script re-runs
+    # on every boot and re-installs, so the operator never has to
+    # manually re-install after a rebuild. Fully self-healing.
+    command: "sh /code/startup.sh"
     volumes:
       - ./VERSION:/code/VERSION:ro
       - ./vision_engine:/code  # 3.21.9 — bind-mount source so scp -> live update (no rebuild)
+      # v4.0.81 — bind-mount the offline wheels directory (currently just
+      # pypylon for Basler support). See vision_engine/startup.sh which
+      # `pip install --no-index`s any pypylon-*.whl on boot if the module
+      # isn't already importable. Required on sites whose container can't
+      # reach files.pythonhosted.org (vteam12, khoy, kiancord). Read-only
+      # so a bug in the container can't clobber our wheels.
+      - ./wheels:/wheels:ro
       - ${DATA_ROOT:-.}/raw_images:/code/raw_images
       # 4.0.64 — cold-queue disk overflow. Previously MVE wrote frame
       # batches to /tmp/cold_queue INSIDE the container's writable overlay

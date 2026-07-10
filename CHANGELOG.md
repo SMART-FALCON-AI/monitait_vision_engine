@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.81] - 2026-07-10 — pypylon self-heal (Basler pro-cameras survive `docker compose up --force-recreate`)
+
+Verified from operator's Chrome tab on `http://192.168.1.106/status` after full `docker rm -f monitait_vision_engine && docker compose up -d`. Basler enumerated in the Cameras tab.
+
+### Problem this fixes
+- Basler pro-camera support relies on the `pypylon` wheel being present inside the `monitait_vision_engine` container.
+- `pypylon` is baked in by hand once, then lives only in the container's writable overlay layer.
+- Any `docker compose up --force-recreate` (or a target-side `docker rm` during troubleshooting) wipes the overlay and pypylon disappears — the Cameras tab reverts to "No Basler / pro cameras detected" until someone SSHs in and re-runs `pip install`.
+- Sites without internet (vteam12, kiancord, khoy) can't just `pip install pypylon` — they have no route to pypi.
+
+### The fix — bind-mounted wheel + entrypoint self-heal
+- New `wheels/` directory bind-mounted read-only into the container (`- ./wheels:/wheels:ro`). Holds the offline pypylon `.whl` and any future offline wheels; the `.whl` itself is `.gitignore`d (86 MB proprietary binary), but a `wheels/README.md` documents the layout so a fresh clone tells operators what belongs there.
+- New `vision_engine/startup.sh` runs before `python3 main.py`. On every boot it checks `/wheels/pypylon-*.whl`, verifies pypylon isn't already importable, and does `pip install --no-index --no-deps <wheel>` from the local file. If already installed → skip. If wheel missing → log and continue (MVE boots normally with USB / IP cameras).
+- `docker-compose.yml` command changed from `python3 main.py` → `sh /code/startup.sh`.
+
+### Why not bake pypylon into the base image?
+The image-build box also often can't reach pypi, and pypylon versions drift per site's kernel/glibc. Offline-wheel-per-site is portable — one `.whl` you carry once from a networked build machine to each target's `wheels/`, then survives every recreate forever.
+
+### Deployment verification on vteam12
+- `docker rm -f monitait_vision_engine && docker compose up -d --no-deps monitait_vision_engine`
+- Container startup logs show: `[startup] installing /wheels/pypylon-26.6-cp39-abi3-manylinux_2_31_x86_64.whl offline`
+- `docker exec monitait_vision_engine python3 -c 'from pypylon import pylon; ...'` → pypylon loads, Basler enumeration succeeds.
+- `/api/cameras/discover-pro` from LAN returns the Basler device.
+- Operator confirmed via Chrome tab: v4.0.81 in the header, Basler visible on Cameras tab, capture/inference (~85-90 fps) unchanged.
+
 ## [4.0.80] - 2026-07-10 — 4-part throughput + UX overhaul (verified working from operator's browser)
 
 Verified from operator's Chrome tab on `http://192.168.1.106/status` before commit. `MonitaQC v4.0.80` in the tab title.
