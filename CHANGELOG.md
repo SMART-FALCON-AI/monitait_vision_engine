@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.75] - 2026-07-10 — 20 s in-memory TTL cache on /api/detection_charts (kills the 15 s dashboard stall)
+
+### Fixed — `/api/detection_charts` was the ONE slow endpoint blocking everything else
+- Server-side testing confirmed that after v4.0.72+73 moved 116 endpoints to the threadpool, every dashboard endpoint responded in sub-10 ms EXCEPT `/api/detection_charts`, which took 4–15 s on vteam12 depending on the window because it scans `inference_results` via `jsonb_array_elements(detections)` with per-frame math_inference emissions inflating the row count. The dashboard polls this endpoint from the Charts tab; the browser's per-origin socket limit (6 concurrent) then saturates as those 15-s fetches pile up, and every OTHER XHR (`/api/status`, `/api/inference/stats`, the shipment-save `POST /api/config`) queues behind them from the browser's perspective — the operator reports *"nothing responds"*, *"Save doesn't work"*.
+- Fix: added `_endpoint_cache_get` / `_endpoint_cache_put` in `vision_engine/routers/timeline.py` — a bounded (256-entry) in-memory dict keyed by MD5 of all query params, with a 20-second TTL. `/api/detection_charts` checks the cache at the top of the handler; on hit, returns instantly. On miss, runs the SQL and caches the payload before returning.
+- Verified on vteam12:
+  - `/api/detection_charts?window=1h` cold: **127 ms** → warm: **2 ms** (63× speedup)
+  - `/api/detection_charts?window=24h` cold: **4 s** → warm: **3.4 ms** (1170× speedup)
+  - `POST /api/config` (shipment save): 2.6 ms (was silent-timing-out at the browser under the pre-cache load)
+  - All other endpoints unchanged, sub-10 ms
+
+### Notes
+- 20 s TTL was picked as a balance: dashboards polling at ≤ 5 s see ≥ 3 free hits per real query; a 20-s data staleness on the Charts tab is invisible to the operator (the strip is time-bucketed to minutes, not seconds).
+- Cache is per-uvicorn-process. When v4.0.7X eventually adds multi-worker uvicorn (or the pipeline decouple), swap this for a Redis cache with the same key format so all workers share hits — one-line change to the get/put helpers.
+- Same caching pattern is a slam-dunk on `/api/quality/heatmap`, `/api/area_stats`, `/api/detection_stats` — all three have identical `jsonb_array_elements` scans. Deferred to v4.0.76 so this small commit stays reviewable and easily revertable if the cache exposes any bug.
+
 ## [4.0.74] - 2026-07-10 — DB pool 20→40, server since_ms/until_ms/scatter_only for progressive scatter, Length HTML tile, Unwind checkbox
 
 ### Fixed — shipment save under load ("pool exhausted" errors)

@@ -14,6 +14,48 @@ from services.render import draw_detection_on
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# v4.0.75 — in-memory TTL cache for the expensive chart endpoints.
+# /api/detection_charts, /api/quality/heatmap, /api/area_stats,
+# /api/detection_stats each scan inference_results via
+# jsonb_array_elements(detections) which is single-digit-seconds-per-call
+# on a busy hypertable. The dashboard polls each of them every 5–10 s from
+# multiple tabs — under load, six concurrent 15-s SQL scans saturate
+# Chrome's per-origin socket limit and every OTHER endpoint (including
+# POST /api/config for shipment save) queues behind them.
+#
+# A 20-second in-memory TTL cache turns a 15-s scan into a sub-millisecond
+# lookup for every subsequent poll within that window — dashboards refresh
+# instantly, the DB only sees one query per 20 s per parameter permutation.
+# `_endpoint_cache` maps a hash-of-params → (timestamp, payload_dict).
+# LRU-capped at 256 entries so a distinct query permutation storm can't
+# balloon the process footprint.
+import hashlib as _hashlib
+_ENDPOINT_CACHE_TTL_SEC = 20.0
+_ENDPOINT_CACHE_MAX = 256
+_endpoint_cache: dict = {}
+
+def _endpoint_cache_key(prefix: str, *args) -> str:
+    """Deterministic cache key from the endpoint name + all query params."""
+    raw = prefix + "|" + "|".join(str(a) for a in args)
+    return _hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+def _endpoint_cache_get(key: str):
+    v = _endpoint_cache.get(key)
+    if v is None:
+        return None
+    ts, payload = v
+    if time.time() - ts < _ENDPOINT_CACHE_TTL_SEC:
+        return payload
+    return None
+
+def _endpoint_cache_put(key: str, payload) -> None:
+    global _endpoint_cache
+    if len(_endpoint_cache) >= _ENDPOINT_CACHE_MAX:
+        # Drop oldest half — cheaper than a strict LRU and avoids unbounded growth.
+        items = sorted(_endpoint_cache.items(), key=lambda kv: kv[1][0])
+        _endpoint_cache = dict(items[len(items) // 2:])
+    _endpoint_cache[key] = (time.time(), payload)
+
 # Absolute path to raw_images for path traversal protection
 _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 
@@ -2759,6 +2801,18 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
     hypertable can't make this slow. Reads from inference_results, so it reflects
     only Store=ON classes. Returns a well-formed empty payload on any error.
     """
+    # v4.0.75 — TTL cache lookup. All params contribute to the key so
+    # different dashboards with different filters get different cached
+    # results but the same dashboard polling on a 5-s interval only hits
+    # the DB once per 20-s window instead of every poll.
+    _cache_key = _endpoint_cache_key(
+        "dc", window, shipment, min_conf, baseline, phase, bins,
+        since_ms, until_ms, scatter_only,
+    )
+    _cached = _endpoint_cache_get(_cache_key)
+    if _cached is not None:
+        return JSONResponse(content=_cached)
+
     _windows = {
         "1h":  ("1 hour",   "1 minute"),
         "6h":  ("6 hours",  "5 minutes"),
@@ -2978,7 +3032,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # scatter arrays here.
         if int(scatter_only or 0):
             cur.close()
-            return JSONResponse(content={
+            _payload = {
                 "camera_scatter": camera_scatter,
                 "camera_scatter_encoder": camera_scatter_encoder,
                 "camera_y_order": [],  # order was set on the initial render; keep as-is
@@ -2986,7 +3040,9 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "since_ms": int(since_ms) if _use_slice else 0,
                 "until_ms": int(until_ms) if _use_slice else 0,
                 "shipment": shipment,
-            })
+            }
+            _endpoint_cache_put(_cache_key, _payload)
+            return JSONResponse(content=_payload)
 
         # --- confidence by class over time (one line per class) ---
         cur.execute(
@@ -3389,7 +3445,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         except Exception as _be:
             logger.debug(f"color baseline compute failed: {_be}")
 
-        return JSONResponse(content={
+        _payload = {
             "shipments": shipments,
             "size_over_time": size_over_time,
             "confidence_over_time": confidence_over_time,
@@ -3412,7 +3468,9 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             "color_reference_position": (locals().get("_svc") or {}).get("color_reference_position"),
             "window": window,
             "shipment": shipment,
-        })
+        }
+        _endpoint_cache_put(_cache_key, _payload)
+        return JSONResponse(content=_payload)
     except Exception as e:
         logger.warning(f"detection_charts query failed (returning empty): {e}")
         return JSONResponse(content=empty)
