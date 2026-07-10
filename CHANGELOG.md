@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.80] - 2026-07-10 — 4-part throughput + UX overhaul (verified working from operator's browser)
+
+Verified from operator's Chrome tab on `http://192.168.1.106/status` before commit. `MonitaQC v4.0.80` in the tab title.
+
+### 1) Postgres tuning (12 settings + shared_buffers restart)
+- `synchronous_commit=off`, `commit_delay=2000`, `commit_siblings=3`, `wal_writer_delay=20ms`, `checkpoint_timeout=30min`, `max_wal_size=16GB`, `min_wal_size=2GB`, `effective_cache_size=12GB`, `work_mem=64MB`, `maintenance_work_mem=1GB`, `wal_compression=on`, `shared_buffers=4GB`.
+- Applied on vteam12 via `ALTER SYSTEM SET ... ; SELECT pg_reload_conf();` (+ shared_buffers via restart). Verified via `SELECT name, setting, source FROM pg_settings`.
+- Bounded crash-loss window: ~72 rows of committed detections on unplanned power cut (wal_writer_delay=20ms × 3600 rows/sec). No DB corruption risk — `fsync` and `full_page_writes` stay on.
+
+### 2) Batch INSERT in `_db_writer_loop`
+- Coalesces up to 200 rows per `INSERT` via `psycopg2.extras.execute_values`, grouped by exact SQL prefix. Flush trigger: 200 rows per bucket OR 100 ms since first-queued item. One `BEGIN` + `SET LOCAL statement_timeout = 0` + `COMMIT` per batch instead of per row.
+- Target: 240 FPS × ~15 detections/frame = 3,600 rows/sec sustained. Batching cuts COMMIT rate from 3600/sec to ~18/sec — the fsync path is amortised over the batch and no longer bottlenecks the writer.
+- Preserves the existing rollback+log+continue semantics (writer thread never dies). Unmatched SQL shapes fall back to row-by-row inside the same transaction — no data loss, just no batch speedup for that odd SQL.
+
+### 3) Charts-tab decoupling + bucket-by-bucket scatter aligned to Quality strip
+- Operator directive: *"decouple anything that may stop UI functioning"* and *"be sync with the buckets of Quality by Time / Ejection by Time — not invent 192 buckets out of nowhere"*.
+- `refreshAdvancedCharts` no longer bundles the whole tab's fetches behind one big `/api/detection_charts` call. `refreshQualityCharts()` (Score per shipment + Quality strip + Ejection strip) now fires in parallel from its own endpoints — if `/api/detection_charts` hangs, those three panels still render.
+- The scatter's `"Loading dots — newest first"` spinner is a small pill in the scatter canvas's top-right corner, NOT the tab-wide `mveLoaderBegin('Loading charts…')` badge. Score per shipment and other panels remain fully interactive while dots stream in.
+- Bucket ladder uses the SAME `bins` count from `mve_bucket_count` localStorage that drives the Quality by Time / Ejection by Time strips — so each scatter fetch covers exactly one strip cell's width. Operator sees dots fill in aligned with the strip cells underneath.
+- Ticket-based cancellation: a new operator refresh bumps `_progressiveLadderTicket`, any prior in-flight ladder bails on the next iteration check.
+
+### 4) UI-configurable per-class dot cap
+- New `Dots/class:` `<select>` in the Charts-tab toolbar next to `Buckets:`. Options 100 / 500 / 750 (default) / 1500 / 3000. Warning chip `⚠ slow` appears at 3000+.
+- Persisted in `localStorage.mve_dot_cap`; client appends `&dot_cap=N` to every `/api/detection_charts` fetch (bucket-slice AND full-window paths).
+- Server `dot_cap` param clamped to `[100, 5000]`, cache key includes it. Replaces the hardcoded `WHERE rn <= 750` in both scatter SQL queries with a bound parameter.
+
+### Verified numbers from vteam12
+- `/api/detection_charts?window=1h`: **148-163 ms** (was hanging 60 s+ before compression, then 3 s timeout empty after v4.0.79)
+- Bucket-slice 5-min window with `scatter_only=1`: **85 ms**
+- Score per shipment card: **47 ms**
+- Detection stats: **86 ms**
+- Save POST /api/config: **1.1 ms**
+
 ## [4.0.78] - 2026-07-10 — LIMIT 50000 on the recent CTEs (safety cap; does NOT fully solve the DB stall yet)
 
 ### Changed — bound the `recent AS (…)` CTE in `/api/detection_charts` scatter queries

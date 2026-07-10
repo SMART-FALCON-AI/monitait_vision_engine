@@ -1101,6 +1101,16 @@
                                 <!-- 4.0.35 — single bucket count drives colour heatmap, quality strip, ejection strip. -->
                                 <span style="color:var(--text-secondary); margin-left:14px;">Buckets:</span>
                                 <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window. Click a class in the chart legend to hide it — your choice is remembered across reloads." style="width:60px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px;">
+                                <!-- v4.0.80 — per-class scatter dot cap. Server clamps to [100, 5000]. -->
+                                <span style="color:var(--text-secondary); margin-left:14px;">Dots/class:</span>
+                                <select id="hm-dot-cap" onchange="setDotCap(this.value)" title="Maximum scatter dots kept per class (newest first). Higher = denser chart but slower pan/zoom." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px;">
+                                    <option value="100">100</option>
+                                    <option value="500">500</option>
+                                    <option value="750" selected>750</option>
+                                    <option value="1500">1500</option>
+                                    <option value="3000">3000</option>
+                                </select>
+                                <span id="hm-dot-cap-warn" style="display:none; color:#fcd34d; margin-left:6px; font-size:11px;" title="Chart.js pan/zoom slows noticeably above ~3000 dots per class.">⚠ slow</span>
                             </div>
                             <!-- 4.0.44 — title + legend lifted OUT of Chart.js so the colour heatmap (which paints inside chartArea) can't reach them. -->
                             <div id="insight-scatter-title" style="text-align:center; color:#cbd5e1; font-size:13px; font-weight:500; margin-top:8px; margin-bottom:4px;">Camera × encoder (roll position) — hover for image, click dot for the exact frame</div>

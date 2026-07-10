@@ -660,6 +660,35 @@ function setBucketCount(value) {
 }
 window.setBucketCount = setBucketCount;
 
+// v4.0.80 — per-class dot cap. Server clamps to [100, 5000]; UI options
+// go up to 3000 with a warning at the top end. Higher = denser scatter but
+// slower Chart.js pan/zoom above ~3000.
+function _dotCap() {
+    const raw = parseInt(localStorage.getItem('mve_dot_cap') || '750', 10);
+    return Math.max(100, Math.min(5000, Number.isFinite(raw) ? raw : 750));
+}
+function setDotCap(value) {
+    let n = parseInt(value, 10);
+    if (!Number.isFinite(n)) n = 750;
+    n = Math.max(100, Math.min(5000, n));
+    localStorage.setItem('mve_dot_cap', String(n));
+    const el = document.getElementById('hm-dot-cap');
+    if (el) el.value = String(n);
+    const warn = document.getElementById('hm-dot-cap-warn');
+    if (warn) warn.style.display = (n >= 3000) ? 'inline' : 'none';
+    if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+}
+window.setDotCap = setDotCap;
+// Restore saved value on load and update warning visibility.
+document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('hm-dot-cap');
+    if (el) {
+        el.value = String(_dotCap());
+    }
+    const warn = document.getElementById('hm-dot-cap-warn');
+    if (warn) warn.style.display = (_dotCap() >= 3000) ? 'inline' : 'none';
+});
+
 // 4.0.38 — 4.0.36's sticky-legend layer was over-complication. Source of
 // truth for "is this class visible" is now ONLY the Process tab "Show"
 // checkbox (which 4.0.37 wires through to the chart scatter via a server
@@ -1123,7 +1152,7 @@ function _ensureGlobalLoader() {
         + 'box-shadow:0 8px 24px rgba(0,0,0,0.55)';
     el.innerHTML = '<span style="width:16px;height:16px;border:3px solid '
         + 'rgba(241,245,249,0.35);border-top-color:#f1f5f9;border-radius:50%;'
-        + 'animation:mve-spin 0.7s linear infinite;display:inline-block"></span>'
+        + 'animation:spin 0.7s linear infinite;display:inline-block"></span>'
         + ' <span id="mve-global-loader-text">Loading…</span>';
     if (document.body) document.body.appendChild(el);
     else document.addEventListener('DOMContentLoaded', () => document.body.appendChild(el), { once: true });
@@ -1193,33 +1222,97 @@ window.mveLoaderEnd   = mveLoaderEnd;
 // to the existing scatter chart via chart.update('none'). Skip iteration
 // when the operator has narrowed the view (window='1h' or a specific
 // shipment).
+// v4.0.80 — real bucket-by-bucket scatter loader, aligned to the Quality
+// strip's bucket count. Operator complaint on v4.0.74/75: "buckets not
+// synced with Quality by Time / Ejection by Time — you invented 192 buckets
+// out of nowhere". Fix: use the SAME `bins` value the operator sees under
+// "Buckets:" (mve_bucket_count localStorage), iterate every one of those
+// buckets from newest to oldest, so one bucket's worth of scatter dots
+// lines up with one Quality/Ejection strip cell as it loads.
+//
+// Also implements the operator's second directive: "decouple anything that
+// may stop UI functioning". This handler no longer calls
+// _refreshAdvancedChartsCore (which fetched EVERY chart via one big
+// /api/detection_charts call and destroyed all charts together). Instead:
+//   - refreshQualityCharts() fires in parallel (Score per shipment,
+//     Quality strip, Ejection strip — each has its own endpoint, their
+//     own loader, their own render, independent failure modes).
+//   - refreshDetectionInsights (Pareto bar, timeline) is untouched — it
+//     fires from its own entrypoint via its own /api/detection_stats fetch.
+//   - The scatter creates its own empty chart, mounts a scatter-scoped
+//     spinner over ONLY the scatter canvas, and fills bucket by bucket.
+//
+// If /api/detection_charts hangs entirely, only the SCATTER shows the
+// spinner. Score per shipment, insights, heatmap and ejection strips
+// still render from their own fast endpoints.
+let _progressiveLadderTicket = 0;
+
 async function refreshAdvancedCharts() {
     const winSel = document.getElementById('insight-window');
     const target = (winSel && winSel.value) || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
 
-    _progressiveScatterSeen = new Set();
+    _progressiveLadderTicket += 1;
+    const myTicket = _progressiveLadderTicket;
 
+    // Kick the OTHER Charts-tab panels off in parallel — they have their
+    // own endpoints (quality/shipments, quality/heatmap, ejection_axis)
+    // and their own render paths. Never await them.
+    try { if (typeof refreshQualityCharts === 'function') refreshQualityCharts(); } catch (e) {}
+
+    // Narrow-scope views are already fast enough — single fetch, no ladder.
     if (target === '1h' || !!shipment) {
         return _refreshAdvancedChartsCore();
     }
 
+    // Read the operator's chosen bucket count (same input that drives the
+    // Quality by Time / Ejection by Time strip resolution). Default 48
+    // matches those strips; the max 192 the operator uses gives 192
+    // aligned scatter-buckets over the target window.
+    const bins = Math.max(4, Math.min(192,
+        parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48));
     const targetMs = _windowToMs(target);
-    const bins = Math.max(4, parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48);
     const bucketMs = Math.max(60 * 1000, Math.floor(targetMs / bins));
     const nowMs = Date.now();
 
-    const origValue = winSel.value;
-    winSel.value = (bucketMs <= 3600 * 1000) ? '1h' : (bucketMs <= 6 * 3600 * 1000) ? '6h' : '24h';
+    // Mount the scatter-scoped loader — NOT the tab-wide mveLoaderBegin.
+    // If /api/detection_charts hangs later, the rest of the tab stays clean.
+    _mountScatterLoader('Loading dots — newest first');
+
+    // Hydrate size + confidence bands + camera_y_order from a tiny fast
+    // fetch. We ONLY use it for those inputs; the scatter data returned by
+    // this call is IGNORED — the bucket loop owns the scatter.
+    let camYOrder = [];
     try {
-        await _refreshAdvancedChartsCore();
+        const bins48 = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
+        const r = await fetch('/api/detection_charts?window=1h'
+            + '&shipment=' + encodeURIComponent(shipment)
+            + '&min_conf=' + minConf
+            + '&baseline=' + encodeURIComponent(localStorage.getItem('mve_heatmap_baseline') || 'camera')
+            + '&phase=' + encodeURIComponent(localStorage.getItem('mve_heatmap_phase') || '')
+            + '&bins=' + bins48
+            + '&dot_cap=' + _dotCap());
+        if (myTicket !== _progressiveLadderTicket) return;
+        const d = await r.json();
+        camYOrder = Array.isArray(d.camera_y_order) ? d.camera_y_order : [];
+        // Populate size + confidence charts only. Leaves the scatter alone.
+        if (typeof _renderSizeConfidenceBandsOnly === 'function') {
+            try { _renderSizeConfidenceBandsOnly(d); } catch (e) { console.warn(e); }
+        } else {
+            // Fallback: reuse the existing Core render just to get the size
+            // and confidence charts up on first tab activation. It also
+            // populates the scatter with 1h data, which the bucket loop
+            // dedupes against below.
+            try { await _refreshAdvancedChartsCore(); } catch (e) { console.warn(e); }
+        }
     } catch (e) {
-        console.warn('[progressive] initial render failed:', e);
-    } finally {
-        winSel.value = origValue;
+        console.warn('[progressive] hydrate failed:', e);
     }
 
+    // Seed the dedup set with whatever's already on the chart (e.g. from
+    // the 1h Core hydrate above, or from a previous poll cycle).
+    _progressiveScatterSeen = new Set();
     if (_insightCameraScatter) {
         for (const ds of (_insightCameraScatter.data.datasets || [])) {
             for (const p of (ds.data || [])) {
@@ -1228,20 +1321,62 @@ async function refreshAdvancedCharts() {
         }
     }
 
-    const initialBackMs = (winSel.value === '6h') ? 6 * 3600 * 1000 : (winSel.value === '24h') ? 24 * 3600 * 1000 : 3600 * 1000;
-    let endMs = nowMs - initialBackMs;
+    // Iterate ONE Quality-strip-aligned bucket at a time, newest first.
+    // Each fetch covers exactly `bucketMs` — the same width one
+    // Quality/Ejection strip cell covers underneath. Operator sees dots
+    // appear ONE strip-cell-width-per-fetch.
+    let endMs = nowMs;
     const stopMs = nowMs - targetMs;
     let bucketCount = 0;
-    const MAX_BUCKETS = Math.min(bins, 24);
-    while (endMs > stopMs && bucketCount < MAX_BUCKETS) {
-        if ((winSel.value || '24h') !== target) break;
-        const sinceMs = Math.max(stopMs, endMs - bucketMs);
-        await _extendScatterFromBucket(sinceMs, endMs, shipment, minConf);
-        endMs = sinceMs;
-        bucketCount++;
+    try {
+        while (endMs > stopMs && bucketCount < bins) {
+            if (myTicket !== _progressiveLadderTicket) return;
+            if (!_insightCameraScatter) break;
+            if ((winSel.value || '24h') !== target) break; // operator changed window
+
+            const sinceMs = Math.max(stopMs, endMs - bucketMs);
+            await _extendScatterFromBucket(sinceMs, endMs, shipment, minConf);
+            endMs = sinceMs;
+            bucketCount += 1;
+        }
+    } finally {
+        if (myTicket === _progressiveLadderTicket) _unmountScatterLoader();
     }
 }
 window.refreshAdvancedCharts = refreshAdvancedCharts;
+
+// v4.0.80 — scatter-scoped spinner: sits INSIDE the scatter canvas's
+// parent, never covers the whole tab. Ensures the rest of Charts remains
+// interactive even while dots are still loading.
+function _mountScatterLoader(label) {
+    const host = document.getElementById('insight-camera-scatter');
+    if (!host || !host.parentElement) return;
+    const parent = host.parentElement;
+    if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+    let el = document.getElementById('mve-scatter-loader');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'mve-scatter-loader';
+        el.style.cssText = 'position:absolute;top:6px;right:6px;display:flex;align-items:center;'
+            + 'gap:6px;background:rgba(15,23,42,0.72);color:#e2e8f0;font-size:11px;'
+            + 'font-weight:600;padding:4px 8px;pointer-events:none;z-index:5;'
+            + 'border-radius:12px;transition:opacity 200ms;';
+        el.innerHTML = '<span style="width:12px;height:12px;border:2px solid rgba(226,232,240,0.35);'
+            + 'border-top-color:#e2e8f0;border-radius:50%;animation:spin 0.7s linear infinite;'
+            + 'display:inline-block"></span><span id="mve-scatter-loader-text"></span>';
+        parent.appendChild(el);
+    }
+    const t = document.getElementById('mve-scatter-loader-text');
+    if (t) t.textContent = String(label || 'Loading dots…');
+    el.style.opacity = '1';
+    el.style.display = 'flex';
+}
+function _unmountScatterLoader() {
+    const el = document.getElementById('mve-scatter-loader');
+    if (!el) return;
+    el.style.opacity = '0';
+    setTimeout(() => { if (el && el.parentElement) el.parentElement.removeChild(el); }, 220);
+}
 
 // v4.0.74 — animate the scatter's growth from newest → oldest so the operator
 // sees dots progressively appear. All data was already fetched by the Core
@@ -1371,7 +1506,8 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
                               '&until_ms=' + Math.floor(untilMs) +
                               '&shipment=' + encodeURIComponent(shipment) +
                               '&min_conf=' + minConf +
-                              '&scatter_only=1');
+                              '&scatter_only=1' +
+                              '&dot_cap=' + _dotCap());
         data = await r.json();
     } catch (e) {
         console.warn('[progressive] bucket fetch failed [' + new Date(sinceMs).toISOString() + ' → ' + new Date(untilMs).toISOString() + ']:', e);
@@ -1458,7 +1594,8 @@ async function _refreshAdvancedChartsCore() {
                               '&min_conf=' + minConf +
                               '&baseline=' + encodeURIComponent(baseline) +
                               '&phase=' + encodeURIComponent(phase) +
-                              '&bins=' + bins);
+                              '&bins=' + bins +
+                              '&dot_cap=' + _dotCap());
         data = await r.json();
     } catch (e) {
         console.error('detection_charts fetch failed:', e);

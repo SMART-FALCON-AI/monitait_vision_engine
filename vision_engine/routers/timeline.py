@@ -2772,7 +2772,7 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
 
 
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -2801,13 +2801,18 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
     hypertable can't make this slow. Reads from inference_results, so it reflects
     only Store=ON classes. Returns a well-formed empty payload on any error.
     """
+    # v4.0.80 — clamp dot_cap to [100, 5000]. UI options top out at 3000 but
+    # the safe max is 5000; anything higher lets a huge scatter noticeably
+    # slow Chart.js pan/zoom.
+    dot_cap = max(100, min(5000, int(dot_cap or 750)))
+
     # v4.0.75 — TTL cache lookup. All params contribute to the key so
     # different dashboards with different filters get different cached
     # results but the same dashboard polling on a 5-s interval only hits
     # the DB once per 20-s window instead of every poll.
     _cache_key = _endpoint_cache_key(
         "dc", window, shipment, min_conf, baseline, phase, bins,
-        since_ms, until_ms, scatter_only,
+        since_ms, until_ms, scatter_only, dot_cap,
     )
     _cached = _endpoint_cache_get(_cache_key)
     if _cached is not None:
@@ -2972,11 +2977,11 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 FROM exploded
             )
             SELECT x_ms, cam, cls, conf, img, ship FROM ranked
-            WHERE rn <= 750
+            WHERE rn <= %s
             ORDER BY t DESC
             LIMIT 6000
             """,
-            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args),
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
         )
         camera_scatter = [
             {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
@@ -3014,10 +3019,10 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 FROM exploded
             )
             SELECT enc, cam, cls, conf, img, ship FROM ranked
-            WHERE rn <= 750
+            WHERE rn <= %s
             LIMIT 6000
             """,
-            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args),
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
         )
         camera_scatter_encoder = [
             {"x": int(enc or 0), "y": cam, "cls": cls,

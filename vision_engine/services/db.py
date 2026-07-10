@@ -38,13 +38,35 @@ def get_db_connection():
             # under enough contention the whole POST timed out at the browser).
             # Postgres default max_connections is 100 so 40 leaves plenty of
             # headroom for other services + external tooling.
+            # v4.0.79 — session-level statement_timeout=3s applied to EVERY
+            # pooled connection via the Postgres `options` parameter. Under
+            # heavy load (13+ hours of accumulated math_inference row spew
+            # blowing up the inference_results hypertable), the analytical
+            # endpoints (detection_charts, quality/shipments, quality/heatmap,
+            # detection_stats, shipment_quality_score, area_stats) all scan
+            # jsonb_array_elements and can hang 12–60 s per call — which
+            # cascades into the browser's 6-concurrent-request-per-origin
+            # limit filling up with pending fetches, so EVERY panel on the
+            # Charts tab looks stuck (Score per shipment, Insights, Trend,
+            # heatmap, scatter — all waiting for socket slots). Failing fast
+            # (500 in ~3 s instead of hanging indefinitely) frees the
+            # browser slot, lets the fast panels render on their own data,
+            # and produces an actionable error the operator can see.
+            #
+            # DB writer thread (services/db.py::_db_writer_loop) already
+            # catches exceptions and rolls back per row, so a 3 s cap on
+            # writes is safe — under overload we drop that row and log a
+            # warning, which is the exact behaviour v4.0.50's autoscaler
+            # already assumes. Existing db-queue-full backpressure kicks
+            # in normally.
             db_connection_pool = pool.SimpleConnectionPool(
                 1, 40,
                 host=POSTGRES_HOST,
                 port=POSTGRES_PORT,
                 database=POSTGRES_DB,
                 user=POSTGRES_USER,
-                password=POSTGRES_PASSWORD
+                password=POSTGRES_PASSWORD,
+                options='-c statement_timeout=3000',
             )
             logger.info("Database connection pool initialized")
         except Exception as e:
@@ -63,29 +85,125 @@ def release_db_connection(conn):
 
 
 def _db_writer_loop():
-    """Background thread that drains the write queue and executes DB inserts."""
-    while True:
-        try:
-            task = _db_queue.get()
-            if task is None:
-                break
-            sql, params = task
+    """Background thread that drains the write queue and executes DB inserts.
+
+    v4.0.80 — batched writes. Coalesces up to 200 rows per INSERT via
+    psycopg2.extras.execute_values, grouped by exact SQL string so multiple
+    distinct INSERT statements queued in parallel each get their own batch.
+    Flushes when EITHER any bucket reaches 200 rows OR 100 ms have elapsed
+    since the first item of the current cycle was pulled — so latency stays
+    bounded when the queue is idle. Preserves the v4.0.79 SET LOCAL
+    statement_timeout = 0 pattern (writes must never be dropped by the
+    pool-wide 3-s cap) and the existing rollback+log+continue error semantics
+    (the writer thread never dies).
+
+    Target throughput at 240 FPS × ~15 detections/frame = 3,600 rows/sec:
+    with batch=200 and flush=100ms, the writer does ~18 COMMITs/sec instead
+    of 3,600. Combined with v4.0.80's synchronous_commit=off + wal_writer_delay=20ms
+    postgres tuning, the fsync path is amortised over the batch and no longer
+    the bottleneck.
+    """
+    import time as _time
+    from psycopg2.extras import execute_values as _execute_values
+    import re as _re
+
+    MAX_BATCH = 200
+    MAX_LATENCY_S = 0.100  # 100 ms
+
+    def _to_values_template(sql):
+        """Rewrite a single-row `... VALUES (...)` INSERT into an
+        execute_values-compatible `... VALUES %s` template. Preserves the row
+        tuple shape via the captured parenthesised group. Returns (None, None)
+        when the SQL doesn't match the ...VALUES(...) tail — fallback path
+        then runs per-row inside the same transaction (no data loss, no batch
+        speedup for that odd SQL)."""
+        m = _re.search(r"(?is)\bVALUES\s*(\([^)]*\))\s*$", sql.strip())
+        if not m:
+            return None, None
+        template = m.group(1)  # e.g. "(NOW(), %s, %s, ...)"
+        prefix = sql[:m.start()] + "VALUES %s"
+        return prefix, template
+
+    # Cache the rewrite per distinct SQL so we don't regex on every row.
+    _tmpl_cache = {}
+
+    def _flush(buckets):
+        for sql, rows in buckets.items():
+            if not rows:
+                continue
+            cached = _tmpl_cache.get(sql)
+            if cached is None:
+                cached = _to_values_template(sql)
+                _tmpl_cache[sql] = cached
+            prefix, template = cached
+
             conn = get_db_connection()
             if not conn:
+                logger.warning(f"DB write: no connection, dropping batch of {len(rows)} rows")
                 continue
             try:
                 cursor = conn.cursor()
-                cursor.execute(sql, params)
+                cursor.execute("BEGIN")
+                cursor.execute("SET LOCAL statement_timeout = 0")
+                if prefix is not None and template is not None:
+                    _execute_values(cursor, prefix, rows, template=template, page_size=MAX_BATCH)
+                else:
+                    for params in rows:
+                        cursor.execute(sql, params)
                 conn.commit()
                 cursor.close()
             except Exception as e:
-                logger.error(f"DB write error: {e}")
+                logger.error(f"DB write error (batch of {len(rows)}): {e}")
                 try:
                     conn.rollback()
                 except Exception:
                     pass
             finally:
                 release_db_connection(conn)
+
+    while True:
+        try:
+            first = _db_queue.get()
+            if first is None:
+                break
+
+            buckets = {}
+            deadline = _time.monotonic() + MAX_LATENCY_S
+            total = [0]
+
+            def _add(task):
+                sql, params = task
+                bucket = buckets.get(sql)
+                if bucket is None:
+                    bucket = []
+                    buckets[sql] = bucket
+                bucket.append(params)
+                total[0] += 1
+
+            _add(first)
+
+            shutdown = False
+            while total[0] < MAX_BATCH:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    task = _db_queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if task is None:
+                    shutdown = True
+                    break
+                _add(task)
+                # Also flush early if any single bucket hit the cap — keeps
+                # one hot SQL from starving another that's been waiting.
+                if len(buckets[task[0]]) >= MAX_BATCH:
+                    break
+
+            _flush(buckets)
+
+            if shutdown:
+                break
         except Exception as e:
             logger.error(f"DB writer loop error: {e}")
 
@@ -193,6 +311,13 @@ def ensure_ejection_events_table():
         return False
     try:
         cur = conn.cursor()
+        # v4.0.79 — same reasoning as ensure_inference_encoder_column: DDL can
+        # legitimately need to wait longer than the pool-wide 3-s statement
+        # timeout when a heavy analytical query is holding a share lock or a
+        # writer is holding row locks. SET LOCAL scopes the disable to this
+        # transaction only.
+        cur.execute("BEGIN")
+        cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(
             """CREATE TABLE IF NOT EXISTS ejection_events (
                    time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -254,6 +379,17 @@ def ensure_inference_encoder_column():
         return False
     try:
         cur = conn.cursor()
+        # v4.0.79 — waive the pool-wide statement_timeout for this DDL. Under
+        # heavy DB load (the same load that made me add the 3-s timeout in the
+        # first place), the ALTER TABLE ... IF NOT EXISTS waits for an ACCESS
+        # EXCLUSIVE lock on inference_results while writers hold it, then hits
+        # the 3-s cap and gets cancelled — retry-loops for hours, spamming
+        # `canceling statement due to statement timeout` and keeping the
+        # column flagged as "not ready" so the encoder-axis scatter can never
+        # populate. Set timeout=0 for THIS statement only via SET LOCAL, which
+        # is scoped to the current transaction and reverts on commit/rollback.
+        cur.execute("BEGIN")
+        cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute("ALTER TABLE inference_results ADD COLUMN IF NOT EXISTS encoder_value BIGINT;")
         conn.commit()
         cur.close()
