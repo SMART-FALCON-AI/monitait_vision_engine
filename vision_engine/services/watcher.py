@@ -350,8 +350,11 @@ class InferenceQueueFacade:
 
     def put(self, item, timeout=None):
         """Add frame — hot queue first, spill to cold disk if hot is full."""
+        # v4.0.90 — temporary INFO-level log so we can see the spill rate.
+        # Was DEBUG (hidden by default log level). Revert to DEBUG once we
+        # understand why cold grows while hot=0.
         if not self.hot.put(item):
-            logger.debug("Hot queue full — spilling to cold disk queue")
+            logger.warning(f"Hot queue full ({self.hot.qsize()}/{self.hot.maxsize}) — spilling to cold disk queue")
             self.cold.put(item)
 
     def stats(self):
@@ -568,6 +571,18 @@ class ArduinoSocket:
         # has moved since this shipment began. Persisted alongside
         # current_shipment so it survives restart. Zero on "no_shipment".
         self.shipment_start_encoder = 0
+        # 4.0.98 — Length persistence for encoder-reset resilience. Every N
+        # seconds we snapshot `(shipment, shipment_start_encoder, last_seen_length)`
+        # to a small JSON file (bind-mounted alongside .env.prepared_query_data).
+        # On boot / after a config restore, we check: if current_encoder <
+        # persisted_shipment_start (encoder was reset by PLC reboot / power cut /
+        # MVE recreate), we rebuild shipment_start_encoder so length continues
+        # from where it left off — no more negative length spikes. Guarded by
+        # `_length_state_lock` so the periodic writer and the shipment-change
+        # writer can't race on the file.
+        self._length_state_path = "/code/.env.length_state.json"
+        self._length_state_lock = threading.Lock()
+        self._length_state_last_saved = 0.0
         self.health_check = False
         self.is_moving = False
         self.step = 15
@@ -736,6 +751,22 @@ class ArduinoSocket:
         threading.Thread(target=self.write_production_metrics_loop).start()
         time.sleep(0.5)
         threading.Thread(target=self.run_barcode_scanner, daemon=True).start()
+        # 4.0.98 — periodic length persistence, so if MVE crashes or the encoder
+        # resets between shipment-change writes, we still have a fresh snapshot
+        # to restore from on next boot. Runs every 5 s inside persist_length_state,
+        # writes only when the actual encoder/length changed.
+        threading.Thread(target=self._length_state_writer_loop, daemon=True, name="length-state-writer").start()
+
+    def _length_state_writer_loop(self):
+        """v4.0.98 — Periodic length-state snapshot. Sleeps 5 s between attempts;
+        `persist_length_state` throttles further to at most one file write every
+        5 s, so real cadence is ~5-10 s. Cheap: one small JSON file write."""
+        while not self.stop_thread:
+            try:
+                self.persist_length_state()
+            except Exception as e:
+                logger.debug(f"length_state_writer_loop: {e}")
+            time.sleep(5.0)
 
 
     def _sync_legacy_cam_attrs(self):
@@ -902,6 +933,72 @@ class ArduinoSocket:
         command = mode_commands.get(mode, '1\n')  # Default to U_ON_B_OFF
         self._send_message(command)
         logger.debug(f"Set light mode: {mode} (command: {command.strip()})")
+
+    def persist_length_state(self, force=False):
+        """v4.0.98 — Save (shipment, shipment_start_encoder, last_seen_length)
+        to a small JSON file so an encoder reset (PLC reboot, MVE recreate,
+        power outage) doesn't cause length to go negative. Throttled to at
+        most one write every 5 s unless `force=True`."""
+        try:
+            with self._length_state_lock:
+                now = time.time()
+                if not force and (now - self._length_state_last_saved) < 5.0:
+                    return
+                ship = str(getattr(self, "shipment", "no_shipment") or "no_shipment")
+                if ship in ("", "no_shipment"):
+                    return  # nothing meaningful to persist
+                enc = int(getattr(self, "encoder_value", 0) or 0)
+                start = int(getattr(self, "shipment_start_encoder", 0) or 0)
+                state = {
+                    "shipment":               ship,
+                    "shipment_start_encoder": start,
+                    "last_seen_encoder":      enc,
+                    "last_seen_length":       enc - start,
+                    "saved_at":               now,
+                }
+                tmp = self._length_state_path + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(state, f)
+                os.replace(tmp, self._length_state_path)
+                self._length_state_last_saved = now
+        except Exception as e:
+            logger.debug(f"persist_length_state failed: {e}")
+
+    def restore_length_state(self):
+        """v4.0.98 — On boot / after config restore, check the persisted length
+        file. If the persisted shipment matches the current shipment AND the
+        current encoder is BELOW the persisted shipment_start_encoder (indicates
+        encoder was reset while shipment stayed active), rebuild
+        shipment_start_encoder so the length delta continues from where it
+        left off. Otherwise no-op. Called ONCE from main.py at startup."""
+        try:
+            with self._length_state_lock:
+                if not os.path.exists(self._length_state_path):
+                    return
+                with open(self._length_state_path) as f:
+                    state = json.load(f)
+            persisted_ship = str(state.get("shipment", "") or "")
+            current_ship   = str(getattr(self, "shipment", "no_shipment") or "no_shipment")
+            if persisted_ship != current_ship or current_ship in ("", "no_shipment"):
+                return  # different shipment; no restore
+            persisted_start  = int(state.get("shipment_start_encoder", 0) or 0)
+            persisted_length = int(state.get("last_seen_length", 0) or 0)
+            current_encoder  = int(getattr(self, "encoder_value", 0) or 0)
+            if current_encoder < persisted_start:
+                # Encoder was reset (PLC reboot / power cut). Rebuild the start
+                # so `encoder_value - shipment_start_encoder == persisted_length`
+                # → length continues from where it left off instead of going
+                # deeply negative like the operator saw on 2026-07-11.
+                new_start = current_encoder - persisted_length
+                self.shipment_start_encoder = int(new_start)
+                logger.info(
+                    f"length restore: encoder reset detected for {current_ship} "
+                    f"(persisted_start={persisted_start} current_encoder={current_encoder} "
+                    f"persisted_length={persisted_length}) — "
+                    f"rebuilt shipment_start_encoder={self.shipment_start_encoder}"
+                )
+        except Exception as e:
+            logger.warning(f"restore_length_state failed: {e}")
 
     def reset_encoder(self):
         if self.serial_available and self.serial:
@@ -1110,6 +1207,14 @@ class ArduinoSocket:
                                     f"Shipment start encoder: {self.shipment_start_encoder} "
                                     f"(barcode scan → {new_shipment})"
                                 )
+                                # 4.0.98 — new shipment → snapshot to disk immediately so
+                                # a crash between now and the next periodic tick doesn't
+                                # lose the start_encoder value.
+                                try:
+                                    self.shipment = new_shipment  # briefly set for persist to see
+                                    self.persist_length_state(force=True)
+                                except Exception:
+                                    pass
 
                             # (1) live in-memory FIRST — detection loop + status
                             self.shipment = new_shipment

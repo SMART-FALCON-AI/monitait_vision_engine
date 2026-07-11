@@ -532,11 +532,10 @@ function updateCameraTable(cameras) {
     const container = document.getElementById('legacy-camera-status-container');
     tbody.innerHTML = '';
 
-    const cameraNames = {
-        'cam_1': 'Camera 1',
-        'cam_2': 'Camera 2',
-        'cam_3': 'Camera 3',
-        'cam_4': 'Camera 4'
+    // v4.0.99 — generalized: was hard-coded cam_1..cam_4, now handles any cam_N.
+    const prettyCamName = (k) => {
+        const m = /^cam_(\d+)$/.exec(String(k));
+        return m ? `Camera ${m[1]}` : k;
     };
 
     // Only show the table if there are cameras
@@ -547,11 +546,18 @@ function updateCameraTable(cameras) {
         return;
     }
 
-    for (const [key, status] of Object.entries(cameras)) {
+    // v4.0.99 — sort by numeric cam id so cam_10 comes after cam_9, not after cam_1.
+    const camKeyOrder = Object.keys(cameras).sort((a, b) => {
+        const na = parseInt((a.match(/\d+/) || [0])[0], 10);
+        const nb = parseInt((b.match(/\d+/) || [0])[0], 10);
+        return na - nb;
+    });
+    for (const key of camKeyOrder) {
+        const status = cameras[key];
         const row = document.createElement('tr');
         row.innerHTML = `
-            <td>${cameraNames[key] || key}</td>
-            <td class="${status ? 'camera-ok' : 'camera-fail'}">${status ? 'OK' : 'FAIL'}</td>
+            <td style="padding: 6px 10px; color: var(--text-primary, #e2e8f0); border: 1px solid var(--border-color, #334155);">${prettyCamName(key)}</td>
+            <td class="${status ? 'camera-ok' : 'camera-fail'}" style="padding: 6px 10px; border: 1px solid var(--border-color, #334155); color: ${status ? '#22c55e' : '#ef4444'}; font-weight: 600;">${status ? 'OK' : 'FAIL'}</td>
         `;
         tbody.appendChild(row);
     }
@@ -3091,10 +3097,13 @@ async function fetchInferenceStats() {
         }
 
         // Update inference FPS (data.inference_fps is already in FPS from backend)
+        // v4.0.87 — 0.0 is a valid measurement (processing is happening, just at low rate).
+        // Only show N/A when the field is genuinely missing / null / non-numeric.
         const inferenceFpsValueEl = document.getElementById('inference-fps-value');
         if (inferenceFpsValueEl) {
-            if (data.inference_fps > 0) {
-                const infFps = parseFloat(data.inference_fps);
+            const rawInf = data.inference_fps;
+            if (rawInf !== undefined && rawInf !== null && !isNaN(parseFloat(rawInf))) {
+                const infFps = parseFloat(rawInf);
                 inferenceFpsValueEl.textContent = infFps.toFixed(2) + ' FPS';
 
                 // Color-code based on FPS performance
@@ -3108,20 +3117,22 @@ async function fetchInferenceStats() {
                     inferenceFpsValueEl.style.color = 'var(--danger-color)';
                 }
 
-                // Trigger inference heartbeat animation
-                pulseHeartbeat('inference-heartbeat');
+                // Trigger inference heartbeat animation (only when non-zero)
+                if (infFps > 0) pulseHeartbeat('inference-heartbeat');
             } else {
                 inferenceFpsValueEl.textContent = 'N/A';
             }
         }
 
         // Update capture FPS (based on camera capture rate)
+        // v4.0.87 — same treatment: 0.0 is a valid reading, only show N/A when missing.
         const captureFpsValueEl = document.getElementById('capture-fps-value');
         if (captureFpsValueEl) {
-            if (data.capture_fps !== undefined && data.capture_fps > 0) {
-                captureFpsValueEl.textContent = data.capture_fps.toFixed(2) + ' FPS';
-                // Trigger capture heartbeat animation
-                pulseHeartbeat('capture-heartbeat');
+            const rawCap = data.capture_fps;
+            if (rawCap !== undefined && rawCap !== null && !isNaN(parseFloat(rawCap))) {
+                const capFps = parseFloat(rawCap);
+                captureFpsValueEl.textContent = capFps.toFixed(2) + ' FPS';
+                if (capFps > 0) pulseHeartbeat('capture-heartbeat');
             } else {
                 captureFpsValueEl.textContent = 'N/A';
             }

@@ -451,16 +451,16 @@
 
             <!-- Legacy Camera Status Table (kept for backward compatibility) -->
             <div id="legacy-camera-status-container" style="display: none;">
-                <h2 data-i18n="camera_status">Camera Connection Status</h2>
-                <table class="camera-table">
+                <h2 data-i18n="camera_status" style="color: var(--text-primary, #e2e8f0);">Camera Connection Status</h2>
+                <table class="camera-table" style="width: 100%; border-collapse: collapse; color: var(--text-primary, #e2e8f0);">
                     <thead>
-                        <tr>
-                            <th>Camera</th>
-                            <th>Status</th>
+                        <tr style="background: rgba(51,65,85,0.5);">
+                            <th style="padding: 6px 10px; text-align: left; color: var(--text-primary, #e2e8f0); border: 1px solid var(--border-color, #334155);">Camera</th>
+                            <th style="padding: 6px 10px; text-align: left; color: var(--text-primary, #e2e8f0); border: 1px solid var(--border-color, #334155);">Status</th>
                         </tr>
                     </thead>
-                    <tbody id="camera-table-body">
-                        <tr><td colspan="2">Loading...</td></tr>
+                    <tbody id="camera-table-body" style="color: var(--text-primary, #e2e8f0);">
+                        <tr><td colspan="2" style="padding: 6px 10px; color: var(--text-primary, #e2e8f0);">Loading...</td></tr>
                     </tbody>
                 </table>
 
@@ -1141,7 +1141,19 @@
                     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
                         <h4 style="margin:0; color: var(--text-primary);">📊 Score per shipment</h4>
                         <div style="display:flex; gap:6px; align-items:center; font-size:12px;">
-                            <span style="color:var(--text-secondary); font-size:11px;">last 30 shipments · color = verdict</span>
+                            <label style="color:var(--text-secondary); font-size:11px;">Shipments:
+                                <input id="sqs-shipments" type="number" min="5" max="200" step="1" value="30"
+                                       style="width:56px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid var(--border-color,#334155); border-radius:3px; padding:1px 4px; font-size:11px;"
+                                       onchange="if(this.value){localStorage.setItem('mve_sqs_count',String(Math.max(5,Math.min(200,parseInt(this.value)||30))));refreshQualityCharts();}">
+                            </label>
+                            <span id="sqs-subtitle" style="color:var(--text-secondary); font-size:11px;">· window 24h · color = verdict</span>
+                            <span class="info-tooltip-sm" style="margin-left:6px;">i
+                                <span class="info-tooltip-text">
+                                    <b>Absolute (solid bar)</b> — calibrated score 100 × (1 − impact/unit). Comparable across time and sites — doesn't move because you calibrated the fleet.<br><br>
+                                    <b>Relative (striped bar)</b> — rank of this shipment within the currently visible window; worst in the window → 0, best → 100. Expands whatever spread exists so subtle drift shows even when all Absolute scores sit at 99–100.<br><br>
+                                    <b>Color</b> — verdict: green = RELEASE, amber = RE-INSPECT, red = HOLD, grey = pending.
+                                </span>
+                            </span>
                             <button onclick="refreshQualityCharts()" style="background:rgba(51,65,85,0.6); color:#fff; border:none; padding:3px 8px; cursor:pointer; font-size:11px; border-radius:3px;">⟳ Refresh</button>
                         </div>
                     </div>

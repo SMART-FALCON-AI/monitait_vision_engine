@@ -69,10 +69,84 @@ async def batch_predict(image: List[UploadFile] = File(...)):
 
 @app.post(os.path.join(DETECTION_URL, 'set-model'))
 async def set_model(request: Request, model_path: str = Form(...)):
+    """v4.0.98 — Persistent set-model with 1-click revert.
+
+    Detector's `__init__` hardcodes `path="best.pt"`, so any weight loaded via
+    the old set-model was lost on container restart. New behavior:
+
+      1. Move current `best.pt` -> `old_best.pt` (backup, overwrites any prior).
+      2. Copy `<model_path>` -> `best.pt` (new active weight; source file
+         preserved so operator can re-select it later).
+      3. Load the new model into memory.
+
+    On the next container restart, `detect.py` still loads `best.pt` — but
+    `best.pt` IS NOW the chosen weight, so persistence is automatic.
+
+    One-click revert: call POST .../revert-model. It swaps `best.pt` <->
+    `old_best.pt` and reloads. Second revert swaps back.
+    """
+    import shutil
     form_data = await request.form()
-    model_path = form_data.get('model_path')
-    detector.set_model(model_path)
-    return {'message': 'ok'}
+    model_path = form_data.get('model_path') or model_path
+    if not model_path:
+        return {'error': 'model_path required'}
+
+    # Resolve relative names (e.g. "zarrin_best.pt") against the /weights or
+    # /code bind-mount. Absolute paths pass through.
+    candidates = [model_path]
+    if not os.path.isabs(model_path):
+        candidates += [
+            os.path.join('/weights', model_path),
+            os.path.join('/code', model_path),
+        ]
+    src = next((p for p in candidates if os.path.exists(p)), None)
+    if src is None:
+        return {'error': f'weight file not found: {model_path}',
+                'searched': candidates}
+
+    try:
+        # Idempotent: if src IS best.pt, still succeed but skip the swap.
+        best = '/code/best.pt'
+        if os.path.abspath(src) != os.path.abspath(best):
+            if os.path.exists(best):
+                # Move current best.pt -> old_best.pt so operator can revert.
+                # Overwrites any prior old_best.pt (single-slot undo).
+                shutil.move(best, '/code/old_best.pt')
+            shutil.copy2(src, best)
+        # Load into memory — subsequent /detect calls use the new weights.
+        detector.set_model(best)
+        return {'message': 'ok',
+                'active_weight': best,
+                'source_used': src,
+                'previous_saved_as': '/code/old_best.pt' if os.path.exists('/code/old_best.pt') else None}
+    except Exception as e:
+        return {'error': f'set-model failed: {e}'}
+
+
+@app.post(os.path.join(DETECTION_URL, 'revert-model'))
+async def revert_model():
+    """v4.0.98 — One-click revert to the previous best.pt.
+
+    Swaps `best.pt` and `old_best.pt`, then reloads. Second revert swaps back
+    (so operator can flip between two weights freely without needing the
+    original source file). Returns 400 if no `old_best.pt` exists.
+    """
+    import shutil
+    best = '/code/best.pt'
+    old  = '/code/old_best.pt'
+    if not os.path.exists(old):
+        return {'error': 'no previous weight to revert to (old_best.pt not found)'}
+    try:
+        tmp = '/code/best.pt.swap'
+        # Atomic-ish 3-step swap
+        shutil.move(best, tmp)
+        shutil.move(old, best)
+        shutil.move(tmp, old)
+        detector.set_model(best)
+        return {'message': 'ok', 'active_weight': best,
+                'note': 'best.pt <-> old_best.pt swapped; revert again to swap back'}
+    except Exception as e:
+        return {'error': f'revert-model failed: {e}'}
 
 
 @app.get(os.path.join(DETECTION_URL, 'health'))

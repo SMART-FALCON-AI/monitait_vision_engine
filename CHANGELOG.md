@@ -7,6 +7,315 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.100] - 2026-07-11 — DB pool + writer count + queue depth are now env-driven (unblocks khoy autoscaler)
+
+### Context
+- On khoy, MVE was dropping ~1,687 inference rows per minute (5,063 in 3 min) with 471 `Failed to get database connection: connection pool exhausted` errors in the same 3 min. Root cause: 12 DB writer threads competing over a 40-connection pool couldn't drain the write queue fast enough under the current shipment's detection rate.
+- Pool max, writer thread max, and queue depth were **hardcoded** in `services/db.py` — so raising them required a code push. That defeats the whole point of the v4.0.50 autoscaler, which was supposed to be able to react at runtime.
+
+### Change (all defaults preserved — nothing changes unless the operator opts in)
+- `services/db.py`:
+  - `POSTGRES_POOL_MAX` (int, default `40`) — supersedes the hardcoded `SimpleConnectionPool(1, 40)`. Postgres default `max_connections = 100`; safe range is 40–90.
+  - `MVE_DB_WRITERS_MAX` (int, default `12`) — supersedes the hardcoded ceiling in `add_db_writers()`. Autoscaler in `main.py` already grows writer count on demand; this raises the cap it can grow up to.
+  - `MVE_DB_QUEUE_MAX` (int, optional) — pins the write queue size. Unset → prior heuristic `max(500, ram_gb * 100)`. Set → clamped to `max(100, value)`. The heuristic is fine on most sites; use this on machines with a lot of RAM but a slow DB (where the RAM-based heuristic over-allocates queue slots that will never drain).
+  - Logs `[DB] pool_max=… writers_max=… queue_max=…` on module import so operator can confirm the running values.
+
+### Deployment plan for khoy (executed with this version)
+- `POSTGRES_POOL_MAX=80  MVE_DB_WRITERS_MAX=24` in `.env` on khoy. Postgres default max_connections is 100; leaves ~20 headroom for the read-path (SSE stream, charts endpoints, save-shipment paths).
+
+## [4.0.99] - 2026-07-11 — Camera Connection Status widget + fix `sqs-count` id collision + length label moved below shipment ID + tooltip anchor fix + neutral relative bar when window is flat
+
+### Score-per-shipment tooltip: no longer clipped at canvas bottom
+- Anchored tooltip **above** the hovered bar (`yAlign: 'bottom'`, `xAlign: 'center'`) so it grows upward instead of downward. Chart.js rasters tooltips into the canvas — when they extended below the canvas bottom edge the last one or two lines got cut off. Now the box grows into the taller upper region.
+- Consolidated some lines (`Verdict · Detections · Δ` merged, `Length` combined with `def/100 unit`) so the box is shorter regardless of anchor.
+
+### Score-per-shipment: relative bar goes NEUTRAL when window is flat
+- When every shipment in the current window has the **same Absolute score** (spread == 0), the Relative computation short-circuits to 100 for all. Before v4.0.99 that made every Relative bar render as `verdict green at 100`, which looked like real information but was actually the flat-fallback. Now those bars render with a **slate-grey stripe** and the header subtitle appends `· relative = flat (all tied)` so the operator can read the state at a glance.
+
+### Score-per-shipment: length label repositioned
+- Length label (e.g. `125 m`) moved from *above the bar* to *the row under the shipment ID* on the x-axis. Reason: at the old position it collided with the ▲/▼ delta-vs-previous arrow, especially when bars were tall. Now: line 1 under bar = shipment ID (native tick), line 2 = length. Delta arrow keeps its slot above the bar top.
+- `layout.padding.bottom` bumped from Chart.js default to 18px to reserve room for the length row.
+
+### Critical hotfix (id collision — was breaking the Score-per-shipment card on the Dashboard)
+- `static/status.html`: `<input id="sqs-count">` added earlier for shipment-window control **collided** with the existing `<span id="sqs-count">` at line 1029 (Detections count). Two elements with the same id — Detections-count writes were spraying into the input's value/layout, visually breaking the Score-per-shipment card. Renamed input → `id="sqs-shipments"`; `charts.js` reader updated to match.
+
+### Camera Connection Status widget
+Operator flagged two bugs: header/rows rendered black-on-dark (unreadable), and only cams 1–4 got friendly labels (rest fell through as raw `cam_5` keys, and rows sorted lexicographically so `cam_10` sat between `cam_1` and `cam_2`).
+
+- `static/status.html`: added inline `color: var(--text-primary, #e2e8f0)` to `<h2>`, `<thead>`, `<tbody>`, and `Loading…` cell for the legacy Camera Connection Status table. Also added `border` + `padding` so it matches the app's dark-theme table style.
+- `static/js/app-core.js` (`updateCameraTable`):
+  - Replaced the hardcoded `cam_1..cam_4` name map with a `prettyCamName()` regex helper that turns any `cam_N` into `Camera N` — no cap.
+  - Cameras now render sorted by numeric ID (so `cam_10` follows `cam_9`, not `cam_1`).
+  - Each row now sets its own text color + OK/FAIL colors inline so the container's dark background doesn't paint the text unreadable.
+
+### Notes
+- The reason the operator was seeing "only 4 cameras" specifically was the friendly-name map — cameras beyond 4 WERE listed, but with raw keys like `cam_5` (and out of order), so operator overlooked them. This does NOT change how many cameras the backend reports; if the operator is still missing cameras after this, that's a `watcher.cameras` / camera-discovery issue on the site, not the UI.
+
+## [4.0.98] - 2026-07-11 — Length persistence + product-agnostic normalized score + chart annotations
+
+Fixes a recurring pain point on both remote sites: after a PLC/encoder reset (power outage, MVE recreate, PLC reboot), the Dashboard `Length` tile would go dramatically negative because `shipment_start_encoder` remembered the pre-reset value. Also adds three chart features the operator asked for.
+
+### 1) Length-state persistence (`services/watcher.py` + `main.py`)
+- New sidecar file `/code/.env.length_state.json` (bind-mounted alongside `.env.prepared_query_data`) that snapshots `(shipment, shipment_start_encoder, last_seen_encoder, last_seen_length, saved_at)`.
+- New `Watcher.persist_length_state(force=False)` — throttled to at most one write per 5 s; called from a new `length-state-writer` daemon thread that ticks every 5 s.
+- New `Watcher.restore_length_state()` — called ONCE from `main.py` after the shipment + `shipment_start_encoder` are restored from `.env.prepared_query_data`. If persisted shipment matches current AND `current_encoder < persisted_shipment_start_encoder` (encoder was reset), rebuilds `shipment_start_encoder = current_encoder − persisted_last_seen_length` so length picks up where it left off.
+- Shipment-change events also fire an immediate `persist_length_state(force=True)` so a crash right after a new shipment barcode doesn't lose the freshly-captured start_encoder.
+
+### 2) Product-agnostic normalized score (`routers/timeline.py`)
+- `/api/quality/shipments` now passes through `encoder_span`, `encoder_unit`, `encoder_units_per_meter`, and `impact_total` alongside the existing score fields.
+- Chart tooltip now shows **`Defects per 100 <unit>`** — the industry-standard defect density metric. Works for any product: fabric metres, glass sheets, wire kilometres, whatever the site's encoder measures. Named `<unit>` not "m" so it's not locked to fabric.
+- Tooltip also shows the raw `Length: X unit` alongside so the operator can eyeball whether a low score is a big deal (500 m roll) or a rounding artefact (5 m sample).
+
+### 3) Chart annotations (`static/js/charts.js`)
+- Length label above each shipment's bar pair — `125 unit`, `89 unit` etc. — instantly reframes low scores by scale.
+- Delta-vs-previous-shipment arrow below the x-axis label — ▲ +3.2 (green) or ▼ −1.8 (red) — directional read at a glance. Suppressed for changes < 0.1.
+- Tooltip enriched with 5 more lines: verdict, detections, length, defects-per-100-unit, impact-per-unit, delta, top defects.
+
+### 4) Operator-controlled shipment count (already deployed in prior tick, documented here)
+- `Shipments:` numeric input in the chart header (default 30, range 5-200). Persisted in `localStorage.mve_sqs_count`. The hardcoded `n=30` in the fetch URL is now `n=<input.value>`.
+
+### Deploy
+- **vteam12 only** for this round. Verify:
+  - Length tile no longer goes negative after a container restart.
+  - Chart shows length labels above bars, delta arrows below.
+  - Tooltip includes the new fields.
+- Operators asked repeatedly to keep MVE product-agnostic — the "defects per 100 <unit>" wording is deliberate. If a site wants "defects per 100 m" they set `encoder_units_per_meter` in config and the frontend will label appropriately.
+
+### Deferred (v4.0.99+)
+- Threshold line + operator-settable pass/fail cutoff (needs config UI surface).
+- Rolling 7-shipment mean overlay with control limits (SPC / Shewhart).
+- Cost-of-poor-quality tooltip line (needs a `MVE_COST_PER_DEFECT` env).
+- LPOP `stream_queue` tight loop fix (Redis load reduction; still separate).
+
+## [4.0.97] - 2026-07-11 — Revert to v4.0.82 single-frame architecture on inference side + keep Option A chart
+
+Operator directive after a day of debugging batching regressions on kiancord + khoy: *"please on the inference side get back to single request instead of batch request"*. Same architecture that reliably ran at ~85 fps in v4.0.82.
+
+### Reverted
+- `vision_engine/main.py` → `v4.0.82:vision_engine/main.py`. Drops:
+  - `_batch_gather_lock`, `_post_pool` (ThreadPoolExecutor)
+  - Adaptive batch-mode (HIGH/LOW hysteresis + queue-depth gate)
+  - `_process_gathered_groups_batched`, `_gather_more_groups`, `_compute_gather_ms`
+  - Cross-group frame gathering, put-back-and-yield worker cycle
+  - All `MVE_BATCH_*` env knobs are no-ops now (env is ignored; safe to leave in `.env`)
+- `vision_engine/services/detection.py` → `v4.0.82:vision_engine/services/detection.py`. Drops the `precomputed_yolo` param on `process_frame` / `process_frame_helper` and its plumbing.
+
+### Kept (all the non-batching wins)
+- `vision_engine/services/watcher.py` — RAM-percent hot queue sizing (v4.0.83), start_janitor, all runtime env knobs.
+- `vision_engine/static/js/app-core.js` — N/A tile fix, length setter, dashboard heartbeat improvements.
+- `vision_engine/static/js/charts.js` — **Option A Score per shipment chart**: single verdict-colored bar per shipment + white horizontal tick marking Relative rank position. Timeline dropdown now honored (bug fixed in v4.0.96). New helper `_makeStripedPattern` retained (dormant, useful for future).
+- `vision_engine/static/status.html` — `#sqs-subtitle` span for dynamic window text.
+
+### Yolo container-side (unchanged from earlier session work)
+- `yolo_inference/main.py` — `/capabilities` + `/batch-detect/` endpoints stay in place. Since MVE no longer calls `/batch-detect/`, they're dormant. Zero cost to leave them.
+- Same for math + anomaly containers' batch endpoints.
+
+### Deploy plan
+- **vteam12**: deploy first, measure CPU / redis-ops / GPU baseline against v4.0.96 to confirm the win.
+- **kiancord + khoy**: they're on v4.0.64 baseline right now (rolled back earlier today). Once v4.0.97 is verified on vteam12, we can consider ripple, or leave them on v4.0.64 if operator prefers.
+
+### Reference for future
+- [[project_return_to_batching_someday]] — architectural notes for when we do return to batching (worker-container side, not MVE).
+- [[project_move_postprocessing_into_workers]] — the real long-term fix for throughput.
+
+## [4.0.96] - 2026-07-11 — Score per shipment: Option A redesign (single bar + rank tick) + timeline-wired subtitle
+
+Operator directive: *"where this last 30 shipments came from? i cahgned the timeline to 30 days and nothing happen"* + *"what is international benchmark?"*.
+
+### 1) Chart: from grouped-bar to single-bar-with-rank-tick (Option A)
+Previous grouped-bar design (Absolute + Relative side-by-side) packed 60 bars into a narrow strip — visually noisy. Now: **ONE bar per shipment**, height = Absolute score, color = verdict (RELEASE/RE-INSPECT/HOLD), with a short white horizontal tick overlaid at the Relative-rank height. Same information density, half the bar count, cleaner read. Pattern used in FDA batch-quality / SPC dashboards.
+
+- New Chart.js plugin `relativeRankTick` (registered inline on the shipment chart) draws the ticks in `afterDatasetsDraw`. White stroke with a soft shadow for contrast on any verdict color underneath.
+- Custom legend replaces default: `Bar height = Absolute score (color = verdict)` + `━━ = Relative rank (this window)`. Self-explanatory encoding.
+
+### 2) Timeline selector now actually drives the shipment chart
+Bug uncovered by the operator: `_loadQualityShipmentsChart` fetch URL was `?n=30&window=30d` HARDCODED. The `#insight-window` dropdown didn't propagate. Now `refreshQualityCharts` passes `win` to `_loadQualityShipmentsChart(win)`, subtitle span (`#sqs-subtitle`) reflects the current window text.
+
+### 3) `_makeStripedPattern` helper (from v4.0.95) retained for future use
+Not used by the Option A design, but the helper stays — useful for any future dataset that needs same-color-different-pattern encoding.
+
+### Deploy — vteam12 only for now
+kiancord + khoy rolled back to v4.0.64 baseline earlier this session because my v4.0.94/95 batching code (ThreadPoolExecutor for per-frame post-processing) caused their uvicorn web thread to starve under their heavier per-frame detection load. See [[project_move_postprocessing_into_workers]] memory — moving Lab/Redis/DB into worker containers is the real architectural fix; deferred.
+
+## [4.0.95] - 2026-07-11 — Score per shipment chart: verdict-colored striped pattern for Relative bar
+
+Operator directive: *"colors should be descreptive, please use two column together, for example one is dot zebra the other is solid, and color should be same as verdict"*.
+
+### Change
+- `vision_engine/static/js/charts.js` Score per shipment chart:
+  - Old: Absolute bar = verdict color, Relative (window) bar = static steel blue. The two bars for one shipment could look visually unrelated, and the blue conveyed no information.
+  - New: BOTH bars share the same verdict color per shipment (RELEASE = green, RE-INSPECT = amber, HOLD = red). They're distinguished by fill pattern instead of hue: Absolute is solid, Relative is a diagonal-striped canvas pattern in the same verdict color.
+- Legend labels updated to `Absolute (solid)` and `Relative (striped)` so the pattern↔meaning mapping is self-explanatory.
+- New helper `_makeStripedPattern(color, tileSize=8, stripeWidth=3)` — canvas pattern generator; can be reused for any future dataset that needs "same color, different pattern".
+
+### Deploy
+- Bind-mount deploy to all three sites: vteam12 (192.168.1.106), kiancord (2226), khoy (2225). Hard-refresh Dashboard to see it.
+
+### Ancillary — sites brought up to v4.0.95 in the same session
+- **vteam12**: 4.0.94 → 4.0.95 (only VERSION + charts.js changed).
+- **kiancord**: 4.0.64 → 4.0.95 (30-version jump; also fixed `.env` `YOLO_WORKERS=13` → `4` — same GPU-OOM trap vteam12 had).
+- **khoy**: 4.0.64 → 4.0.95 (was `unhealthy` for 2 days; MVE was processing frames but `/health` endpoint had stopped responding — restart on v4.0.95 brought it back healthy).
+
+## [4.0.89] - 2026-07-11 — hot always-batch only (revert cold-path batching until math+anomaly ship batch endpoints)
+
+Focused retry after v4.0.87 and v4.0.88 rollbacks. On v4.0.86 (currently live on vteam12) the batch fraction under load is only 1.1 % — HIGH=32 gate rarely trips because single-frame drain keeps up with capture until queue backs up briefly. Operator asked "why 1.1 %? didn't we say every request goes to batch?" — correct, we did, and this ships that.
+
+### The change
+- `main.py` hot-path `do_batch` no longer gates on `app.state.batch_mode`. Every hot-queue frame goes through the gather+batch attempt. `MIN_BATCH=4` silently falls back to single-frame if the gather window can't accumulate ≥4 — under low load lone frames don't pay the gather penalty; under sustained load (Cap ≥ ~40 fps) batches fill and dispatch.
+- `_update_batch_mode` still fires — kept as a stats/logging hook — but doesn't gate dispatch anymore.
+- Cold path REVERTED to simple v4.0.86 single-frame. Cold batching was correct in v4.0.88 (had the lock) but stalled in v4.0.87 (no lock, 24 concurrent 16-frame batches choked math+anomaly's `--workers 1` + no batch endpoint). Until math+anomaly ship their own `/batch-detect` endpoints, cold single-frame is safer.
+
+### Expected effect on vteam12
+- Batch fraction: **1.1 % → 70-90 %** on hot path.
+- Inf FPS: **~76 → 150-250 fps** under yolo-only pipeline (was capped at single-frame ceiling ~85).
+- Under yolo_plus_math with math/anomaly stride 10, math+anomaly overhead is unchanged (they still single-frame after yolo batches) but their per-frame call rate is 1/10 → net effect small negative.
+- Latency per-frame: may CLIMB slightly (batching adds gather-window overhead) but AGGREGATE throughput lifts.
+
+### Why NOT re-attempt v4.0.88's math/anomaly batch endpoints yet
+Two reasons:
+1. Isolate the always-batch effect first, measure it cleanly.
+2. Deploy math+anomaly batch endpoints in v4.0.90 as a separate opt-in, so we can bisect if either causes trouble.
+
+### Environment prerequisite (already applied on vteam12)
+- `YOLO_WORKERS=4` (was 13 in `.env` — silently caused CUDA OOM under load; fixed by `env YOLO_WORKERS=4 docker compose up -d --no-deps --force-recreate yolo_inference`).
+- `MATH_WORKERS=1`, `ANOMALY_WORKERS=1` (default; do NOT scale until we have batch endpoints or vetted per-worker GPU memory footprints).
+
+## [4.0.88] - 2026-07-11 — math + anomaly get batch endpoints, MVE cold path gets the gather lock (fixes v4.0.87 stall)
+
+Three-part release closing out the batching arc. Ship as one unit so the MVE-side change assumes the container-side endpoints exist.
+
+### Part 1 — `math_inference/main.py`: `/capabilities` + `/batch-detect/`
+- Adds `GET /capabilities` at root returning `{"batch": true, "max_batch": MATH_MAX_BATCH}` (default 16). MVE's `probe_batch_capability` auto-picks it up on next 60 s probe cycle.
+- Adds `POST /v1/math-analysis/math_v1/batch-detect(/)` accepting N `image` multipart parts, returning `{"results": [[det, ...], [det, ...], ...]}` in input order.
+- Math analysis isn't natively vectorised across images (each image runs its own FFT / band stats / gradient pass), so the batch endpoint LOOPS `worker.analyze(bgr)` internally. Win vs 16 sequential HTTP calls: eliminates N-1 HTTP round-trips + N-1 FastAPI dispatch overhead + frees one uvicorn worker for the whole batch instead of serialising N calls behind `--workers 1`.
+- Combined with `MATH_WORKERS=4` in the container env (already env-tunable in the existing compose command), math tier lifts from ~100 fps single-worker ceiling to ~400 fps.
+
+### Part 2 — `anomaly_inference/main.py`: `/capabilities` + `/batch-detect/`
+- Same treatment as math. `ANOMALY_MAX_BATCH` (default 16) advertised via `/capabilities`.
+- Batch endpoint reuses the baseline lookup fallback ladder from single-image `detect()` (in-memory → disk lazy-load → `_global` baseline). `camera_id`/`phase`/`mode` form params apply to ALL images in a batch (matches how MVE dispatches today — no per-image metadata plumbed).
+- Set `ANOMALY_WORKERS=4` to lift the tier ceiling.
+- Anomaly is stride-1 in the `yolo_plus_math` pipeline (runs on every frame), so it's likely the bigger contributor to the pre-4.0.88 ceiling than math (which is stride-9 — runs on 1/9 of frames).
+
+### Part 3 — `vision_engine/main.py`: cold-path gather lock (fixes v4.0.87 stall)
+- v4.0.87 batched the cold path but WITHOUT the `_batch_gather_lock`. All 24 MVE workers concurrently gathered 16 cold frames each and dispatched batched pipeline calls. Each batched pipeline call fanned out into 16 sequential math+anomaly calls (neither had a batch endpoint at that point) — 24 × 16 = 384 sequential calls funnelled through `--workers 1` on math+anomaly and the whole system deadlocked at 0.3 fps.
+- v4.0.88 wraps the cold-path batch dispatch in `_batch_gather_lock.acquire(blocking=False)` (same lock the hot path already uses). Only one cold batcher at a time. Losers fall through to single-frame cold dispatch — no ejector timing concern on cold path so no yield/put-back dance needed.
+- With Part 1 + Part 2 shipping the batch endpoints, math + anomaly can now serve batched calls efficiently and the safe rate lifts substantially.
+
+### Env knobs to set on deploy
+- `MATH_WORKERS=4` on the `math_inference` service (already tunable via docker-compose command).
+- `ANOMALY_WORKERS=4` on the `anomaly_inference` service (same — env-tunable in compose).
+- No new MVE env knobs.
+
+### Rollout order on vteam12
+1. `docker compose up -d --no-deps --force-recreate math_inference anomaly_inference` (with the new env vars) — brings up batch-capable, 4-worker inference tiers.
+2. Restart MVE to pick up main.py (bind-mount).
+3. Watch MVE probe log: `probe_batch_capability: url=<math|anomaly>/detect batch=True max_batch=16`.
+4. Switch pipeline back to `yolo_plus_math` via `POST /api/pipelines/activate/yolo_plus_math`.
+5. Verify Inf FPS lifts past prior ceiling under infinite-max.
+
+## [4.0.87] - 2026-07-11 — always-batch (remove HIGH gate) + batch the cold queue
+
+Follow-up to v4.0.86 addressing operator feedback:
+- *"switching entirely to batch processing? and if not available then fall back to single processing?"* → yes, we now attempt batching on EVERY hot-queue frame; `MIN_BATCH` remains as the internal fallback.
+- *"also the cold queue is stacking up"* → cold path now batches too. Previously it drained at single-frame rate (~85 fps ceiling), so once cold stacked up (spillover from hot bursts), it took forever to catch back down. With cold batched, drain jumps to the ~250-320 fps batched ceiling.
+
+### Change 1 — `main.py` hot path: remove queue-depth gate
+- v4.0.82-86 required `app.state.batch_mode == True` (i.e. `hot_q.qsize() >= HIGH=32`) before attempting batching. Below that threshold, everything went single-frame.
+- v4.0.87 drops the gate. Batching is attempted on every frame when `pipeline_manager.batch_available()` is True. `MIN_BATCH=4` silently falls back to single-frame when the gather window can't accumulate ≥4 frames (this is the "fall back to single processing" behavior operator asked for).
+- `_update_batch_mode()` still fires — it's kept as a stats/logging hook so we can see when the queue would have crossed HIGH — but the flag no longer gates dispatch. `MVE_BATCH_QUEUE_HIGH` / `_LOW` env knobs kept for backward-compat but unused in code (removable in a later release).
+
+### Change 2 — `main.py` cold path: batch dispatch
+- Old cold-path code did `_process_frame_batch(single_group, allow_eject=False)` per iteration → single-frame yolo call → ~85 fps ceiling on cold drain.
+- New cold-path code (still no ejector-latency concern): greedy `cold_q.get(block=False)` up to `MVE_BATCH_MAX` frames, then one `_process_gathered_groups_batched` call. Stale frames (>10 min old) discarded during the gulp same as before.
+- Cold drain rate jumps from ~85 fps → 250-320 fps. Cold queue catches down within seconds instead of minutes under sustained load.
+
+### Ancillary
+- No new env knobs. Existing `MVE_BATCH_MAX` / `MIN` / `GATHER_MS` / `YIELD_MS` still apply.
+- Backward compat: sites without a batch-capable yolo (probe returns `batch=False`) behave identically to v4.0.86 in the fallback path.
+
+### Expected effect on vteam12 under infinite-max
+- Inf FPS should hold steady around ~90-120 fps (math container appears to be the new bottleneck — see v4.0.88 target below).
+- **Cold queue actively drains** even when hot is empty. If you leave it running at Cap>Inf for 30 s then let Cap drop, cold empties within ~10 s (was several minutes).
+- `put_back_for_gatherer` count grows large — normal, means rotation is working.
+
+### Known next-blocker
+- Math container `--workers 1` + no `/batch-detect/` → math phase serializes 16 single calls after every yolo batch. Likely the real ceiling now. Plan for v4.0.88: math `/capabilities` + `/batch-detect/` + `--workers 4`.
+
+## [4.0.86] - 2026-07-11 — put-back-and-yield (fix v4.0.85's frame-hoarding design flaw)
+
+Follow-up to v4.0.85. Under infinite-max load v4.0.85 gave:
+- Cap FPS 119.4, latency 372 ms
+- **Inf FPS 62.6** — no measurable improvement over v4.0.84's 65.7 ⚠
+
+Root cause diagnosis: **workers hoarded frames while blocked on the gather lock**. When a worker got a frame and lost the gather-lock race, v4.0.85 made it BLOCK on the lock while still holding its frame. All 23 non-gatherer workers held frames outside the queue → the gatherer's 40 ms gather window only saw ~5 fresh frames from capture → batches averaged 6 frames, not 16 → drain stuck at ~66 fps (matches observation).
+
+### The fix — put frame back before yielding
+- `main.py` worker loop: when the non-gatherer branch fires, immediately `hot_q.put_nowait(frames_data)` (spill to cold if hot full), then `time.sleep(MVE_BATCH_YIELD_MS / 1000)` (default 50 ms), then `continue` to the top of the loop.
+- Frames rotate through the queue but never get lost — same "no frame dropped" contract as before.
+- The gatherer's `_gather_more_groups` now sees the FULL queue (23 workers' put-backs + capture arrivals) → dispatches actual 16-frame batches → ~50 ms wall → **~320 fps effective drain**.
+- Removed `MVE_BATCH_WAIT_MS` (no longer used); added `MVE_BATCH_YIELD_MS` (default 50 ms — matches typical batch cycle so workers wake up roughly when the next batch is complete).
+- New stats fields: `put_back_for_gatherer` (frames pushed back so gatherer sees them), `put_back_spilled_cold` (frames spilled to cold because hot was full — should stay ~0 under normal operation).
+
+### Expected numbers
+- Under infinite-max: Inf FPS should hit 150-250 fps sustained (was 62.6).
+- Latency per-frame: 40-60 ms (down from 372 ms — frame gets put back, waits ~50 ms, gatherer processes in a 16-frame batch).
+- `put_back_for_gatherer` count should be a LARGE fraction of frames processed — indicates rotation is happening.
+- `put_back_spilled_cold` should stay very low (0-1%). If it climbs, the hot queue is genuinely too small and `MVE_HOT_QUEUE_RAM_PCT` needs raising.
+
+### Honest caveat
+- If Inf FPS is still stuck near 100 fps after this, the yolo GPU forward-pass IS the ceiling and the next lever is a second yolo replica (v4.0.87 idea).
+- Post-processing (color/area/audio/DB writes) per frame may also become the visible bottleneck once yolo isn't. That's a separate optimization.
+
+## [4.0.85] - 2026-07-11 — pure-batch mode (non-gatherer workers BLOCK on the lock instead of running single-frame in parallel)
+
+Follow-up to v4.0.84. Under infinite-max load v4.0.84 gave:
+- Cap FPS 112.8 (RAM-percent queue still holding) ✅
+- Ej OK 1518 (batching + single both processing) ✅
+- **Inf FPS 65.7 — LOWER than v4.0.82's ~85 fps single-frame ceiling** ⚠
+
+Root cause: mixed dispatch under GPU contention. The single-gatherer lock let 1 worker batch, but the other 23 workers still fell through to single-frame. 23 concurrent single-yolo calls fought the 1 batched call for the shared yolo GPU; latency climbed from 416 → 549 ms and per-forward-pass efficiency collapsed. Neither mode got clean access to the GPU.
+
+### The fix — pure-batch dispatch
+- `main.py` worker loop: `_batch_gather_lock.acquire(blocking=False)` → `acquire(timeout=MVE_BATCH_WAIT_MS/1000)` (default 200 ms).
+- When batch mode is ON, non-gatherer workers BLOCK on the lock for up to 200 ms instead of racing single-frame calls.
+- Batcher owns the yolo GPU exclusively for its ~50-100 ms cycle; workers rotate through the gatherer role in sequence. Batched throughput can hit its theoretical ceiling (~250-320 fps on this GPU) because no other calls fight it.
+- Escape hatch: if the gatherer stalls beyond `MVE_BATCH_WAIT_MS` (network / yolo hang), the waiter falls through to single-frame so the queue can't hard-stall on a dead batched call. Counted via `batch_stats.single_after_wait_timeout`.
+- New env knob: `MVE_BATCH_WAIT_MS` (default 200).
+
+### Expected effect on vteam12
+- Under infinite-max, inference FPS should lift from ~65 → 200-300 fps.
+- 23 workers waiting per gather cycle sounds wasteful, but each cycle finishes in ~50-100 ms → they simply rotate; no worker sits idle for long.
+- Latency per-frame may INCREASE for individual frames (worker holds the frame briefly waiting for the lock), but AGGREGATE throughput lifts because the GPU is no longer thrashed.
+
+### Watch signals during your load test
+- `docker logs monitaqc-yolo_inference-1 | grep batch-detect | wc -l` (last 60 s) — batch call rate.
+- `batch_stats.single_after_wait_timeout` — should stay small (< 5 % of frames). If it climbs, the timeout is too short or yolo is genuinely stalling.
+- Inf FPS on Dashboard — target: ≥ 150 fps.
+
+## [4.0.84] - 2026-07-11 — single-gatherer lock (fixes 90/10 single/batch ratio under 24-worker contention)
+
+Follow-up to v4.0.83. Under real infinite-max load on vteam12 v4.0.83 gave:
+- Cap FPS 143.7 (up from ~103 — RAM-percent queue win) ✅
+- Batch mode transitions 0 (thrash fixed by wider hysteresis) ✅
+- **Batch fraction only 10 %** (137 batched calls vs 1223 single in 60 s) ⚠
+
+Root cause: 24 worker threads all racing to gather batches simultaneously. Each worker enters the gather path, sees a nearly-empty queue, can't reach `MIN_BATCH=4`, and falls through to single-frame — so the majority of dispatches never actually batch. The extras-put-back mechanism kept extras alive but didn't fix the underlying contention.
+
+### The fix — single-gatherer lock (`vision_engine/main.py`)
+- New `_batch_gather_lock = threading.Lock()` guards the gather+dispatch section.
+- Only ONE worker at a time acquires it and gathers frames — that worker gets to sit on the queue long enough to accumulate 8-16 frames per batch.
+- All other 23 workers immediately fall through to single-frame dispatch — they still drain at ~85 fps combined so real throughput doesn't drop.
+- Non-blocking `acquire(blocking=False)` — losing the lock race is not a stall, just an instant single-frame decision.
+- Added `single_when_gathering` to `app.state.batch_stats` so we can see how often the fallthrough fires.
+
+### Expected effect
+- Batched dispatches settle at 8-16 frames per call (was 2-3).
+- Batch fraction climbs from 10 % → 40-60 % of yolo calls, gets us into the regime where single yolo forward-pass amortization matters.
+- Effective inference FPS lifts past the ~85 fps ceiling because the GPU spends less time on kernel-launch overhead.
+
+### Not yet fixed
+- `Inf FPS: N/A` on Dashboard — server returns `inference_fps: 0.0` under high write pressure. Predates v4.0.83; likely a Redis LPUSH contention issue on `inf_frame_timestamps` during 100+ fps write bursts. Tracking separately.
+
 ## [4.0.83] - 2026-07-11 — RAM-percent hot queue sizing + batch-mode thrash fix + yolo-side endpoint deployed
 
 Full end-to-end batching is now LIVE on vteam12 — MVE dispatches multi-image POSTs to yolo's new `/batch-detect/` endpoint under queue pressure. Two of v4.0.82's tuning defaults were wrong in practice; this bump fixes them and enlarges the hot queue so bursts don't force capture into throttling.

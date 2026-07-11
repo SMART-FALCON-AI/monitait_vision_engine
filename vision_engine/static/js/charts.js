@@ -3138,27 +3138,65 @@ function _verdictColor(v) {
     return 'rgba(100,116,139,0.5)';
 }
 
+// 4.0.95 — Canvas pattern generator for chart fills. Renders diagonal stripes on a
+// small tile with the given color, then wraps it as a repeating CanvasPattern so
+// Chart.js can use it as `backgroundColor` on any bar. Used on the Score-per-shipment
+// chart so the "Relative (window)" bar shares the SAME verdict color as its paired
+// "Absolute" bar but is distinguished by the striped fill instead of a different hue.
+function _makeStripedPattern(color, tileSize = 8, stripeWidth = 3) {
+    const c = document.createElement('canvas');
+    c.width = c.height = tileSize;
+    const ctx = c.getContext('2d');
+    // Faint base tint so bars aren't fully transparent between stripes.
+    ctx.fillStyle = String(color).replace(/,[\d.]+\)/, ',0.15)');
+    ctx.fillRect(0, 0, tileSize, tileSize);
+    // Diagonal opaque stripes in the actual verdict color.
+    ctx.strokeStyle = color;
+    ctx.lineWidth = stripeWidth;
+    ctx.beginPath();
+    ctx.moveTo(-stripeWidth, tileSize + stripeWidth);
+    ctx.lineTo(tileSize + stripeWidth, -stripeWidth);
+    ctx.stroke();
+    return ctx.createPattern(c, 'repeat');
+}
+
 async function refreshQualityCharts() {
     // 3.25.5/13 — strips share the merged scatter's X-axis. Follow Detection
     // Insights' window selector and the current _insightAxis (time vs encoder)
     // so quality + ejection strips both align to whatever the scatter shows.
+    // 4.0.96 — shipment chart ALSO honors the same window (was hardcoded to 30d).
     const insightWin = document.getElementById('insight-window');
     const qualityWin = document.getElementById('quality-charts-window');
     const win = (insightWin && insightWin.value) || (qualityWin && qualityWin.value) || '24h';
     const axis = _insightAxis || 'time';
     await Promise.all([
-        _loadQualityShipmentsChart(),
+        _loadQualityShipmentsChart(win),
         _loadQualityHeatmap(axis, win),
         _loadEjectionAxis(axis, win),
     ]);
 }
 window.refreshQualityCharts = refreshQualityCharts;
 
-async function _loadQualityShipmentsChart() {
+async function _loadQualityShipmentsChart(win) {
     const canvas = document.getElementById('quality-shipments-chart');
     if (!canvas) return;
+    // 4.0.96 — honor the timeline dropdown (was hardcoded 30d). Also update the
+    // subtitle so the operator sees which window drove this render.
+    // 4.0.97 — shipment COUNT is now operator-controlled via #sqs-shipments input
+    // (persisted in localStorage.mve_sqs_count). Default 30.
+    // 4.0.99 — renamed from #sqs-count to avoid id-collision with the
+    // Detections span at status.html:1029 (both had id="sqs-count").
+    // Collision caused Detections-count writes to spray into the input's
+    // value/layout, breaking the whole Score-per-shipment card layout.
+    win = win || '24h';
+    const nInput = document.getElementById('sqs-shipments');
+    const nRaw = parseInt((nInput && nInput.value) || localStorage.getItem('mve_sqs_count') || '30', 10);
+    const n = Math.max(5, Math.min(200, isNaN(nRaw) ? 30 : nRaw));
+    if (nInput && nInput.value !== String(n)) nInput.value = String(n);
+    const subtitleEl = document.getElementById('sqs-subtitle');
+    if (subtitleEl) subtitleEl.textContent = `· window ${win} · color = verdict`;
     try {
-        const r = await fetch('/api/quality/shipments?n=30&window=30d');
+        const r = await fetch(`/api/quality/shipments?n=${n}&window=${encodeURIComponent(win)}`);
         const d = await r.json();
         const rows = (d.shipments || []).slice().reverse();  // oldest left → newest right
         const labels = rows.map(s => s.shipment);
@@ -3191,7 +3229,28 @@ async function _loadQualityShipmentsChart() {
         });
 
         const colors   = rows.map(s => _verdictColor(s.verdict));
-        const relColor = 'rgba(59,130,246,0.55)';  // steel blue for relative bar
+        // 4.0.97 (revised) — Two bars per shipment, same verdict color, distinguished
+        // by fill pattern. Absolute = solid; Relative = diagonal-striped.
+        // 4.0.99 — when the window's Absolute scores are all identical (nothing to
+        // rank), the Relative bars render in a NEUTRAL slate-grey stripe instead
+        // of the verdict color. Reason: operator saw "all bars green (verdict
+        // color) at 100 (relative rank)" and read it as info, when in fact it's
+        // the flat-fallback branch above and there's nothing to compare. Neutral
+        // grey stripe signals "no relative signal — every shipment tied".
+        const _relFlat = absSpread < 1e-9;
+        const NEUTRAL_STRIPE_BASE = 'rgba(148,163,184,0.55)';   // slate-400
+        const relColors = _relFlat
+            ? rows.map(() => _makeStripedPattern(NEUTRAL_STRIPE_BASE))
+            : colors.map(c => _makeStripedPattern(c));
+        // 4.0.99 — surface the flat-window state in the subtitle so the
+        // operator knows the grey relative bars aren't a bug — every shipment
+        // in this window has the same Absolute score, so there's nothing to
+        // relatively rank.
+        if (subtitleEl) {
+            subtitleEl.textContent = _relFlat
+                ? `· window ${win} · color = verdict · relative = flat (all tied)`
+                : `· window ${win} · color = verdict`;
+        }
 
         if (_qualityShipmentsChart) _qualityShipmentsChart.destroy();
         _qualityShipmentsChart = new Chart(canvas, {
@@ -3199,36 +3258,101 @@ async function _loadQualityShipmentsChart() {
             data: {
                 labels,
                 datasets: [
-                    { label: 'Absolute', data: absVals,
+                    { label: 'Absolute (solid)', data: absVals,
                       backgroundColor: colors,
-                      borderColor: colors.map(c => String(c).replace('0.7', '1')),
+                      borderColor: colors.map(c => String(c).replace(/,[\d.]+\)/, ',1)')),
                       borderWidth: 1, order: 1 },
-                    { label: 'Relative (window)', data: relData,
-                      backgroundColor: relColor,
-                      borderColor: 'rgba(59,130,246,1)', borderWidth: 1, order: 1 },
+                    { label: 'Relative (striped)', data: relData,
+                      backgroundColor: relColors,
+                      borderColor: colors.map(c => String(c).replace(/,[\d.]+\)/, ',1)')),
+                      borderWidth: 1, order: 1 },
                 ],
             },
             options: {
                 responsive: true, maintainAspectRatio: false,
+                // 4.0.99 — reserve room BELOW the x-axis for a second line under
+                // each shipment ID: line 1 = shipment ID (native tick), line 2 =
+                // length ("125 m"). The shipmentAnnotations plugin writes line 2
+                // into this padded area. Rotated ticks are ~35–50°, so ~18px of
+                // padding fits an extra 10px text row without overlapping.
+                layout: { padding: { bottom: 18 } },
                 plugins: {
                     legend: {
                         display: true,
                         position: 'top',
-                        labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 },
+                        labels: {
+                            color: '#e2e8f0',          // brighter for dark bg
+                            font: { size: 11, weight: '500' },
+                            boxWidth: 14,
+                            padding: 10,
+                        },
+                        onClick: () => {},
                     },
                     tooltip: {
+                        // 4.0.97 — mode='index' shows BOTH bars in a single tooltip
+                        // when the operator hovers a shipment. Fixes prior confusion
+                        // where hovering the Relative bar led with "Absolute:" text.
+                        mode: 'index',
+                        intersect: false,
+                        // 4.0.99 — anchor tooltip ABOVE the bar (yAlign:'bottom' =
+                        // caret-on-bottom = box-above-caret) and CENTER on the bar
+                        // so it can grow tall without being clipped by the canvas
+                        // bottom edge. Previous default 'nearest' put it beside the
+                        // bar and the last 1-2 lines fell off the canvas because
+                        // Chart.js rasters tooltips onto the canvas and they cannot
+                        // overflow. Also compressed lines below to reduce height.
+                        position: 'nearest',
+                        yAlign: 'bottom',
+                        xAlign: 'center',
+                        titleFont: { size: 12, weight: '600' },
+                        bodyFont: { size: 11 },
+                        bodySpacing: 3,
+                        padding: 8,
                         callbacks: {
                             title: (items) => items[0].label,
-                            label:  (item) => {
+                            // Per-dataset one-liner so the operator sees which value
+                            // corresponds to which swatch.
+                            label: (item) => {
                                 const r = rows[item.dataIndex];
+                                if (item.datasetIndex === 0) {
+                                    const abs = r.score_absolute ?? r.score;
+                                    return `  Abs: ${abs != null ? Number(abs).toFixed(1) : '—'}`;
+                                }
+                                return `  Rel: ${relData[item.dataIndex]}`;
+                            },
+                            // 4.0.98 — Shared context lines: verdict, detections,
+                            // impact-per-unit, LENGTH, DEFECTS-PER-100-UNITS,
+                            // DELTA-VS-PREVIOUS shipment.
+                            // 4.0.99 — merged pairs of lines so the box is shorter
+                            // and never clips at the canvas bottom edge.
+                            afterBody: (items) => {
+                                const i = items[0].dataIndex;
+                                const r = rows[i];
                                 const tops = (r.top_defects || []).join(', ');
+                                const impPerUnit = r.impact_per_unit;
+                                const span = r.encoder_span;
+                                const unit = r.encoder_unit || 'unit';
+                                const per100 = (impPerUnit != null) ? Number(impPerUnit) * 100 : null;
                                 const abs = r.score_absolute ?? r.score;
+                                let deltaStr = '';
+                                if (i > 0 && abs != null) {
+                                    const prev = rows[i - 1].score_absolute ?? rows[i - 1].score;
+                                    if (prev != null && prev !== 0) {
+                                        const d = Number(abs) - Number(prev);
+                                        const sign = d >= 0 ? '↑+' : '↓';
+                                        deltaStr = `${sign}${Math.abs(d).toFixed(1)}`;
+                                    }
+                                }
+                                const lengthPart = span
+                                    ? (per100 != null
+                                        ? `${Number(span).toLocaleString()} ${unit}  (${per100.toFixed(2)} def/100${unit})`
+                                        : `${Number(span).toLocaleString()} ${unit}`)
+                                    : '';
                                 return [
-                                    `Absolute: ${abs != null ? Number(abs).toFixed(1) : '—'}`,
-                                    `Relative (this window): ${relData[item.dataIndex]}`,
-                                    `Verdict: ${r.verdict || '—'}`,
-                                    `Detections: ${r.rows || 0}`,
-                                    tops ? `Top defects: ${tops}` : '',
+                                    `${r.verdict || '—'} · ${(r.rows || 0).toLocaleString()} det${deltaStr ? '  Δ ' + deltaStr : ''}`,
+                                    lengthPart ? `Length: ${lengthPart}` : '',
+                                    impPerUnit != null ? `Impact/${unit}: ${Number(impPerUnit).toFixed(4)}` : '',
+                                    tops ? `Top: ${tops}` : '',
                                 ].filter(Boolean);
                             },
                         },
@@ -3241,6 +3365,59 @@ async function _loadQualityShipmentsChart() {
                          title: { display: true, text: 'Score / 100', color: '#94a3b8', font: { size: 10 } } },
                 },
             },
+            plugins: [{
+                // 4.0.99 — length label is now on line 2 UNDER the shipment ID
+                // (was above the bar, where it collided with the delta arrow).
+                // Delta arrow stays above the bar top.
+                // Product-agnostic: uses whatever `encoder_unit` the server returned.
+                id: 'shipmentAnnotations',
+                afterDatasetsDraw(chart) {
+                    const meta0 = chart.getDatasetMeta(0);
+                    const meta1 = chart.getDatasetMeta(1);
+                    const ctx = chart.ctx;
+                    ctx.save();
+                    ctx.textAlign = 'center';
+                    ctx.font = '10px system-ui, sans-serif';
+                    // Y for the length line: bottom of the x-axis area (which
+                    // already includes the rotated shipment-ID tick labels),
+                    // minus a small breather so it lands cleanly inside our
+                    // 18-px layout.padding.bottom reservation.
+                    const lengthY = chart.scales.x.bottom + (chart.chartArea.bottom !== undefined ? 4 : 4);
+                    rows.forEach((r, i) => {
+                        const bar0 = meta0.data[i]; if (!bar0) return;
+                        const bar1 = meta1 && meta1.data[i];
+                        const centerX = bar1 ? (bar0.x + bar1.x) / 2 : bar0.x;
+                        const topY = Math.min(bar0.y, bar1 ? bar1.y : bar0.y);
+                        // Line 2 under the shipment ID: length.
+                        if (r.encoder_span) {
+                            const unit = r.encoder_unit || 'unit';
+                            const spanShort = Number(r.encoder_span).toLocaleString();
+                            ctx.fillStyle = '#94a3b8';
+                            ctx.font = '10px system-ui, sans-serif';
+                            ctx.fillText(`${spanShort} ${unit}`, centerX, lengthY);
+                        }
+                        // Delta vs previous shipment — above the bar top; no
+                        // longer competes with the length label since length
+                        // has moved to the bottom row.
+                        if (i > 0) {
+                            const abs  = r.score_absolute ?? r.score;
+                            const prev = rows[i-1].score_absolute ?? rows[i-1].score;
+                            if (abs != null && prev != null && prev !== 0) {
+                                const d = Number(abs) - Number(prev);
+                                if (Math.abs(d) >= 0.1) {
+                                    const arrow = d >= 0 ? '▲' : '▼';
+                                    const color = d >= 0 ? '#22c55e' : '#ef4444';
+                                    ctx.fillStyle = color;
+                                    ctx.font = 'bold 9px system-ui, sans-serif';
+                                    ctx.fillText(`${arrow}${Math.abs(d).toFixed(1)}`,
+                                        centerX, Math.max(12, topY - 6));
+                                }
+                            }
+                        }
+                    });
+                    ctx.restore();
+                },
+            }],
         });
     } catch (e) { console.warn('shipments chart failed', e); }
 }

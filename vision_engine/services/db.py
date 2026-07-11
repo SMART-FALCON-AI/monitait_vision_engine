@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 import queue
 import psycopg2
@@ -10,11 +11,31 @@ logger = logging.getLogger(__name__)
 # Database connection pool
 db_connection_pool = None
 
-# Background write queue — all DB writes go through this to avoid blocking callers
-# DB tasks are lightweight metadata (~1KB each); scale with RAM
+# 4.0.100 — the three DB knobs the operator needs to tune per-site are now
+# env-driven so an autoscaler (or a human) can bump them without a code push.
+# Defaults preserve prior v4.0.79 behaviour on any site where the env is
+# unset — nothing changes for existing deployments unless the operator opts in.
+POSTGRES_POOL_MAX   = int(os.environ.get("POSTGRES_POOL_MAX", "40"))
+MVE_DB_WRITERS_MAX  = int(os.environ.get("MVE_DB_WRITERS_MAX", "12"))
+
+# Background write queue — all DB writes go through this to avoid blocking callers.
+# DB tasks are lightweight metadata (~1KB each); default scales with RAM but the
+# operator can pin an explicit size via MVE_DB_QUEUE_MAX (overrides the RAM heuristic).
 import psutil as _psutil
 _ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
-_db_queue = queue.Queue(maxsize=max(500, int(_ram_gb * 100)))
+_MVE_DB_QUEUE_MAX_ENV = os.environ.get("MVE_DB_QUEUE_MAX")
+if _MVE_DB_QUEUE_MAX_ENV:
+    try:
+        _db_queue_max = max(100, int(_MVE_DB_QUEUE_MAX_ENV))
+    except ValueError:
+        _db_queue_max = max(500, int(_ram_gb * 100))
+else:
+    _db_queue_max = max(500, int(_ram_gb * 100))
+_db_queue = queue.Queue(maxsize=_db_queue_max)
+logger.info(
+    f"[DB] pool_max={POSTGRES_POOL_MAX} writers_max={MVE_DB_WRITERS_MAX} "
+    f"queue_max={_db_queue_max} (ram={_ram_gb:.1f} GB)"
+)
 
 
 def get_db_connection():
@@ -60,7 +81,7 @@ def get_db_connection():
             # already assumes. Existing db-queue-full backpressure kicks
             # in normally.
             db_connection_pool = pool.SimpleConnectionPool(
-                1, 40,
+                1, POSTGRES_POOL_MAX,
                 host=POSTGRES_HOST,
                 port=POSTGRES_PORT,
                 database=POSTGRES_DB,
@@ -240,7 +261,7 @@ def add_db_writers(count: int):
         return
     with _db_writers_lock:
         current = _db_writers_count
-        max_total = 12
+        max_total = MVE_DB_WRITERS_MAX     # 4.0.100 env-driven (was hardcoded 12)
         add = min(count, max_total - current)
         if add <= 0:
             return

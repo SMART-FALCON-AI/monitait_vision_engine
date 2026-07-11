@@ -258,6 +258,18 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
             except (TypeError, ValueError) as _e:
                 logger.warning(f"[SHIPMENT-RESTORE] shipment_start_encoder in config not an int: {_e}")
             logger.info(f"[SHIPMENT-RESTORE] restored active shipment from service_config: {cur_ship}")
+            # 4.0.98 — After shipment + shipment_start_encoder are restored from config,
+            # check the length-state sidecar file. If the current encoder is BELOW the
+            # persisted shipment_start_encoder (indicates PLC/encoder was reset while
+            # shipment stayed active), rebuild shipment_start_encoder from the
+            # last-known length. This prevents the negative-length spike operators
+            # were seeing after an encoder reset. Safe no-op if the sidecar is missing
+            # or points to a different shipment.
+            try:
+                if hasattr(watcher_inst, "restore_length_state"):
+                    watcher_inst.restore_length_state()
+            except Exception as _e:
+                logger.warning(f"[SHIPMENT-RESTORE] restore_length_state failed: {_e}")
         except Exception as _e:
             logger.warning(f"[SHIPMENT-RESTORE] failed to restore current_shipment on boot: {_e}")
 
@@ -977,20 +989,10 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
 #
 # Env-tunable per-site. Set MVE_BATCH_QUEUE_HIGH=0 to hard-disable batching (falls back to
 # pure single-frame behavior).
-#
-# v4.0.83 — retuned defaults after observing thrash on vteam12 under infinite-max FPS:
-# with the old HIGH=8/LOW=2/GATHER_MS=20, 24 worker threads would all wake on ON, each pull
-# 1 frame → queue drains to 0 → mode flips OFF → next arrival → mode flips ON again, cycling
-# at ~10 Hz and producing many size-2 "batches" that barely improved throughput. New defaults
-# widen the hysteresis band (LOW=4/HIGH=32), lengthen the gather window (40 ms) so batches
-# actually accumulate, and add a MIN_BATCH gate so we only pay the batch-dispatch overhead
-# when we have ≥4 frames to send at once. Under real load these produce 8-16 frame batches
-# instead of 2-frame batches.
-MVE_BATCH_QUEUE_HIGH = int(os.environ.get("MVE_BATCH_QUEUE_HIGH", "32"))  # enter batch mode at qsize >=
-MVE_BATCH_QUEUE_LOW  = int(os.environ.get("MVE_BATCH_QUEUE_LOW",  "4"))   # exit batch mode at qsize <=
-MVE_BATCH_GATHER_MS  = int(os.environ.get("MVE_BATCH_GATHER_MS",  "40"))  # max wait (ms) to fill a batch
+MVE_BATCH_QUEUE_HIGH = int(os.environ.get("MVE_BATCH_QUEUE_HIGH", "8"))   # enter batch mode at qsize >=
+MVE_BATCH_QUEUE_LOW  = int(os.environ.get("MVE_BATCH_QUEUE_LOW",  "2"))   # exit batch mode at qsize <=
+MVE_BATCH_GATHER_MS  = int(os.environ.get("MVE_BATCH_GATHER_MS",  "20"))  # max wait (ms) to fill a batch
 MVE_BATCH_MAX        = int(os.environ.get("MVE_BATCH_MAX",        "16"))  # hard cap on batched frames
-MVE_BATCH_MIN        = int(os.environ.get("MVE_BATCH_MIN",        "4"))   # single-frame dispatch below this
 _batch_mode_lock = threading.Lock()
 app.state.batch_mode = False
 app.state.batch_stats = {"enters": 0, "exits": 0, "batches": 0, "batched_frames": 0}
@@ -1138,23 +1140,10 @@ def inference_worker_thread():
                     if do_batch:
                         _gather_more_groups(hot_q, gathered)
                         total_frames = sum(len(g.get("frames", [])) for g in gathered)
-                    # v4.0.83 — MIN_BATCH gate: only pay the batched-dispatch overhead when
-                    # we've actually accumulated a meaningful batch. This prevents the tiny
-                    # 2-frame "batches" that dominated on v4.0.82 under 24-worker contention.
-                    # If we can't fill MIN_BATCH within the gather window, spill the extra
-                    # groups back to the hot queue so the next worker can try, and process
-                    # this call as single-frame.
-                    if do_batch and total_frames >= MVE_BATCH_MIN:
+                    if do_batch and total_frames > 1:
                         success = _process_gathered_groups_batched(gathered, allow_eject=True)
                     else:
-                        if do_batch and len(gathered) > 1:
-                            # We over-gathered but under the min → put extras back so we don't
-                            # lose frames or introduce latency, then process this one single.
-                            for extra in gathered[1:]:
-                                try:
-                                    hot_q.put(extra)
-                                except Exception:
-                                    cold_q.put(extra)  # spill on backpressure
+                        # Single-group unbatched — original behavior.
                         success = _process_frame_batch(frames_data, allow_eject=True)
 
                     if not success:

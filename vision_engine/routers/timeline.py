@@ -2142,11 +2142,19 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
                     "score_absolute":   qp.get("score_absolute") if qp else None,
                     "score_relative":   qp.get("score_relative") if qp else None,
                     "impact_per_unit":  qp.get("impact_per_unit") if qp else None,
+                    "impact_total":     qp.get("impact_total") if qp else None,
                     "verdict":          qp.get("verdict") if qp else None,
                     "rows":             int(n_rows or 0),
                     "first_t": first_t.isoformat() if first_t else None,
                     "last_t":  last_t.isoformat()  if last_t  else None,
                     "top_defects": [d.get("class") for d in (qp.get("top_defects") or [])][:3] if qp else [],
+                    # 4.0.98 — pass length + unit context through so the chart can
+                    # show length labels above bars + compute normalized "impact
+                    # per 100 units" (works for any product: fabric metres, glass
+                    # sheets, wire kilometres, whatever your encoder measures).
+                    "encoder_span":            qp.get("encoder_span") if qp else 0,
+                    "encoder_unit":            qp.get("encoder_unit", "unit") if qp else "unit",
+                    "encoder_units_per_meter": qp.get("encoder_units_per_meter") if qp else None,
                 })
             except Exception:
                 out.append({
