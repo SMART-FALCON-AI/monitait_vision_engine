@@ -59,8 +59,38 @@ import collections
 import pickle
 import glob as _glob_mod
 
-# RAM budget for hot queue (5% of RAM, ~500KB per frame)
-_ram_budget = max(100, int(_total_ram_gb * 1024 * 0.05 / 0.5))
+# v4.0.83 — Auto-size the hot RAM queue based on AVAILABLE memory rather than total.
+# Old formula (fixed 5% of TOTAL RAM @ 500KB/frame) gave 3190 slots on a 31GB box —
+# too small for high-FPS bursts (Cap FPS throttled to 39 fps once queue filled, then
+# capture blocked on hot_q.put() until inference workers drained the backlog).
+#
+# New formula scales with what the OS actually has free at boot time. Reserves a
+# headroom the operator controls (default 60% of available RAM stays free — i.e.
+# the queue consumes AT MOST 40%). Frame size and both floor/ceiling are tunable
+# per site via env.
+#
+# Env knobs:
+#   MVE_HOT_QUEUE_RAM_PCT  — % of AVAILABLE RAM the queue may consume (default 40)
+#   MVE_AVG_FRAME_KB       — planning size per frame (default 300)
+#   MVE_HOT_QUEUE_FLOOR    — minimum slots regardless of RAM (default 1000)
+#   MVE_HOT_QUEUE_CEILING  — maximum slots regardless of RAM (default 60000)
+#
+# On a 31 GB box with ~16 GB free: 16 * 1024 * 0.40 / 0.3 ≈ 21,800 slots
+# (vs ~3,190 slots under the old fixed formula). Cap FPS bursts of ~100 fps have
+# ~4 minutes of headroom before the queue caps out — plenty for the drain to
+# catch up under real production loads.
+_avail_ram_bytes = _psutil.virtual_memory().available
+_pct = float(os.environ.get('MVE_HOT_QUEUE_RAM_PCT', '40'))
+_frame_kb = float(os.environ.get('MVE_AVG_FRAME_KB', '300'))
+_floor = int(os.environ.get('MVE_HOT_QUEUE_FLOOR', '1000'))
+_ceiling = int(os.environ.get('MVE_HOT_QUEUE_CEILING', '60000'))
+_ram_budget_raw = int(_avail_ram_bytes * _pct / 100.0 / (_frame_kb * 1024))
+_ram_budget = max(_floor, min(_ceiling, _ram_budget_raw))
+logger.info(
+    f"hot_queue sizing: avail_ram={_avail_ram_bytes/(1024**3):.1f}GB * {_pct}% "
+    f"/ {_frame_kb}KB/frame = {_ram_budget_raw} raw, clamped to {_ram_budget} "
+    f"(floor={_floor}, ceiling={_ceiling})"
+)
 
 
 class HotQueue:

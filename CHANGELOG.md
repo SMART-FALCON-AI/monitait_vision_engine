@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.83] - 2026-07-11 — RAM-percent hot queue sizing + batch-mode thrash fix + yolo-side endpoint deployed
+
+Full end-to-end batching is now LIVE on vteam12 — MVE dispatches multi-image POSTs to yolo's new `/batch-detect/` endpoint under queue pressure. Two of v4.0.82's tuning defaults were wrong in practice; this bump fixes them and enlarges the hot queue so bursts don't force capture into throttling.
+
+### 1) Yolo container gets `GET /capabilities` + `POST /batch-detect/` (via bind-mount at `yolo_inference/`)
+- `yolo_inference/main.py`: adds two endpoints. `/capabilities` returns `{"batch": true, "max_batch": 16}` so MVE's `probe_batch_capability` auto-detects support. `/batch-detect/` accepts N `image` multipart parts, returns `{"results": [[det, ...], [det, ...], …]}` in input order. Existing `/detect/` endpoint untouched.
+- `yolo_inference/detect.py`: new `Detector.detect_batch(imgs_list)` uses YOLOv5 hub's native list input — one forward pass through a batched tensor.
+- Verified end-to-end on vteam12: `GET /capabilities` → `200 {"batch":true,"max_batch":16}`; batched POST with 3 real JPEGs → 129 ms wall (~43 ms/image, vs 56 ms/image single-frame). Yolo access log confirmed MVE actually sends `/batch-detect/` calls under load.
+- `YOLO_MAX_BATCH` env var overrides the advertised max_batch per site.
+
+### 2) `services/watcher.py` — auto-size hot RAM queue from available memory
+- Old formula was `max(100, int(_total_ram_gb * 1024 * 0.05 / 0.5))` — a hardcoded 5% of TOTAL RAM at 500 KB/frame. On a 31 GB box: 3190 slots. Under infinite-max FPS on vteam12, this filled in seconds and capture blocked on `hot_q.put()`, throttling Cap FPS from 117 → 51.9.
+- New formula uses AVAILABLE RAM at boot: `avail_ram * pct / 100 / (avg_frame_kb * 1024)`, clamped to `[floor, ceiling]`. On the same 31 GB box with 16 GB free: ~22,000 slots. Cap FPS bursts have 4× longer runway before backpressure.
+- Env knobs: `MVE_HOT_QUEUE_RAM_PCT` (default 40 — queue takes at most 40 % of available RAM), `MVE_AVG_FRAME_KB` (default 300), `MVE_HOT_QUEUE_FLOOR` (default 1000), `MVE_HOT_QUEUE_CEILING` (default 60000).
+- Startup log line names the chosen size and the inputs so it's obvious per-site: `hot_queue sizing: avail_ram=…GB * …% / …KB/frame = … raw, clamped to … (floor=…, ceiling=…)`.
+
+### 3) `main.py` — batch-mode thrash fix
+- v4.0.82 defaults `HIGH=8 / LOW=2 / GATHER_MS=20` produced destructive thrash under 24-worker contention: mode flipped ON at qsize=8, all 24 workers pulled 1 frame each, queue drained to 0, mode flipped OFF, next arrival flipped ON again — cycling at ~10 Hz and producing many 2-frame "batches" that gave no meaningful GPU speedup. Observed on vteam12: 68 batched calls vs 718 single calls in 30 s under saturation.
+- New defaults: `HIGH=32 / LOW=4 / GATHER_MS=40` widens the hysteresis band so the mode dwells long enough for batches to accumulate.
+- New `MVE_BATCH_MIN=4` gate: only pay batched-dispatch overhead when we've accumulated ≥4 frames. Below that, over-gathered extras are put back on the hot queue (or spilled to cold if full) and the current call runs single-frame. Prevents "batches of 2" from clogging the fast path.
+- Net expected effect on vteam12 under infinite-max: batches settle at 8-16 frames per call, GPU utilization climbs, inference FPS lifts past the previous ~85 fps ceiling.
+
 ## [4.0.82] - 2026-07-10 — adaptive batched YOLO inference dispatch (yolo-team endpoint pending; safe fallback ships now)
 
 Ships **dark on vteam12**: capability probe returns `batch: false` until the yolo container implements `/capabilities` + `/batch-detect` (see [docs/YOLO_BATCH_ENDPOINT_SPEC.md](docs/YOLO_BATCH_ENDPOINT_SPEC.md)). Fallback path = current v4.0.81 behavior verbatim; **zero regression risk** even before yolo team ships anything.
