@@ -50,3 +50,20 @@ class RedisConnection:
 
     def pop_queue_messages_redis(self, stream_name="frames_queue"):
             return self.redis_connection.lpop(stream_name)
+
+    def pop_queue_blocking(self, stream_name="frames_queue", timeout=1.0):
+        """v4.0.101 — wake-on-data BLPOP variant of pop_queue_messages_redis.
+
+        Returns (key, value) tuple on data, or None on timeout. Used by the
+        ejector loop (services/watcher.py) to eliminate its 200 Hz polling
+        against Redis: `EJECTOR_POLL_INTERVAL=0.005` was waking the thread
+        200 times per second even when idle. With BLPOP the thread parks
+        inside Redis until either new data lands or `timeout` seconds pass,
+        which caps idle wake-ups at ~1/sec instead of ~200/sec (also cuts
+        end-to-end ejection latency from ~2.5 ms average to sub-millisecond).
+
+        `timeout=0` would block forever; we pass 1.0 by default so the outer
+        state-machine loop still gets a chance to check the encoder value
+        even during a lull with no new ejection requests.
+        """
+        return self.redis_connection.blpop(stream_name, timeout=timeout)

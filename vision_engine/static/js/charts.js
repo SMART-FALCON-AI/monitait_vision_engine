@@ -3212,44 +3212,55 @@ async function _loadQualityShipmentsChart(win) {
         //       there is nothing to compare. Relative expands whatever spread
         //       exists in the window so subtle drift becomes visible.
         //
-        // Rescale math: shift-and-scale by the OBSERVED spread of absolute
-        // scores in the chart. When every shipment has the same absolute
-        // score (spread == 0), we short-circuit to 100 across the board (no
-        // meaningful differences to highlight — flat is the correct render).
-        const absVals   = rows.map(s => (s.score_absolute != null ? s.score_absolute
-                                       : (s.score != null ? s.score : 0)));
-        const validAbs  = absVals.filter(v => v != null && !isNaN(v));
-        const absMin    = validAbs.length ? Math.min(...validAbs) : 0;
-        const absMax    = validAbs.length ? Math.max(...validAbs) : 100;
-        const absSpread = absMax - absMin;
-        const relData = absVals.map(v => {
+        // Rescale math: shift-and-scale by the OBSERVED spread of scores in
+        // the chart. Rank the window on WHICHEVER of score_absolute /
+        // raw score has real spread — v4.0.101 fallback for the case where
+        // severity calibration is unset (see khoy 2026-07-12): every shipment
+        // clamps to `score_absolute=100` but the raw `score` varies 90–100.
+        // Before this fallback the operator saw "all Relative bars grey (all
+        // tied)" and correctly complained that nothing distinguished them.
+        const absVals = rows.map(s => (s.score_absolute != null ? s.score_absolute
+                                     : (s.score != null ? s.score : 0)));
+        const rawVals = rows.map(s => (s.score         != null ? s.score
+                                     : (s.score_absolute != null ? s.score_absolute : 0)));
+        const spreadOf = (arr) => {
+            const v = arr.filter(x => x != null && !isNaN(x));
+            return v.length ? (Math.max(...v) - Math.min(...v)) : 0;
+        };
+        const absSpread = spreadOf(absVals);
+        const rawSpread = spreadOf(rawVals);
+        // Prefer absVals when it has real spread. Otherwise fall back to raw
+        // score. Only when BOTH are flat do we render the neutral stripe.
+        const useRaw = absSpread < 1e-9 && rawSpread >= 1e-9;
+        const relSrc = useRaw ? rawVals : absVals;
+        const relSrcMin = Math.min(...relSrc.filter(v => v != null && !isNaN(v)));
+        const relSrcMax = Math.max(...relSrc.filter(v => v != null && !isNaN(v)));
+        const relSrcSpread = relSrcMax - relSrcMin;
+        const relData = relSrc.map(v => {
             if (v == null || isNaN(v)) return 0;
-            if (absSpread < 1e-9) return 100;  // all identical → flat max
-            return Number((((v - absMin) / absSpread) * 100).toFixed(1));
+            if (relSrcSpread < 1e-9) return 100;  // truly flat → all 100
+            return Number((((v - relSrcMin) / relSrcSpread) * 100).toFixed(1));
         });
 
         const colors   = rows.map(s => _verdictColor(s.verdict));
         // 4.0.97 (revised) — Two bars per shipment, same verdict color, distinguished
         // by fill pattern. Absolute = solid; Relative = diagonal-striped.
-        // 4.0.99 — when the window's Absolute scores are all identical (nothing to
-        // rank), the Relative bars render in a NEUTRAL slate-grey stripe instead
-        // of the verdict color. Reason: operator saw "all bars green (verdict
-        // color) at 100 (relative rank)" and read it as info, when in fact it's
-        // the flat-fallback branch above and there's nothing to compare. Neutral
-        // grey stripe signals "no relative signal — every shipment tied".
-        const _relFlat = absSpread < 1e-9;
+        // 4.0.99/4.0.101 — Relative bar color signals HOW the ranking was computed:
+        //   - verdict color: normal case (Absolute scores spread — real relative)
+        //   - verdict color with a small annotation in the subtitle: fallback
+        //     to raw `score` because Absolute was flat (calibration issue)
+        //   - slate grey: NEITHER has spread — every shipment truly tied
+        const _relFlat = relSrcSpread < 1e-9;
         const NEUTRAL_STRIPE_BASE = 'rgba(148,163,184,0.55)';   // slate-400
         const relColors = _relFlat
             ? rows.map(() => _makeStripedPattern(NEUTRAL_STRIPE_BASE))
             : colors.map(c => _makeStripedPattern(c));
-        // 4.0.99 — surface the flat-window state in the subtitle so the
-        // operator knows the grey relative bars aren't a bug — every shipment
-        // in this window has the same Absolute score, so there's nothing to
-        // relatively rank.
         if (subtitleEl) {
             subtitleEl.textContent = _relFlat
                 ? `· window ${win} · color = verdict · relative = flat (all tied)`
-                : `· window ${win} · color = verdict`;
+                : (useRaw
+                    ? `· window ${win} · color = verdict · relative = raw score (Absolute uncalibrated)`
+                    : `· window ${win} · color = verdict`);
         }
 
         if (_qualityShipmentsChart) _qualityShipmentsChart.destroy();

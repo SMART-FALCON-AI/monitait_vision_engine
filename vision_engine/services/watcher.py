@@ -1558,8 +1558,23 @@ class ArduinoSocket:
                     time.sleep(cfg.EJECTOR_POLL_INTERVAL)
                     continue
 
-                # Pop new ejection requests from Redis list and add to local queue
-                raw_ejector_data = self.redis_connection.pop_queue_messages_redis(stream_name="ejector_queue")
+                # v4.0.101 — swapped 200 Hz polling (`lpop` + `sleep 0.005`) for
+                # a wake-on-data BLPOP. When there ARE pending items in the
+                # queue we still need to loop fast to process the encoder-based
+                # state machine below, so the timeout adapts:
+                #   - queue drained → BLPOP with 1.0 s timeout (thread parks in
+                #     Redis; wakes instantly on new data or after 1 s to re-check
+                #     encoder progression)
+                #   - queue backing up → very short timeout (5 ms) so the
+                #     state-machine loop runs at full speed and drains it
+                # Result: ~200× fewer wakeups when idle, no throughput loss when
+                # busy. Redis-side BLPOP cost is a park on a condition variable,
+                # so idle CPU cost drops to ~zero here.
+                _blpop_timeout = 0.005 if self.ejection_queue or self._ejector_pending else 1.0
+                blpop_result = self.redis_connection.pop_queue_blocking(
+                    stream_name="ejector_queue", timeout=_blpop_timeout
+                )
+                raw_ejector_data = blpop_result[1] if blpop_result else None
                 if raw_ejector_data:
                     try:
                         ejector_data = json.loads(raw_ejector_data.decode('utf-8'))
@@ -1603,7 +1618,11 @@ class ArduinoSocket:
                     self._send_message('7\n')
                     self.ejector_running = False
 
-                time.sleep(cfg.EJECTOR_POLL_INTERVAL)
+                # v4.0.101 — trailing sleep removed. Pacing is now controlled
+                # by BLPOP's `timeout` at the top of the loop (1.0 s when idle,
+                # 5 ms when the local queue has entries needing encoder-based
+                # progression checks). `EJECTOR_POLL_INTERVAL` is still honored
+                # on the disabled path above (line ~1558).
 
             except Exception as e:
                 logger.error(f"Run ejector failed: {e}")

@@ -1113,6 +1113,12 @@ def inference_worker_thread():
     with _worker_stop_lock:
         _worker_stop_events.append(stop_event)
 
+    # v4.0.101 — cache the `hasattr(pipeline_manager, "batch_available")` probe
+    # once per worker instead of paying the __dict__/__getattr__ walk on every
+    # frame at 60+ fps. pipeline_manager identity doesn't change during a
+    # worker's lifetime (autoscaler restarts workers on pipeline swap).
+    _pipeline_has_batch = pipeline_manager is not None and hasattr(pipeline_manager, "batch_available")
+
     logger.info("Inference worker thread started")
 
     while not stop_event.is_set():
@@ -1133,8 +1139,7 @@ def inference_worker_thread():
                     total_frames = len(frames_data.get("frames", []))
                     do_batch = (
                         app.state.batch_mode
-                        and pipeline_manager
-                        and hasattr(pipeline_manager, "batch_available")
+                        and _pipeline_has_batch                    # v4.0.101 cached
                         and pipeline_manager.batch_available()
                     )
                     if do_batch:
@@ -1168,8 +1173,16 @@ def inference_worker_thread():
                             pass
                 continue
 
-            # Phase 2: Hot queue empty — try cold queue (FIFO — oldest first)
-            frames_data = cold_q.get()
+            # Phase 2: Hot queue empty — try cold queue (FIFO — oldest first).
+            # v4.0.101 — added timeout=1.0 (was blocking indefinitely). Previously
+            # a worker parked on cold_q.get() couldn't wake to grab a fresh hot
+            # frame until *something* landed on cold; under an all-hot workload
+            # that worker was effectively dead. With a 1 s timeout we re-poll
+            # hot_q and stay responsive without spinning.
+            try:
+                frames_data = cold_q.get(timeout=1.0)
+            except queue.Empty:
+                continue
             if frames_data:
                 # Skip stale frames — no point running inference on frames
                 # whose raw images have already been cleaned up

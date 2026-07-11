@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.101] - 2026-07-12 — Chart tab hotfix (scatter dots + relative-bar fallback) + ejector BLPOP + inference worker fixes
+
+### Critical chart tab hotfix (khoy operator saw blank scatter + all-grey Relative bars)
+- `routers/timeline.py::detection_charts` — added `SET LOCAL statement_timeout = 15000` at the start of the transaction. The endpoint's CTE expands `jsonb_array_elements(detections)` and then ROW_NUMBER()s over the exploded set; on khoy (1.5 M inference rows in the last 24 h) that legitimately takes 4–12 s, and the pool-wide 3 s timeout (from v4.0.79) was aborting the query before it returned. Browser rendered a blank scatter ("no dots"). 15 s is enough for the current row volume; if it creeps up further the correct fix is a materialised view, not another timeout raise.
+- `static/js/charts.js::renderQualityShipmentsChart` — the Relative-bar rank source is now WHICHEVER of `score_absolute` / raw `score` has real spread. Root cause on khoy: severity calibration is unset (Detection Insights banner: "Severities set on 3 class(es)... impact totals too small to calibrate") → every shipment collapses to `score_absolute=100.0`, spread=0, so v4.0.99's flat-window fallback (grey stripes for every Relative bar) fired even though the raw `score` values ranged 90.3–100.0. Now the fallback tries raw score first; only when BOTH are flat do we render neutral grey. Subtitle appends `· relative = raw score (Absolute uncalibrated)` in the fallback case so the operator sees why the rank changed source.
+
+### CPU: ejector loop — 200 Hz poll → BLPOP wake-on-data
+- `services/redis_service.py` — new `pop_queue_blocking(stream_name, timeout=1.0)` method wrapping Redis `BLPOP`.
+- `services/watcher.py::run_ejector` — swapped the `lpop` + `time.sleep(EJECTOR_POLL_INTERVAL)` cycle for `pop_queue_blocking`. Timeout adapts: 1.0 s when the local queue is empty (thread parks in Redis), 5 ms when there are pending entries needing encoder-progression checks. Idle wake-ups drop from ~200/s to ~1/s; ejection-to-fire latency drops from ~2.5 ms avg to sub-ms.
+
+### CPU: inference worker — no more indefinite park on cold queue
+- `main.py::inference_worker_thread` — `cold_q.get()` (previously blocking forever) now uses `timeout=1.0` and re-polls hot queue on wake. Prevents a worker from being effectively dead when hot is fed but cold is drained.
+- Cached `hasattr(pipeline_manager, "batch_available")` once per worker at thread start instead of every frame.
+
 ## [4.0.100] - 2026-07-11 — DB pool + writer count + queue depth are now env-driven (unblocks khoy autoscaler)
 
 ### Context

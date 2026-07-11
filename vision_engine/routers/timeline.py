@@ -2862,6 +2862,21 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             return JSONResponse(content=empty)
         cur = conn.cursor()
 
+        # v4.0.101 — raise statement_timeout from the pool default (3 s, set in
+        # services/db.py via `options='-c statement_timeout=3000'`) up to 15 s
+        # for the duration of THIS transaction only. Reason: on high-volume
+        # sites (khoy 2026-07-12: 1.5 M inference rows in 24 h), the CTE that
+        # expands `jsonb_array_elements(detections)` and then ROW_NUMBER()s
+        # over the exploded set legitimately takes 4–12 s, and the 3 s pool
+        # ceiling was aborting the query before it returned — the browser
+        # then rendered a blank scatter ("no dots"). 15 s is high enough to
+        # accommodate the current row volume; if it ever creeps up we should
+        # switch to a materialised view rather than raise this again.
+        # `SET LOCAL` scopes the change to this transaction, so the connection
+        # goes back to 3 s when we release it — write paths and cheap reads
+        # keep their fail-fast behaviour.
+        cur.execute("SET LOCAL statement_timeout = 15000")
+
         # --- distinct shipments in the window (for the dropdown) ---
         cur.execute(
             f"SELECT DISTINCT shipment FROM inference_results "
