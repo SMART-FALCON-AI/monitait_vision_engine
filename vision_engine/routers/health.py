@@ -597,14 +597,76 @@ def health_watchdog(request: Request, stale_seconds: int = 120):
         and stuck_inference_broken
     )
 
+    # v4.0.103 — SECOND definition: `inference_lagging`. Not the same as
+    # `stalled` (which the docker healthcheck watches for a container
+    # restart), but a warning the operator UI should surface loudly.
+    # Fires when inference IS running but can't keep up:
+    #
+    #   inference_lagging = (
+    #       cap_count > 0                       # frames actually being captured
+    #       and inf_count > 0                   # not stalled — inference IS producing
+    #       and (
+    #           cold_size > COLD_WARN_THRESHOLD        # frames piling up on disk
+    #           or  hot_size > HOT_WARN_THRESHOLD      # RAM queue depth alarming
+    #           or  inf_count < cap_count * LAG_RATIO  # inference < 50% of capture over the window
+    #       )
+    #   )
+    #
+    # This is what the operator on khoy actually needed — the old watchdog
+    # correctly said "healthy" because inferences ARE happening; it just
+    # didn't say "healthy but 92 % behind and dropping to disk". Thresholds
+    # are env-tunable so an autoscaler can pick them per site.
+    _cold_size, _hot_size = 0, 0
+    try:
+        import services.watcher as _wmod
+        if getattr(_wmod, "_hot_queue", None) is not None:
+            try: _hot_size = _wmod._hot_queue.qsize()
+            except Exception: pass
+        if getattr(_wmod, "_cold_queue_disk", None) is not None:
+            try: _cold_size = _wmod._cold_queue_disk.qsize()
+            except Exception: pass
+    except Exception:
+        pass
+
+    _COLD_WARN = int(os.environ.get("MVE_WATCHDOG_COLD_WARN", "500"))
+    _HOT_WARN  = int(os.environ.get("MVE_WATCHDOG_HOT_WARN",  "2000"))
+    _LAG_RATIO = float(os.environ.get("MVE_WATCHDOG_LAG_RATIO", "0.5"))
+
+    inference_lagging = bool(
+        cap_count > 0 and inf_count > 0
+        and (
+            _cold_size > _COLD_WARN
+            or _hot_size > _HOT_WARN
+            or (cap_count > 0 and inf_count < cap_count * _LAG_RATIO)
+        )
+    )
+
     # Diagnostic reason string so the docker healthcheck log lines and
     # /api/health/watchdog consumers know why (or why not).
+    #
+    # NEW REASON CODES (v4.0.103):
+    #   inference-lagging  — inference is running but not keeping up. UI
+    #                        should badge yellow. NOT a container-restart
+    #                        trigger (docker healthcheck ignores this).
+    #   inference-stuck    — as before, cap>0 inf=0. Restart trigger.
+    #   idle               — cap=0 inf=0. Line paused. Not a fault.
+    #   shipment-parked    — shipment == no_shipment. Operator explicitly
+    #                        parked the line.
+    #   healthy            — everything ok.
     if shipment in (None, "", "no_shipment"):
         reason = "shipment-parked"
     elif cap_count == 0 and inf_count == 0:
-        reason = "idle"           # NOT stuck — line just isn't capturing
+        reason = "idle"
     elif stuck_inference_broken:
-        reason = "inference-stuck"  # frames in, no frames out → restart
+        reason = "inference-stuck"
+    elif inference_lagging:
+        # We ran a lagging-state calc; surface the actual reason for the badge.
+        if _cold_size > _COLD_WARN:
+            reason = f"inference-lagging (cold_queue={_cold_size} > {_COLD_WARN})"
+        elif _hot_size > _HOT_WARN:
+            reason = f"inference-lagging (hot_queue={_hot_size} > {_HOT_WARN})"
+        else:
+            reason = f"inference-lagging (inf_rate {inf_count}/{cap_count} < {_LAG_RATIO:.0%})"
     else:
         reason = "healthy"
 
@@ -618,8 +680,18 @@ def health_watchdog(request: Request, stale_seconds: int = 120):
         "seconds_since_capture": sec_since_cap,
         "inference_in_last_n": inf_count,
         "capture_in_last_n": cap_count,
+        # v4.0.103 — new fields for the operator UI badge.
+        "hot_queue_size":   _hot_size,
+        "cold_queue_size":  _cold_size,
         "stalled": stalled,
+        "inference_lagging": inference_lagging,
         "reason": reason,
+        "thresholds": {
+            "cold_warn": _COLD_WARN,
+            "hot_warn":  _HOT_WARN,
+            "lag_ratio": _LAG_RATIO,
+            "stale_seconds": stale_seconds,
+        },
     })
 
 

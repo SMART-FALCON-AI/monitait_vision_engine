@@ -645,8 +645,40 @@ _BASELINE_TTL_SEC = 3600  # 1 hour
 # score >= RELEASE_SCORE: green light, ship.
 # RELEASE_SCORE > score >= REINSPECT_SCORE: yellow, re-inspect before ship.
 # score < REINSPECT_SCORE: red, hold; do not ship without QA sign-off.
+#
+# 4.0.103 — these are now the FALLBACKS only. Real values are read from
+# `service_config` in `.env.prepared_query_data` per request (see helpers
+# below) so the operator can tune them via the Process tab without a code
+# push. `_quality_thresholds()` returns the live values and is what every
+# scoring code path should use — NEVER read the module-level constants
+# directly except as a default.
 QUALITY_RELEASE_SCORE = 85
 QUALITY_REINSPECT_SCORE = 60
+QUALITY_MIN_ROWS = 100         # < this many detections in the window → verdict = PENDING
+QUALITY_MIN_ENCODER_SPAN = 100  # encoder span < this → verdict = PENDING (unit-less; site-tuned)
+
+
+def _quality_thresholds():
+    """Return {release, reinspect, min_rows, min_span} — read live from
+    service_config so operator changes take effect immediately with no
+    restart. On any read failure we fall back to the module-level
+    constants above so scoring never crashes."""
+    try:
+        from config import load_service_config as _lsc
+        svc = _lsc() or {}
+        return {
+            "release":   float(svc.get("quality_release_score",   QUALITY_RELEASE_SCORE)),
+            "reinspect": float(svc.get("quality_reinspect_score", QUALITY_REINSPECT_SCORE)),
+            "min_rows":  int(svc.get("quality_min_rows",           QUALITY_MIN_ROWS)),
+            "min_span":  float(svc.get("quality_min_encoder_span", QUALITY_MIN_ENCODER_SPAN)),
+        }
+    except Exception:
+        return {
+            "release":   float(QUALITY_RELEASE_SCORE),
+            "reinspect": float(QUALITY_REINSPECT_SCORE),
+            "min_rows":  int(QUALITY_MIN_ROWS),
+            "min_span":  float(QUALITY_MIN_ENCODER_SPAN),
+        }
 
 
 def _compute_conf_baselines():
@@ -1298,12 +1330,36 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         # thresholds against release/re-inspect gates).
         score = score_relative
 
-        if score >= QUALITY_RELEASE_SCORE:
-            verdict = "RELEASE"
-        elif score >= QUALITY_REINSPECT_SCORE:
-            verdict = "RE-INSPECT"
+        # 4.0.103 — thresholds are LIVE from service_config so operator
+        # changes take effect immediately.
+        _q = _quality_thresholds()
+        # 4.0.103 — PENDING verdict. If the sample is too thin to say
+        # anything meaningful, refuse to slap a RELEASE/RE-INSPECT/HOLD
+        # sticker on it. Reasons the operator asked for this: on khoy,
+        # brand-new shipments were showing RE-INSPECT at score=60.3 with
+        # `encoder_span=0` — undefined-behaviour scoring wearing a lab
+        # coat. Now those come back as PENDING with a machine-readable
+        # `pending_reason`, and the UI can show "gathering data…" instead.
+        # We count detections (`total_detections`) rather than raw frames
+        # so a shipment with 500 empty frames doesn't score PENDING away
+        # from a real 100-defect verdict.
+        _n_rows = int(total_detections or 0)
+        _span = float(encoder_span or 0)
+        if _n_rows < _q["min_rows"] or _span < _q["min_span"]:
+            verdict = "PENDING"
+            pending_reason = (
+                f"insufficient sample: rows={_n_rows}<{_q['min_rows']}"
+                if _n_rows < _q["min_rows"] else
+                f"insufficient span: {_span:.0f}<{_q['min_span']:.0f}"
+            )
         else:
-            verdict = "HOLD"
+            pending_reason = None
+            if score >= _q["release"]:
+                verdict = "RELEASE"
+            elif score >= _q["reinspect"]:
+                verdict = "RE-INSPECT"
+            else:
+                verdict = "HOLD"
 
         duration_sec = 0
         if first_ts and last_ts:
@@ -1345,7 +1401,18 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             "score_relative": round(score_relative, 1),
             "score_scale_factor": round(score_scale_factor, 4),
             "verdict": verdict,
-            "thresholds": {"release": QUALITY_RELEASE_SCORE, "reinspect": QUALITY_REINSPECT_SCORE},
+            # 4.0.103 — new field. Non-null ONLY when verdict=="PENDING". Gives
+            # the UI a human-readable reason to show ("gathering data" etc.).
+            "pending_reason": pending_reason,
+            # 4.0.103 — thresholds now include min_rows + min_span so the
+            # frontend can render "PENDING (78/100 rows)" style progress hints
+            # instead of leaving the operator guessing what "PENDING" means.
+            "thresholds": {
+                "release":   _q["release"],
+                "reinspect": _q["reinspect"],
+                "min_rows":  _q["min_rows"],
+                "min_span":  _q["min_span"],
+            },
             "impact_total": impact_total,
             "impact_by_class": impact_by_class,
             "impact_per_unit": round(impact_per_unit, 4),
@@ -1382,6 +1449,80 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
                 release_db_connection(conn)
             except Exception:
                 pass
+
+
+# 4.0.103 — operator-facing threshold config. GET returns live values so
+# the Process tab UI can populate its inputs; POST validates + persists to
+# `service_config` in the data file. Reads are lock-free (dict copy) and
+# writes go through save_service_config which is atomic.
+@router.get("/api/quality/thresholds")
+def get_quality_thresholds():
+    """Return the live release/reinspect/min_rows/min_span thresholds.
+
+    UI shows these on the Process tab so QC can tune "what counts as
+    RELEASE" without editing YAML or restarting MVE. Values change take
+    effect on the NEXT score computation (no restart).
+    """
+    return JSONResponse(content=_quality_thresholds())
+
+
+@router.post("/api/quality/thresholds")
+async def set_quality_thresholds(request: Request):
+    """Persist new release/reinspect/min_rows/min_span values.
+
+    Body: JSON with any subset of {release, reinspect, min_rows, min_span}.
+    Missing keys keep their current value. Invalid values are rejected.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(content={"error": "invalid JSON body"}, status_code=400)
+
+    try:
+        from config import load_service_config as _lsc, save_service_config as _svc_save
+    except Exception as e:
+        return JSONResponse(content={"error": f"config module unavailable: {e}"}, status_code=500)
+
+    cur = _lsc() or {}
+    errors = []
+    # Each knob has its own type + range. release MUST be > reinspect so
+    # the verdict ladder still makes sense.
+    def _mk_num(k, lo, hi, typ):
+        if k not in body: return None
+        try: v = typ(body[k])
+        except (TypeError, ValueError):
+            errors.append(f"{k}: expected number"); return None
+        if v < lo or v > hi:
+            errors.append(f"{k}: must be in [{lo}, {hi}]"); return None
+        return v
+
+    new_release   = _mk_num("release",   0, 100, float)
+    new_reinspect = _mk_num("reinspect", 0, 100, float)
+    new_min_rows  = _mk_num("min_rows",  0, 10_000_000, int)
+    new_min_span  = _mk_num("min_span",  0, 1e12, float)
+
+    # Ordering check: new (or existing) release must be > reinspect. This
+    # matters even when only one knob was supplied — we compare against the
+    # current value for the other one.
+    _q = _quality_thresholds()
+    eff_release   = new_release   if new_release   is not None else _q["release"]
+    eff_reinspect = new_reinspect if new_reinspect is not None else _q["reinspect"]
+    if eff_release <= eff_reinspect:
+        errors.append(f"release ({eff_release}) must be greater than reinspect ({eff_reinspect})")
+
+    if errors:
+        return JSONResponse(content={"error": "validation failed", "details": errors}, status_code=400)
+
+    if new_release   is not None: cur["quality_release_score"]     = new_release
+    if new_reinspect is not None: cur["quality_reinspect_score"]   = new_reinspect
+    if new_min_rows  is not None: cur["quality_min_rows"]           = new_min_rows
+    if new_min_span  is not None: cur["quality_min_encoder_span"]   = new_min_span
+
+    ok = _svc_save(cur)
+    if not ok:
+        return JSONResponse(content={"error": "failed to persist config"}, status_code=500)
+    return JSONResponse(content={"ok": True, "thresholds": _quality_thresholds()})
+
 
 
 # 3.25.12 — auto-calibrate the score_scale_factor so the p50 of recent shipment
@@ -2097,9 +2238,32 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
     Returns up to `n` shipments started within `window`, each with its
     quality score + verdict + detection count. Order is most-recent-first.
     Chart shows one bar per shipment: bar height = score, color = verdict.
+
+    4.0.103 — `_windows` now includes 1h and 6h (previously they silently
+    fell through to the 30d default because the map only had 24h/7d/30d/90d,
+    which meant "operator clicked 1h, saw 30 days of data, thought it was
+    1 h").
+    4.0.103 — `n<=0` now means "no cap" (customer request: 7d/30d views must
+    show EVERY shipment in the window, not just the first 30). We still cap
+    the effective LIMIT at 5000 as a safety valve — anyone asking for more
+    than 5000 shipments is either testing or writing an integration and
+    should page.
     """
-    _windows = {"24h": "24 hours", "7d": "7 days", "30d": "30 days", "90d": "90 days"}
+    _windows = {
+        "1h":  "1 hour",
+        "6h":  "6 hours",
+        "24h": "24 hours",
+        "7d":  "7 days",
+        "30d": "30 days",
+        "90d": "90 days",
+    }
     interval = _windows.get(window, "30 days")
+    # v4.0.103 — clamp n: <=0 → uncapped (5000 max), else clamp to [1, 5000]
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 30
+    effective_n = 5000 if n <= 0 else max(1, min(n, 5000))
     out: list = []
     try:
         from services.db import get_db_connection, release_db_connection
@@ -2110,6 +2274,10 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
             cur = conn.cursor()
             # 3.25.4 hotfix — image_path is `raw_images/<shipment>/<hour>/<frame>.jpg`,
             # so the shipment label lives in segment 2.
+            # v4.0.103 — heavy CTE against big row counts (30d on khoy = ~45M
+            # rows). Raise per-tx timeout so we don't silently return an
+            # empty list on the operator's default 30d view.
+            cur.execute("SET LOCAL statement_timeout = 20000")
             cur.execute(
                 f"""
                 SELECT SPLIT_PART(image_path, '/', 2) AS ship,
@@ -2124,7 +2292,7 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
                 ORDER BY first_t DESC
                 LIMIT %s
                 """,
-                (interval, int(n)),
+                (interval, effective_n),
             )
             rows = cur.fetchall()
             cur.close()
@@ -2176,7 +2344,15 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
                 })
     except Exception as e:
         logger.warning(f"quality/shipments failed: {e}")
-    return JSONResponse(content={"shipments": out})
+    # v4.0.103 — return metadata so the frontend can differentiate
+    # "list is capped" from "here's everything in the window".
+    return JSONResponse(content={
+        "shipments": out,
+        "window": window,
+        "requested_n": n,
+        "cap_applied": (len(out) == effective_n and n != 0),
+        "count": len(out),
+    })
 
 
 # 3.25.12 — ejection axis: where ejections occurred, colored by procedure name.
@@ -3856,9 +4032,31 @@ def quality_charts(request: Request, window: str = "24h", shipment: str = "", mi
             for bkt, a, m in cur.fetchall()
         ]
         cur.close()
+        # 4.0.103 — the underlying SELECT is bounded by `LIMIT 40000` (line
+        # 3994) so `by_class` + `by_camera` + `heatmap.cells` are all counts
+        # over the SAME 40k-detection sample, NOT over the whole window.
+        # Surface that fact so the frontend can label the tiles "recent
+        # 40k sample" instead of pretending the numbers are the totals.
+        # `sample_size` = the actual number of detections the counts came
+        # from (may be less than the cap if the window was small). Compare
+        # this against `/api/detection_stats.total` for context — that one
+        # is the true full-window count.
+        sample_size = sum(by_class.values())
+        SAMPLE_CAP = 40000
         return JSONResponse(content={
             "by_class": by_class, "by_camera": by_camera, "heatmap": heatmap,
             "latency_over_time": latency_over_time, "window": window, "shipment": shipment,
+            "sample": {
+                "size": sample_size,
+                "cap":  SAMPLE_CAP,
+                "capped": sample_size >= SAMPLE_CAP,
+                "note": (
+                    f"counts over the most-recent {SAMPLE_CAP}-detection sample "
+                    f"(hit the cap; the full-window total is exposed by /api/detection_stats)"
+                    if sample_size >= SAMPLE_CAP else
+                    f"counts over {sample_size} detections in the window (below the {SAMPLE_CAP} cap)"
+                ),
+            },
         })
     except Exception as e:
         logger.warning(f"quality_charts query failed (returning empty): {e}")

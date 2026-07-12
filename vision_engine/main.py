@@ -802,6 +802,14 @@ if hasattr(_cold_queue_disk, 'flush_stale'):
 if hasattr(_cold_queue_disk, 'start_janitor'):
     _cold_queue_disk.start_janitor()
 
+# v4.0.103 — proactive raw_images age-based janitor (env-driven, safe default
+# 30 days matches DB retention). Disabled by RAW_IMAGES_MAX_AGE_DAYS=0.
+try:
+    from services.watcher import start_raw_images_age_janitor
+    start_raw_images_age_janitor()
+except Exception as _rj_e:
+    logger.warning(f"raw_images age janitor could not start: {_rj_e}")
+
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 
 # Update autoscaler initial state with actual values

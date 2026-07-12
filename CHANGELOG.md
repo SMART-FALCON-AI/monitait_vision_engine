@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.103] - 2026-07-12 — Hostile-QA fixes: PENDING verdict, watchdog `inference_lagging`, 7d/30d works, threshold config, raw_images age retention
+
+### Context
+Full picky-operator walk-through of vteam12 (see v4.0.102 report). Ten distinct issues cataloged; this ship addresses the five customer-blocking ones. Auth + audit log (also requested) tracks as v4.0.104. Notification channels (Telegram/Bale) tracks as v4.0.105.
+
+### 1) PENDING verdict + operator-tunable thresholds (was: undefined-behavior scoring)
+- `routers/timeline.py::_compute_quality_payload` now refuses to slap a RELEASE/RE-INSPECT/HOLD label on a shipment when the sample is too thin. Returns `verdict: "PENDING"` with a machine-readable `pending_reason` ("insufficient sample: rows=X<Y" or "insufficient span: X<Y"). This directly fixes the khoy-visible bug where brand-new shipments were showing RE-INSPECT at score=60.3 with `encoder_span=0`.
+- New `_quality_thresholds()` helper reads `quality_release_score`, `quality_reinspect_score`, `quality_min_rows`, `quality_min_encoder_span` from `service_config` (persisted in `.env.prepared_query_data`). Fallbacks to the module constants (85/60/100/100) so nothing breaks on sites that haven't set them yet.
+- New `GET/POST /api/quality/thresholds` endpoints. GET returns live values for the Process-tab UI. POST validates the ordering constraint (release > reinspect) and persists via `save_service_config`.
+- `thresholds` in the payload now includes `min_rows` + `min_span` so the frontend can render "PENDING (78/100 rows)" style hints.
+
+### 2) `/api/quality/shipments` — 7d and 30d finally work
+- `_windows` map gained `"1h"` + `"6h"`. Before v4.0.103 they silently fell back to the "30 days" default — operator clicked 1h, saw 30d of data.
+- `n=0` or negative now means "no cap" (up to a safety valve of 5000). Customer's ask: 7d/30d views must show EVERY shipment, not just the first 30.
+- `SET LOCAL statement_timeout = 20000` added because 30d on khoy scans ~45M rows.
+- Response gained `window`, `requested_n`, `cap_applied`, `count` metadata.
+
+### 3) `quality_charts` — honest sample labeling (`sample of 40k`)
+- Response now includes a `sample` block: `{size, cap: 40000, capped, note}`. When the endpoint hits the LIMIT, the note explicitly says "the full-window total is exposed by /api/detection_stats" so the operator doesn't compare the 40k against detection_stats' millions and think one is wrong.
+
+### 4) Watchdog `inference_lagging` state (was: "healthy" while inference is 92% behind)
+- `routers/health.py::/api/health/watchdog` now computes `inference_lagging` distinct from `stalled`:
+  - `stalled` (unchanged): captures > 0 AND inferences = 0 → docker healthcheck restart trigger
+  - `inference_lagging` (NEW): captures > 0 AND inferences > 0 AND (`cold_queue > MVE_WATCHDOG_COLD_WARN=500` OR `hot_queue > MVE_WATCHDOG_HOT_WARN=2000` OR `inf_count < cap_count * MVE_WATCHDOG_LAG_RATIO=0.5`). Warning-only; UI can badge yellow. NOT a restart trigger.
+- Response gained `hot_queue_size`, `cold_queue_size`, `inference_lagging`, `thresholds`.
+- Reason string gained `inference-lagging (<what breached>)` so the operator badge shows the actual condition, not just "unhealthy".
+
+### 5) `raw_images` retention — proactive + env-tunable (was: pressure-only at hardcoded 75%)
+- `services/watcher.py`: `_DISK_MAX_PCT` now env-driven via `RAW_IMAGES_MAX_DISK_PCT` (default 75 preserved).
+- New `RawImagesAgeJanitor`: age-based sweep of hourly chunks older than `RAW_IMAGES_MAX_AGE_DAYS` (default 30 — matches DB `drop_after` so images + rows leave together). Runs every `RAW_IMAGES_JANITOR_INTERVAL_S` (default 3600 s). Set MAX_AGE_DAYS=0 to disable age-based pruning; pressure-based cleanup keeps working either way.
+- `main.py` bootstrap wired to `start_raw_images_age_janitor()`.
+
+### Documented, not shipped in this version
+- `/api/status` field-completeness fix — v4.0.104 (bundled with the field consolidation across `/api/status` / `/api/health` / `/api/health/watchdog`)
+- Auth + audit log — v4.0.104
+- Notification channels (Telegram/Bale/email pairing flow) — v4.0.105
+- Input validators on every endpoint — v4.0.104
+- Continuous aggregates for the 7d+ views — v4.1.0
+
 ## [4.0.102] - 2026-07-12 — Customer-ship endpoint reliability sweep (5 silent-timeout fixes + 1 param bug)
 
 ### Context
