@@ -473,7 +473,15 @@ def _ensure_disk_space(write_dir):
         shutil.rmtree(chunk_path, ignore_errors=True)
         logger.info(f"DVR cleanup: deleted {chunk_path}")
         try:
-            pct = shutil.disk_usage(write_dir).used * 100 // shutil.disk_usage(write_dir).total
+            # v4.0.108 — MUST use the same (used + free) denominator as the
+            # entry check on line 458. Previously this used `.total` which
+            # includes ext4's 5%-reserved-for-root blocks, silently under-
+            # reporting pct by ~5 pts. Symptom on khoy (SSD-RESERVE 220 GB):
+            # entry sees 79% -> evict; loop check sees 74% -> stops; disk
+            # regrows to 90% before next cycle. Eviction thrashed 159x in
+            # 3 min without holding the disk anywhere near the threshold.
+            _u = shutil.disk_usage(write_dir)
+            pct = _u.used * 100 // max(1, _u.used + _u.free)
             if pct <= _DISK_MAX_PCT:
                 _last_disk_ok = True
                 logger.info(f"DVR cleanup done — disk at {pct}%")

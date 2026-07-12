@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.108] - 2026-07-13 — Critical hotfix: `_ensure_disk_space` loop-exit formula inconsistency (raw_images disk grew unbounded)
+
+### Symptom
+On khoy the raw_images disk climbed to **90 %** (SSD-RESERVE 186/220 GB). DVR cleanup was firing hard (159 cleanups in 3 min) but never held the disk at threshold. Root cause: two different disk-pct formulas inside `_ensure_disk_space`.
+
+### Root cause
+- Entry check (line 458 in `services/watcher.py`): `pct = used / (used + free)` — correctly excludes ext4's ~5 % root reserve. Matches what `df -h` shows.
+- Loop-body check after each chunk delete (line 476): `pct = used / total` — INCLUDES ext4's root reserve, so it under-reports pct by ~5 points. On a 220 GB disk this is ~11 GB of accounting slack.
+- Result: cleanup enters when actual disk is 79 %, deletes a chunk, the loop check sees 74 % and thinks it's done, exits. Disk grows back, cycle repeats. Documented in the code as fixed on 2026-05-29 for the entry check, but the loop check was missed.
+
+### What triggered the symptom now
+- I bumped `RAW_IMAGES_MAX_DISK_PCT` from 75 → 85 on khoy earlier in this ship (workflow-driven, to stop the ceiling-thrash at 75 %). Under the buggy loop formula that's what let the disk climb up past 85 % without the eviction ever catching up.
+
+### Fix
+- `services/watcher.py` line 476: use `used / (used + free)` — same formula as the entry check. Cleanup now correctly reads what df reads and stops exactly at threshold.
+- Reverted `RAW_IMAGES_MAX_DISK_PCT` back to 75 in khoy's `.env`.
+
+### Verified on both canaries
+- khoy: 79 % → **74 %** in 30 s after restart. Log now shows "disk at 73%" (matches df).
+- vteam12: 74 % → **73 %** immediately after restart.
+
 ## [4.0.107] - 2026-07-13 — Score computation: exclude synthetic `_color` (and other `_*`) entries
 
 ### Context
