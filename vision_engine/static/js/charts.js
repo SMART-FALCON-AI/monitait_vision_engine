@@ -1499,6 +1499,58 @@ function _progressiveLadder(target) {
 // run against the bucket's narrow slice. No loader spinner. No touch of
 // the other charts. Uses the exact same downstream extend logic so the
 // dedup + dataset-append behaviour is identical to the window-based path.
+// v4.0.106 — PER-CLASS window-normalized dot radii. Previously each dot's
+// radius was `3 + conf * 9`, a fixed [3, 12] px mapping regardless of the
+// actual confidence spread. Operators reported "all dots look the same
+// size" because most detections cluster in the 0.5-0.9 conf range which
+// mapped to a narrow 7-11 px slice.
+//
+// Per-DATASET (per-class) normalization: each class' own min/max maps
+// independently to [3, 12]. A class that clusters at 0.9 gets its own
+// full-range spread; a class ranging 0.2-0.5 also gets its own full
+// spread. The alternative (global normalization) would make the low-
+// confidence class invisibly small next to the high-confidence one.
+//
+// Reads `p.conf` (raw confidence stored at insertion time) and writes
+// `p.r` (Chart.js bubble radius). Called before every scatter update —
+// both the initial `new Chart(...)` render and every progressive-bucket
+// extend — so the LARGEST dot IN A CLASS is always the highest-
+// confidence detection of that class in view.
+function _renormalizeScatterRadii(chart) {
+    if (!chart || !chart.data || !chart.data.datasets) return;
+    const MIN_R = 3, MAX_R = 12;
+    for (const ds of chart.data.datasets) {
+        let mn = Infinity, mx = -Infinity;
+        for (const p of (ds.data || [])) {
+            const c = p.conf;
+            if (typeof c === 'number' && !isNaN(c)) {
+                if (c < mn) mn = c;
+                if (c > mx) mx = c;
+            }
+        }
+        if (!isFinite(mn)) continue;   // class has no numeric conf; skip
+        if (mn === mx) {
+            // Every dot in this class has identical conf (or only one dot
+            // total). Use midpoint so all are visible but not misleadingly
+            // large.
+            const flat = (MIN_R + MAX_R) / 2;
+            for (const p of (ds.data || [])) {
+                if (typeof p.conf === 'number' && !isNaN(p.conf)) p.r = flat;
+            }
+            continue;
+        }
+        const range = mx - mn;
+        for (const p of (ds.data || [])) {
+            if (typeof p.conf === 'number' && !isNaN(p.conf)) {
+                p.r = MIN_R + ((p.conf - mn) / range) * (MAX_R - MIN_R);
+            } else {
+                p.r = MIN_R;
+            }
+        }
+    }
+}
+
+
 async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
     if (!_insightCameraScatter) return;
     let data;
@@ -1567,6 +1619,11 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
         addedCount++;
     }
     if (addedCount > 0) {
+        // v4.0.106 — renormalize before update so newly-appended dots' sizes
+        // reflect the whole visible set's min/max confidence, not just their
+        // own bucket. Otherwise the first bucket's dots are frozen at their
+        // initial (raw-confidence) sizes while later buckets get rescaled.
+        _renormalizeScatterRadii(_insightCameraScatter);
         _insightCameraScatter.update('none'); // no animation — feels instant
         // v4.0.106 — was `console.log('[progressive] window=' + win + ...)` but
         // `win` was never a parameter of `_extendScatterFromBucket`. That
@@ -2048,6 +2105,16 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // 4.0.7 — direct mousemove hover-preview, independent of Chart.js's
         // external tooltip plugin (which wasn't firing reliably).
         _attachHoverPreview(scCtx, () => _insightCameraScatter);
+        // v4.0.106 — normalize the initial dot radii per-class right after
+        // creation. The insertion formula (line ~1738) used the fixed
+        // `3 + conf*9` for backward compat; this pass rewrites `.r` on
+        // every dot to the class-local [3, 12] normalization so class-A
+        // dots with conf 0.2-0.4 look distinct from class-B dots with
+        // conf 0.7-0.95 (both classes get their own full-range spread).
+        try {
+            _renormalizeScatterRadii(_insightCameraScatter);
+            _insightCameraScatter.update('none');
+        } catch (e) { /* keep the chart if renormalize fails */ }
     }
     // 4.0.42 — hide the loading badge now that the scatter + heatmap have
     // been built. Paired with mveLoaderBegin() at the top of this function.

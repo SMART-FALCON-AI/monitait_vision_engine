@@ -20,6 +20,12 @@ Operator reported "no dots visible" on vteam12 and khoy. Multi-agent workflow di
 - Scatter tooltip's image preview element: when the annotated (`/api/render_detected/...`) URL returns 404, the fallback logic `if (urls.raw && img.src !== urls.raw)` set `img.src = urls.raw`. But `img.src` returns the RESOLVED absolute URL (`http://host:port/api/raw_image/...`) while `urls.raw` is the relative path we set (`/api/raw_image/...`). The strings never match, so the fallback path fired forever, spraying dozens of requests per second at the same missing file until the operator closed the tab. Observed on khoy (where DVR cleanup at 75 % pressure had deleted the referenced hour): 100+ requests to the same 404 URL per hovered dot.
 - Fix: track fallback state with `img.dataset.fellBack = '1'` on first fallback; second `onerror` gives up (opacity 0.3, "✗ image unavailable" caption).
 
+### Feature — Per-class dot-size normalization (operator ask)
+- Previously every scatter dot's radius was `3 + conf × 9` (fixed [3, 12] px mapping). Since most detections cluster in the 0.5–0.9 conf range, everything rendered in the 7-11 px slice and looked the same size. Operator asked for the biggest dot to correspond to the highest confidence.
+- New `_renormalizeScatterRadii(chart)` helper: for EACH dataset (i.e., each class), find its own `[minConf, maxConf]` and map to `[3, 12]` px. Called before every `chart.update()` — both initial render and every progressive-bucket extend.
+- **Per-class** (not global) because classes have different natural confidence ranges: `warp_up` might cluster at 0.2-0.4 while `spot_up` clusters at 0.9-0.95. Global normalization would make one class invisibly small next to the other. Per-class gives each its own full 3-12 px spread.
+- Flat-window edge case (single dot, all identical conf): all radii → midpoint (7.5 px) so nothing looks misleadingly large.
+
 ### Deploy
 - Static-file patch only. `charts.js` md5 `2efa97ad93aa8f3d0d93e385967854d9` on both vteam12 and khoy after deploy. Hard-refresh (Ctrl-F5) required in browser.
 - No MVE restart. No backend touched. No dependency on v4.0.105 rollout state.
