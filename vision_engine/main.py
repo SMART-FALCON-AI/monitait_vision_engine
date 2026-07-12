@@ -802,13 +802,15 @@ if hasattr(_cold_queue_disk, 'flush_stale'):
 if hasattr(_cold_queue_disk, 'start_janitor'):
     _cold_queue_disk.start_janitor()
 
-# v4.0.103 — proactive raw_images age-based janitor (env-driven, safe default
-# 30 days matches DB retention). Disabled by RAW_IMAGES_MAX_AGE_DAYS=0.
+# v4.0.105 — start the DB disk-pressure janitor. Mirrors raw_images
+# retention shape: reactive on host disk usage crossing DB_MAX_DISK_PCT
+# (default 75). Drops oldest hypertable chunks one at a time until back
+# under the threshold. No time-based cutoff, per operator design decision.
 try:
-    from services.watcher import start_raw_images_age_janitor
-    start_raw_images_age_janitor()
-except Exception as _rj_e:
-    logger.warning(f"raw_images age janitor could not start: {_rj_e}")
+    from services.db import start_db_disk_pressure_janitor
+    start_db_disk_pressure_janitor()
+except Exception as _dbj_e:
+    logger.warning(f"DB disk-pressure janitor could not start: {_dbj_e}")
 
 logger.info(f"Inference workers: {INFERENCE_WORKERS} threads for {_num_cameras} camera(s)")
 

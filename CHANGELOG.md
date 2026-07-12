@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.106] - 2026-07-12 — Emergency JS hotfix: `win is not defined` (broke scatter progressive fill) + infinite `img.onerror` retry loop
+
+### Context
+Operator reported "no dots visible" on vteam12 and khoy. Multi-agent workflow diagnosis confirmed the API returns dots correctly (750 dots in 0.45 s for vteam12 window=1h), the images are on disk, and MVE health is good. Root cause was 100 % frontend — two JS bugs I introduced/left in v4.0.101-era `charts.js`.
+
+### Bug 1 — `win is not defined` at charts.js:1571 (broke progressive scatter fill)
+- Inside `_extendScatterFromBucket(sinceMs, untilMs, shipment, minConf)` the debug log referenced `win`, which was never a parameter of that function. When the first bucket returned dots (`addedCount > 0`), the log fired and threw `ReferenceError`. There's no `try/catch` around the bucket loop body, so the throw propagated out of `refreshAdvancedCharts`, killing the entire progressive-fill loop. Net effect on-screen: at most one bucket's worth of dots ever appeared; on high-volume sites where the base 1 h hydrate alone gave <10 dots, the operator saw "no dots visible".
+- Fix: replaced the log with the actual bucket time-range (which IS in scope). Chose a log message over silent removal so the progressive path stays diagnosable in DevTools.
+
+### Bug 2 — infinite `img.onerror` retry loop on 404 images
+- Scatter tooltip's image preview element: when the annotated (`/api/render_detected/...`) URL returns 404, the fallback logic `if (urls.raw && img.src !== urls.raw)` set `img.src = urls.raw`. But `img.src` returns the RESOLVED absolute URL (`http://host:port/api/raw_image/...`) while `urls.raw` is the relative path we set (`/api/raw_image/...`). The strings never match, so the fallback path fired forever, spraying dozens of requests per second at the same missing file until the operator closed the tab. Observed on khoy (where DVR cleanup at 75 % pressure had deleted the referenced hour): 100+ requests to the same 404 URL per hovered dot.
+- Fix: track fallback state with `img.dataset.fellBack = '1'` on first fallback; second `onerror` gives up (opacity 0.3, "✗ image unavailable" caption).
+
+### Deploy
+- Static-file patch only. `charts.js` md5 `2efa97ad93aa8f3d0d93e385967854d9` on both vteam12 and khoy after deploy. Hard-refresh (Ctrl-F5) required in browser.
+- No MVE restart. No backend touched. No dependency on v4.0.105 rollout state.
+
+### Also identified but NOT shipped in this version (documented for v4.1)
+- `/api/detection_stats` empty response hides the whole `#insight-charts` container (kills scatter even when `/api/detection_charts` has data). Real fix = don't gate the scatter widget on a different endpoint's data.
+- No `AbortController` / timeout on any `fetch()` in `charts.js` — long stalls look like broken UI. Would add per-fetch `signal` + fallback banner.
+- `_progressiveLadderTicket` cancellation is silent — legitimate races (tab click during load, class-color reload) cancel in-flight bucket loops with no operator-visible signal.
+
+## [4.0.105] - 2026-07-12 — Retention model redesign: disk-budget for DB, disk-pressure for images, 1-year time floor
+
+### Context
+Operator design correction: retention decisions should be driven by **disk usage**, not by clock. My v4.0.103 raw_images age janitor and the historical TimescaleDB `drop_after: 30 days` policy both violated that — deleting data even when there was plenty of disk headroom, and (on slow-line sites) potentially destroying still-relevant audit evidence.
+
+### Changes
+
+**1) raw_images: reverted the v4.0.103 age janitor**
+- Removed `_raw_images_age_janitor_loop`, `_dir_size_bytes`, `start_raw_images_age_janitor`, and the `main.py` bootstrap. The pressure-based `_ensure_disk_space` at `_DISK_MAX_PCT` (env `RAW_IMAGES_MAX_DISK_PCT`, default 75 %) is the ONLY raw_images retention path.
+- Verified on vteam12 pre-revert: the age janitor never fired (no log entries) and no user data was harmed.
+
+**2) DB: new disk-budget janitor**
+- `services/db.py::_db_disk_pressure_janitor_loop`. Runs every `DB_JANITOR_INTERVAL_S` (default 300 s).
+- Trigger: `pg_database_size(current_database()) > (disk_used + disk_free) * DB_MAX_PCT_OF_DISK / 100` (default 10 %). Uses `used + free` not `total` so we don't spend ext4's 5 % root reserve.
+- Drops the OLDEST chunk of `inference_results` via `drop_chunks(older_than => range_end)`. Up to `DB_MAX_CHUNKS_PER_RUN` (default 5) per pass — safety cap so a bogus disk-total read can't nuke the whole hypertable.
+- Started from `main.py` bootstrap.
+
+**3) DB: TimescaleDB time policy extended 30 days → 1 year**
+- New idempotent startup migration `_reset_inference_retention_policy()` reads the current policy and, if different from `DB_RETENTION_INTERVAL` (default `"1 year"`), removes it and re-adds with the new value. Runs at every MVE boot; no-op if already correct.
+- Set `DB_RETENTION_INTERVAL=0` (or `off`) to remove the time policy entirely — disk-budget janitor becomes the sole authority.
+- Compression policy (`compress_after: 1 day`) untouched — that's a disk optimizer, not a data-drop policy.
+
+### Interaction summary (both layers active)
+- **Busy site** (khoy ~1.5 M rows/day): 10 % of 209 GB ≈ 21 GB budget ≈ 55 days of data. Layer B (disk-budget) fires first, long before Layer A's 1-year mark.
+- **Slow site** (hashtgerd ~100 MB/day): 21 GB budget ≈ 7 months. Layer B rarely fires; Layer A drops chunks > 1 year for audit compliance.
+- **Per-site override** via `.env`: `DB_MAX_PCT_OF_DISK=15` for more history on busy sites, `DB_RETENTION_INTERVAL=2 years` if regulator requires longer.
+
+### Deploy
+- Requires MVE restart (new env-driven config read at module import; migration runs at boot).
+
 ## [4.0.104] - 2026-07-12 — UI surface for v4.0.103 backend (30d/90d in the window selector + Quality Verdict Thresholds panel)
 
 ### Context

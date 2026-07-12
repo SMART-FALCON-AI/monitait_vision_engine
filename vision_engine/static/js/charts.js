@@ -1568,7 +1568,19 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
     }
     if (addedCount > 0) {
         _insightCameraScatter.update('none'); // no animation — feels instant
-        console.log('[progressive] window=' + win + ': added ' + addedCount + ' new points');
+        // v4.0.106 — was `console.log('[progressive] window=' + win + ...)` but
+        // `win` was never a parameter of `_extendScatterFromBucket`. That
+        // ReferenceError threw AFTER the scatter update — the chart WAS
+        // populated in memory but the throw prevented the return, which
+        // aborted `refreshAdvancedCharts`, which aborted the progressive
+        // bucket loop, which meant subsequent buckets never appended their
+        // dots. Net effect on-screen: user saw at most one bucket's worth
+        // of dots, often none. Log the actual time-range we appended so
+        // the entry is still useful.
+        console.log('[progressive] bucket ' +
+                    new Date(sinceMs).toISOString() + ' → ' +
+                    new Date(untilMs).toISOString() +
+                    ': added ' + addedCount + ' new points');
     }
 }
 
@@ -2675,9 +2687,18 @@ function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
                 if (cap) cap.textContent = `${metaTxt}   (click to edit in ai-trainer)`;
             };
             img.onload  = settle;
+            // v4.0.106 — track fallback state with a dataset flag rather than
+            // comparing `img.src !== urls.raw`. `img.src` returns the FULLY
+            // RESOLVED absolute URL ("http://host:port/api/raw_image/..."),
+            // while `urls.raw` is the relative path we set. They never match
+            // as strings, so the fallback path fired forever when both the
+            // annotated AND raw endpoints returned 404, spraying dozens of
+            // requests per second for the SAME missing file until the tab
+            // was closed. Now: one fallback attempt max, then give up.
+            img.dataset.fellBack = '';
             img.onerror = function() {
-                if (urls.raw && img.src !== urls.raw) {
-                    // Fall back to raw and let onload settle.
+                if (urls.raw && img.dataset.fellBack !== '1') {
+                    img.dataset.fellBack = '1';
                     img.src = urls.raw;
                 } else {
                     img.style.opacity = '0.3';

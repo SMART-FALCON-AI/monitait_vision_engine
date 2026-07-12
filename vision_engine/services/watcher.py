@@ -394,20 +394,19 @@ def init_queues(num_cameras, ejector_offset, ejector_enabled):
 _disk_writers_count = 0
 _disk_lock = threading.Lock()
 
-# v4.0.103 — env-driven so customers can pin retention behaviour per site.
-# `_DISK_MAX_PCT` is the pressure-based cutoff: when host disk crosses this
-# percentage, `_ensure_disk_space` deletes oldest hourly chunks (skipping
-# the current hour) until back under it.  75 was the historical hardcode.
+# v4.0.103 / v4.0.105 — env-driven pressure-based retention. When the host
+# disk crosses `_DISK_MAX_PCT`, `_ensure_disk_space` deletes oldest hourly
+# chunks (skipping the current hour) until back under it. Historical
+# hardcode was 75; now tuneable via env.
+#
+# v4.0.105 CORRECTION: the age-based janitor added in v4.0.103 was WRONG
+# design. Files retention MUST be disk-usage based only, not time-based.
+# Reason: on smaller/slower factories a shipment can legitimately span
+# weeks; deleting its raw_images at 30 days by clock would destroy
+# audit evidence the operator still needed. Pressure-based cleanup
+# handles capacity correctly regardless of age. The DB gets the same
+# treatment via `_db_disk_pressure_janitor_loop` in services/db.py.
 _DISK_MAX_PCT = int(os.environ.get("RAW_IMAGES_MAX_DISK_PCT", "75"))
-# v4.0.103 — age-based retention (proactive; runs on a schedule instead of
-# only firing under disk pressure). Chunks whose hour label is older than
-# this many days get pruned by `RawImagesAgeJanitor` even if the disk isn't
-# yet full. Default 30 days matches the DB `drop_after` policy so image +
-# row data leaves together. Set to 0 to disable age-based pruning
-# (pressure-based cleanup keeps working either way).
-_RAW_IMAGES_MAX_AGE_DAYS = int(os.environ.get("RAW_IMAGES_MAX_AGE_DAYS", "30"))
-# v4.0.103 — how often the age janitor wakes up (seconds). Default 1h.
-_RAW_IMAGES_JANITOR_INTERVAL_S = int(os.environ.get("RAW_IMAGES_JANITOR_INTERVAL_S", "3600"))
 _last_disk_ok = True
 _last_disk_check_t = 0
 _raw_root = None                # Resolved once on first write
@@ -483,79 +482,13 @@ def _ensure_disk_space(write_dir):
             break
 
 
-# v4.0.103 — proactive age-based raw_images janitor. Sits alongside
-# `_ensure_disk_space` (which is REACTIVE — fires only when disk crosses
-# `_DISK_MAX_PCT`). The age janitor deletes hourly chunk directories whose
-# label is older than `_RAW_IMAGES_MAX_AGE_DAYS`, running once per
-# `_RAW_IMAGES_JANITOR_INTERVAL_S`. Rationale (customer-ship): with only
-# the reactive path, disk grows unbounded until it hits 75 % — for the
-# operator that means one bad shipment can push us over the cliff. Adding
-# a time-based mirror to the DB's 30-day retention means images leave when
-# the rows that referenced them leave; audit reads still work up to that
-# horizon and there are no orphan images pointing at dropped chunks.
-def _raw_images_age_janitor_loop():
-    """Delete raw_images hourly chunks older than the configured horizon.
-
-    Runs forever, sleeps `_RAW_IMAGES_JANITOR_INTERVAL_S` between passes.
-    Disable by setting `RAW_IMAGES_MAX_AGE_DAYS=0`.
-    """
-    from datetime import datetime, timedelta
-    if _RAW_IMAGES_MAX_AGE_DAYS <= 0:
-        logger.info("raw_images age janitor DISABLED (RAW_IMAGES_MAX_AGE_DAYS=0)")
-        return
-    logger.info(
-        f"raw_images age janitor started (max_age={_RAW_IMAGES_MAX_AGE_DAYS}d, "
-        f"interval={_RAW_IMAGES_JANITOR_INTERVAL_S}s)"
-    )
-    while True:
-        try:
-            time.sleep(_RAW_IMAGES_JANITOR_INTERVAL_S)
-            cutoff = (datetime.now() - timedelta(days=_RAW_IMAGES_MAX_AGE_DAYS)).strftime("%Y-%m-%d_%H")
-            deleted, freed_bytes = 0, 0
-            for chunk_name, chunk_path in _sorted_chunks():
-                if chunk_name >= cutoff:
-                    break   # sorted oldest-first; everything after is younger too
-                try:
-                    freed_bytes += _dir_size_bytes(chunk_path)
-                except OSError:
-                    pass
-                try:
-                    shutil.rmtree(chunk_path, ignore_errors=True)
-                    deleted += 1
-                except OSError as _oe:
-                    logger.warning(f"raw_images janitor: failed to rm {chunk_path}: {_oe}")
-            if deleted:
-                logger.info(
-                    f"raw_images age janitor: deleted {deleted} chunks older than {cutoff} "
-                    f"(freed {freed_bytes / (1024**3):.2f} GB)"
-                )
-        except Exception as _e:
-            logger.error(f"raw_images age janitor loop error: {_e}")
-
-
-def _dir_size_bytes(path):
-    """Total bytes under `path`. Handles missing files without exploding."""
-    total = 0
-    for root, _dirs, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-    return total
-
-
-def start_raw_images_age_janitor():
-    """One-line wrapper the main.py bootstrap can call. Idempotent —
-    subsequent calls no-op because the thread has a fixed name."""
-    for t in threading.enumerate():
-        if t.name == "raw-images-age-janitor":
-            return  # already started
-    threading.Thread(
-        target=_raw_images_age_janitor_loop,
-        daemon=True,
-        name="raw-images-age-janitor",
-    ).start()
+# v4.0.105 — REVERTED. The age-based raw_images janitor added in v4.0.103
+# was the wrong design. Files retention is DISK-USAGE based (the reactive
+# `_ensure_disk_space` at `_DISK_MAX_PCT`), never time based, because on
+# smaller/slower factories one shipment can legitimately span weeks and
+# deleting its raw_images by clock would destroy audit evidence.
+# The corresponding DB retention now also uses disk pressure — see the
+# `_db_disk_pressure_janitor_loop` in services/db.py.
 
 
 def _disk_writer_loop():
