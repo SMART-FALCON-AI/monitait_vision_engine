@@ -1200,6 +1200,16 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             encoder_units_per_meter = 0.0
 
         cur = conn.cursor()
+        # v4.0.107 — filter out synthetic pipeline entries whose class name
+        # starts with an underscore. `_color` (LAB colour analysis output),
+        # `_lab`, and future `_*` markers are added by post-processing;
+        # they are NOT real defect detections. Prior to this filter they
+        # counted as real detections in `by_class`, showed up in the
+        # operator's top-defects list, and — with confidence 1.0 — could
+        # dominate the confidence-sum-based impact calculation for any
+        # class whose configured severity was zero. Same pattern the
+        # detection_charts and detection_stats endpoints use (see line
+        # ~2704 comment "4.0.29: skip synthetic").
         cur.execute(
             f"""
             SELECT (det->>'name') AS cls,
@@ -1208,6 +1218,7 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             FROM inference_results, LATERAL jsonb_array_elements(detections) det
             WHERE time > NOW() - INTERVAL %s {ship_clause}
               AND (det->>'confidence') IS NOT NULL
+              AND COALESCE(det->>'name', '') !~ '^_'
             GROUP BY (det->>'name')
             """,
             base_params,

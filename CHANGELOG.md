@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.107] - 2026-07-13 — Score computation: exclude synthetic `_color` (and other `_*`) entries
+
+### Context
+Operator flagged that `_color` was appearing in the top-defects list AND being considered in scoring. `_color` is a synthetic entry the pipeline appends for LAB colour analysis — it's NOT a real defect detection, its confidence is always 1.0, and it should be ignored by every "how bad is this shipment" computation.
+
+### Change
+- `routers/timeline.py::_compute_quality_payload` — added `AND COALESCE(det->>'name', '') !~ '^_'` to the source `cls_rows` query at line 1203. Every downstream computation (`impact_by_class`, `count_by_class`, `total_detections`, `top_defects`) is derived from `cls_rows`, so filtering at the source stops synthetic entries from leaking through to any of them.
+- Same pattern that `detection_charts` and `detection_stats` have been using since v4.0.29 (comment: "skip synthetic (`_color` etc.)").
+
+### Impact per-site
+- `_color` had severity=0 in the audio-settings map, so it never contributed to `impact_by_class` (guarded by `if sev > 0` at line 1256). But it DID contribute to `total_detections` and `count_by_class`, which is what the "Top defects" list and Detection Insights count read from. So the operator-visible list included a spurious top entry.
+- After v4.0.107: `total_detections` and `count_by_class` reflect only real defect classes. Numbers may decrease if a factory had `_color` firing frequently.
+
+### Deploy
+- Requires MVE restart (backend Python code change).
+
 ## [4.0.106] - 2026-07-12 — Emergency JS hotfix: `win is not defined` (broke scatter progressive fill) + infinite `img.onerror` retry loop
 
 ### Context
