@@ -1300,11 +1300,12 @@ async function refreshAdvancedCharts() {
         if (typeof _renderSizeConfidenceBandsOnly === 'function') {
             try { _renderSizeConfidenceBandsOnly(d); } catch (e) { console.warn(e); }
         } else {
-            // Fallback: reuse the existing Core render just to get the size
-            // and confidence charts up on first tab activation. It also
-            // populates the scatter with 1h data, which the bucket loop
-            // dedupes against below.
-            try { await _refreshAdvancedChartsCore(); } catch (e) { console.warn(e); }
+            // 4.0.101 — pass the already-fetched 1h payload so Core renders
+            // instantly instead of re-fetching `window=<selected>` (which on
+            // khoy takes ~28 s and leaves the operator staring at an empty
+            // scatter). Progressive loop extends the scatter with older
+            // buckets on top of the 1h base.
+            try { await _refreshAdvancedChartsCore(d); } catch (e) { console.warn(e); }
         }
     } catch (e) {
         console.warn('[progressive] hydrate failed:', e);
@@ -1571,32 +1572,43 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
     }
 }
 
-async function _refreshAdvancedChartsCore() {
+async function _refreshAdvancedChartsCore(preloadedData) {
+    // v4.0.101 — accept optional preloaded data so the progressive
+    // hydrate can reuse its window=1h payload instead of triggering
+    // another slow `window=24h` fetch here. Khoy timing: `window=24h`
+    // on 1.5M rows takes ~28 s server-side (five sequential CTEs at
+    // 4-8 s each) — combined with the earlier 12 s hydrate call the
+    // scatter was taking ~40 s to render, which the operator read as
+    // "no dots" (they moved on). With preload the scatter builds from
+    // 1h data in ~200 ms; the progressive bucket loop then extends it
+    // backwards. Callers with no preload keep prior behaviour.
     const window = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
-    let data;
+    let data = preloadedData;
     // 4.0.53 — gate the loader to the Charts tab so the badge can't leak
     // into other tabs. The paired mveLoaderEnd calls below check the same flag.
-    const _showedLoader = _chartsTabActive();
+    const _showedLoader = _chartsTabActive() && !preloadedData;
     if (_showedLoader) mveLoaderBegin('Loading charts…');
     try {
-        // 4.0.30 — tell the server which heatmap baseline mode is active so
-        // it only computes that one (saves SQL for unused modes). Falls back
-        // to `camera` if nothing's been stored yet.
-        const baseline = localStorage.getItem('mve_heatmap_baseline') || 'camera';
-        // 4.0.34 — phase filter is heatmap-only. Empty string = all phases.
-        const phase = localStorage.getItem('mve_heatmap_phase') || '';
-        // 4.0.35 — single bucket count drives heatmap + quality + ejection strips.
-        const bins = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
-        const r = await fetch('/api/detection_charts?window=' + encodeURIComponent(window) +
-                              '&shipment=' + encodeURIComponent(shipment) +
-                              '&min_conf=' + minConf +
-                              '&baseline=' + encodeURIComponent(baseline) +
-                              '&phase=' + encodeURIComponent(phase) +
-                              '&bins=' + bins +
-                              '&dot_cap=' + _dotCap());
-        data = await r.json();
+        if (!data) {
+            // 4.0.30 — tell the server which heatmap baseline mode is active so
+            // it only computes that one (saves SQL for unused modes). Falls back
+            // to `camera` if nothing's been stored yet.
+            const baseline = localStorage.getItem('mve_heatmap_baseline') || 'camera';
+            // 4.0.34 — phase filter is heatmap-only. Empty string = all phases.
+            const phase = localStorage.getItem('mve_heatmap_phase') || '';
+            // 4.0.35 — single bucket count drives heatmap + quality + ejection strips.
+            const bins = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
+            const r = await fetch('/api/detection_charts?window=' + encodeURIComponent(window) +
+                                  '&shipment=' + encodeURIComponent(shipment) +
+                                  '&min_conf=' + minConf +
+                                  '&baseline=' + encodeURIComponent(baseline) +
+                                  '&phase=' + encodeURIComponent(phase) +
+                                  '&bins=' + bins +
+                                  '&dot_cap=' + _dotCap());
+            data = await r.json();
+        }
     } catch (e) {
         console.error('detection_charts fetch failed:', e);
         if (_showedLoader) mveLoaderEnd();
@@ -3410,9 +3422,18 @@ async function _loadQualityShipmentsChart(win) {
                         // Delta vs previous shipment — above the bar top; no
                         // longer competes with the length label since length
                         // has moved to the bottom row.
+                        // 4.0.101 — mirror the Relative bar's spread-source
+                        // choice: if score_absolute is flat because severities
+                        // aren't calibrated, use raw score for the delta so it
+                        // still surfaces trend. Before this fallback the delta
+                        // was suppressed on any window where every abs score
+                        // clamped to 100, which is exactly khoy's current state.
                         if (i > 0) {
-                            const abs  = r.score_absolute ?? r.score;
-                            const prev = rows[i-1].score_absolute ?? rows[i-1].score;
+                            const pickScore = (s) => (useRaw
+                                ? (s.score ?? s.score_absolute)
+                                : (s.score_absolute ?? s.score));
+                            const abs  = pickScore(r);
+                            const prev = pickScore(rows[i-1]);
                             if (abs != null && prev != null && prev !== 0) {
                                 const d = Number(abs) - Number(prev);
                                 if (Math.abs(d) >= 0.1) {

@@ -794,6 +794,14 @@ def get_color_drift(window: str = "7d"):
         if conn is None:
             return JSONResponse(content={"window": window, "classes": {}})
         cur = conn.cursor()
+        # v4.0.102 — same 3s-timeout rescue as area_stats. This endpoint's
+        # per-class percentile_cont pass over ~900k jsonb_array_elements + the
+        # SECOND per-camera GROUP BY (same rows re-scanned per class) was the
+        # heaviest analytical query on khoy; audit clocked it at 18 s to
+        # timeout+fail. 15 s covers the common case; for very large windows
+        # (30d) the operator will still see empty payload if we exceed 15 s,
+        # which is the correct failure mode (materialised view is the real fix).
+        cur.execute("SET LOCAL statement_timeout = 15000")
         # Overall (no camera grouping): one row per class, with p5/p50/p95 for L, a, b
         cur.execute(
             """
@@ -948,6 +956,10 @@ def get_area_stats(window: str = "7d"):
         if conn is None:
             return JSONResponse(content={"window": window, "classes": {}})
         cur = conn.cursor()
+        # v4.0.102 — same 3s-timeout rescue as detection_stats/detection_charts.
+        # jsonb_array_elements over 900k+ rows with two percentile_cont
+        # aggregations was aborting at 3s and returning `classes={}` silently.
+        cur.execute("SET LOCAL statement_timeout = 15000")
         # Overall percentiles
         cur.execute(
             """
@@ -2685,6 +2697,15 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
             return JSONResponse(content=empty)
         cur = conn.cursor()
 
+        # v4.0.101 — raise per-transaction statement_timeout to 15 s (see the
+        # same block in `detection_charts` above for full rationale). The pool
+        # default of 3 s (v4.0.79) was aborting BOTH queries below on khoy
+        # (902 k+ rows in 24 h), the exception handler returned an empty
+        # payload, and the Charts tab UI hid the whole `insight-charts`
+        # container — including the scatter — because `hasData` was false.
+        # SET LOCAL reverts when the connection is released.
+        cur.execute("SET LOCAL statement_timeout = 15000")
+
         # Class distribution over the window. Prefer the human-readable `name`
         # (e.g. "DIE_LINE", "mean_L") over the numeric `class` index. Cap the rows
         # scanned so a huge hypertable (millions of rows) can't make this query
@@ -3772,6 +3793,14 @@ def quality_charts(request: Request, window: str = "24h", shipment: str = "", mi
         if conn is None:
             return JSONResponse(content=empty)
         cur = conn.cursor()
+        # v4.0.102 — same 3s-timeout rescue. Also, this endpoint's outer
+        # try/except was surfacing "list index out of range" on khoy — that's
+        # NOT a timeout, it's `base_params` being shorter than the two %s
+        # placeholders when the query was rewritten with `{ship_clause}` but
+        # the confidence filter (which needs `min_conf`) wasn't added to
+        # `base_params`. Adding it here alongside the timeout raise fixes
+        # both bugs at once.
+        cur.execute("SET LOCAL statement_timeout = 15000")
 
         # by_class / by_camera / heatmap centers (one expansion pass, capped)
         cur.execute(
@@ -3789,7 +3818,7 @@ def quality_charts(request: Request, window: str = "24h", shipment: str = "", mi
             WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
             LIMIT 40000
             """,
-            base_params,
+            base_params + [float(min_conf or 0.0)],   # v4.0.102 — was missing min_conf
         )
         by_class, by_camera, centers = {}, {}, []
         max_x, max_y = 1.0, 1.0

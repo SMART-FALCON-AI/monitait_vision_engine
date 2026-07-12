@@ -1174,15 +1174,16 @@ def inference_worker_thread():
                 continue
 
             # Phase 2: Hot queue empty — try cold queue (FIFO — oldest first).
-            # v4.0.101 — added timeout=1.0 (was blocking indefinitely). Previously
-            # a worker parked on cold_q.get() couldn't wake to grab a fresh hot
-            # frame until *something* landed on cold; under an all-hot workload
-            # that worker was effectively dead. With a 1 s timeout we re-poll
-            # hot_q and stay responsive without spinning.
-            try:
-                frames_data = cold_q.get(timeout=1.0)
-            except queue.Empty:
-                continue
+            # v4.0.102 — REVERTED v4.0.101's `cold_q.get(timeout=1.0)`. That
+            # change assumed cold_q was a stdlib queue.Queue but it's a
+            # custom `services.watcher.ColdDiskQueue` whose `.get()` takes
+            # NO arguments and returns `None` immediately when empty (does
+            # NOT block). v4.0.101's kwarg raised TypeError on every poll,
+            # spraying "unexpected keyword argument 'timeout'" errors and
+            # effectively disabling cold-queue draining. Restoring the
+            # original signature. The 50 ms hot_q timeout at the top of
+            # this loop already provides the "re-poll" heartbeat I wanted.
+            frames_data = cold_q.get()
             if frames_data:
                 # Skip stale frames — no point running inference on frames
                 # whose raw images have already been cleaned up

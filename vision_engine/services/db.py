@@ -18,6 +18,19 @@ db_connection_pool = None
 POSTGRES_POOL_MAX   = int(os.environ.get("POSTGRES_POOL_MAX", "40"))
 MVE_DB_WRITERS_MAX  = int(os.environ.get("MVE_DB_WRITERS_MAX", "12"))
 
+# 4.0.102 — pool-wide statement_timeout is env-driven and DEFAULT RAISED
+# from 3 s (v4.0.79) → 9 s. Reason: the customer-ship endpoint audit on
+# khoy (900 k+ inference rows in 24 h) showed FIVE separate analytical
+# endpoints silently timing out and returning empty payloads —
+# `detection_stats`, `area_stats`, `color_drift`, `quality_charts`, and
+# the `detection_charts` scatter fetch. The 3 s cap was for pool-exhaustion
+# protection under v4.0.79's tight pool=40. With v4.0.100's pool=80 +
+# writers=24 the pool has plenty of headroom, so 9 s gives normal
+# dashboards enough time without letting a truly runaway query camp on
+# a connection indefinitely. The five heaviest analytical endpoints ALSO
+# call `SET LOCAL statement_timeout = 15000` for extra buffer.
+POSTGRES_STATEMENT_TIMEOUT_MS = int(os.environ.get("POSTGRES_STATEMENT_TIMEOUT_MS", "9000"))
+
 # Background write queue — all DB writes go through this to avoid blocking callers.
 # DB tasks are lightweight metadata (~1KB each); default scales with RAM but the
 # operator can pin an explicit size via MVE_DB_QUEUE_MAX (overrides the RAM heuristic).
@@ -34,7 +47,8 @@ else:
 _db_queue = queue.Queue(maxsize=_db_queue_max)
 logger.info(
     f"[DB] pool_max={POSTGRES_POOL_MAX} writers_max={MVE_DB_WRITERS_MAX} "
-    f"queue_max={_db_queue_max} (ram={_ram_gb:.1f} GB)"
+    f"queue_max={_db_queue_max} statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS}ms "
+    f"(ram={_ram_gb:.1f} GB)"
 )
 
 
@@ -87,7 +101,7 @@ def get_db_connection():
                 database=POSTGRES_DB,
                 user=POSTGRES_USER,
                 password=POSTGRES_PASSWORD,
-                options='-c statement_timeout=3000',
+                options=f'-c statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS}',
             )
             logger.info("Database connection pool initialized")
         except Exception as e:

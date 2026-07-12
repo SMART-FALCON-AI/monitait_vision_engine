@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.102] - 2026-07-12 — Customer-ship endpoint reliability sweep (5 silent-timeout fixes + 1 param bug)
+
+### Context
+Sitting at khoy dashboard as an operator, ran a walk-through of every analytical endpoint the UI depends on. Found **five silently failing** and **one crashing** — every one returning an empty payload that the frontend interprets as "no data" and hides the corresponding widget. The scatter dots the operator reported yesterday were the tip of that iceberg.
+
+### Root cause
+- Pool-wide `statement_timeout=3000` (v4.0.79) was chosen for pool-exhaustion protection under v4.0.79's tight `pool=40`. It's now too aggressive: v4.0.100 raised pool to 80 + writers to 24 (plenty of headroom), but the 3 s cap survived and was aborting `LATERAL jsonb_array_elements(detections)` scans against khoy's ~900 k row / 24 h volume. All five endpoints had `except Exception` handlers that returned an empty payload — silent from the caller's POV.
+
+### Fixes
+- `services/db.py`:
+  - `POSTGRES_STATEMENT_TIMEOUT_MS` — new env var, default **9 000 ms** (was hardcoded 3 000). Sets the pool-wide floor; every endpoint automatically gets more headroom without a code edit.
+  - `[DB]` init line now logs the value.
+- `routers/timeline.py` (five endpoints) — each got `cur.execute("SET LOCAL statement_timeout = 15000")` at the top of its transaction, on top of the higher pool default. `SET LOCAL` reverts on connection release, so write paths are untouched.
+  - `/api/detection_stats` — was returning `total=0` → UI hid the whole `insight-charts` container → **scatter dots missing** (the operator's reported bug).
+  - `/api/area_stats` — was returning `classes={}` → bbox-area cards blank.
+  - `/api/color_drift` — was returning `classes={}` → LAB colour drift cards blank.
+  - `/api/quality_charts` — returning empty (see next item).
+  - `/api/detection_charts` — already fixed in v4.0.101.
+- `routers/timeline.py::quality_charts` (bug fix beyond timeout) — the first query has **three** `%s` placeholders (`interval`, optional `shipment`, `min_conf`) but `base_params` only carried the first two. psycopg2 raised `IndexError: list index out of range`, caught by the outer `except`, empty payload returned. Fixed by appending `float(min_conf or 0.0)`.
+
+### Deployment notes
+- All defaults preserved. Sites that don't set `POSTGRES_STATEMENT_TIMEOUT_MS` get 9 s (up from 3 s) automatically. Sites that want the old behaviour can pin `POSTGRES_STATEMENT_TIMEOUT_MS=3000` in `.env`.
+- Requires MVE restart (Python module import time reads the env value).
+
+### Known follow-ups (v4.1 track)
+- The 15 s SET LOCAL is a floor, not a fix. On sites larger than khoy the same endpoints will hit 15 s. The real fix is:
+  1. **Retention + compression policies** on the hypertable (safe, 30 min, no code)
+  2. **TimescaleDB continuous aggregates** for dashboard time-series (2-4 h)
+  3. **Detection normalisation** — separate table with proper indexes instead of `jsonb_array_elements` unrolls (1-2 days, needs migration)
+
 ## [4.0.101] - 2026-07-12 — Chart tab hotfix (scatter dots + relative-bar fallback) + ejector BLPOP + inference worker fixes
 
 ### Critical chart tab hotfix (khoy operator saw blank scatter + all-grey Relative bars)
