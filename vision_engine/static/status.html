@@ -970,11 +970,17 @@
                         <h4 style="margin:0; color: var(--text-primary);">📊 Detection Insights</h4>
                         <div style="display:flex; align-items:center; gap:8px;">
                             <span style="font-size:12px; color:var(--text-secondary);">Window:</span>
+                            <!-- v4.0.103 — added 30d + 90d options. Backend `_windows` map already
+                                 supported 1h/6h/24h/7d/30d/90d, but the UI only exposed 24h + 7d,
+                                 so operators had no way to reach the longer horizons even after
+                                 v4.0.103 unblocked them. -->
                             <select id="insight-window" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
                                 <option value="1h">Last 1 hour</option>
                                 <option value="6h">Last 6 hours</option>
                                 <option value="24h" selected>Last 24 hours</option>
                                 <option value="7d">Last 7 days</option>
+                                <option value="30d">Last 30 days</option>
+                                <option value="90d">Last 90 days</option>
                             </select>
                             <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Shipment:</span>
                             <select id="insight-shipment" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; min-width:140px;">
@@ -1287,6 +1293,98 @@
             <!-- Process Tab -->
             <div id="tab-process" class="tab-content">
                 <h2 style="margin: 0 0 20px 0; color: var(--text-primary); font-weight: 600;" data-i18n="process_config">⚙️ Process Configuration</h2>
+
+                <!-- v4.0.103 — Quality Verdict Thresholds. Operator can now tune what
+                     counts as RELEASE / RE-INSPECT / HOLD / PENDING without an env
+                     edit or restart. Reads/writes /api/quality/thresholds which
+                     persists to service_config in .env.prepared_query_data. -->
+                <div class="control-section" style="border: 1px solid rgba(51,65,85,0.6); padding: 14px 18px; border-radius: 8px; margin-bottom: 15px; background: linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4));">
+                    <h3 data-i18n="quality_thresholds">🎯 Quality Verdict Thresholds</h3>
+                    <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.5;">
+                        Score ≥ <span style="color:#22c55e; font-weight:600;">RELEASE</span> ⇒ ship.
+                        <span style="color:#22c55e; font-weight:600;">RELEASE</span> &gt; score ≥ <span style="color:#eab308; font-weight:600;">RE-INSPECT</span> ⇒ re-inspect before ship.
+                        Score &lt; <span style="color:#eab308; font-weight:600;">RE-INSPECT</span> ⇒ <span style="color:#ef4444; font-weight:600;">HOLD</span>, do not ship without QA sign-off.<br>
+                        A shipment reports <span style="color:#94a3b8; font-weight:600;">PENDING</span> when its data is too thin to say anything meaningful — <b>Min detections</b> and <b>Min encoder span</b> are the safety floor.
+                    </div>
+                    <div class="control-grid">
+                        <div class="control-item">
+                            <div class="control-label">RELEASE score (≥ this = green)</div>
+                            <input type="number" class="control-input" id="qt-release-input" min="0" max="100" step="0.1" value="85">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">RE-INSPECT score (≥ this = yellow)</div>
+                            <input type="number" class="control-input" id="qt-reinspect-input" min="0" max="100" step="0.1" value="60">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Min detections (below → PENDING)</div>
+                            <input type="number" class="control-input" id="qt-min-rows-input" min="0" step="1" value="100">
+                        </div>
+                        <div class="control-item">
+                            <div class="control-label">Min encoder span (below → PENDING)</div>
+                            <input type="number" class="control-input" id="qt-min-span-input" min="0" step="1" value="100">
+                        </div>
+                    </div>
+                    <div style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
+                        <button class="control-button" onclick="saveQualityThresholds()" style="background: linear-gradient(135deg,#3b82f6,#1e40af); color:#fff;">💾 Save Thresholds</button>
+                        <button class="control-button" onclick="loadQualityThresholds()" style="background: rgba(51,65,85,0.6); color:#fff;">↻ Reload</button>
+                        <span id="qt-response" style="font-size: 12px; color: var(--text-secondary);"></span>
+                    </div>
+                </div>
+
+                <script>
+                // v4.0.103 — Quality Verdict Thresholds panel wiring.
+                async function loadQualityThresholds() {
+                    const respEl = document.getElementById('qt-response');
+                    try {
+                        const r = await fetch('/api/quality/thresholds');
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        const d = await r.json();
+                        document.getElementById('qt-release-input').value   = d.release;
+                        document.getElementById('qt-reinspect-input').value = d.reinspect;
+                        document.getElementById('qt-min-rows-input').value  = d.min_rows;
+                        document.getElementById('qt-min-span-input').value  = d.min_span;
+                        if (respEl) { respEl.textContent = 'Loaded (live values shown).'; respEl.style.color = '#22c55e'; }
+                    } catch (e) {
+                        if (respEl) { respEl.textContent = 'Load failed: ' + e.message; respEl.style.color = '#ef4444'; }
+                    }
+                }
+                async function saveQualityThresholds() {
+                    const respEl = document.getElementById('qt-response');
+                    const body = {
+                        release:   parseFloat(document.getElementById('qt-release-input').value),
+                        reinspect: parseFloat(document.getElementById('qt-reinspect-input').value),
+                        min_rows:  parseInt(document.getElementById('qt-min-rows-input').value, 10),
+                        min_span:  parseFloat(document.getElementById('qt-min-span-input').value),
+                    };
+                    try {
+                        const r = await fetch('/api/quality/thresholds', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(body),
+                        });
+                        const d = await r.json();
+                        if (!r.ok) {
+                            const detail = (d.details || []).join('; ');
+                            throw new Error((d.error || 'save failed') + (detail ? ': ' + detail : ''));
+                        }
+                        if (respEl) {
+                            respEl.textContent = '✓ Saved. New verdicts take effect immediately.';
+                            respEl.style.color = '#22c55e';
+                        }
+                    } catch (e) {
+                        if (respEl) { respEl.textContent = '✗ ' + e.message; respEl.style.color = '#ef4444'; }
+                    }
+                }
+                // Auto-load on Process-tab activation.
+                (function() {
+                    const btn = document.querySelector('[data-tab="tab-process"]');
+                    if (btn) btn.addEventListener('click', () => setTimeout(loadQualityThresholds, 200));
+                    // Also load once on initial render if we're already on Process tab.
+                    if (document.getElementById('tab-process') && document.getElementById('tab-process').style.display !== 'none') {
+                        setTimeout(loadQualityThresholds, 300);
+                    }
+                })();
+                </script>
 
                 <!-- Ejector Configuration (from Hardware) -->
                 <div class="control-section">

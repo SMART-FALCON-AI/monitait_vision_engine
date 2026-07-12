@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.104] - 2026-07-12 — UI surface for v4.0.103 backend (30d/90d in the window selector + Quality Verdict Thresholds panel)
+
+### Context
+v4.0.103 shipped the PENDING verdict + `_windows`-map fix + `GET/POST /api/quality/thresholds`, but the UI never gave the operator a way to REACH those. The window `<select>` only exposed 24h + 7d and the threshold POST endpoint had no client. This patch fills those two gaps — all backend + no restart required.
+
+### Changes
+- `static/status.html` — Detection Insights window selector: added `<option>` entries for **Last 30 days** and **Last 90 days** (backend `_windows` map already supports them since v4.0.103).
+- `static/status.html` — Process tab: new "🎯 Quality Verdict Thresholds" panel. Inputs for RELEASE score, RE-INSPECT score, Min detections (PENDING floor), Min encoder span (PENDING floor). Save button POSTs `/api/quality/thresholds`; error responses (e.g. `release <= reinspect`) render inline with the reason. Auto-loads live values on tab activation.
+
+### Rollout
+- Static-only patch (no MVE Python touched, no restart needed on sites that already ran v4.0.103). Just bumps the version label.
+
 ## [4.0.103] - 2026-07-12 — Hostile-QA fixes: PENDING verdict, watchdog `inference_lagging`, 7d/30d works, threshold config, raw_images age retention
 
 ### Context
