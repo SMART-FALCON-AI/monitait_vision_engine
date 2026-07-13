@@ -2766,6 +2766,16 @@ def quality_heatmap(
                       WHERE time > NOW() - INTERVAL %s
                         AND encoder_value IS NOT NULL
                         AND (det->>'name') IS NOT NULL
+                        -- v4.0.110 — skip synthetic entries (`_color`, `_lab`, etc.).
+                        -- Without this the quality-strip's top_class showed
+                        -- `_color` as the "top defect" in every bucket (its
+                        -- confidence is always 1.0 so it dominated the count
+                        -- comparison at line 2785). Same filter that
+                        -- detection_charts / detection_stats / _compute_quality_payload
+                        -- already apply. Also removes _color from the score
+                        -- calculation so buckets don't misleadingly turn red
+                        -- when the actual defect density is fine.
+                        AND COALESCE(det->>'name', '') !~ '^_'
                         {ship_clause}
                     ) src
                     GROUP BY bucket, name
@@ -2827,6 +2837,8 @@ def quality_heatmap(
                   FROM inference_results, LATERAL jsonb_array_elements(detections) det
                   WHERE time > NOW() - INTERVAL %s
                     AND (det->>'name') IS NOT NULL
+                    -- v4.0.110 — same synthetic filter as the encoder path.
+                    AND COALESCE(det->>'name', '') !~ '^_'
                     {ship_clause}
                 ) src
                 GROUP BY bucket, name

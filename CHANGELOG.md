@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.110] - 2026-07-13 — Quality strip: filter `_color` from top_class + score; hover caption gains timestamp + encoder
+
+### Bug 1 — `_color` treated as the "top defect" in every quality bucket
+- Quality by-encoder / by-time strips took the class with the highest count in each bucket as `top_class`, and rolled its impact into the bucket score. `_color` fires with confidence 1.0 on every frame with colour extraction enabled, so it ALWAYS had the highest count → `_color` shown as "top defect" and (worse) rolled into the score, dragging buckets into the red band.
+- Fix (`routers/timeline.py`): added `AND COALESCE(det->>'name', '') !~ '^_'` to both quality/heatmap SQL branches (encoder axis + time axis). Same synthetic filter that `detection_charts` / `detection_stats` / `_compute_quality_payload` already apply since v4.0.29 / v4.0.107.
+- Effect: bucket `top_class` now shows a real defect class; buckets whose only "detections" were `_color` will render neutral (no impact, no misleading red).
+
+### Feature — Hover caption on the scatter now shows time + encoder
+- Operator asked to see "at which meter or time it is happening" without opening the image.
+- Fix (`static/js/charts.js::_showHoverPreview`): caption now reads `<class> • cam N • conf X% • enc 800,000 • 2026-07-13 12:34:56` instead of just `<class> • cam N • conf X%`.
+- Timestamp: reads `pt.x` on the time axis (ms since epoch); on the encoder axis it parses the image filename's `YYYY-MM-DD-HH-MM-SS` stem.
+- Encoder: reads `pt.x` on the encoder axis; omitted on the time axis (encoder isn't sent client-side there).
+- All wrapped in `try/catch` so any format hiccup falls back to the original caption instead of breaking the hover preview.
+
+### Deploy
+- Backend change (SQL filter) → MVE restart required.
+- JS change is a static file, served on next page load.
+
 ## [4.0.109] - 2026-07-13 — Scatter Y-axis duplicate camera fix + harmonized encoder range across color heatmap / quality strip / ejection strip
 
 ### Bug 1 — duplicate camera row on scatter Y-axis

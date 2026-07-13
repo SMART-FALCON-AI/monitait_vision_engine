@@ -2761,7 +2761,41 @@ function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
     el.style.display = 'block';
     const cls = datasetLabel || pt.cls || '';
     const conf = ((pt.conf || 0) * 100).toFixed(0);
-    const metaTxt = `${cls} • cam ${pt.y != null ? pt.y : '?'} • conf ${conf}%`;
+    // v4.0.110 — add TIMESTAMP + ENCODER to the hover caption so the operator
+    // can immediately see WHEN (or at which meter/roll-position) the defect
+    // happened, without having to open the image. Time comes from either
+    // `pt.x` (already ms since epoch on the time axis) or from the filename
+    // stem on the encoder axis (encoder axis uses `pt.x` for encoder value,
+    // but we can still reconstruct timestamp by parsing the image filename
+    // which is written as `YYYY-MM-DD-HH-MM-SS-uuuuuu_pN_M.jpg`).
+    // Encoder comes from `pt.cam_id != null ? pt.enc : pt.x` when the axis
+    // is encoder; on the time axis it isn't stored client-side so we omit.
+    let tsTxt = '', encTxt = '';
+    try {
+        const axisMode = (_insightAxis === 'encoder') ? 'encoder' : 'time';
+        // Encoder value: on the encoder axis, x IS the encoder value.
+        if (axisMode === 'encoder' && typeof pt.x === 'number') {
+            encTxt = ' • enc ' + Math.round(pt.x).toLocaleString();
+        }
+        // Timestamp: on the time axis, x IS ms-since-epoch. On the encoder
+        // axis we parse it out of the image filename stem.
+        let tMs = null;
+        if (axisMode === 'time' && typeof pt.x === 'number') {
+            tMs = pt.x;
+        } else if (pt.img) {
+            const fn = String(pt.img).split('/').pop() || '';
+            const m = fn.match(/^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/);
+            if (m) tMs = Date.UTC(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]);
+        }
+        if (tMs != null) {
+            const d = new Date(tMs);
+            // Local-timezone display: YYYY-MM-DD HH:MM:SS
+            const pad = (n) => String(n).padStart(2, '0');
+            tsTxt = ' • ' + d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate())
+                    + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        }
+    } catch (e) { /* never let caption formatting crash the preview */ }
+    const metaTxt = `${cls} • cam ${pt.y != null ? pt.y : '?'} • conf ${conf}%${encTxt}${tsTxt}`;
     if (img && target) {
         if (img.dataset.src !== target) {
             // 4.0.10 — surface a loading state during the network round-trip so
