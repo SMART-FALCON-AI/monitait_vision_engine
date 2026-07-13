@@ -2498,10 +2498,23 @@ def quality_ejection_axis(
                 params.append(shipment)
 
             if axis_l == "encoder":
+                # v4.0.109 — encoder range now comes from inference_results
+                # (the SAME source that quality/heatmap and detection_charts
+                # use), not from ejection_events. Previously ejection_events
+                # returned a NARROWER encoder range (subset — only rows that
+                # ever fired an ejector), so on the Charts page the ejection
+                # strip cells were narrower and misaligned with the quality
+                # strip and the color heatmap that sit next to it. With the
+                # shared range, empty ejection buckets simply have no
+                # ejection rows in them (renders as a transparent cell),
+                # keeping column-wise alignment across all three widgets.
+                # Fallback: if inference_results has no encoder rows in the
+                # window, fall through to the ejection-events range so the
+                # strip still shows SOMETHING rather than empty.
                 cur.execute(
                     f"""
                     SELECT MIN(encoder_value), MAX(encoder_value)
-                    FROM ejection_events
+                    FROM inference_results
                     WHERE time > NOW() - INTERVAL %s
                       AND encoder_value IS NOT NULL
                       {ship_clause}
@@ -2509,6 +2522,19 @@ def quality_ejection_axis(
                     [interval, *params],
                 )
                 enc_min, enc_max = cur.fetchone() or (None, None)
+                if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
+                    # Fall back to ejection_events range (prior behaviour).
+                    cur.execute(
+                        f"""
+                        SELECT MIN(encoder_value), MAX(encoder_value)
+                        FROM ejection_events
+                        WHERE time > NOW() - INTERVAL %s
+                          AND encoder_value IS NOT NULL
+                          {ship_clause}
+                        """,
+                        [interval, *params],
+                    )
+                    enc_min, enc_max = cur.fetchone() or (None, None)
                 if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
                     cur.close()
                     note = "no ejection events in window" if enc_min is None else \
@@ -3390,14 +3416,23 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 cells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
                               "L": round(mL or 0, 2), "E": round(mE or 0, 2),
                               "delta_e": round(de or 0, 2), "n": int(n or 0)})
+            # v4.0.109 — enc_min/enc_max now come from ALL inference_results
+            # in the window, NOT just rows carrying `_color`. Previously the
+            # color heatmap's range was narrower than the quality / ejection
+            # strips (which use all rows), so on the chart:
+            #   - color overlay covered only a subset of the X-axis
+            #   - strip cells and heatmap cells did NOT line up column-wise
+            # Operators read that as "cells are narrower at the end". With
+            # the shared MIN/MAX, cells that HAVE no color data are simply
+            # absent from `cells`, but their bin position aligns with the
+            # equivalent quality-strip cell. Same phase/shipment filter
+            # preserved so the range still respects the operator's toggles.
             _hm_cur.execute(
                 f"""SELECT MIN(encoder_value), MAX(encoder_value)
-                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    FROM inference_results
                     WHERE time > NOW() - INTERVAL %s {ship_clause}
-                      AND elem->>'name' = '_color' AND encoder_value IS NOT NULL
-                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
-                      {_phase_clause}""",
-                [interval] + ([shipment] if shipment else []) + _phase_args,
+                      AND encoder_value IS NOT NULL""",
+                [interval] + ([shipment] if shipment else []),
             )
             row = _hm_cur.fetchone()
             color_heatmap = {
@@ -3444,15 +3479,16 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 tcells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
                                "L": round(mL or 0, 2), "E": round(mE or 0, 2),
                                "delta_e": round(de or 0, 2), "n": int(n or 0)})
+            # v4.0.109 — same fix for the time-axis twin. t_min/t_max now
+            # come from ALL inference_results in the window, not just rows
+            # carrying `_color`, so the color heatmap's time span matches
+            # the strip cells below.
             _hm_cur.execute(
                 f"""SELECT MIN(EXTRACT(EPOCH FROM time) * 1000.0),
                            MAX(EXTRACT(EPOCH FROM time) * 1000.0)
-                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
-                    WHERE time > NOW() - INTERVAL %s {ship_clause}
-                      AND elem->>'name' = '_color'
-                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
-                      {_phase_clause}""",
-                [interval] + ([shipment] if shipment else []) + _phase_args,
+                    FROM inference_results
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}""",
+                [interval] + ([shipment] if shipment else []),
             )
             row = _hm_cur.fetchone()
             color_heatmap_time = {

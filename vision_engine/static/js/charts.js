@@ -11,6 +11,19 @@ let _insightConfidenceChart = null;
 let _insightConfClassChart = null;
 let _insightCameraScatter = null;
 let _insightCameraScatterEncoder = null;  // 3.25.13: kept (unused) to avoid touching unrelated old refs.
+// v4.0.108 — module-level cache of the last authoritative `camera_y_order`
+// returned by /api/detection_charts. `_extendScatterFromBucket` fetches
+// with `scatter_only=1` which SKIPS computing camera_y_order server-side,
+// so `data.camera_y_order` is empty in bucket responses. Without a cache
+// the bucket path fell through to `_camToIdx(cid) = cid`, plotting dots
+// at Y=raw-cam-id (1, 2, 3, 4, 5, 6) while the BASE scatter (which had
+// camera_y_order in its response) plotted dots at Y=display-index
+// (0, 1, 2, ...) after mapping through the same order. Net effect on
+// screen: camera 6 showed as TWO rows on the Y-axis — one at its display
+// index (e.g. row 0) from the base dots, another at raw id 6 from the
+// bucket dots. Same for every other camera. Caching the last good order
+// lets bucket dots reuse it and plot at the same Y-positions.
+let _lastCameraYOrder = [];
 let _insightAxis = 'encoder';   // 3.26.0 — default to encoder (was 'time'); operators on roll-based lines care about position more than wall-clock.
 let _ejectionProcBar = null;
 let _ejectionProcPie = null;
@@ -1573,11 +1586,15 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
         : (data.camera_scatter || []);
     if (!Array.isArray(points) || points.length === 0) return;
 
-    // Reuse the same y-axis mapping the Core renderer built for '1h' — camera
-    // display order came from data.camera_y_order there. If a wider window
-    // surfaces a camera that wasn't in the '1h' data, fall back to plotting
-    // by raw cam id (Chart.js scales handle it, just no reordered position).
-    const camOrder = Array.isArray(data.camera_y_order) ? data.camera_y_order : [];
+    // v4.0.108 — reuse the y-axis mapping the Core renderer built. Bucket
+    // fetches use `scatter_only=1` which does NOT return `camera_y_order`,
+    // so we fall back to `_lastCameraYOrder` (populated by the base
+    // renderer). Without this, bucket dots plotted at Y=raw-cam-id while
+    // base dots plotted at Y=display-index — same camera appeared twice
+    // on the Y axis.
+    const camOrder = Array.isArray(data.camera_y_order) && data.camera_y_order.length > 0
+        ? data.camera_y_order
+        : _lastCameraYOrder;
     const idxByCam = new Map(camOrder.map(function (cid, i) { return [cid, i]; }));
     const _camToIdx = function (cid) { return idxByCam.has(cid) ? idxByCam.get(cid) : cid; };
 
@@ -1783,7 +1800,14 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // top-to-bottom Y labels read 5, 1, 6, 2, 4, 3 — same as the
         // timeline grid columns. Any camera that appears in the data but
         // not in the order list lands at the end (server appended).
+        // v4.0.108 — save this order to a module-level cache so
+        // `_extendScatterFromBucket` can reuse it. Bucket fetches use
+        // `scatter_only=1` which short-circuits server-side and does NOT
+        // return `camera_y_order`. Without the cache, bucket dots plot at
+        // Y=raw-cam-id while base dots plot at Y=display-index — same
+        // camera appears at TWO Y positions on the axis.
         const camOrder = Array.isArray(data.camera_y_order) ? data.camera_y_order : [];
+        if (camOrder.length > 0) _lastCameraYOrder = camOrder.slice();
         const idxByCam = new Map(camOrder.map((cid, i) => [cid, i]));
         const camByIdx = new Map(camOrder.map((cid, i) => [i, cid]));
         const _camToIdx = (cid) => idxByCam.has(cid) ? idxByCam.get(cid) : cid;

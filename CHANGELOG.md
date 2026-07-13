@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.109] - 2026-07-13 — Scatter Y-axis duplicate camera fix + harmonized encoder range across color heatmap / quality strip / ejection strip
+
+### Bug 1 — duplicate camera row on scatter Y-axis
+- Scatter Y-axis showed camera 6 (and every other camera) at TWO different rows: one at the "display index" position (from `camera_y_order`) and one at the raw camera ID position (e.g. row 6).
+- Root cause: `_extendScatterFromBucket` fetches with `scatter_only=1`, and that server short-circuit does NOT return `camera_y_order`. The bucket path therefore fell through to `_camToIdx(cid) = cid` (raw id), while the base `_refreshAdvancedChartsCore` path had the display-index map. Same camera → two different Y values → two rows on axis.
+- Fix (`static/js/charts.js`):
+  - New module-level `_lastCameraYOrder = []`.
+  - `_refreshAdvancedChartsCore` saves `data.camera_y_order` to this cache on every successful render.
+  - `_extendScatterFromBucket` now uses `data.camera_y_order` when present, otherwise falls back to `_lastCameraYOrder`. Both paths now map to the same Y positions.
+
+### Bug 2 — color heatmap didn't line up with quality / ejection strips
+- Charts tab has three "encoder-by-camera" widgets on the same X axis: the color heatmap painted BEHIND the scatter, the quality strip below, and the ejection strip below that. On real production data they visibly misaligned — the color heatmap looked narrower and offset from the strip cells.
+- Root cause: three different endpoints computed their bucket range from three different row-sets:
+  - `color_heatmap.enc_min/max` came from rows carrying `elem->>'name' = '_color'` (a subset — only classes with color extraction enabled).
+  - `quality/heatmap.enc_min/max` came from all `inference_results` in the window.
+  - `quality/ejection_axis.enc_min/max` came from `ejection_events` (yet another subset).
+- All three widgets then rendered on their own `[enc_min, enc_max]` axis — same X-coordinate meant different real encoder values in each widget.
+- Fix (`routers/timeline.py`):
+  - `color_heatmap.enc_min/max` now come from `SELECT MIN(encoder_value), MAX(encoder_value) FROM inference_results WHERE time > NOW() - INTERVAL <window>` — the same source as `quality/heatmap`.
+  - `color_heatmap_time.t_min/t_max` unified the same way.
+  - `quality/ejection_axis` (encoder mode) also now uses inference_results' range as the primary source; falls back to ejection_events' range only if inference_results has no encoder rows in the window (backward compat for edge cases).
+- Effect: all three widgets now use the SAME encoder range, so their bucket columns align 1:1. Buckets that HAVE no data in a given widget simply render as empty/transparent, keeping the column edges consistent.
+
+### Deploy
+- Backend change → MVE restart required.
+
 ## [4.0.108] - 2026-07-13 — Critical hotfix: `_ensure_disk_space` loop-exit formula inconsistency (raw_images disk grew unbounded)
 
 ### Symptom
