@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.112] - 2026-07-13 — Critical hotfix: `render_detected` detection-lookup timed out on every hover (black image)
+
+### Symptom
+On khoy the Charts-tab scatter hover preview showed a solid black image tile for every dot, even on frames that were still on disk. Caption fields (class, cam, conf, encoder, timestamp) rendered fine but the image never painted. MVE logs showed:
+```
+routers.timeline - WARNING - render_detected: detection lookup failed:
+canceling statement due to statement timeout
+```
+
+### Root cause
+`/api/render_detected/{path}` did three DB lookups to fetch the detections JSON for the requested frame:
+1. `SELECT detections FROM inference_results WHERE image_path = <exact> ORDER BY time DESC LIMIT 1`
+2. Same with `_DETECTED.jpg` suffix.
+3. Fallback: `WHERE image_path LIKE '%<stem>%' ...`
+
+None had a time predicate. Postgres therefore scanned inference_results newest→oldest until it found the match. On khoy (~1.5 M rows / day, 9 GB hypertable, 32 chunks) any hover on a frame more than a few hours old walked millions of rows before hitting the pool-wide statement_timeout (9 s). Endpoint 500'd → the frontend's `img.onerror` fallback (v4.0.106) fell to the raw URL, which also 500'd → "image unavailable" caption sometimes, but in most cases the image tile just rendered black because the browser silently kept the placeholder.
+
+### Fix
+- `routers/timeline.py::render_detected` now parses the shipment id and the capture timestamp out of the URL path (`<shipment>/<hour>/<YYYY-MM-DD-HH-MM-SS-uuuuuu>_...jpg`) and adds `AND shipment = %s AND time BETWEEN %s AND %s` (±2 s) to all three lookup queries. This uses the existing `idx_inference_shipment (shipment, time DESC)` index — the lookup becomes a point-scan of a handful of rows regardless of how old the frame is.
+- Set `SET LOCAL statement_timeout = 3000` so if a legacy row somehow escapes the bound the endpoint fails FAST instead of camping on a pool connection.
+- If parsing fails (out-of-pattern path), the queries fall through to the original un-bounded shape — backward compatible.
+
+### Deploy
+- Backend change → MVE restart required.
+
 ## [4.0.111] - 2026-07-13 — Chart bucket alignment + hide filter + shipment spans + downstream _color fix
 
 ### Bug 1 — color heatmap cells narrower than strip cells (misalignment)

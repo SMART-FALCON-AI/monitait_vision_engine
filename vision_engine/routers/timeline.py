@@ -4640,30 +4640,69 @@ def render_detected(path: str, show: str = "", download: int = 0):
                 else:
                     exact_det = exact_raw + "_DETECTED.jpg"
                 stem = resolved.stem
+                # v4.0.112 — parse shipment + hour + capture-timestamp from the
+                # URL path so each SQL below can filter by shipment + time
+                # bounds. Previously the queries were `WHERE image_path = %s
+                # ORDER BY time DESC LIMIT 1` with NO time predicate; Postgres
+                # scanned back from newest through millions of rows to find
+                # the match, timing out on older images (2026-07-12 hovers
+                # on khoy). Path format:
+                #   <shipment>/<YYYY-MM-DD_HH>/<YYYY-MM-DD-HH-MM-SS-uuuuuu>_...jpg
+                # Both segments are optional guards — if parsing fails we just
+                # fall through to the un-bounded query (worst case = previous
+                # behaviour + statement_timeout still capped).
+                import re as _re
+                _parts = [p for p in path.strip("/").split("/") if p]
+                _ship_guess = _parts[0] if _parts else ""
+                _t_from = _t_to = None
+                # Prefer the exact capture timestamp encoded in the filename.
+                _fn = _parts[-1] if _parts else ""
+                _tm = _re.match(r"^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})", _fn)
+                if _tm:
+                    from datetime import datetime as _dt, timedelta as _td2
+                    _cap = _dt(int(_tm.group(1)), int(_tm.group(2)), int(_tm.group(3)),
+                                int(_tm.group(4)), int(_tm.group(5)), int(_tm.group(6)))
+                    _t_from = _cap - _td2(seconds=2)
+                    _t_to   = _cap + _td2(seconds=2)
+                # SET LOCAL statement_timeout so a slow-path fallback can't
+                # camp on a pool connection for the whole 9 s pool default.
                 cur = conn.cursor()
-                # 1: exact raw
+                cur.execute("SET LOCAL statement_timeout = 3000")
+
+                _bounded_where = ""
+                _bounded_args_prefix = []
+                if _ship_guess and _t_from and _t_to:
+                    _bounded_where = " AND shipment = %s AND time BETWEEN %s AND %s"
+                    _bounded_args_prefix = [_ship_guess, _t_from, _t_to]
+
+                # 1: exact raw (with shipment + time bounds if parseable)
                 cur.execute(
-                    "SELECT detections FROM inference_results WHERE image_path = %s "
-                    "ORDER BY time DESC LIMIT 1",
-                    (exact_raw,),
+                    "SELECT detections FROM inference_results "
+                    "WHERE image_path = %s" + _bounded_where +
+                    " ORDER BY time DESC LIMIT 1",
+                    (exact_raw, *_bounded_args_prefix),
                 )
                 row = cur.fetchone()
-                # 2: exact DETECTED sibling
+                # 2: exact DETECTED sibling (same bounds)
                 if not row:
                     cur.execute(
-                        "SELECT detections FROM inference_results WHERE image_path = %s "
-                        "ORDER BY time DESC LIMIT 1",
-                        (exact_det,),
+                        "SELECT detections FROM inference_results "
+                        "WHERE image_path = %s" + _bounded_where +
+                        " ORDER BY time DESC LIMIT 1",
+                        (exact_det, *_bounded_args_prefix),
                     )
                     row = cur.fetchone()
                 # 3: legacy stem LIKE (kept for any out-of-pattern stored paths,
                 # but BOTH endpoints in this row pair are now warned-logged
-                # so we can find and clean them up).
+                # so we can find and clean them up). Still bounded by shipment +
+                # time when parseable so LIKE runs over a tiny slice, not the
+                # whole hypertable.
                 if not row:
                     cur.execute(
-                        "SELECT detections FROM inference_results WHERE image_path LIKE %s "
-                        "ORDER BY time DESC LIMIT 1",
-                        ("%" + stem + "%",),
+                        "SELECT detections FROM inference_results "
+                        "WHERE image_path LIKE %s" + _bounded_where +
+                        " ORDER BY time DESC LIMIT 1",
+                        ("%" + stem + "%", *_bounded_args_prefix),
                     )
                     row = cur.fetchone()
                     if row:
