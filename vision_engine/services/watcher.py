@@ -968,7 +968,19 @@ class ArduinoSocket:
         """v4.0.98 — Save (shipment, shipment_start_encoder, last_seen_length)
         to a small JSON file so an encoder reset (PLC reboot, MVE recreate,
         power outage) doesn't cause length to go negative. Throttled to at
-        most one write every 5 s unless `force=True`."""
+        most one write every 5 s unless `force=True`.
+
+        v4.0.114 — encoder-wrap guard. If we observe enc drop far below
+        start mid-shipment (PLC power cycle while MVE stays up), the raw
+        delta goes catastrophically negative and — worse — the previous
+        version PERSISTED that negative delta to disk. Restart then read
+        back the poisoned state and rebuilt shipment_start_encoder from
+        it, so length stayed negative forever. On khoy 2026-07-13 the
+        operator saw length=-2,149,574 for hours because of this loop.
+        Fix: on downward jumps >REBASE_THRESHOLD, rebase start_encoder
+        to the current encoder in-memory so length restarts at 0. We do
+        NOT persist a negative length — ever.
+        """
         try:
             with self._length_state_lock:
                 now = time.time()
@@ -976,14 +988,25 @@ class ArduinoSocket:
                     return
                 ship = str(getattr(self, "shipment", "no_shipment") or "no_shipment")
                 if ship in ("", "no_shipment"):
-                    return  # nothing meaningful to persist
+                    return
                 enc = int(getattr(self, "encoder_value", 0) or 0)
                 start = int(getattr(self, "shipment_start_encoder", 0) or 0)
+                REBASE_THRESHOLD = 10000  # < 10k = belt reversal, keep the signed delta
+                if start > 0 and (start - enc) > REBASE_THRESHOLD:
+                    # Real encoder reset. Rebase so length restarts at 0.
+                    logger.warning(
+                        f"length wrap-guard: encoder reset detected mid-shipment "
+                        f"(start={start} enc={enc} drop={start-enc}) — "
+                        f"rebasing shipment_start_encoder={enc}"
+                    )
+                    self.shipment_start_encoder = int(enc)
+                    start = int(enc)
+                length_delta = enc - start
                 state = {
                     "shipment":               ship,
                     "shipment_start_encoder": start,
                     "last_seen_encoder":      enc,
-                    "last_seen_length":       enc - start,
+                    "last_seen_length":       length_delta,
                     "saved_at":               now,
                 }
                 tmp = self._length_state_path + ".tmp"
@@ -1014,6 +1037,19 @@ class ArduinoSocket:
             persisted_start  = int(state.get("shipment_start_encoder", 0) or 0)
             persisted_length = int(state.get("last_seen_length", 0) or 0)
             current_encoder  = int(getattr(self, "encoder_value", 0) or 0)
+            # v4.0.114 — reject poisoned state. Prior versions saved
+            # negative persisted_length when the encoder was reset
+            # mid-shipment (see persist_length_state wrap-guard). Reading
+            # that back and rebuilding start_encoder from a negative
+            # length just carries the bad state forward across restarts.
+            if persisted_length < 0:
+                logger.warning(
+                    f"length restore: persisted_length={persisted_length} < 0 "
+                    f"(poisoned state from pre-4.0.114) — anchoring "
+                    f"shipment_start_encoder to current_encoder={current_encoder}"
+                )
+                self.shipment_start_encoder = int(current_encoder)
+                return
             if current_encoder < persisted_start:
                 # Encoder was reset (PLC reboot / power cut). Rebuild the start
                 # so `encoder_value - shipment_start_encoder == persisted_length`

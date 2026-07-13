@@ -2137,8 +2137,19 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 },
                 // Align the merged strip wrap (which contains quality + ejection strips)
                 // to the scatter's chartArea on every render + resize.
-                animation: { onComplete: function() { _alignStripToScatter(this, 'quality-strip-wrap'); } },
-                onResize: function() { setTimeout(() => _alignStripToScatter(this, 'quality-strip-wrap'), 0); }
+                // v4.0.113 — also align the new shipment-strip-wrap and re-run
+                // its label visibility after margins settle so labels hide/show
+                // correctly for the final pixel width.
+                animation: { onComplete: function() {
+                    _alignStripToScatter(this, 'quality-strip-wrap');
+                    _alignStripToScatter(this, 'shipment-strip-wrap');
+                    if (typeof _relayoutShipmentStripLabels === 'function') _relayoutShipmentStripLabels();
+                } },
+                onResize: function() { setTimeout(() => {
+                    _alignStripToScatter(this, 'quality-strip-wrap');
+                    _alignStripToScatter(this, 'shipment-strip-wrap');
+                    if (typeof _relayoutShipmentStripLabels === 'function') _relayoutShipmentStripLabels();
+                }, 0); }
             }
         });
         // 4.0.7 — direct mousemove hover-preview, independent of Chart.js's
@@ -2155,10 +2166,159 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             _insightCameraScatter.update('none');
         } catch (e) { /* keep the chart if renormalize fails */ }
     }
+    // v4.0.113 — populate the shipment-lane strip that sits between the
+    // scatter and the quality strip. Same axis bounds as the scatter's
+    // x-scale (locked to heatmapEncMin/Max in encoder mode, _scatterXMin/
+    // Max in time mode) so lanes line up with the dots above. Empty
+    // spans → strip collapses via _renderShipmentStrip's hide-title path.
+    try {
+        _renderShipmentStrip(
+            data.shipment_spans || [],
+            axisMode,
+            heatmapEncMin, heatmapEncMax,
+            _scatterXMin, _scatterXMax
+        );
+    } catch (_stripE) { /* never let strip render break the chart */ }
     // 4.0.42 — hide the loading badge now that the scatter + heatmap have
     // been built. Paired with mveLoaderBegin() at the top of this function.
     if (_showedLoader) mveLoaderEnd();
 }
+
+
+// v4.0.114 — Shipment strip renderer with multi-lane overlap handling.
+// One horizontal bar per shipment span, stretched across the scatter's
+// x-axis so each bar sits directly under the dots it produced. When two
+// shipments overlap in encoder/time range (parallel loading, rewind,
+// merged rolls), each gets its own vertical lane so both stay legible.
+// Deterministic hue per shipment ID via golden-angle hash. Empty spans
+// collapse the title.
+function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
+    const strip = document.getElementById('shipment-strip');
+    const title = document.getElementById('shipment-strip-title');
+    if (!strip) return;
+    if (!Array.isArray(spans) || spans.length === 0) {
+        strip.innerHTML = '';
+        if (title) title.style.display = 'none';
+        return;
+    }
+    if (title) title.style.display = '';
+    const isEnc  = (axisMode === 'encoder');
+    const axisMin = isEnc ? enc_min : t_min;
+    const axisMax = isEnc ? enc_max : t_max;
+    if (axisMin == null || axisMax == null || !(axisMax > axisMin)) {
+        strip.innerHTML = '';
+        return;
+    }
+    const range = axisMax - axisMin;
+    // Golden-angle hash → hue. Same formula _procColor uses (see line
+    // ~3670) so distinct IDs get well-separated hues.
+    const _hueForShipment = (id) => {
+        const s = String(id || '');
+        let h = 0;
+        for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+        return ((h * 137.508) % 360 + 360) % 360;
+    };
+    const _fmtEnc  = (v) => (v == null ? '?' : Number(v).toLocaleString());
+    const _fmtTime = (v) => {
+        if (v == null) return '?';
+        try { return new Date(v).toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
+        catch (_e) { return String(v); }
+    };
+    // First pass — clip each span to the visible axis, drop the ones
+    // that fall entirely outside, and sort by clipped start so the
+    // greedy lane-packer processes them left-to-right.
+    const clipped = [];
+    for (const sp of spans) {
+        const lo = isEnc ? sp.enc_min : sp.t_min;
+        const hi = isEnc ? sp.enc_max : sp.t_max;
+        if (lo == null || hi == null || !(hi > lo)) continue;
+        const clipLo = Math.max(lo, axisMin);
+        const clipHi = Math.min(hi, axisMax);
+        if (!(clipHi > clipLo)) continue;
+        clipped.push({ sp, clipLo, clipHi });
+    }
+    if (clipped.length === 0) { strip.innerHTML = ''; return; }
+    clipped.sort((a, b) => a.clipLo - b.clipLo);
+    // Greedy lane assignment. Each lane tracks the max clipHi seen so
+    // far; a span goes into the first lane whose max is <= this span's
+    // clipLo. If none fits, open a new lane. Cap at 5 lanes — extras
+    // wrap back to lane 0 (they'll overlap visually, but the tooltip
+    // still resolves the ambiguity).
+    const MAX_LANES = 5;
+    const laneHi = []; // laneHi[i] = highest clipHi placed in lane i
+    for (const c of clipped) {
+        let placed = false;
+        for (let i = 0; i < laneHi.length; i++) {
+            if (laneHi[i] <= c.clipLo) { c.lane = i; laneHi[i] = c.clipHi; placed = true; break; }
+        }
+        if (!placed) {
+            if (laneHi.length < MAX_LANES) { c.lane = laneHi.length; laneHi.push(c.clipHi); }
+            else { c.lane = 0; laneHi[0] = Math.max(laneHi[0], c.clipHi); }
+        }
+    }
+    const nLanes = Math.max(1, laneHi.length);
+    // Grow the strip container vertically to fit N lanes (14 px each).
+    const laneH  = 14;
+    strip.style.height = (nLanes * laneH) + 'px';
+    const html = clipped.map(({ sp, clipLo, clipHi, lane }) => {
+        const leftPct  = ((clipLo - axisMin) / range) * 100;
+        const widthPct = ((clipHi - clipLo) / range) * 100;
+        const hue   = _hueForShipment(sp.shipment);
+        const color = 'hsl(' + hue.toFixed(0) + ', 65%, 45%)';
+        const shipStr = String(sp.shipment || '');
+        // Always show at least the last 4 chars — the site+date prefix
+        // is shared across shipments and wastes label real estate.
+        const labelFull = shipStr.length > 6 ? '…' + shipStr.slice(-6) : shipStr;
+        const labelTail = shipStr.length > 4 ? shipStr.slice(-4)       : shipStr;
+        const tipLines = [
+            'Shipment: ' + shipStr,
+            'Lane: '     + (lane + 1) + ' / ' + nLanes,
+            'Encoder: '  + _fmtEnc(sp.enc_min) + ' → ' + _fmtEnc(sp.enc_max),
+            'Time: '     + _fmtTime(sp.t_min)  + ' → ' + _fmtTime(sp.t_max),
+            'Detections: ' + (sp.n_rows != null ? Number(sp.n_rows).toLocaleString() : '?'),
+        ];
+        const tip = tipLines.join('\n').replace(/"/g, '&quot;');
+        const top = (lane * laneH) + 'px';
+        return '<div class="mve-ship-bar" data-w-pct="' + widthPct + '" '
+             + 'data-label-full="' + labelFull.replace(/"/g, '&quot;') + '" '
+             + 'data-label-tail="' + labelTail.replace(/"/g, '&quot;') + '" '
+             + 'title="' + tip + '" '
+             + 'style="position:absolute; top:' + top + '; height:' + (laneH - 1) + 'px; '
+             + 'left:' + leftPct + '%; width:' + widthPct + '%; '
+             + 'background:' + color + '; border-radius:2px; overflow:hidden; '
+             + 'display:flex; align-items:center; justify-content:center; '
+             + 'font-size:9px; color:#fff; font-weight:600; letter-spacing:0.3px; '
+             + 'text-shadow:0 1px 1px rgba(0,0,0,0.35); cursor:default;">'
+             + '<span class="mve-ship-label" style="pointer-events:none; padding:0 3px; '
+             + 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + labelFull + '</span>'
+             + '</div>';
+    }).join('');
+    strip.innerHTML = html;
+    _relayoutShipmentStripLabels();
+}
+window._renderShipmentStrip = _renderShipmentStrip;
+
+// Sibling helper: swap label between full (…tail-6) / short (tail-4) /
+// hidden based on the bar's current pixel width. Cheap; safe to call
+// from onResize / _alignStripToScatter follow-up.
+function _relayoutShipmentStripLabels() {
+    const strip = document.getElementById('shipment-strip');
+    if (!strip) return;
+    const parentW = strip.clientWidth || 0;
+    if (parentW <= 0) return;
+    strip.querySelectorAll('.mve-ship-bar').forEach((el) => {
+        const wPct = parseFloat(el.getAttribute('data-w-pct')) || 0;
+        const px   = (wPct / 100) * parentW;
+        const lbl  = el.querySelector('.mve-ship-label');
+        if (!lbl) return;
+        const full = el.getAttribute('data-label-full') || '';
+        const tail = el.getAttribute('data-label-tail') || '';
+        if (px < 14)      { lbl.style.display = 'none'; }
+        else if (px < 40) { lbl.style.display = ''; lbl.textContent = tail; }
+        else              { lbl.style.display = ''; lbl.textContent = full; }
+    });
+}
+window._relayoutShipmentStripLabels = _relayoutShipmentStripLabels;
 
 // 3.25.13 — toggle the merged scatter's X-axis between time and encoder.
 // Re-renders the scatter (destroy + rebuild), reloads the quality + ejection

@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.114] - 2026-07-13 — Shipment strip: wire payload key + multi-lane overlap; length wrap-guard
+
+### Bug 0 — `shipment_spans` computed but NEVER inserted into the response payload (root cause of empty strip)
+The v4.0.111 payload dict at the end of `/api/detection_charts` listed every other field (`shipments`, `size_over_time`, `color_heatmap`, ...) but literally forgot the new `"shipment_spans": shipment_spans` line. The CTE ran fine and populated the local variable — the payload just dropped it on the floor. Frontend `data.shipment_spans || []` therefore always resolved to `[]` and the strip stayed empty on every window/site.
+
+Verified on khoy: response `keys=[..., 'shipment']` — no `shipment_spans` key at all. Adding one line to `_payload` in `routers/timeline.py` fixes it end-to-end.
+
+### Bug 1 — `shipment_spans` empty for all windows on khoy (strip appeared, bars did not)
+On khoy the "🚚 shipment lanes" title showed but the bar below stayed empty. `/api/detection_charts?window=1h` returned `shipment_spans: []`, and `?window=6h` timed out at 15 s (browser + server both).
+
+**Root cause.** The v4.0.111 query shape was:
+```sql
+SELECT shipment, MIN(encoder_value), MAX(encoder_value), MIN(time), MAX(time), COUNT(*)
+FROM inference_results
+WHERE time > NOW() - INTERVAL <window> AND shipment IS NOT NULL AND shipment <> ''
+GROUP BY shipment
+```
+On khoy that's ~1.5 M rows/hour. `GROUP BY shipment` over the raw scan walked every row in the window and blew past the endpoint's 15 s `statement_timeout` for anything past ~1 h; even for `1h` it raced the timeout and often lost, returning an empty result.
+
+**Fix** (`routers/timeline.py`): bounded-CTE variant.
+```sql
+WITH recent AS (
+    SELECT shipment, encoder_value, time
+    FROM inference_results
+    WHERE <time predicate> AND shipment IS NOT NULL AND shipment <> ''
+    ORDER BY time DESC
+    LIMIT 200000
+)
+SELECT shipment, MIN(...), MAX(...), COUNT(*) FROM recent GROUP BY shipment ...
+```
+The `ORDER BY time DESC LIMIT 200000` lets Postgres walk `idx_inference_time` from newest→oldest and stop once the cap is hit. 200 k / 1.5 M ≈ 8 min of production data — plenty to cover every ACTIVE shipment; a shipment idle longer than that isn't interesting for the strip anyway. Local `statement_timeout` also set to 10 s so we fail fast if the base scan is somehow still slow.
+
+### Bug 2 — Overlapping shipments were invisible; shipment IDs weren't legible
+The v4.0.113 strip drew all bars in a single 14 px row, so parallel shipments (rewind, merged rolls, two active shipments in the same window) painted on top of each other and only the last one was visible. Labels were also cut off entirely on narrow bars — the user's exact ask was "where is the shipment ids in the shipment lane?"
+
+**Fix** (`static/js/charts.js::_renderShipmentStrip`):
+1. Greedy lane-packing — each span goes into the first vertical lane whose last-seen `hi` is ≤ this span's `lo`. Extra lanes open as needed, up to 5 (extras wrap; tooltip still resolves). The strip container grows to `nLanes × 14 px`.
+2. Three-tier label — full `…tail-6` (bars ≥40 px), short `tail-4` (bars 14-40 px), hidden (bars <14 px). Even tiny bars now have their tail visible; hover always shows the full ID + lane + encoder + time + count in the tooltip.
+3. `_relayoutShipmentStripLabels` swaps between the three tiers on resize, not just hide/show.
+
+### Bug 3 — Length went negative and STAYED negative across restarts (regression from v4.0.98 persistence)
+Operator saw `length=-2,149,574` for hours on khoy. Root cause is a loop:
+1. Encoder hardware resets mid-shipment (PLC reboot while MVE stays up). Say `shipment_start_encoder=1,612,466`, new `encoder=38,917` → runtime length = -1,573,549.
+2. `persist_length_state` (v4.0.98) saved that raw negative delta to `.env.length_state.json` — no guard.
+3. On next restart, `restore_length_state` read `persisted_length=-1,573,549` and rebuilt `shipment_start_encoder = current_encoder - persisted_length = 0 - (-1,573,549) = 1,573,549`. So the negative offset survived.
+4. Repeat forever.
+
+**Fix** (`services/watcher.py`):
+- `persist_length_state`: if `(shipment_start_encoder - encoder) > 10_000` — a real reset, not a belt reversal — rebase `shipment_start_encoder = encoder` in-memory FIRST, then persist length=0. Negative deltas are never written to disk.
+- `restore_length_state`: if `persisted_length < 0` (i.e. we're reading a poisoned file from a pre-4.0.114 build), refuse to trust it and anchor `shipment_start_encoder` to the current encoder — length resumes at 0 for the current shipment. Logged as WARNING so we see it happen.
+
+### Deploy
+- Backend + frontend change → MVE restart + browser hard-refresh.
+
 ## [4.0.112] - 2026-07-13 — Critical hotfix: `render_detected` detection-lookup timed out on every hover (black image)
 
 ### Symptom

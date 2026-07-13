@@ -3787,18 +3787,36 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         shipment_spans = []
         try:
             _sp_cur = conn.cursor()
+            # v4.0.114 — bounded-CTE variant. The v4.0.111 shape did a raw
+            # `SELECT ... FROM inference_results WHERE time > NOW() - INTERVAL
+            # %s GROUP BY shipment` which on khoy (1.5 M rows/hour) walked
+            # every row in the window and blew past the 15 s statement_timeout
+            # for anything past ~1 h. The CTE caps the base scan at 200 k
+            # rows (200 k / 1.5 M ≈ 8 min of production data — plenty to
+            # cover every active shipment; a shipment that hasn't produced a
+            # row in the last 200 k inserts is genuinely idle and its span
+            # from earlier in the window isn't interesting for the strip).
+            # ORDER BY time DESC + LIMIT lets Postgres walk the time index
+            # from newest → oldest, stopping when the cap is hit.
+            _sp_cur.execute("SET LOCAL statement_timeout = 10000")
             _sp_cur.execute(
                 f"""
-                SELECT COALESCE(shipment, 'no_shipment') AS shipment,
-                       MIN(encoder_value) AS enc_min,
-                       MAX(encoder_value) AS enc_max,
-                       EXTRACT(EPOCH FROM MIN(time)) * 1000.0 AS t_min,
-                       EXTRACT(EPOCH FROM MAX(time)) * 1000.0 AS t_max,
-                       COUNT(*) AS n_rows
-                FROM inference_results
-                WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
-                  AND shipment IS NOT NULL
-                  AND shipment <> ''
+                WITH recent AS (
+                    SELECT shipment, encoder_value, time
+                    FROM inference_results
+                    WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
+                      AND shipment IS NOT NULL
+                      AND shipment <> ''
+                    ORDER BY time DESC
+                    LIMIT 200000
+                )
+                SELECT shipment,
+                       MIN(encoder_value)                        AS enc_min,
+                       MAX(encoder_value)                        AS enc_max,
+                       EXTRACT(EPOCH FROM MIN(time)) * 1000.0    AS t_min,
+                       EXTRACT(EPOCH FROM MAX(time)) * 1000.0    AS t_max,
+                       COUNT(*)                                  AS n_rows
+                FROM recent
                 GROUP BY shipment
                 ORDER BY MIN(time) ASC
                 LIMIT 200
@@ -3842,6 +3860,10 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             "color_reference_position": (locals().get("_svc") or {}).get("color_reference_position"),
             "window": window,
             "shipment": shipment,
+            # v4.0.114 — the strip renderer in charts.js reads this key
+            # (introduced in v4.0.111 but never wired into the payload).
+            # Empty list when the CTE returns nothing.
+            "shipment_spans": shipment_spans,
         }
         _endpoint_cache_put(_cache_key, _payload)
         return JSONResponse(content=_payload)
@@ -4656,14 +4678,28 @@ def render_detected(path: str, show: str = "", download: int = 0):
                 _ship_guess = _parts[0] if _parts else ""
                 _t_from = _t_to = None
                 # Prefer the exact capture timestamp encoded in the filename.
+                # v4.0.113 — MUST tag the parsed datetime as UTC. Frame filenames
+                # are written with UTC components (see services/watcher.py
+                # frame-write path), so the raw digits are UTC. If we build a
+                # naive `datetime` psycopg2 forwards it as server-local time,
+                # and PG then converts local → UTC using the server's zone
+                # (Iran, UTC+3:30 on khoy). Net effect: the BETWEEN window
+                # shifts by 3.5 h and matches ZERO rows — so v4.0.112
+                # returned an image with no boxes drawn even when detections
+                # existed. Constructing with `tzinfo=UTC` fixes the shift.
                 _fn = _parts[-1] if _parts else ""
                 _tm = _re.match(r"^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})", _fn)
                 if _tm:
-                    from datetime import datetime as _dt, timedelta as _td2
+                    from datetime import datetime as _dt, timedelta as _td2, timezone as _tz2
                     _cap = _dt(int(_tm.group(1)), int(_tm.group(2)), int(_tm.group(3)),
-                                int(_tm.group(4)), int(_tm.group(5)), int(_tm.group(6)))
-                    _t_from = _cap - _td2(seconds=2)
-                    _t_to   = _cap + _td2(seconds=2)
+                                int(_tm.group(4)), int(_tm.group(5)), int(_tm.group(6)),
+                                tzinfo=_tz2.utc)
+                    # Widen window from ±2 s to ±5 s so a small clock drift
+                    # between capture and DB insert (~ms in normal flow, but
+                    # could be seconds if the DB writer queue was backed up)
+                    # still resolves to the right row.
+                    _t_from = _cap - _td2(seconds=5)
+                    _t_to   = _cap + _td2(seconds=5)
                 # SET LOCAL statement_timeout so a slow-path fallback can't
                 # camp on a pool connection for the whole 9 s pool default.
                 cur = conn.cursor()

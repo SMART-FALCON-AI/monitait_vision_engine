@@ -1122,6 +1122,11 @@
                             <div id="insight-scatter-title" style="text-align:center; color:#cbd5e1; font-size:13px; font-weight:500; margin-top:8px; margin-bottom:4px;">Camera × encoder (roll position) — hover for image, click dot for the exact frame</div>
                             <div id="insight-scatter-legend" style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-bottom:6px; font-size:11px; color:#cbd5e1; min-height:14px;"></div>
                             <div style="min-height:300px; min-width:0; overflow:hidden;"><canvas id="insight-camera-scatter"></canvas></div>
+                            <!-- v4.0.113 — shipment lane strip: encoder/time range → shipment_id so operators can trace an anomaly back to the specific shipment. Lower visual weight (14px) than quality/ejection; sits BETWEEN the scatter and the quality strip so lanes read directly under the dots. Same margin scheme as #quality-strip-wrap; JS mirrors the same marginLeft/Right inset from scatter.chartArea so lane edges line up with the encoder scatter above. -->
+                            <div id="shipment-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
+                                <div id="shipment-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">🚚 shipment lanes — encoder range per shipment id</div>
+                                <div id="shipment-strip" style="position:relative; display:block; height:14px; width:100%; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                            </div>
                             <!-- Strip wrap inset to match the scatter's plot area (JS sets marginLeft/Right from scatter.chartArea). -->
                             <div id="quality-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <!-- 3.26.0 — default axis is encoder; setInsightAxis() swaps these on toggle. -->
