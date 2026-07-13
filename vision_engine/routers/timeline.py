@@ -1199,6 +1199,23 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         except (TypeError, ValueError):
             encoder_units_per_meter = 0.0
 
+        # v4.0.111 — also exclude classes the operator hid in the Process tab.
+        # Same source (audio_settings[cls].show === False) that
+        # detection_charts / quality/heatmap already use. Without this, an
+        # operator-hidden class (e.g. `jean` — dominant frame-label not a
+        # defect) still counted toward total_detections, top_defects, and
+        # every downstream aggregate. `_compute_quality_payload` is the
+        # heart of the score system so this change ripples cleanly.
+        _hidden_by_process = sorted([
+            str(cls) for cls, cfg in _audio.items()
+            if isinstance(cfg, dict) and cfg.get("show") is False
+        ])
+        _hp_sql = ""
+        _hp_args = []
+        if _hidden_by_process:
+            _hp_sql = " AND (det->>'name') <> ALL(%s)"
+            _hp_args = [_hidden_by_process]
+
         cur = conn.cursor()
         # v4.0.107 — filter out synthetic pipeline entries whose class name
         # starts with an underscore. `_color` (LAB colour analysis output),
@@ -1219,9 +1236,10 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             WHERE time > NOW() - INTERVAL %s {ship_clause}
               AND (det->>'confidence') IS NOT NULL
               AND COALESCE(det->>'name', '') !~ '^_'
+              {_hp_sql}
             GROUP BY (det->>'name')
             """,
-            base_params,
+            list(base_params) + _hp_args,
         )
         cls_rows = cur.fetchall()
 
@@ -2707,9 +2725,20 @@ def quality_heatmap(
             _heatmap_scale = float(svc.get("score_scale_factor") or 1.0)
         except (TypeError, ValueError):
             _heatmap_scale = 1.0
+        # v4.0.111 — classes where the operator un-checked "Show" in the
+        # Process tab must NOT contribute to the quality strip either.
+        # Otherwise a hidden class (e.g. `jean` — dominant frame-label, not
+        # a defect) shows up as top_class in every bucket AND drives its
+        # score. Same source (audio_settings[cls].show === False) that
+        # detection_charts uses for `_hidden_by_process`.
+        _hidden_by_process = sorted([
+            str(cls) for cls, cfg in (svc.get("audio_settings") or {}).items()
+            if isinstance(cfg, dict) and cfg.get("show") is False
+        ])
     except Exception:
         sev_map = {}
         _heatmap_scale = 1.0
+        _hidden_by_process = []
 
     cells = []
     try:
@@ -2751,6 +2780,13 @@ def quality_heatmap(
                 enc_min = int(enc_min); enc_max = int(enc_max)
                 span = enc_max - enc_min
                 width = max(1, span // buckets)
+                # v4.0.111 — extend WHERE with the "Show" filter so classes the
+                # operator hid in Process tab don't reach top_class or score.
+                _hp_sql = ""
+                _hp_args = []
+                if _hidden_by_process:
+                    _hp_sql = " AND (det->>'name') <> ALL(%s)"
+                    _hp_args = [_hidden_by_process]
                 cur.execute(
                     f"""
                     SELECT bucket, name, COUNT(*) AS n,
@@ -2776,11 +2812,12 @@ def quality_heatmap(
                         -- calculation so buckets don't misleadingly turn red
                         -- when the actual defect density is fine.
                         AND COALESCE(det->>'name', '') !~ '^_'
+                        {_hp_sql}
                         {ship_clause}
                     ) src
                     GROUP BY bucket, name
                     """,
-                    [buckets, enc_min, width, interval, *params],
+                    [buckets, enc_min, width, interval, *_hp_args, *params],
                 )
                 bucket_data: dict = {}
                 for b, name, n, ac in cur.fetchall():
@@ -2822,6 +2859,12 @@ def quality_heatmap(
                 cur.close()
                 return JSONResponse(content={"axis": "time", "buckets": [], "shipment": shipment})
 
+            # v4.0.111 — same Show-filter wiring as the encoder path.
+            _hp_sql_t = ""
+            _hp_args_t = []
+            if _hidden_by_process:
+                _hp_sql_t = " AND (det->>'name') <> ALL(%s)"
+                _hp_args_t = [_hidden_by_process]
             cur.execute(
                 f"""
                 SELECT bucket, name, COUNT(*) AS n,
@@ -2839,11 +2882,12 @@ def quality_heatmap(
                     AND (det->>'name') IS NOT NULL
                     -- v4.0.110 — same synthetic filter as the encoder path.
                     AND COALESCE(det->>'name', '') !~ '^_'
+                    {_hp_sql_t}
                     {ship_clause}
                 ) src
                 GROUP BY bucket, name
                 """,
-                [buckets, t_min, t_max, t_min, buckets, interval, *params],
+                [buckets, t_min, t_max, t_min, buckets, interval, *_hp_args_t, *params],
             )
             bucket_data2: dict = {}
             for b, name, n, ac in cur.fetchall():
@@ -3732,6 +3776,48 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             cur.close()
         except Exception as _be:
             logger.debug(f"color baseline compute failed: {_be}")
+
+        # v4.0.111 — per-shipment encoder + time spans, for the new
+        # "shipment lanes" strip the operator asked for. Rendered between
+        # the scatter and the quality strip on the Charts tab so it's
+        # instantly obvious which encoder / time range corresponds to
+        # which shipment id. Same window scoping and shipment filter as
+        # the rest of the endpoint. Ordered oldest-first so left → right
+        # on the strip reads oldest → newest.
+        shipment_spans = []
+        try:
+            _sp_cur = conn.cursor()
+            _sp_cur.execute(
+                f"""
+                SELECT COALESCE(shipment, 'no_shipment') AS shipment,
+                       MIN(encoder_value) AS enc_min,
+                       MAX(encoder_value) AS enc_max,
+                       EXTRACT(EPOCH FROM MIN(time)) * 1000.0 AS t_min,
+                       EXTRACT(EPOCH FROM MAX(time)) * 1000.0 AS t_max,
+                       COUNT(*) AS n_rows
+                FROM inference_results
+                WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
+                  AND shipment IS NOT NULL
+                  AND shipment <> ''
+                GROUP BY shipment
+                ORDER BY MIN(time) ASC
+                LIMIT 200
+                """,
+                (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else [])),
+            )
+            for _s, _e_min, _e_max, _t_min, _t_max, _n in _sp_cur.fetchall():
+                if _s is None: continue
+                shipment_spans.append({
+                    "shipment": str(_s),
+                    "enc_min": int(_e_min) if _e_min is not None else None,
+                    "enc_max": int(_e_max) if _e_max is not None else None,
+                    "t_min":   float(_t_min) if _t_min is not None else None,
+                    "t_max":   float(_t_max) if _t_max is not None else None,
+                    "n_rows":  int(_n or 0),
+                })
+            _sp_cur.close()
+        except Exception as _spe:
+            logger.debug(f"shipment_spans compute failed: {_spe}")
 
         _payload = {
             "shipments": shipments,

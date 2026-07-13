@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.111] - 2026-07-13 — Chart bucket alignment + hide filter + shipment spans + downstream _color fix
+
+### Bug 1 — color heatmap cells narrower than strip cells (misalignment)
+- The color heatmap plugin drew cells at `heatmapEncMin + bin × binWidth` mapped through the scatter's X-scale. But the scatter's encoder axis auto-scaled to `dot_min..dot_max` with padding, which is wider than `heatmapEncMin..heatmapEncMax`. So heatmap bin edges were squeezed into a narrower pixel range than the strip cells below (strip container's already-aligned-to-plot-area width).
+- Fix (`static/js/charts.js`): encoder axis now locks to `heatmapEncMin/Max` (identical to what the quality/ejection strips use since v4.0.109). Both widgets now share the SAME encoder-to-pixel mapping. One color bucket = one strip cell, edge-to-edge.
+
+### Bug 2 — operator's "Show" toggle didn't hide classes from the quality strip or shipment score
+- Classes hidden by unchecking "Show" in Process tab still contributed to the quality strip's `top_class`, its score, and to `_compute_quality_payload`'s `total_detections`/`top_defects`. A dominant frame-label like `jean` (usually just tags the frame's carrier, not a defect) still won the count comparison in every bucket.
+- Fix (`routers/timeline.py`): both `quality/heatmap` SQL branches and `_compute_quality_payload` now read `audio_settings[cls].show === False` into `_hidden_by_process` and add `AND (det->>'name') <> ALL(%s)` to their queries. Same source `detection_charts` and the scatter already use.
+- Now Process-tab hidden classes are consistently invisible across scatter, quality strip, ejection score, top-defects list, and the score card.
+
+### Feature — shipment-spans strip in `/api/detection_charts` response
+- Operator asked for a strip between the scatter and the quality strip that shows "encoder A → encoder B ⇒ shipment X". Response now includes a `shipment_spans` array: `[{shipment, enc_min, enc_max, t_min, t_max, n_rows}, ...]` ordered oldest-first, capped at 200. Frontend rendering is a follow-up static-file patch (JS-only, no restart) — planned for v4.0.112.
+
+### Deploy
+- Backend + JS both changed → MVE restart required.
+
 ## [4.0.110] - 2026-07-13 — Quality strip: filter `_color` from top_class + score; hover caption gains timestamp + encoder
 
 ### Bug 1 — `_color` treated as the "top defect" in every quality bucket

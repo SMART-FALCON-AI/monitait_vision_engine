@@ -2027,11 +2027,26 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 ctx.restore();
             }
         }] : [];
+        // v4.0.111 — force encoder axis min/max to the color-heatmap's
+        // enc_min/enc_max (which after v4.0.109 IS the same as the
+        // quality/ejection strip's range). Without this, Chart.js auto-
+        // scaled the encoder axis to fit the dot data + padding, so the
+        // color heatmap bin edges got squeezed into a narrower pixel
+        // range than the strip cells below (which use the strip
+        // container's full width, already aligned to the plot area).
+        // Operators saw the color cells as "narrower" and misaligned
+        // with the strips. Locking the axis to the heatmap range makes
+        // both use the SAME encoder-to-pixel mapping — 1 bucket in the
+        // heatmap = 1 cell in the strip, edge-to-edge.
+        //
+        // Time axis already had this behaviour via _scatterXMin/Max.
         const xScaleCfg = axisMode === 'time'
             ? { type: 'linear', min: _scatterXMin, max: _scatterXMax,
                 ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) },
                 grid: { color: 'rgba(148,163,184,0.08)' } }
             : { type: 'linear',
+                min: (heatmapEncMin != null) ? heatmapEncMin : undefined,
+                max: (heatmapEncMax != null) ? heatmapEncMax : undefined,
                 ticks: { color: '#94a3b8', font: { size: 9 } },
                 grid: { color: 'rgba(148,163,184,0.08)' },
                 title: { display: true, text: 'Encoder (roll position)', color: '#94a3b8', font: { size: 10 } } };
