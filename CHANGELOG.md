@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.115] - 2026-07-14 — Shipment strip: fix empty-render when heatmap bounds are null + bordered-box visual
+
+### Bug — strip still empty on khoy even though `/api/detection_charts` returned 2 valid spans
+The v4.0.114 render read its axis bounds from `heatmapEncMin/Max` (the color-heatmap's enc range). In windows where no cells have LAB-baseline color data (fresh MVE, or shipment early enough that no color-heatmap ran yet), `data.color_heatmap.enc_min` is null. The render bailed silently on the null-check and the strip stayed empty even with a perfectly valid `shipment_spans` list. Verified on khoy 2026-07-14: server returned `count=2, spans=[{enc_min:4018, enc_max:1137334}, {enc_min:1137102, enc_max:1202760}]` but the strip did not paint.
+
+**Fix** (`static/js/charts.js::_renderShipmentStrip`): if the caller-supplied `axisMin/axisMax` are null, derive them from the spans themselves (min-of-mins, max-of-maxes). Strip always renders when data is present. Empty payload still collapses the title.
+
+### Visual — bordered-box style per the operator's mockup
+The v4.0.114 filled-bar look was hard to read on wide bars with long shipment IDs (13-digit ints). The operator sketched a bordered-box style:
+- 2 px solid border in the shipment's hue
+- Tinted (18 % alpha) fill of the same hue
+- Bold hue-matched text (font 11 px, bumped from 9 px)
+- Lane height 22 px so the full ID has vertical room
+
+Label tier bumped to 4 levels (full / tail-8 / tail-4 / hidden) so the FULL ID shows on any bar wide enough to fit it, degrading gracefully only when physically impossible.
+
+### Deploy
+- Frontend-only change → MVE restart NOT strictly required (bind-mounted static), but a restart bumps the `?v=` query string so browsers refetch charts.js.
+
 ## [4.0.114] - 2026-07-13 — Shipment strip: wire payload key + multi-lane overlap; length wrap-guard
 
 ### Bug 0 — `shipment_spans` computed but NEVER inserted into the response payload (root cause of empty strip)

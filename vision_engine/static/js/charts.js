@@ -2185,13 +2185,14 @@ async function _refreshAdvancedChartsCore(preloadedData) {
 }
 
 
-// v4.0.114 — Shipment strip renderer with multi-lane overlap handling.
-// One horizontal bar per shipment span, stretched across the scatter's
-// x-axis so each bar sits directly under the dots it produced. When two
-// shipments overlap in encoder/time range (parallel loading, rewind,
-// merged rolls), each gets its own vertical lane so both stay legible.
-// Deterministic hue per shipment ID via golden-angle hash. Empty spans
-// collapse the title.
+// v4.0.115 — Shipment strip renderer with multi-lane overlap handling
+// and self-derived axis bounds. One bordered box per shipment span, laid
+// out across the scatter's x-axis so each box sits under the dots it
+// produced. Overlapping shipments (parallel loading, rewind, merged
+// rolls) stack in separate lanes so every ID stays visible. Deterministic
+// hue per shipment ID via golden-angle hash. Style intentionally matches
+// the operator's requested design: colored border + tinted background,
+// full shipment ID in matching hue text.
 function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
     const strip = document.getElementById('shipment-strip');
     const title = document.getElementById('shipment-strip-title');
@@ -2203,8 +2204,20 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
     }
     if (title) title.style.display = '';
     const isEnc  = (axisMode === 'encoder');
-    const axisMin = isEnc ? enc_min : t_min;
-    const axisMax = isEnc ? enc_max : t_max;
+    let axisMin = isEnc ? enc_min : t_min;
+    let axisMax = isEnc ? enc_max : t_max;
+    // v4.0.115 — fallback: derive bounds from the spans themselves when
+    // the caller couldn't. This was the root cause of the empty strip on
+    // khoy — heatmapEncMin was null in windows with no color-heatmap
+    // cells, so the old bail-out swallowed a perfectly valid dataset.
+    if (axisMin == null || axisMax == null || !(axisMax > axisMin)) {
+        const los = spans.map(s => isEnc ? s.enc_min : s.t_min).filter(x => x != null);
+        const his = spans.map(s => isEnc ? s.enc_max : s.t_max).filter(x => x != null);
+        if (los.length && his.length) {
+            axisMin = Math.min.apply(null, los);
+            axisMax = Math.max.apply(null, his);
+        }
+    }
     if (axisMin == null || axisMax == null || !(axisMax > axisMin)) {
         strip.innerHTML = '';
         return;
@@ -2257,19 +2270,29 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
         }
     }
     const nLanes = Math.max(1, laneHi.length);
-    // Grow the strip container vertically to fit N lanes (14 px each).
-    const laneH  = 14;
+    // v4.0.115 — taller lanes (22 px) so the full shipment ID stays
+    // legible inside the bordered box, matching the mockup the operator
+    // sketched. Height grows with lane count so overlaps never overflow.
+    const laneH  = 22;
     strip.style.height = (nLanes * laneH) + 'px';
     const html = clipped.map(({ sp, clipLo, clipHi, lane }) => {
         const leftPct  = ((clipLo - axisMin) / range) * 100;
         const widthPct = ((clipHi - clipLo) / range) * 100;
         const hue   = _hueForShipment(sp.shipment);
-        const color = 'hsl(' + hue.toFixed(0) + ', 65%, 45%)';
+        const hueS  = hue.toFixed(0);
+        // Mockup palette: bright saturated border, faint tinted fill,
+        // matching-hue text on top. Reads well against the dark strip
+        // background.
+        const border = 'hsl(' + hueS + ', 75%, 55%)';
+        const bg     = 'hsla(' + hueS + ', 75%, 45%, 0.18)';
+        const text   = 'hsl(' + hueS + ', 85%, 78%)';
         const shipStr = String(sp.shipment || '');
-        // Always show at least the last 4 chars — the site+date prefix
-        // is shared across shipments and wastes label real estate.
-        const labelFull = shipStr.length > 6 ? '…' + shipStr.slice(-6) : shipStr;
-        const labelTail = shipStr.length > 4 ? shipStr.slice(-4)       : shipStr;
+        // v4.0.115 — prefer FULL shipment ID always; relayout helper
+        // downgrades to a tail-8 / tail-4 slice only when the bar is
+        // physically too narrow for the full string.
+        const labelFull = shipStr;
+        const labelMed  = shipStr.length > 8 ? shipStr.slice(-8) : shipStr;
+        const labelTail = shipStr.length > 4 ? shipStr.slice(-4) : shipStr;
         const tipLines = [
             'Shipment: ' + shipStr,
             'Lane: '     + (lane + 1) + ' / ' + nLanes,
@@ -2281,15 +2304,17 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
         const top = (lane * laneH) + 'px';
         return '<div class="mve-ship-bar" data-w-pct="' + widthPct + '" '
              + 'data-label-full="' + labelFull.replace(/"/g, '&quot;') + '" '
+             + 'data-label-med="'  + labelMed.replace(/"/g, '&quot;')  + '" '
              + 'data-label-tail="' + labelTail.replace(/"/g, '&quot;') + '" '
              + 'title="' + tip + '" '
-             + 'style="position:absolute; top:' + top + '; height:' + (laneH - 1) + 'px; '
+             + 'style="position:absolute; top:' + top + 'px; height:' + (laneH - 2) + 'px; '
              + 'left:' + leftPct + '%; width:' + widthPct + '%; '
-             + 'background:' + color + '; border-radius:2px; overflow:hidden; '
+             + 'background:' + bg + '; border:2px solid ' + border + '; '
+             + 'box-sizing:border-box; border-radius:4px; overflow:hidden; '
              + 'display:flex; align-items:center; justify-content:center; '
-             + 'font-size:9px; color:#fff; font-weight:600; letter-spacing:0.3px; '
-             + 'text-shadow:0 1px 1px rgba(0,0,0,0.35); cursor:default;">'
-             + '<span class="mve-ship-label" style="pointer-events:none; padding:0 3px; '
+             + 'font-size:11px; color:' + text + '; font-weight:700; letter-spacing:0.3px; '
+             + 'text-shadow:0 1px 2px rgba(0,0,0,0.55); cursor:default;">'
+             + '<span class="mve-ship-label" style="pointer-events:none; padding:0 6px; '
              + 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + labelFull + '</span>'
              + '</div>';
     }).join('');
@@ -2298,9 +2323,9 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
 }
 window._renderShipmentStrip = _renderShipmentStrip;
 
-// Sibling helper: swap label between full (…tail-6) / short (tail-4) /
-// hidden based on the bar's current pixel width. Cheap; safe to call
-// from onResize / _alignStripToScatter follow-up.
+// Sibling helper: pick FULL / tail-8 / tail-4 / hidden based on the
+// bar's current pixel width. Full-id preferred so the operator can
+// eyeball the whole shipment number the way they wrote it on the roll.
 function _relayoutShipmentStripLabels() {
     const strip = document.getElementById('shipment-strip');
     if (!strip) return;
@@ -2312,10 +2337,13 @@ function _relayoutShipmentStripLabels() {
         const lbl  = el.querySelector('.mve-ship-label');
         if (!lbl) return;
         const full = el.getAttribute('data-label-full') || '';
-        const tail = el.getAttribute('data-label-tail') || '';
-        if (px < 14)      { lbl.style.display = 'none'; }
-        else if (px < 40) { lbl.style.display = ''; lbl.textContent = tail; }
-        else              { lbl.style.display = ''; lbl.textContent = full; }
+        const med  = el.getAttribute('data-label-med')  || full;
+        const tail = el.getAttribute('data-label-tail') || full;
+        // Rough char-width heuristic: ~7 px per char at 11 px font.
+        if (px < 20)                     { lbl.style.display = 'none'; }
+        else if (px < 45)                { lbl.style.display = ''; lbl.textContent = tail; }
+        else if (px < full.length * 8)   { lbl.style.display = ''; lbl.textContent = med;  }
+        else                             { lbl.style.display = ''; lbl.textContent = full; }
     });
 }
 window._relayoutShipmentStripLabels = _relayoutShipmentStripLabels;
