@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.121"></script>
+        <script src="/static/js/i18n.js?v=4.0.123"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -1240,9 +1240,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.121"></script>
+            <script src="/static/js/iframes.js?v=4.0.123"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.121"></script>
+            <script src="/static/js/charts.js?v=4.0.123"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1764,9 +1764,30 @@
                      a Telegram-compatible service (self-hosted gateway, etc.) just
                      change the base URL; the wire format is the same. Tokens are write-only. -->
                 <div class="control-section">
-                    <h3>📨 <span>Notifications (Telegram)</span></h3>
+                    <h3>📨 <span>Notifications</span></h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
-                        Configure a Telegram bot from <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather</code>. The base URL defaults to the standard Telegram API; change it if you're using a Telegram-compatible service (e.g. a self-hosted gateway or a custom relay). Schedules below run on a cron — same format as classic crontab (5 fields: <code>MIN HOUR DOM MON DOW</code>).
+                        Choose your messaging platform, then click the <span style="display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; font-style:italic;">i</span> icon for a 5-step setup guide. Schedules below run on a cron — same format as classic crontab (5 fields: <code>MIN HOUR DOM MON DOW</code>).
+                    </div>
+                    <!-- v4.0.122 — Platform picker. Telegram and Bale share the same bot-API wire format,
+                         so the only real difference is the base URL. Picking Bale auto-fills base_url with
+                         the Bale API endpoint. The `i` icon opens a step-by-step modal per platform. -->
+                    <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px; flex-wrap:wrap;">
+                        <span style="font-size:12px; color:var(--text-secondary); font-weight:500;">Platform:</span>
+                        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                            <input type="radio" name="notif-platform" value="telegram" id="notif-platform-telegram" checked onchange="onNotifPlatformChange()">
+                            <span>✈️ Telegram</span>
+                        </label>
+                        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+                            <input type="radio" name="notif-platform" value="bale" id="notif-platform-bale" onchange="onNotifPlatformChange()">
+                            <span>🇮🇷 Bale (بله)</span>
+                        </label>
+                        <button type="button" onclick="showNotifSetupSteps()" title="Show 5-step setup guide for the selected platform"
+                                style="display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; background:#3b82f6; color:#fff; border:none; font-size:14px; font-weight:700; font-style:italic; cursor:pointer; box-shadow:0 1px 3px rgba(0,0,0,0.3);">
+                            i
+                        </button>
+                        <span id="notif-platform-hint" style="font-size:11px; color:var(--text-secondary); font-style:italic;">
+                            Click the <b>i</b> to see how to set this up →
+                        </span>
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
@@ -1778,7 +1799,7 @@
                             <input type="text" class="control-input" id="notif-telegram-chat" placeholder="-100… or 123456789">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Base URL <small style="opacity:0.6;">(default = Telegram)</small></div>
+                            <div class="control-label">Base URL <small style="opacity:0.6;" id="notif-baseurl-hint">(auto — leave blank for Telegram)</small></div>
                             <input type="text" class="control-input" id="notif-telegram-baseurl" placeholder="https://api.telegram.org/bot{token}/">
                         </div>
                         <div class="control-item" style="display:flex; flex-direction:column; gap:6px;">
@@ -2073,7 +2094,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.121">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.123">
         <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2096,10 +2117,28 @@
             </div>
         </div>
 
-        <script src="/static/js/audio.js?v=4.0.121"></script>
-        <script src="/static/js/app-core.js?v=4.0.121"></script>
+        <!-- v4.0.122 — Notifications: platform setup-steps modal. Content is switched
+             by the currently-selected platform radio (Telegram or Bale). Populated by
+             `showNotifSetupSteps()` in app-core.js. -->
+        <div id="notif-setup-modal" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.75); align-items:center; justify-content:center; padding:20px;">
+            <div style="background:#0f172a; color:#e2e8f0; max-width:640px; width:100%; max-height:90vh; overflow-y:auto; border-radius:8px; border:1px solid #334155; box-shadow:0 10px 40px rgba(0,0,0,0.6);">
+                <div style="display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid #334155; position:sticky; top:0; background:#0f172a;">
+                    <h3 id="notif-setup-title" style="margin:0; font-size:16px; color:#f8fafc;">Setup guide</h3>
+                    <button type="button" onclick="hideNotifSetupSteps()" style="background:transparent; color:#94a3b8; border:none; font-size:24px; cursor:pointer; line-height:1; padding:0 4px;">×</button>
+                </div>
+                <div id="notif-setup-body" style="padding:20px; font-size:13px; line-height:1.6;"></div>
+                <div style="padding:12px 20px 18px; text-align:right; border-top:1px solid #334155; position:sticky; bottom:0; background:#0f172a;">
+                    <button type="button" onclick="hideNotifSetupSteps()"
+                            style="background:#3b82f6; color:white; border:none; padding:8px 18px; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500;">
+                        Got it
+                    </button>
+                </div>
+            </div>
+        </div>
+        <script src="/static/js/audio.js?v=4.0.123"></script>
+        <script src="/static/js/app-core.js?v=4.0.123"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.121"></script>
-        <script src="/static/js/annotate.js?v=4.0.121"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.123"></script>
+        <script src="/static/js/annotate.js?v=4.0.123"></script>
     </body>
 </html>

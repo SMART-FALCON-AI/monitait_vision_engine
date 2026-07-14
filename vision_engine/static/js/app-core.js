@@ -979,6 +979,18 @@ async function loadNotifConfig() {
         set('notif-telegram-chat',    tel.default_chat_id);
         set('notif-telegram-baseurl', tel.base_url);                    // 3.24.4
         setCb('notif-telegram-enabled', tel.enabled);
+        // v4.0.122 — infer platform from the saved base_url so the picker
+        // reflects the current config on load.
+        try {
+            const _burl = (tel.base_url || '').toLowerCase();
+            const _isBale = _burl.indexOf('bale.ai') !== -1 || _burl.indexOf('bale.') !== -1;
+            const rT = document.getElementById('notif-platform-telegram');
+            const rB = document.getElementById('notif-platform-bale');
+            if (rT && rB) {
+                if (_isBale) { rB.checked = true; } else { rT.checked = true; }
+                if (typeof onNotifPlatformChange === 'function') onNotifPlatformChange();
+            }
+        } catch (_e) { /* platform picker hydration is best-effort */ }
         _renderNotifSchedules(d.schedules || []);
     } catch (e) {
         _notifResp('Load failed: ' + e.message, false);
@@ -1178,6 +1190,113 @@ async function loadNotifLog() {
 
 window.saveNotifChannel    = saveNotifChannel;
 window.testNotifChannel    = testNotifChannel;
+
+// v4.0.122 — Notifications: platform picker + inline setup-steps modal.
+// Telegram and Bale share the same bot-API wire format; only base_url
+// differs, so the picker just auto-fills that field. The `i` icon opens
+// a per-platform step-by-step guide.
+function onNotifPlatformChange() {
+    try {
+        const bale = document.getElementById('notif-platform-bale');
+        const isBale = !!(bale && bale.checked);
+        const burlEl = document.getElementById('notif-telegram-baseurl');
+        const hint   = document.getElementById('notif-platform-hint');
+        const burlHint = document.getElementById('notif-baseurl-hint');
+        if (isBale) {
+            if (burlEl && !burlEl.value.toLowerCase().includes('bale')) {
+                burlEl.value = 'https://tapi.bale.ai/bot{token}/';
+            }
+            if (burlHint) burlHint.textContent = '(auto-filled for Bale — leave as-is)';
+            if (hint) hint.textContent = 'Bale selected — click the i for the 5-step guide.';
+        } else {
+            // Telegram: clear the URL back to blank (uses api.telegram.org by default).
+            if (burlEl && burlEl.value.toLowerCase().includes('bale')) {
+                burlEl.value = '';
+            }
+            if (burlHint) burlHint.textContent = '(auto — leave blank for Telegram)';
+            if (hint) hint.textContent = 'Telegram selected — click the i for the 5-step guide.';
+        }
+    } catch (_e) { /* picker is best-effort */ }
+}
+window.onNotifPlatformChange = onNotifPlatformChange;
+
+const _NOTIF_SETUP_TELEGRAM = `
+<div style="margin-bottom:12px; padding:10px 14px; background:rgba(59,130,246,0.12); border-left:3px solid #3b82f6; border-radius:4px;">
+  <b>✈️ Telegram setup — 5 steps</b><br>
+  <span style="font-size:12px; color:#94a3b8;">Get the bot talking to your channel, then paste 2 values into MVE.</span>
+</div>
+<ol style="padding-left:22px; margin:0;">
+  <li style="margin-bottom:14px;">
+    <b>Create a bot.</b> In Telegram, search <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@BotFather</code> → tap <b>Start</b> → send <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">/newbot</code> → follow prompts (name + username ending in <code>bot</code>).<br>
+    BotFather sends back a token like <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#fbbf24;">7534827:AAG9x…</code> — <b>copy this</b>.
+  </li>
+  <li style="margin-bottom:14px;">
+    <b>Create a private channel</b> for the reports (or use an existing one). Groups also work.
+  </li>
+  <li style="margin-bottom:14px;">
+    <b>Add your bot as admin.</b> Open the channel → tap the title → <b>Administrators</b> → <b>Add Administrator</b> → search for your bot's username → tap ✓. It only needs "Post Messages" permission.
+  </li>
+  <li style="margin-bottom:14px;">
+    <b>Get the channel's chat ID.</b>
+    <ol style="padding-left:20px; margin-top:6px;">
+      <li>Post any message in your channel.</li>
+      <li>In Telegram, search <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@userinfobot</code> → tap Start.</li>
+      <li>Forward that message from your channel to <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@userinfobot</code>.</li>
+      <li>It replies with the ID (looks like <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#fbbf24;">-1001234567890</code>) — <b>copy this</b>.</li>
+    </ol>
+  </li>
+  <li>
+    <b>Save in MVE (this page).</b> Paste the bot token in <b>Bot Token</b>, paste the chat ID in <b>Default Chat ID</b>, tick <b>Enable channel</b>, click <b>Save</b>, then <b>Test send</b> to confirm.
+  </li>
+</ol>
+`;
+
+const _NOTIF_SETUP_BALE = `
+<div style="margin-bottom:12px; padding:10px 14px; background:rgba(16,185,129,0.12); border-left:3px solid #10b981; border-radius:4px;">
+  <b>🇮🇷 Bale (بله) setup — 5 steps</b><br>
+  <span style="font-size:12px; color:#94a3b8;">Same shape as Telegram; the only difference is one URL field is auto-filled.</span>
+</div>
+<ol style="padding-left:22px; margin:0;">
+  <li style="margin-bottom:14px;">
+    <b>Create a bot.</b> In Bale (بله), search <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@botfather</code> → send <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">/newbot</code> → follow the prompts. Copy the token that BotFather sends back.
+  </li>
+  <li style="margin-bottom:14px;">
+    <b>Create a channel</b> (کانال) in Bale where the reports should arrive.
+  </li>
+  <li style="margin-bottom:14px;">
+    <b>Add your bot as admin</b> of that channel with "Post Messages" permission.
+  </li>
+  <li style="margin-bottom:14px;">
+    <b>Get the channel's chat ID.</b> Post a message in the channel → search a Bale user-info bot (e.g. <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">@bale_id_bot</code>) → forward the message to it → it replies with the chat ID.
+  </li>
+  <li>
+    <b>Save in MVE (this page).</b> Paste the bot token in <b>Bot Token</b>, paste the chat ID in <b>Default Chat ID</b>. The <b>Base URL</b> field is already filled for you with <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#fbbf24;">https://tapi.bale.ai/bot{token}/</code> — leave it as-is. Tick <b>Enable channel</b>, click <b>Save</b>, then <b>Test send</b>.
+  </li>
+</ol>
+<div style="margin-top:14px; padding:8px 12px; background:rgba(148,163,184,0.08); border-radius:4px; font-size:12px; color:#94a3b8;">
+  💡 If Test send fails, check that the bot is <b>admin</b> in the channel and that the chat ID starts with <code>-</code> (channels are negative numbers).
+</div>
+`;
+
+function showNotifSetupSteps() {
+    const modal = document.getElementById('notif-setup-modal');
+    const title = document.getElementById('notif-setup-title');
+    const body  = document.getElementById('notif-setup-body');
+    if (!modal || !title || !body) return;
+    const bale = document.getElementById('notif-platform-bale');
+    const isBale = !!(bale && bale.checked);
+    title.textContent = isBale
+        ? '🇮🇷 Bale (بله) — 5-step setup guide'
+        : '✈️ Telegram — 5-step setup guide';
+    body.innerHTML = isBale ? _NOTIF_SETUP_BALE : _NOTIF_SETUP_TELEGRAM;
+    modal.style.display = 'flex';
+}
+function hideNotifSetupSteps() {
+    const modal = document.getElementById('notif-setup-modal');
+    if (modal) modal.style.display = 'none';
+}
+window.showNotifSetupSteps = showNotifSetupSteps;
+window.hideNotifSetupSteps = hideNotifSetupSteps;
 window.addNotifSchedule    = addNotifSchedule;
 window.saveNotifSchedules  = saveNotifSchedules;
 window.sendShiftReportNow  = sendShiftReportNow;

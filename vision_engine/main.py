@@ -735,7 +735,15 @@ _cpu_logical = psutil.cpu_count(logical=True) or 1
 _cpu_physical = psutil.cpu_count(logical=False) or 1
 _mem = psutil.virtual_memory()
 _mem_total_gb = round(_mem.total / (1024**3), 1)
-_max_disk_writers = max(4, _cpu_logical)
+# v4.0.123 — disk writers are I/O-bound (dsync 5-6 ms per 3 MB write on
+# khoy) not CPU-bound. The old cap of `max(4, cpu_logical)` = 8 on an
+# 8-core box (khoy) was hitting the ceiling under load — autoscaler saw
+# `disk_count == MAX_DISK_WRITERS` and refused to scale, so bursts drove
+# the queue into CRITICAL (44.6 % seen 2026-07-14). New default:
+# max(16, cpu_logical*2) — a machine's disk can absorb far more parallel
+# writes than one thread per core when writes are I/O-bound. Operators
+# can override per site via `MAX_DISK_WRITERS`.
+_max_disk_writers = int(os.environ.get("MAX_DISK_WRITERS", str(max(16, _cpu_logical * 2))))
 _max_inference_workers = max(8, min(_cpu_logical * 2, 32))
 app.state.system_capacity = {
     "cpu_logical": _cpu_logical,

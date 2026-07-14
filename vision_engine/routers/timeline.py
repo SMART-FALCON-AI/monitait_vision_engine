@@ -3943,6 +3943,37 @@ def shipment_spans_endpoint(request: Request, window: str = "1h"):
                 "n_rows":  int(_n or 0),
             })
         cur.close()
+        # v4.0.123 — annotate each span with its RELEASE / RE-INSPECT / HOLD
+        # / PENDING verdict so the shipment-strip renderer can color boxes
+        # by status instead of by golden-angle hash. Cached per shipment
+        # with a 60 s TTL because `_compute_quality_payload` is expensive
+        # (does its own scoring pass over inference_results).
+        _now = time.time()
+        _cache = getattr(shipment_spans_endpoint, "_verdict_cache", None)
+        if _cache is None:
+            _cache = {}
+            shipment_spans_endpoint._verdict_cache = _cache
+        for _sp in spans:
+            _ship = _sp.get("shipment") or ""
+            if not _ship or _ship == "no_shipment":
+                _sp["verdict"] = None
+                _sp["score"] = None
+                continue
+            _entry = _cache.get(_ship)
+            if _entry and (_now - _entry[0]) < 60.0:
+                _sp["verdict"] = _entry[1]
+                _sp["score"]   = _entry[2]
+                continue
+            try:
+                _qp = _compute_quality_payload(shipment=_ship, window=window)
+                _v = _qp.get("verdict") if _qp else None
+                _sc = _qp.get("score")   if _qp else None
+                _sp["verdict"] = _v
+                _sp["score"]   = _sc
+                _cache[_ship]  = (_now, _v, _sc)
+            except Exception:
+                _sp["verdict"] = None
+                _sp["score"]   = None
         return JSONResponse(content={"shipment_spans": spans, "window": window})
     except Exception as e:
         logger.warning(f"shipment_spans standalone endpoint failed: {e}")

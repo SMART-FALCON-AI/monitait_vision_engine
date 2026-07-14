@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.123] - 2026-07-14 — Disk-writer uncap + queue-size bump + shipment-status colors on the strip
+
+### 1. MAX_DISK_WRITERS uncap
+`main.py:738` used `max(4, cpu_logical)` for the writer cap. Disk writers are I/O-bound (5-6 ms dsync per 3 MB on khoy), not CPU-bound. On the 8-core khoy box the ceiling was 8 — autoscaler saw `disk_count == MAX_DISK_WRITERS` and refused to scale during CPU spikes, so bursts drove the queue to CRITICAL (44.6 % on 2026-07-14 at CPU 90 %). New default: `max(16, cpu_logical*2)`, env-overridable via `MAX_DISK_WRITERS`. Live on vteam12 (24-core): `Max workers: 48 disk` (was 24). Live on khoy (8-core): `16 disk` (was 8).
+
+### 2. Disk queue formula rebased on AVAILABLE RAM + byte-budget
+`watcher.py:48` used `max(200, TOTAL_RAM_MB × 10 % ÷ 3 MB)` — same "% of TOTAL" the v4.0.83 hot queue was already moved OFF of, because containers on a shared box already consume a big chunk of TOTAL. New formula uses AVAILABLE RAM, 20 % budget, per-item MB from env (so 4K / Basler sites can shrink slot count without losing bytes-of-budget), floor 500 (up from 200), ceiling 4000. Live on vteam12: `queue_max=1435` (was 1063).
+
+New env: `MVE_DISK_QUEUE_PCT_AVAIL` (default 20), `MVE_DISK_QUEUE_ITEM_MB` (default 3), `MVE_DISK_QUEUE_FLOOR` (500), `MVE_DISK_QUEUE_CEILING` (4000).
+
+### 3. Shipment strip colored by verdict
+`/api/shipment_spans` now includes `verdict` (RELEASE / RE-INSPECT / HOLD / PENDING) and `score` per shipment, computed via `_compute_quality_payload` and cached per-shipment with a 60 s TTL. Frontend `_renderShipmentStrip` picks a semantic hue when verdict is set — green for RELEASE, amber for RE-INSPECT, red for HOLD, gray for PENDING — falling back to the golden-angle hash when verdict is null (`no_shipment` and error cases). Tooltip now shows `Status: RELEASE (score 91.8)` inline.
+
+Live on khoy: `2607140112479 RELEASE 91.8`, `2607141446128 RE-INSPECT 78.0`, `2607141336489/351511 PENDING`.
+
+### Deploy
+Backend change → MVE restart. Frontend re-fetches on cache-buster bump.
+
+## [4.0.122] - 2026-07-14 — Notifications platform picker (Telegram / Bale) + inline setup-steps modal
+
+Notifications tab now has a Platform radio (Telegram / Bale) with an `i` button that opens a modal with 5-step setup instructions per platform. Selecting Bale auto-fills the Base URL with `https://tapi.bale.ai/bot{token}/`. Existing base_url configs auto-detect Bale on load and preselect the right radio.
+
+Frontend-only change: `static/status.html` + `static/js/app-core.js`.
+
 ## [4.0.121] - 2026-07-14 — Disk-pressure janitor thread: `_ensure_disk_space` off the writer hot path
 
 ### The problem

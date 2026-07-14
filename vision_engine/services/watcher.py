@@ -42,10 +42,24 @@ _state_manager = None
 _app = None
 
 # Background disk write queue — cv2.imwrite runs here to unblock capture loop
-# Each item ~3MB numpy array; budget 10% of RAM
+# Each item is a raw numpy array from cv2 (~3 MB for 1280x720 USB, ~6.9 MB
+# for Basler acA1920 1920x1200 uint8 BGR).
+#
+# v4.0.123 — size from AVAILABLE RAM, not TOTAL, matching the v4.0.83 hot-
+# queue lesson (containers on a shared box already consume a big chunk of
+# TOTAL). Per-item budget and RAM percentage are env-driven so 4K / large-
+# sensor sites can shrink the slot count without losing bytes-of-budget.
+# FLOOR 500 (up from 200) gives usable burst headroom even on tiny boxes;
+# CEILING 4000 prevents an oversized queue on a 128+ GB host.
 import psutil as _psutil
 _total_ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
-_disk_queue = queue.Queue(maxsize=max(200, int(_total_ram_gb * 1024 * 0.10 / 3)))
+_avail_ram_gb = _psutil.virtual_memory().available / (1024 ** 3)
+_DISK_QUEUE_PCT_AVAIL = float(os.environ.get("MVE_DISK_QUEUE_PCT_AVAIL", "20"))
+_DISK_QUEUE_ITEM_MB   = float(os.environ.get("MVE_DISK_QUEUE_ITEM_MB",   "3"))
+_DISK_QUEUE_FLOOR     = int(os.environ.get("MVE_DISK_QUEUE_FLOOR",       "500"))
+_DISK_QUEUE_CEILING   = int(os.environ.get("MVE_DISK_QUEUE_CEILING",     "4000"))
+_disk_queue_ideal = int(_avail_ram_gb * 1024 * _DISK_QUEUE_PCT_AVAIL / 100 / max(0.1, _DISK_QUEUE_ITEM_MB))
+_disk_queue = queue.Queue(maxsize=max(_DISK_QUEUE_FLOOR, min(_DISK_QUEUE_CEILING, _disk_queue_ideal)))
 
 # ── Two-tier inference queue: Hot (RAM) + Cold (Disk) ──
 #

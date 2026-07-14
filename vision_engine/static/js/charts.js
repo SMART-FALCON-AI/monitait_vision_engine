@@ -2262,6 +2262,24 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
         for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
         return ((h * 137.508) % 360 + 360) % 360;
     };
+    // v4.0.123 — semantic color by verdict when the backend supplies one.
+    // Falls back to golden-angle hue when verdict is null (no_shipment,
+    // insufficient data, or compute error).
+    const _colorForVerdict = (verdict) => {
+        switch (String(verdict || '').toUpperCase()) {
+            case 'RELEASE':
+                return { border: 'hsl(142, 70%, 50%)', bg: 'hsla(142, 70%, 40%, 0.20)', text: 'hsl(142, 85%, 82%)' };
+            case 'RE-INSPECT':
+            case 'REINSPECT':
+                return { border: 'hsl(45, 90%, 55%)',  bg: 'hsla(45,  90%, 45%, 0.22)', text: 'hsl(45,  95%, 82%)' };
+            case 'HOLD':
+                return { border: 'hsl(0,  75%, 58%)',  bg: 'hsla(0,   75%, 45%, 0.22)', text: 'hsl(0,   90%, 85%)' };
+            case 'PENDING':
+                return { border: 'hsl(220, 15%, 60%)', bg: 'hsla(220, 15%, 40%, 0.18)', text: 'hsl(220, 20%, 82%)' };
+            default:
+                return null;   // caller falls back to hue-based
+        }
+    };
     const _fmtEnc  = (v) => (v == null ? '?' : Number(v).toLocaleString());
     const _fmtTime = (v) => {
         if (v == null) return '?';
@@ -2351,14 +2369,14 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
     const html = clipped.map(({ sp, clipLo, clipHi, lane }) => {
         const leftPct  = ((clipLo - axisMin) / range) * 100;
         const widthPct = ((clipHi - clipLo) / range) * 100;
+        // v4.0.123 — prefer verdict-based color; fall back to hue-hash when
+        // no verdict is available (e.g. no_shipment or insufficient data).
+        const _verdictColors = _colorForVerdict(sp.verdict);
         const hue   = _hueForShipment(sp.shipment);
         const hueS  = hue.toFixed(0);
-        // Mockup palette: bright saturated border, faint tinted fill,
-        // matching-hue text on top. Reads well against the dark strip
-        // background.
-        const border = 'hsl(' + hueS + ', 75%, 55%)';
-        const bg     = 'hsla(' + hueS + ', 75%, 45%, 0.18)';
-        const text   = 'hsl(' + hueS + ', 85%, 78%)';
+        const border = _verdictColors ? _verdictColors.border : ('hsl(' + hueS + ', 75%, 55%)');
+        const bg     = _verdictColors ? _verdictColors.bg     : ('hsla(' + hueS + ', 75%, 45%, 0.18)');
+        const text   = _verdictColors ? _verdictColors.text   : ('hsl(' + hueS + ', 85%, 78%)');
         const shipStr = String(sp.shipment || '');
         // v4.0.115 — prefer FULL shipment ID always; relayout helper
         // downgrades to a tail-8 / tail-4 slice only when the bar is
@@ -2366,8 +2384,12 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
         const labelFull = shipStr;
         const labelMed  = shipStr.length > 8 ? shipStr.slice(-8) : shipStr;
         const labelTail = shipStr.length > 4 ? shipStr.slice(-4) : shipStr;
+        const _verdictLabel = sp.verdict
+            ? (sp.verdict + (sp.score != null ? ' (score ' + Number(sp.score).toFixed(1) + ')' : ''))
+            : (sp.score != null ? 'score ' + Number(sp.score).toFixed(1) : '—');
         const tipLines = [
             'Shipment: ' + shipStr,
+            'Status: '   + _verdictLabel,
             'Lane: '     + (lane + 1) + ' / ' + nLanes,
             'Encoder: '  + _fmtEnc(sp.enc_min) + ' → ' + _fmtEnc(sp.enc_max),
             'Time: '     + _fmtTime(sp.t_min)  + ' → ' + _fmtTime(sp.t_max),
