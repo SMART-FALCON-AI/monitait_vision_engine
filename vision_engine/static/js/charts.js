@@ -2402,7 +2402,12 @@ window._renderShipmentStrip = _renderShipmentStrip;
 // completely decoupled from `_refreshAdvancedChartsCore` which does the
 // full 24 h fetch that can take >30 s on busy sites. Without this the
 // strip could never paint until the full dashboard fetch resolved.
+// v4.0.120 — also cache the last-fetched spans so an axis toggle can
+// re-render INSTANTLY without waiting for a network round-trip. Toggle
+// hook below in setInsightAxis re-renders from cache immediately, then
+// kicks a background refresh to pick up any new shipments.
 let _shipmentStripTimer = null;
+let _lastShipmentSpans = [];
 async function _refreshShipmentStripStandalone() {
     try {
         const axisMode = (typeof _insightAxis === 'string' && _insightAxis) ? _insightAxis : 'encoder';
@@ -2410,6 +2415,7 @@ async function _refreshShipmentStripStandalone() {
         if (!r.ok) return;
         const j = await r.json();
         const spans = (j && j.shipment_spans) || [];
+        _lastShipmentSpans = spans;
         if (typeof _renderShipmentStrip === 'function') {
             _renderShipmentStrip(spans, axisMode, null, null, null, null);
         }
@@ -2417,6 +2423,18 @@ async function _refreshShipmentStripStandalone() {
         console.warn('standalone shipment-strip refresh failed:', e);
     }
 }
+// v4.0.120 — instant re-render from cache in the current axisMode.
+// Called by setInsightAxis on toggle so the operator sees the strip
+// flip modes with no perceptible lag.
+function _repaintShipmentStripFromCache() {
+    try {
+        const axisMode = (typeof _insightAxis === 'string' && _insightAxis) ? _insightAxis : 'encoder';
+        if (typeof _renderShipmentStrip === 'function') {
+            _renderShipmentStrip(_lastShipmentSpans || [], axisMode, null, null, null, null);
+        }
+    } catch (_e) { /* swallow — strip re-render is best-effort */ }
+}
+window._repaintShipmentStripFromCache = _repaintShipmentStripFromCache;
 window._refreshShipmentStripStandalone = _refreshShipmentStripStandalone;
 // Kick off the first paint as soon as the DOM is ready.
 (function _bootstrapStandaloneStrip() {
@@ -2485,6 +2503,12 @@ function setInsightAxis(axis) {
     if (eTitle) eTitle.textContent = axis === 'encoder'
         ? '⏏️ ejections by encoder — color = procedure; hover for breakdown'
         : '⏏️ ejections by time — color = procedure; hover for breakdown';
+    // v4.0.120 — flip the shipment strip to the new axis INSTANTLY from
+    // the cached spans (no network wait). Then kick a background refresh
+    // to pick up any new shipments that may have started since the last
+    // 30 s tick.
+    if (typeof _repaintShipmentStripFromCache === 'function') _repaintShipmentStripFromCache();
+    if (typeof _refreshShipmentStripStandalone === 'function') _refreshShipmentStripStandalone();
     // Re-fetch insight + re-render scatter + reload both strips for the new axis.
     if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
 }
