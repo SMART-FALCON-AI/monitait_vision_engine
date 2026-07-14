@@ -3879,6 +3879,83 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 pass
 
 
+@router.get("/api/shipment_spans")
+def shipment_spans_endpoint(request: Request, window: str = "1h"):
+    """v4.0.119 — Standalone lightweight endpoint that ONLY returns the
+    shipment_spans list. The Charts-tab dashboard uses `window=24h` on
+    `/api/detection_charts`, which on vteam12 takes >30 s to run all
+    five CTEs — the browser fetch hangs, `_refreshAdvancedChartsCore`
+    never resolves, and the shipment strip never paints even though the
+    span data itself is trivial (200 k-row bounded CTE, ~70 ms).
+
+    This endpoint isolates the strip data so the frontend can fetch it
+    IMMEDIATELY on page load and paint the strip regardless of what the
+    rest of the dashboard is doing.
+    """
+    _windows_map = {
+        "1h":  "1 hour",
+        "6h":  "6 hours",
+        "24h": "24 hours",
+        "7d":  "7 days",
+    }
+    interval = _windows_map.get(window, "1 hour")
+    empty = {"shipment_spans": [], "window": window}
+    conn = None
+    try:
+        from services.db import get_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = 8000")
+        cur.execute(
+            """
+            WITH recent AS (
+                SELECT shipment, encoder_value, time
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s
+                  AND shipment IS NOT NULL
+                  AND shipment <> ''
+                ORDER BY time DESC
+                LIMIT 200000
+            )
+            SELECT shipment,
+                   MIN(encoder_value)                        AS enc_min,
+                   MAX(encoder_value)                        AS enc_max,
+                   EXTRACT(EPOCH FROM MIN(time)) * 1000.0    AS t_min,
+                   EXTRACT(EPOCH FROM MAX(time)) * 1000.0    AS t_max,
+                   COUNT(*)                                  AS n_rows
+            FROM recent
+            GROUP BY shipment
+            ORDER BY MIN(time) ASC
+            LIMIT 200
+            """,
+            (interval,),
+        )
+        spans = []
+        for _s, _e_min, _e_max, _t_min, _t_max, _n in cur.fetchall():
+            spans.append({
+                "shipment": _s,
+                "enc_min": int(_e_min) if _e_min is not None else None,
+                "enc_max": int(_e_max) if _e_max is not None else None,
+                "t_min":   float(_t_min) if _t_min is not None else None,
+                "t_max":   float(_t_max) if _t_max is not None else None,
+                "n_rows":  int(_n or 0),
+            })
+        cur.close()
+        return JSONResponse(content={"shipment_spans": spans, "window": window})
+    except Exception as e:
+        logger.warning(f"shipment_spans standalone endpoint failed: {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
 @router.get("/api/ejection_stats")
 def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
     """Ejection analytics for the Charts tab (3.17.0).

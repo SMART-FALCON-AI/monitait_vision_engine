@@ -1711,6 +1711,42 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         shipSel.value = cur; // keep selection if still present
     }
 
+    // v4.0.119 — RENDER THE SHIPMENT STRIP IMMEDIATELY as soon as data
+    // arrives. Previously the render was near the end of the function,
+    // AFTER the big scatter/heatmap/color pipelines. Any error or slow
+    // path in those blocks left the strip stuck showing the static HTML
+    // fallback ("JS not loaded yet") even though data was available.
+    // The strip only needs shipment_spans + a light axis choice — no
+    // reason to gate it on the scatter finishing.
+    try {
+        const _axisModeEarly = (typeof _insightAxis === 'string' && _insightAxis) ? _insightAxis : 'encoder';
+        const _hmEarly = (_axisModeEarly === 'encoder')
+            ? (data.color_heatmap || {})
+            : (data.color_heatmap_time || {});
+        const _encMinEarly = (_axisModeEarly === 'encoder')
+            ? (_hmEarly.enc_min != null ? Number(_hmEarly.enc_min) : null)
+            : null;
+        const _encMaxEarly = (_axisModeEarly === 'encoder')
+            ? (_hmEarly.enc_max != null ? Number(_hmEarly.enc_max) : null)
+            : null;
+        const _tMinEarly = (_axisModeEarly === 'time')
+            ? (_hmEarly.t_min != null ? Number(_hmEarly.t_min) : null)
+            : null;
+        const _tMaxEarly = (_axisModeEarly === 'time')
+            ? (_hmEarly.t_max != null ? Number(_hmEarly.t_max) : null)
+            : null;
+        if (typeof _renderShipmentStrip === 'function') {
+            _renderShipmentStrip(
+                data.shipment_spans || [],
+                _axisModeEarly,
+                _encMinEarly, _encMaxEarly,
+                _tMinEarly, _tMaxEarly
+            );
+        }
+    } catch (_earlyStripErr) {
+        console.warn('early shipment-strip render failed:', _earlyStripErr);
+    }
+
     const sizeT = data.size_over_time || [];
     const confT = data.confidence_over_time || [];
     const scatter = data.camera_scatter || [];
@@ -2203,28 +2239,23 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
         return;
     }
     if (title) title.style.display = '';
-    const isEnc  = (axisMode === 'encoder');
-    let axisMin = isEnc ? enc_min : t_min;
-    let axisMax = isEnc ? enc_max : t_max;
-    // v4.0.115 — fallback: derive bounds from the spans themselves when
-    // the caller couldn't. This was the root cause of the empty strip on
-    // khoy — heatmapEncMin was null in windows with no color-heatmap
-    // cells, so the old bail-out swallowed a perfectly valid dataset.
-    if (axisMin == null || axisMax == null || !(axisMax > axisMin)) {
-        const los = spans.map(s => isEnc ? s.enc_min : s.t_min).filter(x => x != null);
-        const his = spans.map(s => isEnc ? s.enc_max : s.t_max).filter(x => x != null);
-        if (los.length && his.length) {
-            axisMin = Math.min.apply(null, los);
-            axisMax = Math.max.apply(null, his);
-        }
-    }
-    if (axisMin == null || axisMax == null || !(axisMax > axisMin)) {
-        strip.innerHTML = '';
-        return;
-    }
-    const range = axisMax - axisMin;
-    // Golden-angle hash → hue. Same formula _procColor uses (see line
-    // ~3670) so distinct IDs get well-separated hues.
+    // v4.0.117 — update title to reflect what axis we're actually using
+    // (encoder / time / equal-slice) so an operator on a stationary line
+    // (vteam12 test box, or a fresh shipment before first encoder tick)
+    // isn't confused by "encoder range" when we're really painting by time.
+    const _updateTitle = (m) => {
+        if (!title) return;
+        const t = (m === 'enc')  ? '🚚 shipment lanes — encoder range per shipment id'
+                : (m === 'time') ? '🚚 shipment lanes — time range per shipment id (line stationary)'
+                :                  '🚚 shipment lanes — one slice per shipment (no encoder/time width)';
+        title.textContent = t;
+    };
+    // v4.0.117 — RULE: if we got spans, we MUST render something. Zero-
+    // width spans (line stationary; test-box vteam12; brand-new shipment
+    // before first encoder tick) previously silently dropped and the
+    // strip stayed empty. Now: prefer encoder-axis with real widths,
+    // else time-axis if that has a real range, else equal-slice layout.
+    // Every shipment always gets a visible box.
     const _hueForShipment = (id) => {
         const s = String(id || '');
         let h = 0;
@@ -2237,18 +2268,60 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
         try { return new Date(v).toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
         catch (_e) { return String(v); }
     };
-    // First pass — clip each span to the visible axis, drop the ones
-    // that fall entirely outside, and sort by clipped start so the
-    // greedy lane-packer processes them left-to-right.
-    const clipped = [];
-    for (const sp of spans) {
-        const lo = isEnc ? sp.enc_min : sp.t_min;
-        const hi = isEnc ? sp.enc_max : sp.t_max;
-        if (lo == null || hi == null || !(hi > lo)) continue;
-        const clipLo = Math.max(lo, axisMin);
-        const clipHi = Math.min(hi, axisMax);
-        if (!(clipHi > clipLo)) continue;
-        clipped.push({ sp, clipLo, clipHi });
+    // Decide layout mode.
+    const isEnc  = (axisMode === 'encoder');
+    const encRanges  = spans.map(s => [Number(s.enc_min || 0), Number(s.enc_max || 0)]);
+    const timeRanges = spans.map(s => [Number(s.t_min   || 0), Number(s.t_max   || 0)]);
+    const encTotal   = Math.max.apply(null, encRanges.map(r => r[1])) - Math.min.apply(null, encRanges.map(r => r[0]));
+    const timeTotal  = Math.max.apply(null, timeRanges.map(r => r[1])) - Math.min.apply(null, timeRanges.map(r => r[0]));
+    const encHasWidth  = encRanges.some(r => r[1] > r[0]);
+    const timeHasWidth = timeRanges.some(r => r[1] > r[0]);
+    let mode;
+    if (isEnc && encHasWidth && encTotal > 0)        mode = 'enc';
+    else if (!isEnc && timeHasWidth && timeTotal > 0) mode = 'time';
+    else if (encHasWidth && encTotal > 0)             mode = 'enc';
+    else if (timeHasWidth && timeTotal > 0)           mode = 'time';
+    else                                              mode = 'equal';
+    // Compute per-span (lo, hi) in the chosen mode's units.
+    let axisMin, axisMax, range;
+    let clipped;
+    _updateTitle(mode);
+    if (mode === 'equal') {
+        // Sort by t_min (or shipment string) so ordering is stable.
+        const sorted = spans.slice().sort((a, b) => (a.t_min || 0) - (b.t_min || 0));
+        const N = sorted.length;
+        clipped = sorted.map((sp, i) => ({
+            sp,
+            clipLo: i / N,
+            clipHi: (i + 1) / N,
+        }));
+        axisMin = 0; axisMax = 1; range = 1;
+    } else {
+        const useEnc = (mode === 'enc');
+        // Caller bounds first, then span-derived fallback.
+        let inMin = useEnc ? enc_min : t_min;
+        let inMax = useEnc ? enc_max : t_max;
+        if (inMin == null || inMax == null || !(inMax > inMin)) {
+            const los = spans.map(s => useEnc ? s.enc_min : s.t_min).filter(x => x != null);
+            const his = spans.map(s => useEnc ? s.enc_max : s.t_max).filter(x => x != null);
+            inMin = los.length ? Math.min.apply(null, los) : 0;
+            inMax = his.length ? Math.max.apply(null, his) : 1;
+        }
+        if (!(inMax > inMin)) { inMax = inMin + 1; }
+        axisMin = inMin; axisMax = inMax; range = axisMax - axisMin;
+        // Give every span AT LEAST a min-visible slice (2% of axis).
+        const minSlice = range * 0.02;
+        clipped = [];
+        for (const sp of spans) {
+            const lo = useEnc ? sp.enc_min : sp.t_min;
+            const hi = useEnc ? sp.enc_max : sp.t_max;
+            if (lo == null || hi == null) continue;
+            let clipLo = Math.max(lo, axisMin);
+            let clipHi = Math.min(hi, axisMax);
+            if (!(clipHi > clipLo)) clipHi = clipLo + minSlice;
+            if ((clipHi - clipLo) < minSlice) clipHi = clipLo + minSlice;
+            clipped.push({ sp, clipLo, clipHi });
+        }
     }
     if (clipped.length === 0) { strip.innerHTML = ''; return; }
     clipped.sort((a, b) => a.clipLo - b.clipLo);
@@ -2322,6 +2395,43 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
     _relayoutShipmentStripLabels();
 }
 window._renderShipmentStrip = _renderShipmentStrip;
+
+// v4.0.119 — INDEPENDENT strip refresher. Hits `/api/shipment_spans`
+// (a standalone endpoint that only runs the bounded CTE — ~70 ms) and
+// paints the strip. Runs on page load and every 30 s afterwards,
+// completely decoupled from `_refreshAdvancedChartsCore` which does the
+// full 24 h fetch that can take >30 s on busy sites. Without this the
+// strip could never paint until the full dashboard fetch resolved.
+let _shipmentStripTimer = null;
+async function _refreshShipmentStripStandalone() {
+    try {
+        const axisMode = (typeof _insightAxis === 'string' && _insightAxis) ? _insightAxis : 'encoder';
+        const r = await fetch('/api/shipment_spans?window=24h');
+        if (!r.ok) return;
+        const j = await r.json();
+        const spans = (j && j.shipment_spans) || [];
+        if (typeof _renderShipmentStrip === 'function') {
+            _renderShipmentStrip(spans, axisMode, null, null, null, null);
+        }
+    } catch (e) {
+        console.warn('standalone shipment-strip refresh failed:', e);
+    }
+}
+window._refreshShipmentStripStandalone = _refreshShipmentStripStandalone;
+// Kick off the first paint as soon as the DOM is ready.
+(function _bootstrapStandaloneStrip() {
+    const start = () => {
+        _refreshShipmentStripStandalone();
+        if (_shipmentStripTimer) clearInterval(_shipmentStripTimer);
+        _shipmentStripTimer = setInterval(_refreshShipmentStripStandalone, 30000);
+    };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+        // DOM already ready — defer to next tick so late-defined helpers exist.
+        setTimeout(start, 0);
+    }
+})();
 
 // Sibling helper: pick FULL / tail-8 / tail-4 / hidden based on the
 // bar's current pixel width. Full-id preferred so the operator can

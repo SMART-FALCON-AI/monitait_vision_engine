@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.116] - 2026-07-14 — CRITICAL: status.html cache-buster stuck at ?v=4.0.70 for 45 versions
+
+### The bug (why every JS fix since v4.0.71 was invisible to browsers)
+Every `<script>` and `<link>` in `vision_engine/static/status.html` had `?v=4.0.70` hardcoded — the cache-buster comment at the top literally says "Bump on every version" but for the last 45 versions nobody did. That meant:
+
+- Deploy new `charts.js` → file on disk = new code
+- Browser reloads page → HTML sent fresh
+- Browser sees `<script src="/static/js/charts.js?v=4.0.70">` — SAME URL as it had cached from weeks ago
+- Browser skips the fetch, runs stale JS
+- User sees the v4.0.115 version banner (that reads `/api/version` at runtime) so believes the new code is running
+- Strip title is in the static HTML so it appears
+- But `_renderShipmentStrip` doesn't exist in the cached v4.0.70 JS → no bars
+
+Reproduced end-to-end on khoy: server-side `curl /static/js/charts.js` returned my v4.0.115 code, but the browser was executing the v4.0.70 copy from cache. Operator asked (rightfully) "why the shipment lane isn't showing? this is a simple task!". It was. The bug wasn't in the strip code — it was in the deploy pipeline.
+
+### Fix
+- Bumped every `?v=4.0.70` in `status.html` to `?v=4.0.116` (8 assets: i18n.js, iframes.js, charts.js, audio.js, app-core.js, annotate.js, label-studio main.css, label-studio main.js).
+- **Follow-up owed** — this needs to become dynamic. Either read `VERSION` at server startup and inject into a template, or a pre-commit hook that syncs. For now: EVERY future VERSION bump must sweep-replace `?v=X.Y.Z` in status.html in the same commit.
+
+### Also included
+- All the v4.0.115 changes (strip fallback bounds + bordered-box visual) that were on disk but invisible in browsers.
+
+### Deploy
+- Backend restart NOT strictly required (bind-mounted static), but restart bumps the version banner so operators can visually confirm the deploy.
+
 ## [4.0.115] - 2026-07-14 — Shipment strip: fix empty-render when heatmap bounds are null + bordered-box visual
 
 ### Bug — strip still empty on khoy even though `/api/detection_charts` returned 2 valid spans
