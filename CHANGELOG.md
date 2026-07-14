@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.121] - 2026-07-14 — Disk-pressure janitor thread: `_ensure_disk_space` off the writer hot path
+
+### The problem
+Since v3.2.0 (2026-02-15) `_disk_writer_loop` has called `_ensure_disk_space` before every `imwrite_jpeg`. The 2-second cache made this "cheap when healthy", but it's gated by `_last_disk_ok` — which flips False the moment disk crosses `_DISK_MAX_PCT` and stays False until the loop can drive disk back under. On khoy at 86 % the gate is permanently off, and every one of 8 disk writers pays full cost per write: `disk_usage` + `_sorted_chunks()` (full listdir) + `shutil.rmtree` — with NO lock, so all 8 threads race into the same rmtree calls. Result: 3,738 "Disk write queue full — dropping" events in 30 min on khoy right now, peak qsize 872/1064 (82 %).
+
+### The fix
+Move eviction to a dedicated background thread. Writers no longer call `_ensure_disk_space` — they just resolve `_raw_root` and `imwrite_jpeg`. Three safety layers preserve the "never miss a frame" contract:
+
+1. **Proactive margin.** Janitor starts evicting at `_DISK_MAX_PCT - _DISK_EVICT_MARGIN_PCT` (default `75 - 5 = 70 %`). On khoy that's 65 GB of headroom = 120 s runway at 540 MB/s worst-case ingress.
+2. **Fast tick under pressure.** Janitor uses `Event.wait(timeout=…)` — 500 ms while evicting, 2 s while idle.
+3. **Writer retry on genuine ENOSPC.** If `imwrite_jpeg` returns False, writer sets `_disk_janitor_event`, waits 100 ms, retries the same frame once.
+
+Threshold, algorithm, and `_last_disk_ok` semantics are unchanged.
+
+### New env
+- `DISK_EVICT_MARGIN_PCT` (default 5) — headroom below `RAW_IMAGES_MAX_DISK_PCT`.
+
+## [4.0.120] - 2026-07-14 — Shipment strip repaints instantly on axis toggle
+
+Cache last-fetched spans, add `_repaintShipmentStripFromCache()`, hook `setInsightAxis` so Time↔Encoder flips the strip with no network wait.
+
+## [4.0.119] - 2026-07-14 — Standalone `/api/shipment_spans` endpoint + independent bootstrap
+
+Lightweight endpoint (bounded 200k-row CTE, ~70 ms) that only returns shipment_spans. New `_refreshShipmentStripStandalone` fires on `DOMContentLoaded` and every 30 s afterwards, decoupled from `_refreshAdvancedChartsCore`'s slow 24 h fetch that was blocking the strip from painting.
+
+## [4.0.118] - 2026-07-14 — Diagnostic HTML fallback title
+
+Static strip title shows "🚚 shipment lanes — JS not loaded yet — Ctrl+Shift+R" in orange so we can distinguish a broken JS render from a stale browser cache.
+
+## [4.0.117] - 2026-07-14 — Bulletproof shipment strip with mode fallback
+
+If encoder widths are all 0 (line stationary), fall back to time-mode. If time widths are also 0, equal-slice layout. Every shipment always gets a visible bordered box.
+
 ## [4.0.116] - 2026-07-14 — CRITICAL: status.html cache-buster stuck at ?v=4.0.70 for 45 versions
 
 ### The bug (why every JS fix since v4.0.71 was invisible to browsers)

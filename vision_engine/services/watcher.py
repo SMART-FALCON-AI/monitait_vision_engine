@@ -407,9 +407,20 @@ _disk_lock = threading.Lock()
 # handles capacity correctly regardless of age. The DB gets the same
 # treatment via `_db_disk_pressure_janitor_loop` in services/db.py.
 _DISK_MAX_PCT = int(os.environ.get("RAW_IMAGES_MAX_DISK_PCT", "75"))
+# v4.0.121 — proactive margin below the hard cap. Janitor thread starts
+# evicting at (_DISK_MAX_PCT - _DISK_EVICT_MARGIN_PCT) so writers ALWAYS
+# have runway. Default 5 → evict starts at 70 %, cap remains 75 %. This
+# is the buffer that guarantees writers never see ENOSPC in practice.
+_DISK_EVICT_MARGIN_PCT = int(os.environ.get("DISK_EVICT_MARGIN_PCT", "5"))
 _last_disk_ok = True
 _last_disk_check_t = 0
 _raw_root = None                # Resolved once on first write
+
+# v4.0.121 — event the writer can set to WAKE the janitor immediately
+# (used on a rare ENOSPC retry path in _disk_writer_loop).
+_disk_janitor_event = threading.Event()
+_disk_janitor_started = False
+_disk_janitor_start_lock = threading.Lock()
 
 def _resolve_raw_root(some_path):
     """Walk up from a write path to find the raw_images root."""
@@ -499,6 +510,94 @@ def _ensure_disk_space(write_dir):
 # `_db_disk_pressure_janitor_loop` in services/db.py.
 
 
+# v4.0.121 — disk-pressure JANITOR THREAD. Runs continuously in the
+# background so that `_ensure_disk_space` no longer needs to fire from
+# the disk-writer hot path. Keeps disk under `_DISK_MAX_PCT` by evicting
+# oldest hourly chunks, and starts eviction PROACTIVELY at
+# `_DISK_MAX_PCT - _DISK_EVICT_MARGIN_PCT` (default 70 %) so writers
+# always have runway — a full disk should never actually happen.
+#
+# Why this design change: v3.2.0 put `_ensure_disk_space` inside
+# `_disk_writer_loop` on the theory that the check is "cheap when
+# healthy" (2-second cache short-circuits below the threshold). That
+# assumption breaks once disk crosses the threshold: `_last_disk_ok`
+# flips False and the cache is bypassed, so every write pays the full
+# scan + rmtree cost. Worse, all N writer threads race into
+# `_sorted_chunks()` and `shutil.rmtree` simultaneously with no lock.
+# On khoy at 86 % this produced 3,738 queue-full events / 30 min.
+#
+# Contract preserved: DVR "never stop writing", same `_DISK_MAX_PCT`
+# threshold semantics, same eviction algorithm (oldest hourly chunk,
+# skip current hour). Just moved off the writer hot path.
+def _disk_pressure_janitor_loop():
+    """Runs forever. Adaptive tick: 500 ms while under pressure, 2 s while idle."""
+    global _last_disk_ok, _raw_root
+    logger.info(
+        f"disk-pressure janitor started "
+        f"(evict_at={_DISK_MAX_PCT - _DISK_EVICT_MARGIN_PCT}% target={_DISK_MAX_PCT}%)"
+    )
+    while True:
+        try:
+            root = _raw_root or "raw_images"
+            # Only measure once we have a real raw_root — resolved by
+            # the first _resolve_raw_root call from a writer. Until then
+            # sleep and re-check.
+            if not os.path.isdir(root):
+                _disk_janitor_event.wait(timeout=2.0)
+                _disk_janitor_event.clear()
+                continue
+            try:
+                u = shutil.disk_usage(root)
+                pct = u.used * 100 // max(1, u.used + u.free)
+            except OSError:
+                _disk_janitor_event.wait(timeout=2.0)
+                _disk_janitor_event.clear()
+                continue
+            evict_start = max(1, _DISK_MAX_PCT - _DISK_EVICT_MARGIN_PCT)
+            if pct <= evict_start:
+                _last_disk_ok = True
+                _disk_janitor_event.wait(timeout=2.0)
+                _disk_janitor_event.clear()
+                continue
+            # Under pressure. Evict oldest chunks until back under evict_start.
+            _last_disk_ok = False
+            current_hour = datetime.now().strftime("%Y-%m-%d_%H")
+            for chunk_name, chunk_path in _sorted_chunks():
+                if chunk_name >= current_hour:
+                    break  # never touch the current hour
+                shutil.rmtree(chunk_path, ignore_errors=True)
+                logger.info(f"DVR cleanup (janitor): deleted {chunk_path}")
+                try:
+                    u2 = shutil.disk_usage(root)
+                    pct = u2.used * 100 // max(1, u2.used + u2.free)
+                    if pct <= evict_start:
+                        _last_disk_ok = True
+                        logger.info(f"DVR cleanup done — disk at {pct}%")
+                        break
+                except OSError:
+                    break
+            # Fast tick under continued pressure, otherwise back off.
+            _disk_janitor_event.wait(timeout=0.5 if not _last_disk_ok else 2.0)
+            _disk_janitor_event.clear()
+        except Exception as _e:
+            logger.error(f"disk-pressure janitor error: {_e}")
+            time.sleep(2.0)
+
+
+def start_disk_pressure_janitor():
+    """Idempotent — safe to call from main.py startup."""
+    global _disk_janitor_started
+    with _disk_janitor_start_lock:
+        if _disk_janitor_started:
+            return
+        threading.Thread(
+            target=_disk_pressure_janitor_loop,
+            daemon=True,
+            name="disk-pressure-janitor",
+        ).start()
+        _disk_janitor_started = True
+
+
 def _disk_writer_loop():
     """Background thread: checks disk space (NVR-style), then writes image.
 
@@ -509,13 +608,22 @@ def _disk_writer_loop():
     absorb 3× the framerate before the queue backs up.
     """
     from services.jpeg_codec import imwrite_jpeg
+    _q = cfg.RAW_IMAGE_JPEG_QUALITY if hasattr(cfg, 'RAW_IMAGE_JPEG_QUALITY') else 85
     while True:
         try:
             path, frame = _disk_queue.get()
-            # Ensure disk has space before writing (deletes oldest chunks if full)
-            _ensure_disk_space(os.path.dirname(path))
-            if not imwrite_jpeg(path, frame, quality=cfg.RAW_IMAGE_JPEG_QUALITY if hasattr(cfg, 'RAW_IMAGE_JPEG_QUALITY') else 85):
-                logger.debug(f"jpeg_codec.imwrite_jpeg returned False for {path}")
+            # v4.0.121 — no more per-write _ensure_disk_space. The
+            # disk-pressure janitor thread evicts oldest chunks in the
+            # background at (75% - 5%) = 70% so writers always have
+            # runway. Ensure raw_root is resolved (janitor needs it).
+            _resolve_raw_root(os.path.dirname(path))
+            if not imwrite_jpeg(path, frame, quality=_q):
+                # Write failed — most likely ENOSPC. Wake the janitor
+                # so it evicts immediately, then retry the frame once.
+                _disk_janitor_event.set()
+                time.sleep(0.1)
+                if not imwrite_jpeg(path, frame, quality=_q):
+                    logger.warning(f"jpeg_codec.imwrite_jpeg failed twice for {path}")
         except Exception as e:
             logger.error(f"Disk write error: {e}")
 

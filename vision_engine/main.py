@@ -802,6 +802,16 @@ if hasattr(_cold_queue_disk, 'flush_stale'):
 if hasattr(_cold_queue_disk, 'start_janitor'):
     _cold_queue_disk.start_janitor()
 
+# v4.0.121 — start the disk-pressure janitor thread so `_ensure_disk_space`
+# no longer needs to fire from the disk-writer hot path. Runs continuously,
+# evicts oldest hourly chunks in the background when disk crosses
+# `_DISK_MAX_PCT - _DISK_EVICT_MARGIN_PCT` (default 70 %).
+try:
+    from services.watcher import start_disk_pressure_janitor
+    start_disk_pressure_janitor()
+except Exception as _e:
+    logger.warning(f"failed to start disk-pressure janitor: {_e}")
+
 # v4.0.105 — start the DB disk-pressure janitor. Mirrors raw_images
 # retention shape: reactive on host disk usage crossing DB_MAX_DISK_PCT
 # (default 75). Drops oldest hypertable chunks one at a time until back
