@@ -7,6 +7,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.142] - 2026-07-18 — Camera Path row: value stacks under the label, no more text overlap
+
+Long `/dev/v4l/by-path/…` symlinks (45-60 chars) were overflowing leftward into the "Path" label because `.camera-info-item` uses `display: flex; justify-content: space-between;` and flex items default to `min-width: auto` — they refuse to shrink below their intrinsic content width, so `word-break: break-all` on the value never kicked in.
+
+Two changes in [static/css/main.css](vision_engine/static/css/main.css):
+- `.camera-info-value` now has `min-width: 0; text-align: right; overflow-wrap: anywhere;` — any long value in any row can now wrap within its column instead of overflowing.
+- New `.camera-info-item--stack` modifier: label on top, value full-width below with left align. Applied to the Path row in [static/js/app-core.js](vision_engine/static/js/app-core.js) where the by-path symlink lives.
+- Value in the Path row is now monospace for readability of `bus:port` digits.
+
+## [4.0.141] - 2026-07-17 — Shipment-lanes strip tooltip: add Length row
+
+The shipment-lanes strip (below the Camera×Encoder scatter) had a tooltip listing Shipment / Status / Lane / Encoder / Time / Detections but no Length. Added a `Length: …` line computed from `enc_max − enc_min`, formatted through the shared `_fmtLenWithUpu` helper so it uses the operator's unit label (Meter / Batch / …) and per-site calibration seeded on every /api/status tick. Uses the global length cache since the shipment_spans payload doesn't ship per-shipment upu — that's fine because calibration is per-site not per-shipment.
+
+## [4.0.140] - 2026-07-17 — Unit calibration decoupled from "meter" (any operator-chosen label)
+
+### The change
+`encoder_units_per_meter` renamed to **`encoder_units_per_unit`** on the wire. `encoder_unit` (already existed) is now the operator-chosen display label — Meter, Batch, Cubic Meter, mm, tile, roll, any string up to 32 chars with spaces + basic punctuation allowed. `encoder_units_per_unit` is how many raw encoder pulses accumulate for ONE of those units.
+
+Every length display in the UI reads from the new pair:
+- Dashboard length tile
+- Score-per-shipment: bar annotation, 2-line labels, tooltip's `Length: …` + `def/100 unit` + `Impact/unit`
+- Shipment-quality strip (length row + normalisation note)
+- Camera × Length axis: tick labels + axis title (e.g. `Length (Batch, cumulative across shipments)`)
+
+### Backward compat
+Backend accepts either field name on POST, writes both on save. Frontend seeds cache from either field. Existing sites with `encoder_units_per_meter=1000` and `encoder_unit=m` keep working with zero operator action — they just now see "12.3 m" (where "m" is the label they set) instead of "12.3 m" (where "m" was hardcoded).
+
+### Files
+- **Backend**: `routers/config_routes.py` (`/api/encoder_calibration` GET+POST), `routers/health.py` (new `_encoder_calibration_payload` helper feeds `/api/status` + SSE), `routers/timeline.py` (`_compute_quality_payload`, shipment list, PDF report).
+- **Frontend**: `static/js/app-core.js` (renamed `window._lengthCache.upm` → `upu`, formatLength appends the operator's label, load/save use new input id `encoder-units-per-unit-input`, new `_refreshEncoderUnitLabels` helper drives every `data-encoder-unit-echo` span so the "pulses per 1 <unit>" text updates the moment the operator types), `static/js/charts.js` (new `_fmtLenWithUpu` + `_upuFromAny` + `_unitLabelFromAny` helpers, 6 call sites migrated), `static/status.html` (Advanced tab UI text + input id).
+
+### Advanced tab UI
+Old: "Encoder unit label" + "Encoder units per meter (optional)".
+New: "Unit name" (with placeholder listing Meter/Batch/Cubic Meter/tile/piece) + "Encoder pulses per 1 <live unit echo> (optional)".
+Help text now shows worked examples for fabric, roll-batch, and glass lines so operators have a template.
+
+## [4.0.139] - 2026-07-17 — Camera Path shows by-path + SSE carries encoder calibration + CPU/RAM/Disk text colour
+
+### 1. Camera card shows by-path
+`/api/cameras` now returns `by_path` per USB camera — the current `/dev/v4l/by-path/…` symlink. The Cameras tab card renders the by-path (the stable USB bus:port identifier) as the primary Path label, with the raw `/dev/videoN` shown as a smaller `→` suffix. Operators can now read the identifier that survives USB renumber events at a glance.
+
+### 2. SSE payload carries encoder calibration
+v4.0.137 added `encoder_unit` + `encoder_units_per_meter` to `/api/status` (poll), but the dashboard reads live updates from `/api/status/stream` (SSE). Without the same fields on the SSE channel, the frontend's length cache stayed at its `('units', 0)` init and the dashboard Length tile showed `0 units` even when Advanced tab had `mm` / `1000` set. Fixed by mirroring both fields into the SSE payload from the same `load_service_config` helper.
+
+### 3. CPU/RAM/Disk text on light-theme hosts
+The System Resources grid had no explicit `color:` on its wrapper, so on browsers that resolved the theme to light mode the CPU / RAM / Disk labels rendered near-black on the dark card background. Added `color: var(--text-primary)` to the grid.
+
+## [4.0.138] - 2026-07-17 — Deterministic USB-renumber recovery via /dev/v4l/by-path
+
+### Why
+On kiancord (observed 2026-07-17): a USB event at 20:52 renumbered a physical camera's kernel node from `/dev/video11` → `/dev/video10`. The `.env.prepared_query_data` still pointed at `/dev/video11`, so `cv2.VideoCapture` opened the metadata sibling → runtime saw the cam as DISCONNECTED. The existing v4.0.54 self-heal path — `_find_replacement_v4l_path` in [services/camera.py](vision_engine/services/camera.py) — probes unclaimed `/dev/videoN` nodes and grabs the first one that yields a frame. That's fine when only one camera is missing, but with two vanished cams (kiancord had both cam 4 AND cam 6 dropped) it could silently pair the wrong physical camera to the wrong ROI/lane.
+
+### What v4.0.138 does
+Uses `/dev/v4l/by-path/…` — a udev-generated symlink keyed by the **physical USB bus:port**, not the /dev/videoN index. Following the same by-path after a USB renumber lands on the same physical camera, deterministically. No fuzzy matching, no risk of swapping ROIs between cams.
+
+Three additions in `services/camera.py`:
+
+1. **`_by_path_for_video_node(video_node)`** — resolves any `/dev/videoN` to its current `/dev/v4l/by-path/…` symlink (`None` when the machine doesn't have v4l by-path symlinks).
+2. **`_remember_by_path(video_node)`** — snapshots the by-path on every successful open (both initial `__init__` and reconnect). Memo is process-local; rebuilt in seconds on restart.
+3. **`_recover_via_by_path(original_video_node)`** — returns whatever `/dev/videoN` the remembered by-path currently points to. Only returns nodes that: exist on disk, are different from the original, and aren't already claimed by another live `CameraBuffer`. Result still goes through `_probe_v4l_capture_capable` before adoption.
+
+`_find_replacement_v4l_path` tries the by-path recovery FIRST. Fuzzy scan is retained as fallback for the fresh-boot case (memo empty).
+
+### Fallback / safety
+- **RTSP, HTTP, basler://** sources are untouched (memo is a no-op for non-`/dev/video`).
+- **No persistence writes** — the memo lives in-process. Config files aren't rewritten at runtime (respects [[feedback_mve_config_edit_requires_stop]]).
+- **Machines without by-path symlinks** (very minimal base) — memo stays empty, `_recover_via_by_path` always returns None, existing fuzzy scan runs — no regression.
+
+### Deploy
+Backend-only Python change → MVE restart. On boot the memo is empty; first successful open on every USB camera populates it (usually within a second). From that point on, any USB renumber on the same physical port is invisible to the operator.
+
+## [4.0.137] - 2026-07-17 — Length in meters everywhere (dashboard, quality strip, tooltips, camera×length axis)
+
+Operators calibrate the line by setting `encoder_units_per_meter` in Advanced tab. That conversion is now applied to every length display in the UI so the whole app speaks the same unit:
+
+### Backend
+- `/api/status` now includes `encoder_unit` and `encoder_units_per_meter` on every tick. Cost is one cached `load_service_config()` call per SSE tick.
+
+### Frontend — new helper
+- `window.formatLength(units, opts)` in [app-core.js](vision_engine/static/js/app-core.js). Reads a cached upm seeded from `/api/status`; returns `"736 m"` when upm > 0 (with one decimal below 10 m), otherwise raw units. `opts.numeric=true` returns the number for math (not a string).
+
+### Wired in
+- **Dashboard length tile** — was `data.length || 0` (raw encoder units, no label). Now `window.formatLength(data.length)`.
+- **Shipment quality panel** — length row and normalization note. Uses per-shipment `encoder_units_per_meter` from `shipment_quality`, falling back to the global cache.
+- **Score-per-shipment chart** — tooltip's `Length: …` line, `def/100X` unit label, and the bar-annotation label under each shipment ID all render in meters when upm is set.
+- **Camera × Length scatter axis** — tick labels convert cumulative encoder units to meters; axis title reads `Length (meters, cumulative across shipments)`. Underlying data stays in encoder units so bin math and shipment_length_offsets alignment don't change.
+
+### Fallback
+Sites without calibration set (`encoder_units_per_meter == 0`) keep the existing raw-unit display — nothing regresses.
+
+## [4.0.136] - 2026-07-17 — Fix WIR (and other progressive-bucket classes) drawing as ✕ context instead of their real group
+
+### The bug
+On vteam12 the scatter showed WIR dots as crosses (context shape) even though `audio_settings["WIR"].severity > 0` classifies WIR as a defect. WIR was also missing from the class-colour legend row below the chart.
+
+### Root cause
+`class_groups` in `/api/detection_charts` at [timeline.py](vision_engine/routers/timeline.py) enumerated only classes present in the initial dot payload (`camera_scatter` + `camera_scatter_encoder`, both capped at `dot_cap`). Progressive bucket streaming (`scatter_only=1`) later brought older WIR dots onto the chart; the frontend's cached `_lastClassGroups` had no entry for WIR → `_pointStyleFor` fell back to `context` → cross. Same story for the class-colour legend: it was rendered once from the initial `datasets` array in [charts.js:1983](vision_engine/static/js/charts.js#L1983), so datasets added later by `_extendScatterFromBucket` never appeared in the legend.
+
+### Fix
+- Backend: `class_groups` now enumerates every class known to the config — union of `audio_settings` keys, `parent_object_list`, `marker_object_list`, plus any class actually seen in the window. So the frontend gets a complete map on the first fetch, and progressive buckets can look up any class shape correctly.
+- Frontend: `_extendScatterFromBucket` at [charts.js](vision_engine/static/js/charts.js) tracks whether it created a NEW dataset (not just appended to an existing one). When it did, it re-renders the class-colour legend (`#insight-scatter-legend`) with the current full dataset list, re-binding the click-to-toggle handlers.
+
+## [4.0.135] - 2026-07-17 — Camera×Encoder header: title + shape legend on one line
+
+Wrapped the scatter title and the shape legend inside a single flex row so they occupy ONE horizontal line instead of two stacked lines above the chart. Purely a layout change in `static/status.html` — no behaviour changes; shape assignment, tooltips, and dot rendering are unchanged from v4.0.134.
+
+## [4.0.134] - 2026-07-17 — Camera×Encoder scatter: per-class shape scheme + shipment length in meters
+
+### 1. Shape scheme by class group
+Every class rendered on the Camera × Encoder scatter now carries a shape that reflects its role, not only its colour. Classes are grouped server-side in `/api/detection_charts` at [timeline.py](vision_engine/routers/timeline.py) as a new `class_groups` map, keyed by class name:
+- **defect** → `●` circle — any class where `audio_settings[cls].severity > 0`
+- **parent** → `◆` rotated square (diamond) — any class in `image_processing.parent_object_list`
+- **marker** → `▲` triangle — any class in `image_processing.marker_object_list` (e.g. stitch)
+- **context** → `✕` rotated cross — everything else (unclassified helpers)
+
+Frontend switches the chart type from `bubble` → `scatter` and uses Chart.js scriptable options (`pointStyle`, `pointRadius`, `pointHoverRadius`) so each dot picks its own shape from the point's `raw` payload. The `_extendScatterFromBucket` streaming path reuses a cached `_lastClassGroups` map so newly-streamed dots keep their shape.
+
+Static legend row added above the class-colour swatches in `static/status.html` with a hover tooltip explaining the assignment rule.
+
+### 2. Shipment labels: two lines with length in meters
+Score-per-shipment X-axis labels are now arrays of `[shipment_id, length_str]`, rendered by Chart.js natively as two stacked lines so nothing collides. `length_str` uses `encoder_units_per_meter` from `/api/detection_charts` when present (`736 m`), falling back to raw encoder units + `encoder_unit` otherwise.
+
+### Deploy
+Backend + frontend change → MVE restart. Backend change is additive (extra map on payload), safe to roll back to v4.0.133 clients.
+
 ## [4.0.123] - 2026-07-14 — Disk-writer uncap + queue-size bump + shipment-status colors on the strip
 
 ### 1. MAX_DISK_WRITERS uncap

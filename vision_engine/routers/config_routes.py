@@ -585,16 +585,39 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
 
 @router.get("/api/encoder_calibration")
 def get_encoder_calibration():
-    """Return the operator-set encoder unit label and units-per-meter conversion."""
+    """Return the operator-set encoder unit label and encoder-pulses-per-unit conversion.
+
+    v4.0.140 — decoupled from the "meter" hardcode. `encoder_unit` is now a
+    free-form display label (Meter, Batch, Cubic Meter, mm, tile, …) and
+    `encoder_units_per_unit` is how many raw encoder pulses accumulate for
+    ONE of those units. The legacy field `encoder_units_per_meter` is still
+    read as a fallback when `encoder_units_per_unit` isn't present, so
+    upgrade requires zero operator action. Both new and legacy fields are
+    returned so older frontends keep working during the rollout window.
+    """
     try:
         svc = load_service_config() or {}
+        # v4.0.140 — new field wins; fall back to legacy so sites that haven't
+        # touched Advanced tab post-upgrade still display correctly.
+        upu_raw = svc.get("encoder_units_per_unit")
+        if upu_raw is None:
+            upu_raw = svc.get("encoder_units_per_meter")
+        try:
+            upu_val = float(upu_raw or 0) or None
+        except (TypeError, ValueError):
+            upu_val = None
         return JSONResponse(content={
             "encoder_unit": str(svc.get("encoder_unit") or "encoder_unit"),
-            "encoder_units_per_meter": float(svc.get("encoder_units_per_meter") or 0) or None,
+            "encoder_units_per_unit":  upu_val,
+            "encoder_units_per_meter": upu_val,   # legacy alias — one-release compat
         })
     except Exception as e:
         logger.error(f"get_encoder_calibration error: {e}")
-        return JSONResponse(content={"encoder_unit": "encoder_unit", "encoder_units_per_meter": None})
+        return JSONResponse(content={
+            "encoder_unit": "encoder_unit",
+            "encoder_units_per_unit":  None,
+            "encoder_units_per_meter": None,
+        })
 
 
 # 4.0.32 — operator-set per-camera L*a*b* "target" baseline for the heatmap's
@@ -749,25 +772,47 @@ def set_score_scale_factor(payload: Dict[str, Any]):
 
 @router.post("/api/encoder_calibration")
 def set_encoder_calibration(payload: Dict[str, Any]):
-    """Set the encoder calibration (unit label + units-per-meter)."""
+    """Set the encoder calibration (unit label + encoder-pulses-per-unit).
+
+    v4.0.140 — accepts new `encoder_units_per_unit`, still accepts legacy
+    `encoder_units_per_meter` alias for one release so an older frontend
+    talking to a newer backend keeps working. Writes BOTH fields on save
+    (identical value) so any downstream integration reading either name
+    keeps seeing the current calibration.
+
+    Label sanitization was widened: letters, digits, spaces, and a few
+    punctuation marks are now allowed so operators can write "Cubic Meter"
+    or "Roll #" instead of being reduced to alphanumerics.
+    """
     try:
         svc = load_service_config() or {}
         if "encoder_unit" in payload:
             unit = str(payload["encoder_unit"] or "encoder_unit").strip() or "encoder_unit"
-            # sanitize — keep printable, prevent injection
-            unit = "".join(c for c in unit if c.isalnum() or c in "_-/.")[:24] or "encoder_unit"
+            # v4.0.140 — allow spaces + a small punctuation whitelist so
+            # multi-word labels ("Cubic Meter", "Batch #A") are preserved.
+            unit = "".join(c for c in unit if c.isalnum() or c.isspace() or c in "_-/.#+()").strip()[:32] or "encoder_unit"
             svc["encoder_unit"] = unit
-        if "encoder_units_per_meter" in payload:
+        # v4.0.140 — accept either name; new field wins when both present.
+        raw = None
+        if "encoder_units_per_unit" in payload:
+            raw = payload["encoder_units_per_unit"]
+        elif "encoder_units_per_meter" in payload:
+            raw = payload["encoder_units_per_meter"]
+        if raw is not None:
             try:
-                upm = float(payload["encoder_units_per_meter"] or 0)
-                svc["encoder_units_per_meter"] = max(0.0, upm) if upm > 0 else 0
+                v = float(raw or 0)
+                v = max(0.0, v) if v > 0 else 0
+                svc["encoder_units_per_unit"]  = v
+                svc["encoder_units_per_meter"] = v   # keep legacy in sync one release
             except (TypeError, ValueError):
                 pass
         save_service_config(svc)
+        upu_saved = svc.get("encoder_units_per_unit") or None
         return JSONResponse(content={
             "status": "ok",
             "encoder_unit": svc.get("encoder_unit", "encoder_unit"),
-            "encoder_units_per_meter": svc.get("encoder_units_per_meter") or None,
+            "encoder_units_per_unit":  upu_saved,
+            "encoder_units_per_meter": upu_saved,   # legacy alias
         })
     except Exception as e:
         logger.error(f"set_encoder_calibration error: {e}")

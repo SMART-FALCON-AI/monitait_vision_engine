@@ -58,6 +58,79 @@ CAM_4_PATH = os.environ.get("CAM_4_PATH", "")
 _V4L_BINDINGS_LOCK = threading.Lock()
 _V4L_BOUND_PATHS: set = set()
 
+# v4.0.138 — deterministic USB-renumber recovery via /dev/v4l/by-path.
+# Every time we open a /dev/videoN successfully, we snapshot the current
+# `/dev/v4l/by-path/…` symlink that resolves to that node. That symlink is
+# tied to the physical USB bus:port, not the /dev/videoN index. When the
+# same physical camera later comes back on a DIFFERENT /dev/videoN because
+# a hub or another device renumbered the bus, following the SAME by-path
+# lands us on the same physical camera again — no fuzzy "grab the next
+# unclaimed videoN" logic, no risk of swapping cam-4's ROI onto cam-6's
+# frames. Memo lives in-process only; on MVE restart it's rebuilt on the
+# first successful open per camera (usually within the first frame poll).
+_V4L_BY_PATH_MEMO: Dict[str, str] = {}          # last-known-good /dev/videoN → its by-path
+_V4L_BY_PATH_MEMO_LOCK = threading.Lock()
+
+
+def _by_path_for_video_node(video_node: str) -> Optional[str]:
+    """Return the currently-active /dev/v4l/by-path/… symlink whose target
+    resolves to ``video_node`` (e.g. `/dev/video7`). None when the machine
+    doesn't have v4l by-path symlinks (very minimal container base) or when
+    the node isn't reachable through any."""
+    if not video_node or not video_node.startswith('/dev/video'):
+        return None
+    import glob
+    try:
+        target = os.path.realpath(video_node)
+    except Exception:
+        return None
+    for link in glob.glob('/dev/v4l/by-path/*'):
+        try:
+            if os.path.realpath(link) == target:
+                return link
+        except Exception:
+            continue
+    return None
+
+
+def _remember_by_path(video_node: str) -> Optional[str]:
+    """After a successful open on ``video_node``, snapshot the by-path so
+    a later USB renumber can be recovered deterministically. Returns the
+    resolved by-path for the caller's log line; None when no symlink exists.
+    Safe to call with any source — no-op for RTSP / basler / by-path itself.
+    """
+    if not video_node or not video_node.startswith('/dev/video'):
+        return None
+    bp = _by_path_for_video_node(video_node)
+    if bp:
+        with _V4L_BY_PATH_MEMO_LOCK:
+            _V4L_BY_PATH_MEMO[video_node] = bp
+    return bp
+
+
+def _recover_via_by_path(original_video_node: str) -> Optional[str]:
+    """If ``original_video_node`` has vanished and we previously remembered
+    its by-path, return whatever /dev/videoN that by-path resolves to now.
+    Only returns a NEW node (different from original) that:
+      - exists on disk (by-path symlink still resolves),
+      - is not already claimed by another live CameraBuffer.
+    Callers still probe the returned node with _probe_v4l_capture_capable
+    before adopting it, so a metadata-sibling swap can't sneak through."""
+    with _V4L_BY_PATH_MEMO_LOCK:
+        bp = _V4L_BY_PATH_MEMO.get(original_video_node)
+    if not bp or not os.path.exists(bp):
+        return None
+    try:
+        target = os.path.realpath(bp)
+    except Exception:
+        return None
+    if not target.startswith('/dev/video') or target == original_video_node:
+        return None
+    with _V4L_BINDINGS_LOCK:
+        if target in _V4L_BOUND_PATHS:
+            return None
+    return target
+
 
 def _register_v4l_binding(path: str) -> None:
     """Record that ``path`` is currently held by a CameraBuffer.
@@ -107,12 +180,30 @@ def _probe_v4l_capture_capable(path: str, timeout_s: float = 2.0) -> bool:
 
 
 def _find_replacement_v4l_path(current_path: str) -> Optional[str]:
-    """Look for an unclaimed /dev/videoN node that actually delivers frames.
-    Prefers EVEN-numbered nodes (metadata siblings are conventionally odd),
-    then falls back to odd nodes if no even candidate probes green (covers
-    the case where a hot-replug landed the capture endpoint on an odd
-    index, as observed on kiancord where cam moved from video10 → video11).
-    Returns the replacement path, or None if nothing works."""
+    """Look for a replacement /dev/videoN for a stale source.
+
+    v4.0.138 — DETERMINISTIC FIRST: consult the by-path memo. If we opened
+    ``current_path`` successfully before, we know which USB bus:port it was
+    on. Following the SAME by-path lands us on the same physical camera even
+    when the /dev/videoN index changed. Then AND ONLY THEN fall back to
+    probing unclaimed nodes — which is the old behaviour, kept for the
+    fresh-boot case where the memo is empty.
+
+    Prefers EVEN-numbered nodes in the fallback (metadata siblings are
+    conventionally odd), then falls back to odd nodes if no even candidate
+    probes green.
+
+    Returns the replacement path, or None if nothing works.
+    """
+    # v4.0.138 — deterministic by-path recovery. Zero risk of grabbing the
+    # wrong physical camera because the bus:port is baked into the symlink.
+    recovered = _recover_via_by_path(current_path)
+    if recovered and _probe_v4l_capture_capable(recovered, timeout_s=2.0):
+        logger.info(
+            f"v4l-recover: {current_path} → {recovered} via by-path memo "
+            f"(bus:port preserved, no fuzzy hunt needed)"
+        )
+        return recovered
     import glob
     even_candidates: List[tuple] = []
     odd_candidates: List[tuple] = []
@@ -720,6 +811,12 @@ class CameraBuffer:
         else:
             self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
             logger.info(f"Initializing USB camera: {source}")
+            # v4.0.138 — snapshot the current /dev/v4l/by-path symlink that
+            # points at this /dev/videoN so a later USB renumber can be
+            # recovered deterministically (see _recover_via_by_path).
+            _bp = _remember_by_path(source)
+            if _bp:
+                logger.info(f"USB camera {source}: by-path memo → {_bp}")
 
         # Set resolution
         self.camera.set(cv2.CAP_PROP_FPS, 30)
@@ -912,6 +1009,10 @@ class CameraBuffer:
                             else:
                                 self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
                                 logger.info(f"Reconnecting USB camera: {self.source}")
+                                # v4.0.138 — refresh by-path memo on every reconnect
+                                # so a subsequent USB renumber can be recovered even
+                                # if it happens minutes/hours after the initial open.
+                                _remember_by_path(self.source)
 
                             # Re-apply saved camera properties
                             self._apply_saved_props()

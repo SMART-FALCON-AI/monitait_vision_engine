@@ -1,10 +1,63 @@
+// v4.0.140 — global length formatter, decoupled from "meter".
+// Reads `encoder_unit` (any operator-chosen label — Meter, Batch, Cubic
+// Meter, mm, tile, …) and `encoder_units_per_unit` (encoder pulses per 1
+// of those units) from a small cache seeded on every /api/status tick.
+// When upu > 0, returns "12.3 Batch"; otherwise "12,345 units".
+// Used by dashboard tile, score-per-shipment chart, quality strip, and
+// camera×length axis so every length display in the UI is in the SAME
+// operator-chosen unit.
+//
+// Legacy: v4.0.137 called this cache `upm` (units-per-meter). v4.0.140
+// renames the field to `upu` (units-per-unit); still seeded from either
+// wire field name so an older backend on the same LAN keeps working.
+window._lengthCache = { upu: 0, unit: 'units' };
+window.formatLength = function (value, opts) {
+    opts = opts || {};
+    const raw = Number(value);
+    if (!Number.isFinite(raw)) return '—';
+    const upu  = Number(window._lengthCache.upu)  || 0;
+    const unit = window._lengthCache.unit || 'units';
+    if (upu > 0) {
+        const converted = raw / upu;
+        if (opts.numeric) return converted;
+        const abs = Math.abs(converted);
+        // < 10 units → one decimal so operators see "3.2 Batch", not "3 Batch";
+        // else round to the nearest whole unit so long rolls read as
+        // "1,234 Meter" not "1,234.7 Meter".
+        const s = abs < 10 ? converted.toFixed(1) : Math.round(converted).toLocaleString();
+        return s + ' ' + unit;
+    }
+    if (opts.numeric) return raw;
+    return raw.toLocaleString() + ' ' + unit;
+};
+
 // Update UI with status data (used by SSE stream)
 function updateStatusUI(data) {
+    // v4.0.140 — seed the length cache from every /api/status tick. Reads
+    // the new `encoder_units_per_unit` field first, falls back to legacy
+    // `encoder_units_per_meter` so a page loaded before v4.0.140 backend
+    // was deployed keeps working. Kept BEFORE the tile updates below so
+    // #length-value formats with the fresh conversion the moment the
+    // operator saves it in Advanced tab.
+    if (data && data.encoder_unit) window._lengthCache.unit = data.encoder_unit;
+    if (data) {
+        const rawUpu = (data.encoder_units_per_unit !== undefined)
+            ? data.encoder_units_per_unit
+            : data.encoder_units_per_meter;
+        if (rawUpu === null || rawUpu === undefined) {
+            window._lengthCache.upu = 0;
+        } else {
+            const _v = Number(rawUpu);
+            window._lengthCache.upu = Number.isFinite(_v) && _v > 0 ? _v : 0;
+        }
+    }
     document.getElementById('encoder-value').textContent = data.encoder_value || 0;
     // 4.0.54 — Length = encoder_value - shipment_start_encoder. Server clamps
     // to 0 when shipment is inactive so this line stays simple.
+    // v4.0.137 — formatted through window.formatLength so the dashboard tile
+    // shows meters when calibration is set.
     const _lengthEl = document.getElementById('length-value');
-    if (_lengthEl) _lengthEl.textContent = data.length || 0;
+    if (_lengthEl) _lengthEl.textContent = window.formatLength(data.length || 0);
     document.getElementById('speed-value').textContent = (data.ppm || 0).toFixed ? (data.ppm || 0).toFixed(2) : data.ppm || 0;
     document.getElementById('pps-value').textContent = data.pps || 0;
     document.getElementById('ok-counter').textContent = data.ok_counter || 0;
@@ -618,30 +671,57 @@ function updateAPITypeFields() {
     }
 }
 
-// 3.21.14 — Encoder calibration (encoder_unit + encoder_units_per_meter).
-// Drives Shipment Quality Score normalization.
+// v4.0.140 — Encoder calibration (encoder_unit + encoder_units_per_unit).
+// Fully decoupled from "meter": encoder_unit is any operator-chosen display
+// label (Meter, Batch, Cubic Meter, mm, tile, …), encoder_units_per_unit
+// is how many encoder pulses accumulate for ONE of those units. Drives the
+// Shipment Quality Score normalisation AND every length display in the UI.
 async function loadEncoderCalibration() {
     try {
         const r = await fetch('/api/encoder_calibration');
         if (!r.ok) return;
         const d = await r.json();
         const u = document.getElementById('encoder-unit-input');
-        const m = document.getElementById('encoder-units-per-meter-input');
+        // v4.0.140 — input renamed to encoder-units-per-unit-input in
+        // status.html. Old id kept as a fallback for a partial deploy
+        // where an operator's browser cached the pre-v4.0.140 status.html.
+        const m = document.getElementById('encoder-units-per-unit-input')
+               || document.getElementById('encoder-units-per-meter-input');
         if (u && d.encoder_unit) u.value = d.encoder_unit;
-        if (m && d.encoder_units_per_meter !== null && d.encoder_units_per_meter !== undefined) {
-            m.value = d.encoder_units_per_meter;
-        }
+        // Backend emits both new and legacy names; take whichever is present.
+        const upu = (d.encoder_units_per_unit !== null && d.encoder_units_per_unit !== undefined)
+            ? d.encoder_units_per_unit
+            : d.encoder_units_per_meter;
+        if (m && upu !== null && upu !== undefined) m.value = upu;
+        // Update every "1 <unit>" label that references the current name
+        // so the operator sees "how many encoder pulses per 1 Batch" the
+        // moment they type in the label field.
+        _refreshEncoderUnitLabels();
     } catch (e) {}
 }
 
+// v4.0.140 — helper to update every UI element that echoes the current
+// unit name (e.g. the "pulses per 1 <unit>" input label, the placeholder,
+// the save-button confirmation text). Called after load and on every
+// keystroke in the label input.
+function _refreshEncoderUnitLabels() {
+    const unit = (document.getElementById('encoder-unit-input')?.value || '').trim() || 'unit';
+    document.querySelectorAll('[data-encoder-unit-echo]').forEach(el => {
+        el.textContent = unit;
+    });
+}
+window._refreshEncoderUnitLabels = _refreshEncoderUnitLabels;
+
 async function saveEncoderCalibration() {
     const unit = (document.getElementById('encoder-unit-input')?.value || '').trim() || 'encoder_unit';
-    const upmRaw = (document.getElementById('encoder-units-per-meter-input')?.value || '').trim();
+    const upuRaw = (document.getElementById('encoder-units-per-unit-input')?.value
+                 || document.getElementById('encoder-units-per-meter-input')?.value
+                 || '').trim();
     const resp = document.getElementById('encoder-unit-response');
     const body = { encoder_unit: unit };
-    if (upmRaw) {
-        const upm = parseFloat(upmRaw);
-        if (Number.isFinite(upm) && upm >= 0) body.encoder_units_per_meter = upm;
+    if (upuRaw) {
+        const upu = parseFloat(upuRaw);
+        if (Number.isFinite(upu) && upu >= 0) body.encoder_units_per_unit = upu;
     }
     try {
         const r = await fetch('/api/encoder_calibration', {
@@ -651,7 +731,12 @@ async function saveEncoderCalibration() {
         });
         const d = await r.json();
         if (r.ok) {
-            if (resp) { resp.textContent = `Saved. unit=${d.encoder_unit}` + (d.encoder_units_per_meter ? `, ${d.encoder_units_per_meter}/m` : ''); resp.className = 'control-response success'; }
+            const upuSaved = d.encoder_units_per_unit ?? d.encoder_units_per_meter;
+            if (resp) {
+                resp.textContent = `Saved. unit=${d.encoder_unit}` + (upuSaved ? `, ${upuSaved} pulses per 1 ${d.encoder_unit}` : '');
+                resp.className = 'control-response success';
+            }
+            _refreshEncoderUnitLabels();
         } else {
             if (resp) { resp.textContent = `Error: ${d.detail || 'failed'}`; resp.className = 'control-response error'; }
         }
@@ -1572,9 +1657,23 @@ function createCameraCard(cameraId, camera) {
                     <span class="camera-info-value">IP Camera (${camera.ip || 'N/A'})</span>
                 </div>
                 ` : ''}
-                <div class="camera-info-item">
+                <!-- v4.0.142 — Path row stacked so the by-path symlink can
+                     wrap on its own line without overlapping the label.
+                     Value is monospace for readability (bus:port digits). -->
+                <div class="camera-info-item camera-info-item--stack">
                     <span class="camera-info-label">Path</span>
-                    <span class="camera-info-value" style="font-size: 11px;">${isIPCamera && camera.camera_path ? camera.camera_path : camera.path || '-'}</span>
+                    <span class="camera-info-value" style="font-size: 10px; font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; line-height: 1.35;">
+                        ${(() => {
+                            if (isIPCamera && camera.camera_path) return camera.camera_path;
+                            if (camera.by_path) {
+                                const bp = String(camera.by_path).replace(/^\/dev\/v4l\/by-path\//, '');
+                                const raw = camera.path || '';
+                                return `<span title="by-path: ${camera.by_path}\ncurrently → ${raw}">${bp}</span>` +
+                                       (raw ? ` <span style="font-size: 9px; color: var(--text-secondary); font-weight: normal;">→ ${raw}</span>` : '');
+                            }
+                            return camera.path || '-';
+                        })()}
+                    </span>
                 </div>
                 <div class="camera-info-item">
                     <span class="camera-info-label">Resolution</span>

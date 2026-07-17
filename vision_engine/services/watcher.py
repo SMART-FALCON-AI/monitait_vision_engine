@@ -2177,8 +2177,18 @@ class ArduinoSocket:
 
                             else:
                                 remove_raw_image = False
-                                name_bb = os.path.join("raw_images", f"{stream_path}_nd.jpg")
-                                cv2.imwrite(name_bb, stream_frame[1])
+                                # v4.0.124 — removed the `_nd.jpg` write.
+                                # Grepped the whole repo: nothing ever reads
+                                # `_nd.jpg` files (write-only dead code).
+                                # It was also going to the wrong path — the
+                                # `os.path.join("raw_images", stream_path…)`
+                                # form produced a nested `raw_images/
+                                # raw_images/…` tree the disk-pressure
+                                # janitor never walked, so it grew forever.
+                                # The raw frame is already on disk at
+                                # `stream_path.jpg`; no need for a `_nd`
+                                # duplicate. Operator asked: "don't we only
+                                # store the raw image?" — yes, correct.
                                 stream_image = np.concatenate((stream_image, frame_red_image), axis=1) if stream_image is not None else frame_red_image
 
                         # Check if we should remove the raw image

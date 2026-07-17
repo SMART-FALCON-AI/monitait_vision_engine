@@ -729,14 +729,40 @@ body {
 .camera-info-item {
     display: flex;
     justify-content: space-between;
+    align-items: center;
+    gap: 8px;
     padding: 6px 10px;
     background: rgba(15, 23, 42, 0.5);
     border: 1px solid rgba(51, 65, 85, 0.6);
     border-radius: 4px;
     font-size: 13px;
 }
-.camera-info-label { color: var(--text-secondary); }
-.camera-info-value { font-weight: bold; color: var(--text-primary); }
+.camera-info-label { color: var(--text-secondary); flex-shrink: 0; }
+.camera-info-value {
+    font-weight: bold;
+    color: var(--text-primary);
+    /* v4.0.142 — min-width:0 disables the flex "don't-shrink-below-intrinsic-
+       content-width" default, so a long value (like a /dev/v4l/by-path/…
+       symlink) actually wraps inside its column instead of overflowing
+       leftward into the label. text-align:right keeps short values right-
+       aligned as before. */
+    min-width: 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+/* v4.0.142 — stack variant for rows whose value is too long to share a line
+   with the label without looking cramped. Label sits above; value takes the
+   full width. Used by the Camera Path row (usb by-path symlinks are 45-60
+   chars). */
+.camera-info-item--stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+}
+.camera-info-item--stack .camera-info-value {
+    text-align: left;
+}
 .info-tooltip {
     position: relative;
     display: inline-flex;

@@ -1164,7 +1164,12 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         "impact_total": 0.0, "impact_by_class": {},
         "total_detections": 0, "top_defects": [],
         "encoder_min": None, "encoder_max": None, "encoder_span": 0,
-        "encoder_unit": "encoder_unit", "encoder_units_per_meter": None,
+        "encoder_unit": "encoder_unit",
+        # v4.0.140 — both new and legacy fields present on the empty payload
+        # so a caller iterating .get(...) uniformly against either sees None
+        # instead of KeyError.
+        "encoder_units_per_unit":  None,
+        "encoder_units_per_meter": None,
         "impact_per_unit": 0.0, "impact_per_unit_label": "/unit",
         "first_ts": None, "last_ts": None, "duration_sec": 0,
         "throughput": 0.0, "throughput_label": "units/sec",
@@ -1194,10 +1199,17 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             for p in _procs if isinstance(p, dict) and p.get("name")
         }
         encoder_unit = str(_svc.get("encoder_unit") or "encoder_unit")
+        # v4.0.140 — read new `encoder_units_per_unit`; fall back to legacy
+        # `encoder_units_per_meter` so calibration set before v4.0.140 still
+        # drives the shipment-quality normalisation without operator action.
+        _upu_raw = _svc.get("encoder_units_per_unit")
+        if _upu_raw is None:
+            _upu_raw = _svc.get("encoder_units_per_meter")
         try:
-            encoder_units_per_meter = float(_svc.get("encoder_units_per_meter") or 0)
+            encoder_units_per_meter = float(_upu_raw or 0)
         except (TypeError, ValueError):
             encoder_units_per_meter = 0.0
+        encoder_units_per_unit = encoder_units_per_meter   # v4.0.140 alias for readability
 
         # v4.0.111 — also exclude classes the operator hid in the Process tab.
         # Same source (audio_settings[cls].show === False) that
@@ -1452,6 +1464,10 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             "encoder_max": int(enc_max) if enc_max is not None else None,
             "encoder_span": encoder_span,
             "encoder_unit": encoder_unit,
+            # v4.0.140 — new field is primary; legacy alias kept for one release
+            # so any consumer (report generator, dashboards) that still reads
+            # the old name doesn't regress.
+            "encoder_units_per_unit":  encoder_units_per_unit or None,
             "encoder_units_per_meter": encoder_units_per_meter or None,
             "frame_count": int(frame_count or 0),
             "first_ts": first_ts.isoformat() if first_ts else None,
@@ -1960,10 +1976,12 @@ def shipment_quality_score_report(request: Request, shipment: str = "", window: 
     # --- KPI grid ---
     story.append(Paragraph("Production KPIs", H2))
     span = payload.get("encoder_span") or 0
-    upm = payload.get("encoder_units_per_meter")
+    # v4.0.140 — read new field first, legacy fallback so PDF report on
+    # older sites still shows the physical-length hint.
+    upu = payload.get("encoder_units_per_unit") or payload.get("encoder_units_per_meter")
     length_txt = f"{span:,} {unit}"
-    if upm and span:
-        length_txt += f"  (≈ {span / upm:,.1f} m)"
+    if upu and span:
+        length_txt += f"  (≈ {span / upu:,.1f} {unit})"
     throughput_label = payload.get("throughput_label", "units/sec")
     if is_default_unit:
         throughput_label = "units/sec"
@@ -2279,12 +2297,20 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
     should page.
     """
     _windows = {
-        "1h":  "1 hour",
-        "6h":  "6 hours",
-        "24h": "24 hours",
-        "7d":  "7 days",
-        "30d": "30 days",
-        "90d": "90 days",
+        "1h":   "1 hour",
+        "6h":   "6 hours",
+        "24h":  "24 hours",
+        "7d":   "7 days",
+        "30d":  "30 days",
+        "90d":  "90 days",
+        # v4.0.131 — long-window support so operators can look at quarterly
+        # / yearly score trends. Only /api/quality/shipments is bounded
+        # enough to serve these (30 rows max via `n` cap). The scatter +
+        # detection_stats + detection_charts endpoints would time out; the
+        # Charts tab UI enters "long window" mode on the frontend and only
+        # renders Score-per-shipment for these values.
+        "120d": "120 days",
+        "1y":   "365 days",
     }
     interval = _windows.get(window, "30 days")
     # v4.0.103 — clamp n: <=0 → uncapped (5000 max), else clamp to [1, 5000]
@@ -2363,7 +2389,9 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
                     # sheets, wire kilometres, whatever your encoder measures).
                     "encoder_span":            qp.get("encoder_span") if qp else 0,
                     "encoder_unit":            qp.get("encoder_unit", "unit") if qp else "unit",
-                    "encoder_units_per_meter": qp.get("encoder_units_per_meter") if qp else None,
+                    # v4.0.140 — new field primary; legacy alias kept one release.
+                    "encoder_units_per_unit":  (qp.get("encoder_units_per_unit") if qp else None),
+                    "encoder_units_per_meter": (qp.get("encoder_units_per_meter") if qp else None),
                 })
             except Exception:
                 out.append({
@@ -2949,11 +2977,16 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
     yet" state instead of erroring.
     """
     # window → (interval SQL, bucket SQL, label fmt)
+    # v4.0.126 — added 30d + 90d so operators can inspect long-window
+    # detection distributions from the Charts tab without hitting the
+    # "no stored detections" empty state on any window > 7d.
     _windows = {
         "1h":  ("1 hour",   "1 minute"),
         "6h":  ("6 hours",  "10 minutes"),
         "24h": ("24 hours", "1 hour"),
         "7d":  ("7 days",   "6 hours"),
+        "30d": ("30 days",  "1 day"),
+        "90d": ("90 days",  "1 day"),
     }
     interval, bucket = _windows.get(window, _windows["1h"])
     empty = {"by_class": {}, "timeline": [], "total": 0, "window": window, "persisted": False}
@@ -2964,59 +2997,77 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
         conn = get_db_connection()
         if conn is None:
             return JSONResponse(content=empty)
-        cur = conn.cursor()
+        # v4.0.128 — autocommit mode so each query is its own tiny
+        # transaction. When a query hits statement_timeout Postgres cancels
+        # ONLY that query — the next cursor.execute() starts clean.
+        # Savepoints on a shared cursor were fragile (a cancelled statement
+        # left the cursor in a state where even ROLLBACK TO SAVEPOINT
+        # failed) so the outer try/except kept swallowing the exception
+        # AND every subsequent per-query catch. Autocommit isolates them.
+        # Pool default statement_timeout (9 s) governs each; that's enough
+        # for the sub-second by_class + impact queries and forces the slow
+        # timeline query to fail fast without eating the outer budget.
+        prev_autocommit = conn.autocommit
+        conn.autocommit = True
 
-        # v4.0.101 — raise per-transaction statement_timeout to 15 s (see the
-        # same block in `detection_charts` above for full rationale). The pool
-        # default of 3 s (v4.0.79) was aborting BOTH queries below on khoy
-        # (902 k+ rows in 24 h), the exception handler returned an empty
-        # payload, and the Charts tab UI hid the whole `insight-charts`
-        # container — including the scatter — because `hasData` was false.
-        # SET LOCAL reverts when the connection is released.
-        cur.execute("SET LOCAL statement_timeout = 15000")
-
-        # Class distribution over the window. Prefer the human-readable `name`
-        # (e.g. "DIE_LINE", "mean_L") over the numeric `class` index. Cap the rows
-        # scanned so a huge hypertable (millions of rows) can't make this query
-        # run for many seconds — a recent sample is representative for the panel.
-        cur.execute(
-            """
-            SELECT COALESCE(elem->>'name', elem->>'class') AS cls, COUNT(*) AS n
-            FROM (
-                SELECT detections FROM inference_results
-                WHERE time > NOW() - INTERVAL %s
-                ORDER BY time DESC
-            ) recent,
-            LATERAL jsonb_array_elements(recent.detections) AS elem
-            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
-              -- 4.0.38: skip synthetic entries (e.g. `_color`) so they don't
-              -- show up as a real class in the Detections-by-class bar / pie.
-              AND COALESCE(elem->>'name', '') !~ '^_'
-            GROUP BY cls
-            ORDER BY n DESC
-            LIMIT 30
-            """,
-            (interval, float(min_conf or 0.0)),
-        )
         by_class = {}
-        for cls, n in cur.fetchall():
-            if cls is not None:
-                by_class[str(cls)] = int(n)
+        timeline = []
+        try:
+            cur = conn.cursor()
+            # v4.0.129 — explicit per-statement timeout: 6 s for by_class
+            # (has to be enough for LIMIT 100k + LATERAL unnest on khoy's
+            # 8 M-row hypertable, empirically ~3-4 s at peak; anything
+            # over 6 s means the DB is thrashing and we should just fail
+            # fast so the panel populates from the other two queries).
+            cur.execute("SET statement_timeout = 6000")
+            cur.execute(
+                """
+                SELECT COALESCE(elem->>'name', elem->>'class') AS cls, COUNT(*) AS n
+                FROM (
+                    SELECT detections FROM inference_results
+                    WHERE time > NOW() - INTERVAL %s
+                    ORDER BY time DESC
+                    LIMIT 100000
+                ) recent,
+                LATERAL jsonb_array_elements(recent.detections) AS elem
+                WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
+                  -- 4.0.38: skip synthetic entries (e.g. `_color`) so they don't
+                  -- show up as a real class in the Detections-by-class bar / pie.
+                  AND COALESCE(elem->>'name', '') !~ '^_'
+                GROUP BY cls
+                ORDER BY n DESC
+                LIMIT 30
+                """,
+                (interval, float(min_conf or 0.0)),
+            )
+            for cls, n in cur.fetchall():
+                if cls is not None:
+                    by_class[str(cls)] = int(n)
+            cur.close()
+        except Exception as _e1:
+            logger.warning(f"detection_stats by_class failed: {type(_e1).__name__}: {_e1}")
 
-        # Detections-per-bucket timeline
-        cur.execute(
-            """
-            SELECT time_bucket(INTERVAL %s, time) AS bkt,
-                   COALESCE(SUM(detection_count), 0) AS n
-            FROM inference_results
-            WHERE time > NOW() - INTERVAL %s
-            GROUP BY bkt
-            ORDER BY bkt
-            """,
-            (bucket, interval),
-        )
-        timeline = [{"t": b.strftime("%m-%d %H:%M"), "count": int(n)} for b, n in cur.fetchall()]
-        cur.close()
+        # Detections-per-bucket timeline. Give it 4 s — a SUM aggregate
+        # over the whole window either fits in that or misses the panel
+        # (by_class is what really matters here).
+        try:
+            cur = conn.cursor()
+            cur.execute("SET statement_timeout = 4000")
+            cur.execute(
+                """
+                SELECT time_bucket(INTERVAL %s, time) AS bkt,
+                       COALESCE(SUM(detection_count), 0) AS n
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s
+                GROUP BY bkt
+                ORDER BY bkt
+                """,
+                (bucket, interval),
+            )
+            timeline = [{"t": b.strftime("%m-%d %H:%M"), "count": int(n)} for b, n in cur.fetchall()]
+            cur.close()
+        except Exception as _e2:
+            logger.warning(f"detection_stats timeline failed: {type(_e2).__name__}: {_e2}")
 
         # 3.21.12 — impact score per class (severity × confidence, summed per class).
         # area_factor is currently 1 (no normalisation yet); will be added when we
@@ -3027,24 +3078,38 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
         _severities = {k: (v.get("severity", 0) or 0) / 100.0 for k, v in _audio.items() if isinstance(v, dict)}
         impact_by_class = {}
         if any(s > 0 for s in _severities.values()):
-            cur2 = conn.cursor()
-            cur2.execute(
-                """
-                SELECT (det->>'name') AS cls,
-                       SUM((det->>'confidence')::float) AS conf_sum
-                FROM inference_results, LATERAL jsonb_array_elements(detections) det
-                WHERE time > NOW() - INTERVAL %s
-                  AND COALESCE((det->>'confidence')::float, 0) >= %s
-                  -- 4.0.38: skip synthetic (`_color` etc.) from impact-by-class too.
-                  AND COALESCE(det->>'name', '') !~ '^_'
-                GROUP BY (det->>'name')
-                """,
-                (interval, float(min_conf or 0.0)),
-            )
-            for cls, conf_sum in cur2.fetchall():
-                if cls and _severities.get(cls, 0) > 0:
-                    impact_by_class[str(cls)] = round(_severities[cls] * float(conf_sum or 0.0), 2)
-            cur2.close()
+            try:
+                cur2 = conn.cursor()
+                cur2.execute("SET statement_timeout = 6000")
+                cur2.execute(
+                    """
+                    SELECT (det->>'name') AS cls,
+                           SUM((det->>'confidence')::float) AS conf_sum
+                    FROM (
+                        SELECT detections FROM inference_results
+                        WHERE time > NOW() - INTERVAL %s
+                        ORDER BY time DESC
+                        LIMIT 100000
+                    ) recent,
+                    LATERAL jsonb_array_elements(recent.detections) det
+                    WHERE COALESCE((det->>'confidence')::float, 0) >= %s
+                      -- 4.0.38: skip synthetic (`_color` etc.) from impact-by-class too.
+                      AND COALESCE(det->>'name', '') !~ '^_'
+                    GROUP BY (det->>'name')
+                    """,
+                    (interval, float(min_conf or 0.0)),
+                )
+                for cls, conf_sum in cur2.fetchall():
+                    if cls and _severities.get(cls, 0) > 0:
+                        impact_by_class[str(cls)] = round(_severities[cls] * float(conf_sum or 0.0), 2)
+                cur2.close()
+            except Exception as _e3:
+                logger.warning(f"detection_stats impact_by_class failed: {type(_e3).__name__}: {_e3}")
+
+        # Restore autocommit to the pool default so the connection is
+        # clean when handed back.
+        try: conn.autocommit = prev_autocommit
+        except Exception: pass
         impact_total = round(sum(impact_by_class.values()), 2)
 
         total = sum(by_class.values())
@@ -3785,6 +3850,17 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # the rest of the endpoint. Ordered oldest-first so left → right
         # on the strip reads oldest → newest.
         shipment_spans = []
+        # v4.0.132 — rollback any aborted transaction state left by
+        # earlier heavy queries in this endpoint (color_heatmap, etc.).
+        # Without this, on khoy the earlier queries can hit
+        # statement_timeout, leave the transaction aborted, and this
+        # shipment_spans query then fails with "current transaction is
+        # aborted" — silently swallowed by logger.debug so the payload
+        # went out with shipment_spans=[] and shipment_length_offsets={}
+        # even though the /api/shipment_spans standalone endpoint (which
+        # uses a fresh connection) returned the same data fine.
+        try: conn.rollback()
+        except Exception: pass
         try:
             _sp_cur = conn.cursor()
             # v4.0.114 — bounded-CTE variant. The v4.0.111 shape did a raw
@@ -3835,7 +3911,96 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 })
             _sp_cur.close()
         except Exception as _spe:
-            logger.debug(f"shipment_spans compute failed: {_spe}")
+            # v4.0.132 — raise from debug → warning so the operator can
+            # see when this compute fails. It's the source of the length-
+            # axis offsets AND the shipment strip; a silent failure here
+            # is why the length toggle looked broken on khoy.
+            logger.warning(f"shipment_spans compute failed: {type(_spe).__name__}: {_spe}")
+            try: conn.rollback()
+            except Exception: pass
+
+        # v4.0.132 — cumulative length offsets so the frontend can render a
+        # single continuous "length axis" across all shipments in the window,
+        # immune to PLC-encoder resets. For each shipment (ordered by first-
+        # timestamp), the offset is the sum of prior shipments' encoder spans.
+        # Frontend then computes each dot's global-length x as:
+        #    offsets[dot.ship].offset + max(0, dot.encoder - offsets[dot.ship].enc_min)
+        # `enc_min` is included so the frontend doesn't have to look it up
+        # separately. If a shipment straddles a PLC reset within its span,
+        # dots after the reset will overlap dots from before the reset on
+        # the length axis — that's a limitation of not storing per-row
+        # length. Most shipments don't reset.
+        shipment_length_offsets = {}
+        try:
+            _cum = 0
+            for _sp in shipment_spans:
+                _sid = _sp.get("shipment")
+                if not _sid:
+                    continue
+                _em = int(_sp.get("enc_min") or 0)
+                _ex = int(_sp.get("enc_max") or 0)
+                _span = max(0, _ex - _em)
+                shipment_length_offsets[_sid] = {
+                    "offset": int(_cum),
+                    "enc_min": int(_em),
+                    "length_span": int(_span),
+                    "t_min": _sp.get("t_min"),
+                    "t_max": _sp.get("t_max"),
+                }
+                _cum += _span
+        except Exception as _sle:
+            logger.debug(f"shipment_length_offsets compute failed: {_sle}")
+
+        # v4.0.134 — class-group map for shape-based scatter markers.
+        # 4 groups drive point-shape on the Camera×Encoder scatter:
+        #   defect  = severity > 0 in audio_settings (real issue to flag)     → circle
+        #   parent  = class in parent_object_list (base material/object)      → diamond (rectRot)
+        #   marker  = class in marker_object_list (e.g. stitch, seam)         → triangle
+        #   context = fallback (unclassified / low-signal)                    → cross
+        # Frontend reads the map to set per-point pointStyle. Color still
+        # comes from the per-class palette so shape adds a SECOND channel
+        # for "type of thing" without competing with color.
+        class_groups = {}
+        try:
+            from config import load_service_config as _lsc_cg
+            _svc_cg = _lsc_cg() or {}
+            _audio_cg = _svc_cg.get("audio_settings", {}) or {}
+            _img_proc = _svc_cg.get("image_processing", {}) or {}
+            _parents_cg = set(_img_proc.get("parent_object_list") or [])
+            _markers_cg = set(_img_proc.get("marker_object_list") or [])
+            # v4.0.136 — enumerate EVERY class the config knows about, not just
+            # ones with dots in the current dot_cap slice. Progressive bucket
+            # streaming later brings older classes onto the chart; the frontend
+            # caches this map and looks up shapes by class name, so a missing
+            # entry means the dot renders as `context` (cross) even when the
+            # class is really a defect. This was the WIR bug on vteam12: WIR
+            # only appeared in the older buckets, so `class_groups` was
+            # {TB:defect} at fetch time and WIR drew as a cross.
+            _all_classes = set()
+            _all_classes.update(k for k in _audio_cg.keys() if k)
+            _all_classes.update(_parents_cg)
+            _all_classes.update(_markers_cg)
+            # Still union with anything actually seen in the current window,
+            # so a class that exists on disk / DB without a config entry still
+            # gets a group ("context" via the fallback below).
+            for _row in (camera_scatter_encoder or []):
+                _c = _row.get("cls")
+                if _c: _all_classes.add(str(_c))
+            for _row in (camera_scatter or []):
+                _c = _row.get("cls")
+                if _c: _all_classes.add(str(_c))
+            for _c in _all_classes:
+                if _c in _parents_cg:
+                    class_groups[_c] = "parent"
+                elif _c in _markers_cg:
+                    class_groups[_c] = "marker"
+                else:
+                    _sev = (_audio_cg.get(_c, {}) or {}).get("severity", 0)
+                    try: _sev = float(_sev or 0)
+                    except Exception: _sev = 0
+                    class_groups[_c] = "defect" if _sev > 0 else "context"
+        except Exception as _cge:
+            logger.debug(f"class_groups compute failed: {_cge}")
 
         _payload = {
             "shipments": shipments,
@@ -3844,6 +4009,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             "confidence_by_class": confidence_by_class,
             "camera_scatter": camera_scatter,
             "camera_scatter_encoder": camera_scatter_encoder,
+            "class_groups": class_groups,
             "camera_y_order": camera_y_order,
             "color_heatmap": color_heatmap,
             "color_heatmap_time": color_heatmap_time,
@@ -3864,6 +4030,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # (introduced in v4.0.111 but never wired into the payload).
             # Empty list when the CTE returns nothing.
             "shipment_spans": shipment_spans,
+            # v4.0.132 — {shipment_id: {offset, enc_min, length_span, t_min, t_max}}
+            "shipment_length_offsets": shipment_length_offsets,
         }
         _endpoint_cache_put(_cache_key, _payload)
         return JSONResponse(content=_payload)

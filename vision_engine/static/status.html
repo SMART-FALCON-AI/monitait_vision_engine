@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.123"></script>
+        <script src="/static/js/i18n.js?v=4.0.142"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -234,9 +234,14 @@
                         </div>
 
                         <!-- System Resources -->
+                        <!-- v4.0.139 — was black on hashtgerd (light-theme + no
+                             explicit color on the CPU/RAM/Disk row). Grid now
+                             carries color:var(--text-primary) so both the
+                             labels and the sub-details inherit correctly
+                             regardless of the browser's default color. -->
                         <div class="status-box" style="padding: 5px;">
                             <div style="font-size: 8px; color: var(--text-secondary); margin-bottom: 3px;">💻 <span data-i18n="system">System</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_system">Live server resource usage.</span></span></div>
-                            <div style="font-size: 9px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
+                            <div style="font-size: 9px; color: var(--text-primary); display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;">
                                 <div><span data-i18n="cpu">CPU</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_cpu">CPU usage percentage and core count.</span></span>: <strong id="system-cpu-value" style="color: var(--primary-color);">...</strong><br><span id="system-cpu-cores" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
                                 <div><span data-i18n="ram">RAM</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_ram">Memory usage percentage and total available.</span></span>: <strong id="system-ram-value" style="color: var(--primary-color);">...</strong><br><span id="system-ram-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
                                 <div><span data-i18n="disk">Disk</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_disk">Disk usage percentage and total capacity.</span></span>: <strong id="system-disk-value" style="color: var(--primary-color);">...</strong><br><span id="system-disk-details" style="font-size: 8px; color: var(--text-secondary);">...</span></div>
@@ -981,7 +986,12 @@
                                 <option value="7d">Last 7 days</option>
                                 <option value="30d">Last 30 days</option>
                                 <option value="90d">Last 90 days</option>
+                                <option value="120d">Last 120 days</option>
+                                <option value="1y">Last 1 year</option>
                             </select>
+                            <span id="insight-long-window-note" style="display:none; font-size:11px; color:#f97316; font-style:italic; margin-left:8px;">
+                                📊 Long window — only Score-per-shipment loaded (other panels skipped for performance)
+                            </span>
                             <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Shipment:</span>
                             <select id="insight-shipment" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; min-width:140px;">
                                 <option value="">All shipments</option>
@@ -1085,6 +1095,7 @@
                                 <!-- 3.26.0 — default is now 📏 Encoder; 📍 Time can still be toggled. -->
                                 <button id="insight-axis-toggle-time" onclick="setInsightAxis('time')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📍 Time</button>
                                 <button id="insight-axis-toggle-encoder" onclick="setInsightAxis('encoder')" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📏 Encoder</button>
+                                <button id="insight-axis-toggle-length" onclick="setInsightAxis('length')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;" title="Cumulative length across shipments — immune to PLC encoder resets">🧵 Length</button>
                                 <span style="color:var(--text-secondary); font-size:10px; margin-left:6px;">scatter + quality strip + ejection strip all use the selected axis</span>
                                 <span style="color:var(--text-secondary); margin-left:14px;">Color baseline:</span>
                                 <!-- 4.0.30 — heatmap baseline mode toggle. Stored as `mve_heatmap_baseline`
@@ -1119,7 +1130,16 @@
                                 <span id="hm-dot-cap-warn" style="display:none; color:#fcd34d; margin-left:6px; font-size:11px;" title="Chart.js pan/zoom slows noticeably above ~3000 dots per class.">⚠ slow</span>
                             </div>
                             <!-- 4.0.44 — title + legend lifted OUT of Chart.js so the colour heatmap (which paints inside chartArea) can't reach them. -->
-                            <div id="insight-scatter-title" style="text-align:center; color:#cbd5e1; font-size:13px; font-weight:500; margin-top:8px; margin-bottom:4px;">Camera × encoder (roll position) — hover for image, click dot for the exact frame</div>
+                            <!-- v4.0.135 — title + shape legend in a single row so it takes ONE line, not two. -->
+                            <div style="display:flex; flex-wrap:wrap; justify-content:center; align-items:baseline; gap:16px; margin-top:8px; margin-bottom:4px;">
+                                <div id="insight-scatter-title" style="color:#cbd5e1; font-size:13px; font-weight:500;">Camera × encoder (roll position) — hover for image, click dot for the exact frame</div>
+                                <div id="insight-scatter-shape-legend" style="display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; font-size:10px; color:#94a3b8; letter-spacing:0.3px;">
+                                    <span title="Class severity > 0 in audio_settings"><span style="color:#e2e8f0; font-size:14px;">●</span> Defect</span>
+                                    <span title="Class in parent_object_list"><span style="color:#e2e8f0; font-size:14px;">◆</span> Parent</span>
+                                    <span title="Class in marker_object_list (e.g. stitch)"><span style="color:#e2e8f0; font-size:14px;">▲</span> Marker</span>
+                                    <span title="Everything else (unclassified)"><span style="color:#e2e8f0; font-size:14px;">✕</span> Context</span>
+                                </div>
+                            </div>
                             <div id="insight-scatter-legend" style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-bottom:6px; font-size:11px; color:#cbd5e1; min-height:14px;"></div>
                             <div style="min-height:300px; min-width:0; overflow:hidden;"><canvas id="insight-camera-scatter"></canvas></div>
                             <!-- v4.0.113 — shipment lane strip: encoder/time range → shipment_id so operators can trace an anomaly back to the specific shipment. Lower visual weight (14px) than quality/ejection; sits BETWEEN the scatter and the quality strip so lanes read directly under the dots. Same margin scheme as #quality-strip-wrap; JS mirrors the same marginLeft/Right inset from scatter.chartArea so lane edges line up with the encoder scatter above. -->
@@ -1240,9 +1260,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.123"></script>
+            <script src="/static/js/iframes.js?v=4.0.142"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.123"></script>
+            <script src="/static/js/charts.js?v=4.0.142"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1691,27 +1711,38 @@
 
                 </div>
 
-                <!-- 3.21.14 — Encoder Calibration (drives Shipment Quality Score normalization).
-                     The score normalizes impact by encoder span; this section lets you tell the
-                     system what unit the encoder counts (encoder pulses / mm / ticks / pieces / etc.)
-                     so the UI labels reflect your line. encoder_units_per_meter is optional but lets
-                     us convert to a physical length when needed. -->
+                <!-- v4.0.140 — Encoder Calibration is now fully decoupled from
+                     "meter". Operator picks ANY unit name (Meter, Batch, Cubic
+                     Meter, mm, tile, piece, …) and says how many encoder
+                     pulses accumulate for ONE of those units. Every length
+                     display in the UI (dashboard tile, quality strip, score
+                     chart, camera×length axis) uses that label + conversion. -->
                 <div class="control-section">
                     <h3>📏 <span data-i18n="encoder_calibration">Encoder Calibration</span></h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
-                        Used by the Shipment Quality Score. <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px; color:#86efac;">encoder_unit</code> is the label shown in the UI (e.g. <code>m</code>, <code>mm</code>, <code>pieces</code>). <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px;">encoder_units_per_meter</code> is optional and lets us convert to meters when reporting.
+                        Tell the system what unit your line counts in and how many encoder pulses equal <b>1</b> of them. Every length display in the UI — dashboard tile, quality strip, Score-per-shipment chart, Camera × Length axis — uses this pair.
+                        <br><br>
+                        <b>Examples:</b>
+                        <br>&nbsp;• Fabric line: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px;">Meter</code>, 1000 pulses per 1 Meter → dashboard shows "12.3 Meter"
+                        <br>&nbsp;• Roll-batch line: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px;">Batch</code>, 50000 pulses per 1 Batch → dashboard shows "0.2 Batch"
+                        <br>&nbsp;• Glass line: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px;">Cubic Meter</code>, 300 pulses per 1 Cubic Meter
+                        <br><br>Leave the pulses field blank/0 if you just want raw counts with your custom label.
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Encoder unit label</div>
-                            <input type="text" class="control-input" id="encoder-unit-input" value="encoder_unit" placeholder="m, mm, pieces, ticks, …">
+                            <div class="control-label">Unit name</div>
+                            <input type="text" class="control-input" id="encoder-unit-input" value="encoder_unit"
+                                   placeholder="Meter, Batch, Cubic Meter, tile, piece, …"
+                                   oninput="window._refreshEncoderUnitLabels && window._refreshEncoderUnitLabels()">
                             <button class="control-button" onclick="saveEncoderCalibration()" style="background:var(--primary-color); color:white;">Save</button>
                             <div id="encoder-unit-response" class="control-response"></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Encoder units per meter (optional)</div>
-                            <input type="number" class="control-input" id="encoder-units-per-meter-input" min="0" step="0.001" placeholder="0 = unknown">
-                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Leave 0 if you don't want physical-length conversion.</div>
+                            <div class="control-label">Encoder pulses per 1 <span data-encoder-unit-echo>unit</span> (optional)</div>
+                            <!-- v4.0.140 — id renamed from encoder-units-per-meter-input.
+                                 app-core.js accepts either id for one release. -->
+                            <input type="number" class="control-input" id="encoder-units-per-unit-input" min="0" step="0.001" placeholder="0 = unknown">
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Leave 0 to display raw encoder counts labeled as your chosen <span data-encoder-unit-echo>unit</span>.</div>
                         </div>
                     </div>
                 </div>
@@ -2094,7 +2125,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.123">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.142">
         <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2135,10 +2166,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.123"></script>
-        <script src="/static/js/app-core.js?v=4.0.123"></script>
+        <script src="/static/js/audio.js?v=4.0.142"></script>
+        <script src="/static/js/app-core.js?v=4.0.142"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.123"></script>
-        <script src="/static/js/annotate.js?v=4.0.123"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.142"></script>
+        <script src="/static/js/annotate.js?v=4.0.142"></script>
     </body>
 </html>

@@ -21,6 +21,38 @@ from fastapi.responses import (
 
 import config as cfg_module  # Direct module ref for runtime-updated values (SSE)
 
+
+# v4.0.137 — safe accessor for service config used by /api/status. Wraps
+# load_service_config in a try/except so a stray IOError on the config file
+# never poisons the status endpoint (frontend polls this every ~250 ms).
+def _load_svc_cfg_for_status():
+    try:
+        from config import load_service_config
+        return load_service_config() or {}
+    except Exception:
+        return {}
+
+
+# v4.0.140 — build the encoder-calibration slice that both /api/status and
+# the SSE stream include. Reads the new `encoder_units_per_unit`, falls
+# back to legacy `encoder_units_per_meter` when unset (so a fresh upgrade
+# doesn't lose calibration), and always emits BOTH field names on the wire
+# so an older frontend on the same site keeps working during the rollout.
+def _encoder_calibration_payload(svc):
+    raw = svc.get("encoder_units_per_unit")
+    if raw is None:
+        raw = svc.get("encoder_units_per_meter")
+    try:
+        upu = float(raw or 0) or None
+    except (TypeError, ValueError):
+        upu = None
+    return {
+        "encoder_unit": str(svc.get("encoder_unit") or "units"),
+        "encoder_units_per_unit":  upu,
+        "encoder_units_per_meter": upu,   # legacy alias — one-release compat
+    }
+
+
 from config import (
     YOLO_INFERENCE_URL,
     EJECTOR_OFFSET,
@@ -909,6 +941,14 @@ def api_status(request: Request):
                 "baudrate": getattr(watcher, "serial_baudrate", SERIAL_BAUDRATE) if watcher else SERIAL_BAUDRATE,
                 "mode": getattr(watcher, "serial_mode", SERIAL_MODE) if watcher else SERIAL_MODE,
             },
+            # v4.0.137 — expose encoder calibration on every /api/status tick
+            # so the frontend can format Length in meters (dashboard tile,
+            # score-per-shipment tooltips, camera×length axis, quality-strip
+            # tooltips). Reading service config here is cached in-process by
+            # load_service_config; the ~250 ms SSE cadence isn't hot enough to
+            # notice. Fields are always present; encoder_units_per_meter is
+            # None when the operator hasn't calibrated yet (raw units shown).
+            **_encoder_calibration_payload(_load_svc_cfg_for_status()),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
     except Exception as e:
@@ -1050,6 +1090,18 @@ async def status_stream(request: Request):
                         "baudrate": getattr(watcher, "serial_baudrate", SERIAL_BAUDRATE) if watcher else SERIAL_BAUDRATE,
                         "mode": getattr(watcher, "serial_mode", SERIAL_MODE) if watcher else SERIAL_MODE,
                     },
+                    # v4.0.139 — mirror encoder calibration on SSE too. v4.0.137
+                    # only added it to /api/status (poll). The dashboard reads
+                    # length from SSE — without this the length-cache stays at
+                    # its ('units', 0) init and the tile shows "0 units" even
+                    # when Advanced tab has mm/1000 set. Same helper as
+                    # /api/status so identical values on both channels.
+                    **(lambda _svc: {
+                        "encoder_unit": str(_svc.get("encoder_unit") or "units"),
+                        "encoder_units_per_meter": (
+                            float(_svc.get("encoder_units_per_meter") or 0) or None
+                        ),
+                    })(_load_svc_cfg_for_status()),
                     # Camera status
                     "cameras": {
                         name: {

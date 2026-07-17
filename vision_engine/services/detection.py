@@ -1632,7 +1632,14 @@ def most_frequent_string(dms_list):
     counter = Counter(dms_list)
     return counter.most_common(1)[0][0] if counter else None
 
-def process_frame_helper(frame, capture_t=None, encoder=None):
+def process_frame_helper(frame, capture_t=None, encoder=None, precomputed_yolo=None):
+    # v4.0.125 — accept and forward `precomputed_yolo` so the v4.0.82
+    # batched-YOLO callsite in main.py:886 stops raising TypeError on
+    # every frame. Without this, `_process_frame_batch`'s
+    # `use_precomputed=True` branch dies immediately, workers crash, hot
+    # queue backs up to CRITICAL and Inf FPS reads 0. Bug has been in
+    # every build since v4.0.82 (2026-07-11) but only fires when the
+    # batched-YOLO path is active (i.e. high capture load).
     capture_mode = "single"  # or "multiple"
-    return process_frame(frame, capture_mode, capture_t=capture_t, encoder=encoder)
+    return process_frame(frame, capture_mode, capture_t=capture_t, encoder=encoder, precomputed_yolo=precomputed_yolo)
 

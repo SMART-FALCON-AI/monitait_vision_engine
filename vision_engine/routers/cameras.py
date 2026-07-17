@@ -192,9 +192,21 @@ def get_cameras_status(request: Request):
         device_exists = os.path.exists(cam_path) if is_usb and cam_path != "unknown" else True
         is_connected = cam is not None and getattr(cam, 'success', False) and device_exists
 
+        # v4.0.139 — surface the current /dev/v4l/by-path/… symlink so
+        # operators see the STABLE physical-USB-port identifier next to (or
+        # instead of) the fragile /dev/videoN index. Only relevant for USB.
+        by_path = None
+        if is_usb and cam_path and cam_path.startswith('/dev/video'):
+            try:
+                from services.camera import _by_path_for_video_node
+                by_path = _by_path_for_video_node(cam_path)
+            except Exception:
+                by_path = None
+
         cam_info = {
             "id": cam_id,
             "path": cam_path,
+            "by_path": by_path,   # v4.0.139 — None when not a USB or no symlink present
             "name": metadata.get("name", f"Camera {cam_id}"),
             "type": cam_type,
             "connected": is_connected,
