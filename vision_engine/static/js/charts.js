@@ -4141,25 +4141,18 @@ async function _loadQualityShipmentsChart(win) {
                     ctx.save();
                     ctx.textAlign = 'center';
                     ctx.font = '10px system-ui, sans-serif';
-                    // Y for the length line: bottom of the x-axis area (which
-                    // already includes the rotated shipment-ID tick labels),
-                    // minus a small breather so it lands cleanly inside our
-                    // 18-px layout.padding.bottom reservation.
-                    const lengthY = chart.scales.x.bottom + (chart.chartArea.bottom !== undefined ? 4 : 4);
+                    // v4.0.144 — `lengthY` used to position the horizontal
+                    // length text under each bar; removed with that draw.
                     rows.forEach((r, i) => {
                         const bar0 = meta0.data[i]; if (!bar0) return;
                         const bar1 = meta1 && meta1.data[i];
                         const centerX = bar1 ? (bar0.x + bar1.x) / 2 : bar0.x;
                         const topY = Math.min(bar0.y, bar1 ? bar1.y : bar0.y);
-                        // Line 2 under the shipment ID: length.
-                        if (r.encoder_span) {
-                            // v4.0.140 — shared formatter. Same value the tooltip
-                            // shows above so they can't disagree on the same bar.
-                            const label = _fmtLenWithUpu(r.encoder_span, _upuFromAny(r, d), _unitLabelFromAny(r, d));
-                            ctx.fillStyle = '#94a3b8';
-                            ctx.font = '10px system-ui, sans-serif';
-                            ctx.fillText(label, centerX, lengthY);
-                        }
+                        // v4.0.144 — removed the horizontal `234 m` annotation
+                        // drawn under each bar. Duplicated the length string
+                        // that already renders as line 2 of the tilted X-axis
+                        // label (see labels = rows.map(s => [id, lengthLabel])
+                        // above), so it was pure noise. Delta arrow stays.
                         // Delta vs previous shipment — above the bar top; no
                         // longer competes with the length label since length
                         // has moved to the bottom row.

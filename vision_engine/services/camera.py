@@ -227,6 +227,74 @@ def _find_replacement_v4l_path(current_path: str) -> Optional[str]:
     return None
 
 
+def _load_persisted_usb_sources_ordered() -> List[str]:
+    """v4.0.143 — return the list of USB camera sources from persistence,
+    ordered by cam ID (1, 2, 3, ...). Each source is:
+      - resolved from `/dev/v4l/by-path/…` symlink to the current /dev/videoN
+        target (so downstream code that does `os.path.exists` / registration
+        by raw path still works), OR
+      - kept as raw /dev/videoN when persistence still has one.
+    Skips cams whose source doesn't exist on disk (physically absent).
+    Returns an empty list when persistence is empty / unreadable, so callers
+    fall back to auto-detection.
+    """
+    try:
+        # Lazy import: config module isn't ready at services.camera import time
+        # in every entry-point (some tools import services.camera standalone).
+        from config import load_service_config
+        svc = load_service_config() or {}
+        cams = svc.get("cameras") or {}
+        if not cams:
+            return []
+        try:
+            ordered_ids = sorted(cams.keys(), key=lambda k: int(k))
+        except (ValueError, TypeError):
+            ordered_ids = sorted(cams.keys())
+        result = []
+        for cid in ordered_ids:
+            c = cams.get(cid) or {}
+            ct = str(c.get("type") or "usb").lower()
+            if ct != "usb":
+                continue  # skip IP and pro (basler) — those are opened by other paths
+            src = c.get("source")
+            if not isinstance(src, str) or not src:
+                continue
+            if src.startswith("/dev/v4l/by-path/"):
+                if not os.path.exists(src):
+                    logger.warning(f"persisted USB cam {cid}: by-path missing on disk, skip: {src}")
+                    continue
+                # v4.0.143 — resolve the by-path symlink to its current
+                # /dev/videoN target so downstream code (CameraBuffer init,
+                # _register_v4l_binding, self-heal fuzzy scan's bound-set)
+                # sees a normal /dev/video* path and its existing invariants
+                # hold. The physical camera identity is preserved because
+                # the by-path always points at the same USB bus:port — its
+                # target is whatever kernel-node number that port has right
+                # now. On the next save, the memo (populated during
+                # __init__'s _remember_by_path) converts the /dev/videoN
+                # back to a by-path so persistence stays stable.
+                try:
+                    resolved = os.path.realpath(src)
+                except Exception:
+                    resolved = None
+                if not resolved or not resolved.startswith("/dev/video") or not os.path.exists(resolved):
+                    logger.warning(f"persisted USB cam {cid}: by-path resolves to bad target ({resolved}), skip")
+                    continue
+                logger.info(f"persisted USB cam {cid}: by-path {src} -> {resolved}")
+                result.append(resolved)
+            elif src.startswith("/dev/video"):
+                if not os.path.exists(src):
+                    logger.warning(f"persisted USB cam {cid}: raw path missing on disk, skip: {src}")
+                    continue
+                result.append(src)
+            # anything else (rtsp/http/basler/...) doesn't belong in the USB
+            # boot list — it's added elsewhere.
+        return result
+    except Exception as e:
+        logger.warning(f"_load_persisted_usb_sources_ordered failed, falling back to auto-detect: {e}")
+        return []
+
+
 def detect_video_devices() -> List[str]:
     """Auto-detect available video devices from /dev/video* (even numbers only).
 
@@ -535,12 +603,24 @@ def get_all_cameras() -> List[str]:
                 all_cameras.append(cam_path)
                 logger.info(f"Found USB camera from env: {cam_path}")
     else:
-        # Auto-detect USB cameras from /dev/video*
-        detected = detect_video_devices()
-        for cam_path in detected:
-            if os.path.exists(cam_path):
+        # v4.0.143 — PREFER persistence sources over raw /dev/video* scan.
+        # If the operator has persisted USB cams (typically with by-path
+        # sources written by the save-time normaliser), boot in the SAME
+        # cam-ID → physical-device order every time, even after a USB
+        # re-enumeration renumbered /dev/videoN. Falls back to raw scan
+        # when persistence has no USB cams (fresh install, first boot).
+        persisted = _load_persisted_usb_sources_ordered()
+        if persisted:
+            for cam_path in persisted:
                 all_cameras.append(cam_path)
-                logger.info(f"Auto-detected USB camera: {cam_path}")
+                logger.info(f"Boot: using persisted USB source: {cam_path}")
+        else:
+            # Auto-detect USB cameras from /dev/video*
+            detected = detect_video_devices()
+            for cam_path in detected:
+                if os.path.exists(cam_path):
+                    all_cameras.append(cam_path)
+                    logger.info(f"Auto-detected USB camera: {cam_path}")
 
     # 4.0.50 — append auto-detected "pro" cameras (Basler etc.) after UVC.
     # `type: "pro"` is a first-class camera category alongside "usb" and "ip"
@@ -611,7 +691,23 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
 
     # Add camera source (URL/path)
     if hasattr(cam, 'source'):
-        config["source"] = cam.source
+        # v4.0.143 — normalise raw /dev/videoN → its /dev/v4l/by-path/…
+        # symlink at save time (using the by-path memo captured on the last
+        # successful open). Persistence therefore records the physical USB
+        # bus:port instead of the kernel-assigned videoN index. On next boot
+        # or USB re-enumeration, resolving the same by-path lands on the
+        # same physical camera — no fuzzy hunt, no silent swap between cams.
+        # Never fails the save: any exception falls back to the raw source.
+        _src_to_save = cam.source
+        try:
+            if isinstance(_src_to_save, str) and _src_to_save.startswith('/dev/video'):
+                with _V4L_BY_PATH_MEMO_LOCK:
+                    _bp = _V4L_BY_PATH_MEMO.get(_src_to_save)
+                if _bp and os.path.exists(_bp):
+                    _src_to_save = _bp
+        except Exception:
+            pass
+        config["source"] = _src_to_save
         # Determine camera type if not already set from metadata
         if "type" not in config:
             if isinstance(cam.source, str) and cam.source.startswith(("rtsp://", "http://", "https://")):

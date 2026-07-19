@@ -3495,59 +3495,69 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 N_BINS = 32
             N_BINS = max(4, min(192, N_BINS))
             _hm_cur = conn.cursor()
+            # v4.0.149 — kept v4.0.148 stretch: bins 0..N-1 computed against
+            # the _color subset's MIN/MAX so slots stay populated, payload
+            # enc_min/enc_max come from the full inference range so the
+            # frontend spreads the cells across the chart's full width. The
+            # v4.0.148 data was correct; the issue was visual — cells with
+            # low ΔE painted at alpha=0.35 (green over dark background) were
+            # barely visible, making it look like only the recent high-ΔE
+            # cells rendered. Alpha bumped in the plugin (see charts.js:2216).
             _hm_cur.execute(
-                f"""
-                WITH color_rows AS (
-                    SELECT
-                        encoder_value AS enc,
-                        (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
-                        (elem->>'L')::float AS L,
-                        (elem->>'E')::float AS E,
-                        (elem->>'phase') AS phase
+                f"""SELECT MIN(encoder_value), MAX(encoder_value)
                     FROM inference_results, LATERAL jsonb_array_elements(detections) elem
                     WHERE time > NOW() - INTERVAL %s {ship_clause}
                       AND elem->>'name' = '_color'
                       AND encoder_value IS NOT NULL
-                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
-                      {_phase_clause}
-                ),
-                bounds AS (SELECT MIN(enc) AS lo, MAX(enc) AS hi FROM color_rows),
-                binned AS (
-                    SELECT cr.cam,
-                           CASE WHEN b.hi > b.lo
-                                THEN LEAST({N_BINS} - 1, GREATEST(0,
-                                     FLOOR(((cr.enc - b.lo)::numeric * {N_BINS}) / (b.hi - b.lo))))::int
-                                ELSE 0 END AS bin,
-                           cr.L, cr.E
-                    FROM color_rows cr CROSS JOIN bounds b
-                ),
-                cam_baselines AS (
-                    SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
-                    FROM binned GROUP BY cam
-                )
-                SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
-                       AVG(b.E)::float - MAX(cb.base_E)::float
-                FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
-                GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
-                """,
+                      {_phase_clause}""",
                 [interval] + ([shipment] if shipment else []) + _phase_args,
             )
+            row = _hm_cur.fetchone()
+            _color_enc_lo = int(row[0]) if row and row[0] is not None else None
+            _color_enc_hi = int(row[1]) if row and row[1] is not None else None
             cells = []
-            for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
-                cells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
-                              "L": round(mL or 0, 2), "E": round(mE or 0, 2),
-                              "delta_e": round(de or 0, 2), "n": int(n or 0)})
-            # v4.0.109 — enc_min/enc_max now come from ALL inference_results
-            # in the window, NOT just rows carrying `_color`. Previously the
-            # color heatmap's range was narrower than the quality / ejection
-            # strips (which use all rows), so on the chart:
-            #   - color overlay covered only a subset of the X-axis
-            #   - strip cells and heatmap cells did NOT line up column-wise
-            # Operators read that as "cells are narrower at the end". With
-            # the shared MIN/MAX, cells that HAVE no color data are simply
-            # absent from `cells`, but their bin position aligns with the
-            # equivalent quality-strip cell. Same phase/shipment filter
-            # preserved so the range still respects the operator's toggles.
+            if _color_enc_lo is not None and _color_enc_hi is not None and _color_enc_hi > _color_enc_lo:
+                _hm_cur.execute(
+                    f"""
+                    WITH color_rows AS (
+                        SELECT
+                            encoder_value AS enc,
+                            (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                            (elem->>'L')::float AS L,
+                            (elem->>'E')::float AS E,
+                            (elem->>'phase') AS phase
+                        FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                          AND elem->>'name' = '_color'
+                          AND encoder_value IS NOT NULL
+                          AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                          {_phase_clause}
+                    ),
+                    binned AS (
+                        SELECT cr.cam,
+                               LEAST({N_BINS} - 1, GREATEST(0,
+                                    FLOOR(((cr.enc - %s)::numeric * {N_BINS}) / (%s - %s))))::int AS bin,
+                               cr.L, cr.E
+                        FROM color_rows cr
+                    ),
+                    cam_baselines AS (
+                        SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM binned GROUP BY cam
+                    )
+                    SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
+                           AVG(b.E)::float - MAX(cb.base_E)::float
+                    FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
+                    GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
+                    """,
+                    [interval] + ([shipment] if shipment else []) + _phase_args +
+                    [_color_enc_lo, _color_enc_hi, _color_enc_lo],
+                )
+                for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
+                    cells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
+                                  "L": round(mL or 0, 2), "E": round(mE or 0, 2),
+                                  "delta_e": round(de or 0, 2), "n": int(n or 0)})
+            # Payload enc_min/enc_max from FULL inference range → frontend
+            # spreads the N cells across the chart's full width.
             _hm_cur.execute(
                 f"""SELECT MIN(encoder_value), MAX(encoder_value)
                     FROM inference_results
@@ -3561,55 +3571,63 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "enc_max": int(row[1]) if row and row[1] is not None else None,
                 "n_bins": N_BINS, "cells": cells,
             }
-            # Time-binned twin
+            # Time-binned twin — v4.0.149 honest positioning: bins 0..N-1
+            # computed against the FIXED chart window `[now - interval, now]`.
+            # Bin K represents the actual time slice under strip cell K.
+            # Empty slices produce no cell — honest gap, matches the chart
+            # X-axis (`_scatterXMin`/`_scatterXMax`) and the strip below.
             _hm_cur.execute(
-                f"""
-                WITH color_rows AS (
-                    SELECT EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
-                        (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
-                        (elem->>'L')::float AS L, (elem->>'E')::float AS E
-                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
-                    WHERE time > NOW() - INTERVAL %s {ship_clause}
-                      AND elem->>'name' = '_color'
-                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
-                      {_phase_clause}
-                ),
-                bounds AS (SELECT MIN(t_ms) AS lo, MAX(t_ms) AS hi FROM color_rows),
-                binned AS (
-                    SELECT cr.cam,
-                           CASE WHEN b.hi > b.lo
-                                THEN LEAST({N_BINS} - 1, GREATEST(0,
-                                     FLOOR(((cr.t_ms - b.lo) * {N_BINS}) / (b.hi - b.lo))))::int
-                                ELSE 0 END AS bin,
-                           cr.L, cr.E
-                    FROM color_rows cr CROSS JOIN bounds b
-                ),
-                cam_baselines AS (
-                    SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
-                    FROM binned GROUP BY cam
-                )
-                SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
-                       AVG(b.E)::float - MAX(cb.base_E)::float
-                FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
-                GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
-                """,
-                [interval] + ([shipment] if shipment else []) + _phase_args,
+                f"""SELECT EXTRACT(EPOCH FROM (NOW() - INTERVAL %s)) * 1000.0,
+                           EXTRACT(EPOCH FROM NOW()) * 1000.0""",
+                [interval],
             )
+            row = _hm_cur.fetchone()
+            _t_min = float(row[0]) if row and row[0] is not None else None
+            _t_max = float(row[1]) if row and row[1] is not None else None
             tcells = []
-            for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
-                tcells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
-                               "L": round(mL or 0, 2), "E": round(mE or 0, 2),
-                               "delta_e": round(de or 0, 2), "n": int(n or 0)})
-            # v4.0.109 — same fix for the time-axis twin. t_min/t_max now
-            # come from ALL inference_results in the window, not just rows
-            # carrying `_color`, so the color heatmap's time span matches
-            # the strip cells below.
+            if _t_min is not None and _t_max is not None and _t_max > _t_min:
+                _hm_cur.execute(
+                    f"""
+                    WITH color_rows AS (
+                        SELECT EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
+                            (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                            (elem->>'L')::float AS L, (elem->>'E')::float AS E
+                        FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                          AND elem->>'name' = '_color'
+                          AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                          {_phase_clause}
+                    ),
+                    binned AS (
+                        SELECT cr.cam,
+                               LEAST({N_BINS} - 1, GREATEST(0,
+                                    FLOOR(((cr.t_ms - %s) * {N_BINS}) / (%s - %s))))::int AS bin,
+                               cr.L, cr.E
+                        FROM color_rows cr
+                    ),
+                    cam_baselines AS (
+                        SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM binned GROUP BY cam
+                    )
+                    SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
+                           AVG(b.E)::float - MAX(cb.base_E)::float
+                    FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
+                    GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
+                    """,
+                    [interval] + ([shipment] if shipment else []) + _phase_args +
+                    [_color_t_lo, _color_t_hi, _color_t_lo],
+                )
+                for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
+                    tcells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
+                                   "L": round(mL or 0, 2), "E": round(mE or 0, 2),
+                                   "delta_e": round(de or 0, 2), "n": int(n or 0)})
+            # Payload t_min/t_max = FIXED chart window (matches strip range,
+            # matches Chart.js `_scatterXMin`/`_scatterXMax` at [now-interval,
+            # now]). Frontend spreads bins 0..N-1 across this range.
             _hm_cur.execute(
-                f"""SELECT MIN(EXTRACT(EPOCH FROM time) * 1000.0),
-                           MAX(EXTRACT(EPOCH FROM time) * 1000.0)
-                    FROM inference_results
-                    WHERE time > NOW() - INTERVAL %s {ship_clause}""",
-                [interval] + ([shipment] if shipment else []),
+                f"""SELECT EXTRACT(EPOCH FROM (NOW() - INTERVAL %s)) * 1000.0,
+                           EXTRACT(EPOCH FROM NOW()) * 1000.0""",
+                [interval],
             )
             row = _hm_cur.fetchone()
             color_heatmap_time = {
@@ -3990,15 +4008,33 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 _c = _row.get("cls")
                 if _c: _all_classes.add(str(_c))
             for _c in _all_classes:
+                # v4.0.146 — read the per-class `role` field on
+                # audio_settings[cls] FIRST. The Process tab UI writes the
+                # marker/parent tag there (audio_settings.TB.role = 'marker'),
+                # not into the legacy image_processing.marker_object_list
+                # (which stays None on sites that never used the old bulk
+                # editor). Prior to this fix, TB was classified as context on
+                # kiancord even though the operator had explicitly set it as
+                # a marker via the per-class UI.
+                _entry = _audio_cg.get(_c, {}) or {}
+                _role = str(_entry.get("role") or "").strip().lower()
+                if _role == "parent":
+                    class_groups[_c] = "parent"
+                    continue
+                if _role == "marker":
+                    class_groups[_c] = "marker"
+                    continue
+                # Legacy bulk lists — kept for sites that still use them.
                 if _c in _parents_cg:
                     class_groups[_c] = "parent"
-                elif _c in _markers_cg:
+                    continue
+                if _c in _markers_cg:
                     class_groups[_c] = "marker"
-                else:
-                    _sev = (_audio_cg.get(_c, {}) or {}).get("severity", 0)
-                    try: _sev = float(_sev or 0)
-                    except Exception: _sev = 0
-                    class_groups[_c] = "defect" if _sev > 0 else "context"
+                    continue
+                _sev = _entry.get("severity", 0)
+                try: _sev = float(_sev or 0)
+                except Exception: _sev = 0
+                class_groups[_c] = "defect" if _sev > 0 else "context"
         except Exception as _cge:
             logger.debug(f"class_groups compute failed: {_cge}")
 

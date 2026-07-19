@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.148] - 2026-07-18 — Restore v4.0.144 "stretch" behaviour for the colour heatmap
+
+Operator asked for the v4.0.144 look back: cells always fill the whole chart width, 1:1 with the strip below, no gaps where `_color` data is sparse. v4.0.146/147 was moving toward "honest" bin positioning (cells only where data exists), but the visual mismatch with the strip below wasn't what the operator wanted.
+
+### What v4.0.148 does
+Both axes now compute bins against the `_color` subset's MIN/MAX (all N slots stay populated), but the payload's `enc_min/enc_max` and `t_min/t_max` come from the **frontend-visible chart range**:
+
+- **Encoder axis**: `MIN/MAX(inference_results.encoder_value)` — same range the chart's X axis is locked to, same range the quality strip uses.
+- **Time axis**: `[now - interval, now]` — the fixed chart window `_scatterXMin`/`_scatterXMax` uses.
+
+Frontend places cell K at `payload_min + K * (payload_max - payload_min) / N_BINS`, so cells always cover the full width of the strip below regardless of whether `_color` data spans the full window.
+
+### v4.0.146 fast-scalar-param pattern kept
+Bounds are still computed via one scalar SELECT and passed as `%s` params to the heatmap query, so PostgreSQL doesn't double-scan the hypertable. That was v4.0.145's khoy timeout; keeping the fix.
+
+## [4.0.147] - 2026-07-18 — TIME-axis colour heatmap uses fixed window bounds (matches chart X and strip below)
+
+The TIME-axis chart X-axis is locked to `[now - windowMs, now]` (in `charts.js:_scatterXMin`), and the quality-by-time strip pixel-aligns to that scatter's chart area via `_alignStripToScatter`. Colour heatmap was using `MIN/MAX(inference_results.time)` — a **subset** of the window when data doesn't span the whole 24 h — so cells got compressed toward the data-end (usually the right side) instead of filling the same full-window row as the strip below.
+
+Fixed [timeline.py](vision_engine/routers/timeline.py) to compute `t_min/t_max` from `NOW() - INTERVAL %s` … `NOW()` — the same fixed window bounds the chart X-axis and strip use. Bin K now sits directly under strip cell K, and the heatmap row spans the same width as the strip. Encoder axis unchanged (its chart X-axis is locked to `enc_min/enc_max` from data, so that pair stays as-is).
+
+## [4.0.146] - 2026-07-18 — class_groups reads per-class role + state-name URL-encoded + annotate.js + colour-heatmap SQL refactor
+
+### 3. `activateState()` URL-encodes the state name — fixes "Failed to activate state: 404"
+State name `Knit-Up-/4` (with a `/`) got template-literal'd raw into the URL — the `/` split the path so the route didn't match, server returned 404. Fixed at [app-core.js:2289](vision_engine/static/js/app-core.js#L2289), plus the two other sites with the same pattern: `deleteState` at [:2489](vision_engine/static/js/app-core.js#L2489) and `activatePipeline` at [:2872](vision_engine/static/js/app-core.js#L2872). All three now wrap the name in `encodeURIComponent()`.
+
+### 4. Colour-heatmap SQL refactor — v4.0.145 caused `/api/detection_charts` to time out on khoy
+v4.0.145 added a `bounds` CTE that MIN/MAXed `inference_results` a SECOND time inside the colour_heatmap query. On khoy's million-row hypertable that put two full-window aggregate scans in one statement and hit the 25 s statement timeout.
+
+Rewrote both encoder and time twins in [timeline.py](vision_engine/routers/timeline.py) to compute `enc_min/enc_max` and `t_min/t_max` ONCE upfront (the same query that was already there for the payload's `enc_min` / `t_min` fields), then pass them as scalar `%s` params into the colour-heatmap query. Same 1:1 strip alignment, ~half the query cost.
+
+
+
+### 1. class_groups now respects `audio_settings[cls].role`
+On kiancord the operator set TB as "marker" via the per-class Process-tab UI, which writes `audio_settings.TB.role = 'marker'`. The v4.0.136 backend only checked the legacy bulk fields `image_processing.parent_object_list` and `.marker_object_list`. Kiancord had `marker_object_list = None`, so TB fell through to context and rendered as ✕ on the scatter instead of ▲.
+
+Fix at [timeline.py](vision_engine/routers/timeline.py): read `audio_settings[cls].role` FIRST (`'parent'` → parent, `'marker'` → marker). Fall through to the legacy lists for sites that only ever used the bulk editor.
+
+### 2. Ship `static/js/annotate.js` — stale on kiancord since 17 June
+Kiancord's `annotate.js` was 23,692 bytes dated 2026-06-17 and lacked the underscore-prefix filter added in 3.26.0. Consequence: synthetic classes emitted by math_inference (`_color`, `_stitch`, …) showed up in the annotate modal's "Unmapped classes" panel, asking the operator to map fake classes to trainer categories.
+
+No code change — just adding `vision_engine/static/js/annotate.js` to the ship bundle so kiancord picks up the existing `.filter(n => !n.startsWith('_'))` at line 156. Same root cause as v4.0.139's `routers/cameras.py` miss: files I never listed in my curated deploy bundles kept drifting from the working tree. Going forward the bundle is derived from `git diff --name-only` per site, not curated by hand.
+
+## [4.0.145] - 2026-07-18 — Colour heatmap cell width matches the quality strip below (both axes)
+
+### Symptom
+On khoy the colour heatmap cells inside the Camera × Time scatter were visibly narrower and offset relative to the quality-by-time strip below them. When math_inference had produced `_color` detections for only part of the window (e.g. the last hour of a 6-hour view), the cells were also stretched 6× wider than the strip cells they were supposed to line up with.
+
+### Root cause
+`/api/detection_charts` computed `t_min`/`t_max` (and `enc_min`/`enc_max`) from ALL rows in `inference_results` — the same source the strip uses. But the SQL `bounds` CTE that generated the `bin` numbers for each colour cell was drawn from `color_rows` only (the subset with `_color` detections). So bin `K` in the cell payload corresponded to `K * (color_rows range) / N_BINS`, while the frontend placed it at `t_min + K * (full window / N_BINS)`. Numerator and denominator were from different ranges → cells drifted and stretched.
+
+### Fix
+Rebase the `bounds` CTE onto the same source as `t_min`/`t_max` / `enc_min`/`enc_max`: full `inference_results` in the window. Bin `K` now lands exactly at `t_min + K * fullWindow / N_BINS`, one-to-one with the strip's Kth cell. Applied symmetrically to both encoder and time twins in `_hm_cur.execute(…)` at [timeline.py](vision_engine/routers/timeline.py).
+
+Cells now:
+- Sit precisely under the strip cells with matching X.
+- Have the same width as strip cells (both use N_BINS partitions of the same range).
+- Only appear where `_color` data actually exists — no stretch — leaving honest gaps in the strip's row that aren't backed by math data.
+
+### Deploy
+Backend-only. MVE restart. No persistence / DB changes.
+
+## [4.0.144] - 2026-07-18 — Score-per-shipment: drop the duplicate horizontal length annotation
+
+The shipment length was rendering twice under each bar: once as line 2 of the tilted X-axis label (v4.0.134's `[shipmentId, "234 m"]` array label), and again as a horizontal `234 m` string drawn by the `shipmentAnnotations` plugin (from v4.0.99, pre-2-line-labels). Same string, same value, different orientation — duplicate ink.
+
+Removed the plugin's length draw and its `lengthY` calculation. The tilted 2-line label continues to show shipment ID + length together, and the delta-vs-previous arrow above the bar top remains unchanged.
+
+## [4.0.143] - 2026-07-18 — Camera source anchored to USB bus:port (by-path) across reboots
+
+### Why
+v4.0.138 added the by-path *memo* for runtime USB-renumber recovery, but persistence save-back stripped it: `cam.source` was written to disk as the resolved `/dev/videoN`, which changes on the next USB event. Boot still used `detect_video_devices()` — a raw `/dev/video*` scan — completely ignoring whatever source the operator saved. Net effect on kiancord: after reboot, cams 4 and 6 got auto-added as phantoms with default `exposure=100`, cam 5's `/dev/video8` got fuzzy-hijacked by cam 4, and the operator's carefully-set exposure=10 kept reverting to 100.
+
+### Fix
+Two surgical changes in [services/camera.py](vision_engine/services/camera.py):
+
+1. **Save time — `get_camera_config_for_save`**: if `cam.source` is a raw `/dev/videoN`, look up the by-path memo (populated on the last successful open) and save the **by-path** to persistence instead. Persistence now records the physical USB bus:port, never the ephemeral kernel-node index.
+2. **Boot time — new `_load_persisted_usb_sources_ordered` + `get_all_cameras`**: read persistence FIRST. For each USB cam ordered by ID, resolve its persisted by-path to whatever `/dev/videoN` the symlink currently points to, and pass THAT to `CameraBuffer`. Only fall back to raw scan when persistence is empty (fresh install). So on every subsequent boot, cam 1 always opens the camera on `usb-0:1`, cam 2 always opens `usb-0:2`, etc.
+
+### What survives what (post-v4.0.143)
+| Event | Config bound to correct physical camera? |
+|---|---|
+| MVE restart | ✓ |
+| Reboot | ✓ |
+| USB hub renumber (`/dev/video7 → /dev/video11`) | ✓ |
+| Unplug + replug into the same USB port | ✓ |
+| Physically move a camera to a different port | ✗ — by design (silent-swap prevention) |
+
+### Deploy note
+Runtime-only. Persistence is auto-migrated on the next save: cams that open successfully get their `source` field converted from raw `/dev/videoN` to by-path within a few seconds.
+
 ## [4.0.142] - 2026-07-18 — Camera Path row: value stacks under the label, no more text overlap
 
 Long `/dev/v4l/by-path/…` symlinks (45-60 chars) were overflowing leftward into the "Path" label because `.camera-info-item` uses `display: flex; justify-content: space-between;` and flex items default to `min-width: auto` — they refuse to shrink below their intrinsic content width, so `word-break: break-all` on the value never kicked in.

@@ -2286,7 +2286,9 @@ function loadStateToEditor(name, state) {
 async function activateState(stateName) {
     try {
         showStateMessage('Activating state...', 'info');
-        const response = await fetch(`/api/states/${stateName}/activate`, { method: 'POST' });
+        // v4.0.146 — encodeURIComponent so state names containing `/`
+        // (e.g. "Knit-Up-/4") don't split the URL path and 404 the route.
+        const response = await fetch(`/api/states/${encodeURIComponent(stateName)}/activate`, { method: 'POST' });
         const result = await response.json();
 
         if (response.ok && result.success) {
@@ -2484,7 +2486,8 @@ async function deleteCurrentState() {
     if (!confirm(`Delete state '${name}'?`)) return;
 
     try {
-        const response = await fetch(`/api/states/${name}`, { method: 'DELETE' });
+        // v4.0.146 — encodeURIComponent for state names with `/`, etc.
+        const response = await fetch(`/api/states/${encodeURIComponent(name)}`, { method: 'DELETE' });
         const result = await response.json();
 
         if (response.ok && result.success) {
@@ -2869,7 +2872,8 @@ function loadModelForEdit(modelId) {
 async function activatePipeline(pipelineName) {
     const responseEl = document.getElementById('pipeline-response');
     try {
-        const response = await fetch(`/api/pipelines/activate/${pipelineName}`, { method: 'POST' });
+        // v4.0.146 — encodeURIComponent for pipeline names with `/`, etc.
+        const response = await fetch(`/api/pipelines/activate/${encodeURIComponent(pipelineName)}`, { method: 'POST' });
         const result = await response.json();
 
         if (response.ok) {
