@@ -723,6 +723,17 @@ class ArduinoSocket:
         # has moved since this shipment began. Persisted alongside
         # current_shipment so it survives restart. Zero on "no_shipment".
         self.shipment_start_encoder = 0
+        # v4.0.154 — wall-clock timestamp of when the current shipment started.
+        # Set alongside shipment_start_encoder every time the shipment id
+        # changes (barcode scan, UI edit, auto-cutoff). Used by the `time_sec`
+        # metric of the auto-cutoff feature. Persisted next to
+        # shipment_start_encoder so a restart doesn't reset the elapsed time.
+        import time as _t
+        self.shipment_start_ts = _t.time()
+        # v4.0.153 — max-shipment-size auto-cutoff. Wall-clock timestamp of the
+        # last auto-cutoff so the cooldown guard can suppress double-fires.
+        # Initialized to 0 so the very first cutoff always passes the cooldown.
+        self._auto_cutoff_last_ts = 0.0
         # 4.0.98 — Length persistence for encoder-reset resilience. Every N
         # seconds we snapshot `(shipment, shipment_start_encoder, last_seen_length)`
         # to a small JSON file (bind-mounted alongside .env.prepared_query_data).
@@ -1086,6 +1097,150 @@ class ArduinoSocket:
         self._send_message(command)
         logger.debug(f"Set light mode: {mode} (command: {command.strip()})")
 
+    def _maybe_auto_cutoff(self):
+        """v4.0.154 — configurable-metric auto-cutoff.
+
+        Called from the encoder-tick loop after `self.encoder_value` updates.
+        Reads three config fields:
+          - `auto_cutoff_metric`     "encoder" | "time_sec" | "length"
+          - `auto_cutoff_threshold`  numeric (in whichever metric's unit)
+          - `auto_shipment_id_prefix` string, prepended to yymmddhhmmssX
+
+        Legacy alias: v4.0.153's `max_shipment_length` is treated as
+        `auto_cutoff_threshold` when metric is unset OR "length".
+
+        Guards (all short-circuit early — cheap on every tick):
+          - Feature disabled (`threshold <= 0`) → return.
+          - No active shipment (`shipment == 'no_shipment'` or empty) → skip.
+          - Encoder-based metrics: skip when length_raw < 0 (v4.0.114 wrap).
+          - Cooldown not elapsed since the last auto-cutoff → skip.
+
+        Never raises: any exception is logged at warning and swallowed so a
+        malformed config field can't kill the encoder loop.
+        """
+        try:
+            from config import load_service_config
+            svc = load_service_config() or {}
+        except Exception as _lce:
+            logger.debug(f"auto-cutoff: config load failed: {_lce}")
+            return
+
+        # v4.0.155 — explicit boolean toggle. Decouples "is the feature on"
+        # from the numeric threshold so a real negative threshold value
+        # (e.g. during a v4.0.114 encoder-wrap window) can't accidentally
+        # disable the feature by matching the -1 sentinel used pre-v4.0.155.
+        # Backward compat: if `auto_cutoff_enabled` is unset AND the legacy
+        # threshold value is > 0, treat as enabled (so v4.0.153/154 configs
+        # keep working without operator action).
+        enabled_raw = svc.get("auto_cutoff_enabled")
+        if enabled_raw is None:
+            _legacy_thr = svc.get("auto_cutoff_threshold")
+            if _legacy_thr is None:
+                _legacy_thr = svc.get("max_shipment_length")
+            try:
+                enabled = float(_legacy_thr or 0) > 0
+            except (TypeError, ValueError):
+                enabled = False
+        else:
+            enabled = bool(enabled_raw)
+        if not enabled:
+            return
+
+        # v4.0.154 — metric selector (default: length). Legacy config that
+        # only set `max_shipment_length` continues to work under metric=length.
+        metric = str(svc.get("auto_cutoff_metric") or "length").strip().lower()
+        if metric not in ("encoder", "time_sec", "length"):
+            metric = "length"
+
+        # Threshold: new field wins; fall back to legacy `max_shipment_length`.
+        # v4.0.155 — no longer the on/off signal; that's `auto_cutoff_enabled`.
+        # A threshold of 0 still short-circuits (would fire on every tick).
+        thr_raw = svc.get("auto_cutoff_threshold")
+        if thr_raw is None:
+            thr_raw = svc.get("max_shipment_length")
+        try:
+            threshold = float(thr_raw if thr_raw is not None else 0)
+        except (TypeError, ValueError):
+            threshold = 0
+        if threshold <= 0:
+            return
+
+        # Skip when no active shipment (nothing to cut)
+        ship = str(getattr(self, "shipment", "") or "")
+        if not ship or ship == "no_shipment":
+            return
+
+        import time as _t
+
+        # Compute current value against the chosen metric's yardstick
+        length_raw = int(self.encoder_value or 0) - int(getattr(self, "shipment_start_encoder", 0) or 0)
+        if metric == "encoder":
+            if length_raw < 0:      # v4.0.114 wrap guard
+                return
+            current_value = length_raw
+        elif metric == "time_sec":
+            start_ts = float(getattr(self, "shipment_start_ts", 0) or 0)
+            if start_ts <= 0:
+                return              # no start ts recorded yet
+            current_value = _t.time() - start_ts
+            if current_value < 0:
+                return              # clock skew — skip
+        else:  # "length"
+            if length_raw < 0:      # v4.0.114 wrap guard
+                return
+            try:
+                upu = float(svc.get("encoder_units_per_unit") or svc.get("encoder_units_per_meter") or 0)
+            except (TypeError, ValueError):
+                upu = 0
+            current_value = (length_raw / upu) if upu > 0 else length_raw
+
+        if current_value < threshold:
+            return
+
+        # Cooldown guard
+        try:
+            cooldown = float(svc.get("auto_cutoff_cooldown_sec") or 5)
+        except (TypeError, ValueError):
+            cooldown = 5.0
+        now_ts = _t.time()
+        if (now_ts - self._auto_cutoff_last_ts) < cooldown:
+            return
+        self._auto_cutoff_last_ts = now_ts
+
+        # Build the new shipment id — same format as the frontend 🎲 button
+        # (js/audio.js:generateShipmentCode): yy mm dd hh mm ss d.
+        prefix = str(svc.get("auto_shipment_id_prefix") or "MR").strip()
+        prefix = "".join(c for c in prefix if c.isalnum() or c in "-_.")[:16]
+        from datetime import datetime as _dt
+        _n = _dt.now()
+        yy = f"{_n.year % 100:02d}"; mm = f"{_n.month:02d}"; dd = f"{_n.day:02d}"
+        hh = f"{_n.hour:02d}"; mi = f"{_n.minute:02d}"; ss = f"{_n.second:02d}"
+        ds = f"{_n.microsecond // 100_000:d}"
+        new_id = f"{prefix}{yy}{mm}{dd}{hh}{mi}{ss}{ds}"
+
+        # Rebase shipment (mirrors the barcode-scan path at line ~1391)
+        old_id = ship
+        old_start = int(getattr(self, "shipment_start_encoder", 0) or 0)
+        self.shipment_start_encoder = int(self.encoder_value or 0)
+        self.shipment_start_ts = now_ts     # v4.0.154 — reset elapsed time too
+        self.shipment = new_id
+        logger.info(
+            f"auto-cutoff [metric={metric}]: current={current_value:.2f} hit threshold={threshold} → "
+            f"new shipment {new_id} (was {old_id}, start_enc {old_start} → {self.shipment_start_encoder})"
+        )
+        # Propagate to redis (detection loop reads shipment from redis)
+        try:
+            if self.redis_connection:
+                self.redis_connection.redis_connection.set("shipment", new_id)
+        except Exception as _re:
+            logger.warning(f"auto-cutoff: redis set failed: {_re}")
+        # Snapshot to disk immediately so a crash between here and the next
+        # periodic persist doesn't lose the new shipment.
+        try:
+            self.persist_length_state(force=True)
+        except Exception as _pe:
+            logger.warning(f"auto-cutoff: persist failed: {_pe}")
+
     def persist_length_state(self, force=False):
         """v4.0.98 — Save (shipment, shipment_start_encoder, last_seen_length)
         to a small JSON file so an encoder reset (PLC reboot, MVE recreate,
@@ -1391,6 +1546,12 @@ class ArduinoSocket:
                             is_new_shipment = new_shipment != self.shipment
                             if is_new_shipment:
                                 self.shipment_start_encoder = int(self.encoder_value or 0)
+                                # v4.0.154 — reset shipment_start_ts so the
+                                # `time_sec` auto-cutoff metric measures from
+                                # the new shipment's actual start, not the
+                                # previous one's.
+                                import time as _tsc
+                                self.shipment_start_ts = _tsc.time()
                                 logger.info(
                                     f"Shipment start encoder: {self.shipment_start_encoder} "
                                     f"(barcode scan → {new_shipment})"
@@ -1575,6 +1736,11 @@ class ArduinoSocket:
                                 self.encoder_value = int(
                                     line[encoder_first_string_index + len("Encoder:"):encoder_last_string_index]
                                 )
+                                # v4.0.153 — check max-shipment-size auto-cutoff
+                                # on the legacy Encoder: line too. Cheap when
+                                # disabled (single dict lookup).
+                                try: self._maybe_auto_cutoff()
+                                except Exception: pass
 
                                 self.data = {
                                     "encoder_value": self.encoder_value,
@@ -1605,6 +1771,10 @@ class ArduinoSocket:
 
                                 self.last_encoder_value = self.encoder_value
                                 self.encoder_value = kv["ENC"]
+                                # v4.0.153 — auto-cutoff check on the new ENC:
+                                # line format (primary encoder path in v4+).
+                                try: self._maybe_auto_cutoff()
+                                except Exception: pass
 
                                 # Extended counters and metrics (if provided)
                                 self.ok_counter = kv.get("OKC", self.ok_counter)

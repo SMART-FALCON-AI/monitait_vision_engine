@@ -820,6 +820,136 @@ def set_encoder_calibration(payload: Dict[str, Any]):
 
 
 # =============================================================================
+# v4.0.153 — Max shipment length auto-cutoff
+# =============================================================================
+
+_VALID_CUTOFF_METRICS = ("encoder", "time_sec", "length")
+
+
+@router.get("/api/auto_cutoff_config")
+def get_auto_cutoff_config():
+    """v4.0.154 — return operator-configured auto-cutoff fields.
+
+    Fields:
+      - `auto_cutoff_metric`   : "encoder" | "time_sec" | "length" (default "length")
+      - `auto_cutoff_threshold`: numeric threshold in the chosen metric's unit
+                                 (encoder pulses, seconds, or display unit)
+      - `auto_shipment_id_prefix`: prefix for the auto-generated shipment id
+      - `auto_cutoff_cooldown_sec`: minimum seconds between two auto-cutoffs
+
+    Legacy: v4.0.153's `max_shipment_length` field is still recognised and
+    returned in the payload for one release so an older frontend keeps
+    working. New callers should use `auto_cutoff_threshold`.
+    """
+    try:
+        svc = load_service_config() or {}
+        # v4.0.155 — new threshold field wins; fall back to the v4.0.153 alias.
+        thr_raw = svc.get("auto_cutoff_threshold")
+        if thr_raw is None:
+            thr_raw = svc.get("max_shipment_length")
+        try:
+            threshold = float(thr_raw) if thr_raw is not None else 0.0
+        except (TypeError, ValueError):
+            threshold = 0.0
+        metric = str(svc.get("auto_cutoff_metric") or "length").strip().lower()
+        if metric not in _VALID_CUTOFF_METRICS:
+            metric = "length"
+        # v4.0.155 — explicit enabled bool. Legacy migration: when unset,
+        # infer from the pre-v4.0.155 sentinel (threshold > 0 meant enabled).
+        enabled_raw = svc.get("auto_cutoff_enabled")
+        if enabled_raw is None:
+            enabled = threshold > 0
+        else:
+            enabled = bool(enabled_raw)
+        try:
+            cooldown = float(svc.get("auto_cutoff_cooldown_sec") or 5)
+        except (TypeError, ValueError):
+            cooldown = 5.0
+        return JSONResponse(content={
+            "auto_cutoff_enabled": enabled,
+            "auto_cutoff_metric": metric,
+            "auto_cutoff_threshold": threshold,
+            "auto_shipment_id_prefix": str(svc.get("auto_shipment_id_prefix") or "MR"),
+            "auto_cutoff_cooldown_sec": cooldown,
+            "encoder_unit": str(svc.get("encoder_unit") or "units"),
+            "max_shipment_length": threshold if metric == "length" else 0,
+        })
+    except Exception as e:
+        logger.error(f"get_auto_cutoff_config error: {e}")
+        return JSONResponse(content={
+            "auto_cutoff_enabled": False,
+            "auto_cutoff_metric": "length",
+            "auto_cutoff_threshold": 0,
+            "auto_shipment_id_prefix": "MR",
+            "auto_cutoff_cooldown_sec": 5.0,
+            "encoder_unit": "units",
+            "max_shipment_length": 0,
+        })
+
+
+@router.post("/api/auto_cutoff_config")
+def set_auto_cutoff_config(payload: Dict[str, Any]):
+    """v4.0.154 — persist auto-cutoff fields. Dual-writes DB + file.
+
+    All fields optional; unspecified fields keep their current value. Invalid
+    values are silently ignored so a malformed request can never poison the
+    config file.
+
+    Accepts `auto_cutoff_threshold` (new) and `max_shipment_length` (legacy
+    alias). If both are given, new wins.
+    """
+    try:
+        svc = load_service_config() or {}
+        # v4.0.155 — explicit boolean enable toggle.
+        if "auto_cutoff_enabled" in payload:
+            svc["auto_cutoff_enabled"] = bool(payload["auto_cutoff_enabled"])
+        # Metric
+        if "auto_cutoff_metric" in payload:
+            m = str(payload["auto_cutoff_metric"] or "").strip().lower()
+            if m in _VALID_CUTOFF_METRICS:
+                svc["auto_cutoff_metric"] = m
+        # Threshold (new field wins over legacy alias in the same payload).
+        # v4.0.155 — threshold is no longer the on/off signal, so it accepts
+        # any float. Negative values are allowed (though unusual) so a real
+        # negative encoder-wrap situation can be handled by the operator.
+        thr_key = None
+        if "auto_cutoff_threshold" in payload:
+            thr_key = "auto_cutoff_threshold"
+        elif "max_shipment_length" in payload:
+            thr_key = "max_shipment_length"
+        if thr_key is not None:
+            try:
+                v = float(payload[thr_key])
+                svc["auto_cutoff_threshold"] = v
+                svc["max_shipment_length"] = v   # keep legacy alias in sync
+            except (TypeError, ValueError):
+                pass
+        if "auto_shipment_id_prefix" in payload:
+            p = str(payload["auto_shipment_id_prefix"] or "").strip()
+            p = "".join(c for c in p if c.isalnum() or c in "-_.")[:16] or "MR"
+            svc["auto_shipment_id_prefix"] = p
+        if "auto_cutoff_cooldown_sec" in payload:
+            try:
+                c = float(payload["auto_cutoff_cooldown_sec"])
+                svc["auto_cutoff_cooldown_sec"] = max(0.5, c)
+            except (TypeError, ValueError):
+                pass
+        save_service_config(svc)
+        return JSONResponse(content={
+            "status": "ok",
+            "auto_cutoff_enabled": bool(svc.get("auto_cutoff_enabled", False)),
+            "auto_cutoff_metric": svc.get("auto_cutoff_metric", "length"),
+            "auto_cutoff_threshold": svc.get("auto_cutoff_threshold", 0),
+            "auto_shipment_id_prefix": svc.get("auto_shipment_id_prefix", "MR"),
+            "auto_cutoff_cooldown_sec": svc.get("auto_cutoff_cooldown_sec", 5.0),
+            "max_shipment_length": svc.get("max_shipment_length", 0),
+        })
+    except Exception as e:
+        logger.error(f"set_auto_cutoff_config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
 # Storage path (DATA_ROOT) endpoints (3.21.11)
 # =============================================================================
 # The raw_images bind-mount is `${DATA_ROOT:-.}/raw_images:/code/raw_images`.

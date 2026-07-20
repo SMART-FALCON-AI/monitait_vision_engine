@@ -33,6 +33,42 @@ def _load_svc_cfg_for_status():
         return {}
 
 
+# v4.0.150 — read the VERSION file at request time so a file-only ship
+# (bumping VERSION without restarting the container) is reflected everywhere
+# the version is surfaced: /health payload, /status cache-buster, browser
+# title. Prior code used `app.version` which FastAPI captures once at
+# app-creation time, so operators had to restart the container for a version
+# bump to show up. Small mtime-based cache (~ns cost) so we don't stat the
+# file on every request under load.
+_VERSION_FILE_CACHE = {"path": None, "mtime": 0.0, "value": None}
+
+
+def get_current_version(app_version: str = "") -> str:
+    """Return the version string operators should see. Reads the VERSION file
+    fresh whenever its mtime changes; falls back to `app_version` (the value
+    FastAPI captured at startup) when the file can't be read.
+
+    Common lookup locations:
+      - $DATA_ROOT/VERSION (compose bind-mount typical)
+      - /code/VERSION       (inside the container)
+      - ./VERSION           (relative to cwd)
+      - ../VERSION          (repo root when cwd is vision_engine/)
+    """
+    for _p in ("./VERSION", "/code/VERSION", "../VERSION"):
+        try:
+            _mt = os.path.getmtime(_p)
+            if _VERSION_FILE_CACHE["path"] == _p and _VERSION_FILE_CACHE["mtime"] == _mt:
+                return _VERSION_FILE_CACHE["value"] or (app_version or "dev")
+            with open(_p, "r", encoding="utf-8") as f:
+                _v = f.read().strip()
+            if _v:
+                _VERSION_FILE_CACHE.update({"path": _p, "mtime": _mt, "value": _v})
+                return _v
+        except (OSError, IOError):
+            continue
+    return app_version or "dev"
+
+
 # v4.0.140 — build the encoder-calibration slice that both /api/status and
 # the SSE stream include. Reads the new `encoder_units_per_unit`, falls
 # back to legacy `encoder_units_per_meter` when unset (so a fresh upgrade
@@ -476,7 +512,9 @@ async def health_check(request: Request):
 
         response_content = {
             "status": "healthy" if status_code == 200 else "unhealthy",
-            "version": request.app.version,
+            # v4.0.150 — VERSION file read fresh so file-only ships propagate
+            # without a container restart; falls back to app.version when read fails.
+            "version": get_current_version(request.app.version),
             "device": "connected" if device_ok else ("camera-only" if not serial_available else "disconnected"),
             "serial": "connected" if serial_available else "not available",
             "redis": "connected" if redis_ok else "disconnected",
@@ -811,7 +849,10 @@ def status_page(request: Request):
     try:
         with open("static/status.html", "r", encoding="utf-8") as f:
             html = f.read()
-        ver = getattr(request.app, "version", None) or "dev"
+        # v4.0.150 — read VERSION file fresh so file-only ships propagate to
+        # cache-busters without a container restart. Falls back to
+        # `app.version` (captured at startup) if the file read fails.
+        ver = get_current_version(getattr(request.app, "version", None) or "dev")
         # Any /static/**/*.{js,css} include — strip existing ?v=… and force the
         # live version. Captures vendor sub-dirs, hyphens, dots in paths.
         html = re.sub(

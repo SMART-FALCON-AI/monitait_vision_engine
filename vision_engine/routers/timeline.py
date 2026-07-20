@@ -4721,22 +4721,67 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
                 pass
 
 
+# v4.0.152 — CSV export column list (shared between single-CSV and per-
+# shipment ZIP paths). Kept here so both paths can't drift.
+_CSV_COLUMNS = [
+    "time", "shipment", "encoder", "length", "camera", "class", "confidence",
+    "severity", "impact",
+    "xmin", "ymin", "xmax", "ymax", "image_path",
+    "inference_time_ms", "model_used",
+]
+
+
+def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, unwind, min_conf_f):
+    """Build one detection row (list of column values) or None if the row is
+    filtered out by min_conf. Extracted so single-CSV and ZIP paths share it.
+    """
+    try:
+        conf_f = float(d.get("confidence") or 0.0)
+        if conf_f < min_conf_f:
+            return None
+    except (TypeError, ValueError):
+        conf_f = 0.0
+    cls = d.get("name", "")
+    sev = sev_map.get(cls, 0)
+    impact = round((sev / 100.0) * conf_f, 3)
+    if enc is None:
+        length_val = ""
+    elif unwind:
+        length_val = int(enc_max - int(enc))
+    else:
+        length_val = int(int(enc) - enc_min)
+    return [
+        t.strftime("%Y-%m-%d %H:%M:%S.%f") if t else "",
+        ship or "", enc if enc is not None else "",
+        length_val,
+        d.get("_cam", ""), cls,
+        d.get("confidence", ""),
+        sev, impact,
+        d.get("xmin", ""), d.get("ymin", ""),
+        d.get("xmax", ""), d.get("ymax", ""),
+        img or "", infms or "", model or "",
+    ]
+
+
 @router.get("/api/export_csv")
 def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, unwind: bool = False):
-    """Stream a CSV export of stored detections for a shipment+window (3.21.3).
+    """Export stored detections for a window.
 
-    One row per detection (inference_results expanded). Honors the Charts tab's
-    window + shipment + min_conf selectors (3.21.10). Filename: detections_<shipment>_<window>.csv.
+    v4.0.152 — output format now depends on the `shipment` parameter:
+      * `shipment=<id>`  → single CSV (streamed).      Filename: detections_<id>_<window>.csv
+      * `shipment=`      → ZIP of one CSV per shipment. Filename: detections_all_<window>.zip
 
-    4.0.59:
-      * New ``length`` column = ``encoder_value - min(encoder_value in this shipment)``
-        so each row shows how far the belt had moved when that detection was
-        captured, in encoder counts.
-      * New ``unwind`` query flag: for roll-unwinding lines the operator
-        thinks of the SHIPMENT-END as position 0 and earlier detections as
-        further along the roll. Setting ``unwind=true`` reports
-        ``length = max(encoder) - encoder`` per row instead — same magnitude,
-        inverted direction.
+    The ZIP path is what the "CSV" button on Charts triggers when the operator
+    hasn't picked a specific shipment. Each entry inside the ZIP is named
+    `detections_<shipment>_<window>.csv` so unzipping into a directory gives
+    one file per shipment the operator can open in Excel independently.
+
+    Column list (shared):
+      time, shipment, encoder, length, camera, class, confidence, severity,
+      impact, xmin, ymin, xmax, ymax, image_path, inference_time_ms, model_used
+
+    `unwind=true` inverts the length column (max(encoder) − encoder) for
+    roll-unwinding lines where the operator thinks of shipment-end as 0.
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
@@ -4752,116 +4797,155 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
 
     import csv as _csv
     import io as _io
+    import re as _re
 
-    def gen():
-        try:
-            # 3.21.12 — load per-class severity (0-100) for impact column.
-            from config import load_service_config as _lsc
-            _svc = _lsc() or {}
-            _audio = _svc.get("audio_settings", {}) or {}
-            sev_map = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+    # Shared: severity map + window-wide enc_min/enc_max for length column.
+    try:
+        from config import load_service_config as _lsc
+        _svc = _lsc() or {}
+        _audio = _svc.get("audio_settings", {}) or {}
+        sev_map = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+    except Exception:
+        sev_map = {}
 
-            # 4.0.59 — pre-query min/max encoder for the selected window so the
-            # length column can be computed per row without holding all rows in
-            # memory. The MIN is the shipment-start anchor (equivalent to
-            # watcher.shipment_start_encoder for the CURRENT shipment, but this
-            # works for HISTORICAL shipments too because it's derived from the
-            # data). MAX is only used in unwind mode. Runs on the same cursor
-            # connection but a separate short-lived cursor so it doesn't
-            # interfere with the streaming server-side cursor below.
-            enc_min = 0
-            enc_max = 0
-            try:
-                with conn.cursor() as _mcur:
-                    _mcur.execute(
-                        f"""SELECT MIN(encoder_value), MAX(encoder_value)
-                            FROM inference_results
-                            WHERE time > NOW() - INTERVAL %s {ship_clause}""",
-                        params,
-                    )
-                    _row = _mcur.fetchone()
-                    if _row:
-                        enc_min = int(_row[0]) if _row[0] is not None else 0
-                        enc_max = int(_row[1]) if _row[1] is not None else 0
-            except Exception as _me:
-                logger.debug(f"export_csv min/max encoder probe failed: {_me}")
-
-            cur = conn.cursor(name="export_csv_cursor")  # server-side cursor (streaming, low RAM)
-            cur.itersize = 500
-            cur.execute(
-                f"""SELECT time, shipment, encoder_value, image_path,
-                           inference_time_ms, model_used, detections
+    enc_min_global = 0
+    enc_max_global = 0
+    try:
+        with conn.cursor() as _mcur:
+            _mcur.execute(
+                f"""SELECT MIN(encoder_value), MAX(encoder_value)
                     FROM inference_results
-                    WHERE time > NOW() - INTERVAL %s {ship_clause}
-                    ORDER BY time ASC""",
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}""",
                 params,
             )
-            buf = _io.StringIO()
-            writer = _csv.writer(buf)
-            # 4.0.59 — added "length" between encoder and camera.
-            writer.writerow([
-                "time", "shipment", "encoder", "length", "camera", "class", "confidence",
-                "severity", "impact",                                  # 3.21.12
-                "xmin", "ymin", "xmax", "ymax", "image_path",
-                "inference_time_ms", "model_used",
-            ])
-            yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+            _row = _mcur.fetchone()
+            if _row:
+                enc_min_global = int(_row[0]) if _row[0] is not None else 0
+                enc_max_global = int(_row[1]) if _row[1] is not None else 0
+    except Exception as _me:
+        logger.debug(f"export_csv min/max encoder probe failed: {_me}")
 
-            for t, ship, enc, img, infms, model, dets in cur:
-                ts = t.strftime("%Y-%m-%d %H:%M:%S.%f") if t else ""
-                if not dets:
-                    continue
-                # 4.0.59 — compute length per row. Wind (default) = distance
-                # travelled from the shipment start (min encoder). Unwind =
-                # distance remaining before the end (max encoder − now), the
-                # right mental model for a roll being unwound from full.
-                if enc is None:
-                    length_val = ""
-                elif unwind:
-                    length_val = int(enc_max - int(enc))
-                else:
-                    length_val = int(int(enc) - enc_min)
-                for d in dets:
-                    if not isinstance(d, dict):
-                        continue
-                    # 3.21.10: filter rows by min_conf so CSV matches what the
-                    # charts show.
-                    try:
-                        conf_f = float(d.get("confidence") or 0.0)
-                        if conf_f < min_conf_f:
-                            continue
-                    except (TypeError, ValueError):
-                        conf_f = 0.0
-                    cls = d.get("name", "")
-                    sev = sev_map.get(cls, 0)
-                    impact = round((sev / 100.0) * conf_f, 3)  # 3.21.12 — defect impact
-                    writer.writerow([
-                        ts, ship or "", enc if enc is not None else "",
-                        length_val,
-                        d.get("_cam", ""), cls,
-                        d.get("confidence", ""),
-                        sev, impact,
-                        d.get("xmin", ""), d.get("ymin", ""),
-                        d.get("xmax", ""), d.get("ymax", ""),
-                        img or "", infms or "", model or "",
-                    ])
-                    yield buf.getvalue(); buf.seek(0); buf.truncate(0)
-            cur.close()
-        except Exception as e:
-            logger.warning(f"export_csv stream failed: {e}")
-            yield f"# ERROR: {e}\n"
-        finally:
-            try: release_db_connection(conn)
-            except Exception: pass
-
-    import re as _re
-    safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", shipment) if shipment else "all"
-    # 4.0.59 — include direction hint in filename so unwind exports are
-    # visibly distinct from wind exports on disk.
     _dir_tag = "_unwind" if unwind else ""
-    fname = f"detections_{safe_ship}_{window}{_dir_tag}.csv"
-    return StreamingResponse(gen(), media_type="text/csv; charset=utf-8",
-                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+    # ------------------------------------------------------------------
+    # Single-CSV path (operator picked a specific shipment)
+    # ------------------------------------------------------------------
+    if shipment:
+        def gen_single():
+            try:
+                cur = conn.cursor(name="export_csv_single_cursor")
+                cur.itersize = 500
+                cur.execute(
+                    f"""SELECT time, shipment, encoder_value, image_path,
+                               inference_time_ms, model_used, detections
+                        FROM inference_results
+                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                        ORDER BY time ASC""",
+                    params,
+                )
+                buf = _io.StringIO()
+                writer = _csv.writer(buf)
+                writer.writerow(_CSV_COLUMNS)
+                yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+                for t, ship, enc, img, infms, model, dets in cur:
+                    if not dets:
+                        continue
+                    for d in dets:
+                        if not isinstance(d, dict):
+                            continue
+                        row = _detection_row(t, ship, enc, img, infms, model, d,
+                                             sev_map, enc_min_global, enc_max_global,
+                                             unwind, min_conf_f)
+                        if row is None:
+                            continue
+                        writer.writerow(row)
+                        yield buf.getvalue(); buf.seek(0); buf.truncate(0)
+                cur.close()
+            except Exception as e:
+                logger.warning(f"export_csv single stream failed: {e}")
+                yield f"# ERROR: {e}\n"
+            finally:
+                try: release_db_connection(conn)
+                except Exception: pass
+
+        safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", shipment)
+        fname = f"detections_{safe_ship}_{window}{_dir_tag}.csv"
+        return StreamingResponse(gen_single(), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+    # ------------------------------------------------------------------
+    # ZIP path (all shipments in the window, one CSV per shipment inside)
+    # ------------------------------------------------------------------
+    # Group detections by shipment in memory. The rows are grouped as we scan,
+    # so peak memory holds only the built rows (not the raw jsonb detections).
+    # For a 24 h window on the biggest current site that's roughly a few MB.
+    try:
+        from collections import defaultdict
+        import zipfile as _zip
+
+        per_shipment_rows = defaultdict(list)
+        cur = conn.cursor(name="export_csv_zip_cursor")
+        cur.itersize = 500
+        cur.execute(
+            f"""SELECT time, shipment, encoder_value, image_path,
+                       inference_time_ms, model_used, detections
+                FROM inference_results
+                WHERE time > NOW() - INTERVAL %s
+                ORDER BY time ASC""",
+            [interval],
+        )
+        for t, ship, enc, img, infms, model, dets in cur:
+            if not dets or not ship:
+                continue
+            for d in dets:
+                if not isinstance(d, dict):
+                    continue
+                row = _detection_row(t, ship, enc, img, infms, model, d,
+                                     sev_map, enc_min_global, enc_max_global,
+                                     unwind, min_conf_f)
+                if row is None:
+                    continue
+                per_shipment_rows[ship].append(row)
+        cur.close()
+
+        # Build the ZIP in memory. One CSV entry per shipment id, sorted so the
+        # ZIP has a stable file order (helps diffs and human scanning).
+        buf = _io.BytesIO()
+        with _zip.ZipFile(buf, "w", compression=_zip.ZIP_DEFLATED) as zf:
+            if not per_shipment_rows:
+                # Empty result — still return a valid ZIP with a README so the
+                # operator sees something meaningful instead of a 0-byte
+                # download that looks like a bug.
+                zf.writestr(
+                    "README.txt",
+                    f"No detections in window={window}.\n"
+                    f"Filter used: unwind={unwind}, min_conf={min_conf_f}\n",
+                )
+            for ship_id in sorted(per_shipment_rows.keys()):
+                sbuf = _io.StringIO()
+                w = _csv.writer(sbuf)
+                w.writerow(_CSV_COLUMNS)
+                for r in per_shipment_rows[ship_id]:
+                    w.writerow(r)
+                safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", str(ship_id))
+                zf.writestr(f"detections_{safe_ship}_{window}{_dir_tag}.csv",
+                            sbuf.getvalue())
+        buf.seek(0)
+        zip_bytes = buf.getvalue()
+        fname = f"detections_all_{window}{_dir_tag}.zip"
+        return Response(content=zip_bytes,
+                        media_type="application/zip",
+                        headers={
+                            "Content-Disposition": f'attachment; filename="{fname}"',
+                            "Content-Length": str(len(zip_bytes)),
+                        })
+    except Exception as e:
+        logger.warning(f"export_csv zip build failed: {e}")
+        return Response(content=f"ERROR: {e}\n", status_code=500,
+                        media_type="text/plain")
+    finally:
+        try: release_db_connection(conn)
+        except Exception: pass
 
 
 @router.get("/api/raw_image/{path:path}")

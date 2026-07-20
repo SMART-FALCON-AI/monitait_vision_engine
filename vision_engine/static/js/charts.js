@@ -2184,6 +2184,22 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         // for this camera. Useful when line is stopped.
                         x = ca ? ca.left : 0;
                         w = ca ? (ca.right - ca.left) : chart.width;
+                    } else if (ca) {
+                        // v4.0.149 — direct pixel positioning across chartArea.
+                        // Previously used xScale.getPixelForValue(heatmapMin +
+                        // bin*binWidth) which returned wrong pixels when the
+                        // payload bounds and the chart X-axis bounds were even
+                        // slightly out of sync (operator reported: on time
+                        // axis, all 48 bins clustered on the right edge of
+                        // the chart, `start and stop of each bin` looked
+                        // wrong). Direct math gives an unambiguous 1:1 mapping:
+                        // bin K sits at `chartArea.left + K * chartWidth /
+                        // heatmapBins`, always spread across the full width,
+                        // 1:1 with the strip cells below.
+                        const chartWidth = ca.right - ca.left;
+                        const binPixelWidth = chartWidth / heatmapBins;
+                        x = ca.left + cell.bin * binPixelWidth;
+                        w = binPixelWidth;
                     } else {
                         const encL = heatmapEncMin + cell.bin * binWidth;
                         const encR = heatmapEncMin + (cell.bin + 1) * binWidth;
@@ -2213,7 +2229,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     else if (de <= 5)  hue = 60;           // yellow
                     else if (de <= 10) hue = 30;           // orange
                     else               hue = 0;            // red
-                    ctx.fillStyle = `hsla(${hue}, 65%, 45%, 0.35)`;
+                    // v4.0.149 — alpha bumped 0.35 → 0.55 so low-ΔE cells
+                    // (green over the dark chart background) are visible,
+                    // not just the loud red/orange ones.
+                    ctx.fillStyle = `hsla(${hue}, 65%, 45%, 0.55)`;
                     ctx.fillRect(x, y, w, h);
                     // 4.0.38 — thin dark stroke so each cell is visually
                     // distinct from its neighbours. Without this, adjacent

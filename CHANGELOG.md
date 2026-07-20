@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.155] - 2026-07-19 — Auto-cutoff: explicit "Enabled" boolean toggle (no more -1 sentinel)
+
+### Why
+v4.0.153/154 used `auto_cutoff_threshold <= 0` as the "disabled" signal. Operator flagged: **length can legitimately be negative** during a v4.0.114 encoder-wrap window, so overloading the numeric value as both "value" and "on/off state" was a footgun.
+
+### Change
+New boolean field `auto_cutoff_enabled` in `service_config` drives on/off. The threshold field is now free to hold any real number (including negatives if the operator genuinely wants that semantic — though the wrap guard still short-circuits negative-length paths).
+
+### Legacy compat
+When `auto_cutoff_enabled` is unset AND the legacy `auto_cutoff_threshold` / `max_shipment_length` is > 0, the backend still treats the feature as enabled — so a site persisted on v4.0.153/154 keeps working without any operator action.
+
+### UI (Advanced tab)
+Added a checkbox `Enable auto-cutoff` at the top of the card. When off, MVE never rewrites the shipment id — the threshold input still holds whatever value the operator set, they just aren't applied.
+
+### Backend
+- `services/watcher.py:_maybe_auto_cutoff` reads `auto_cutoff_enabled` first; early-returns if not truthy.
+- `routers/config_routes.py` GET/POST propagate `auto_cutoff_enabled`; POST accepts it as a plain bool.
+
+## [4.0.154] - 2026-07-19 — Auto-cutoff: operator picks the metric (encoder / time / length)
+
+### What changed vs v4.0.153
+v4.0.153 auto-cut on **length** in the operator's display unit. v4.0.154 adds a **metric selector** so the operator can also cut on:
+
+| Metric | Threshold semantics |
+|---|---|
+| `length` (default) | `(encoder_value - shipment_start_encoder) / encoder_units_per_unit` — falls back to raw encoder when no upu is set |
+| `encoder` | `encoder_value - shipment_start_encoder` (raw pulses) |
+| `time_sec` | `time.time() - shipment_start_ts` (wall-clock seconds since the shipment started) |
+
+`shipment_start_ts` is now tracked alongside `shipment_start_encoder` — reset on barcode-scan and on every auto-cutoff so the `time_sec` metric measures from the correct moment.
+
+### Backend
+- New: `auto_cutoff_metric` + `auto_cutoff_threshold` fields in service_config.
+- Legacy: `max_shipment_length` is still read and written as an alias for `auto_cutoff_threshold` when metric=length, so a v4.0.153-configured site keeps working with no operator action.
+- `services/watcher.py:_maybe_auto_cutoff` branches on metric; the wrap-guard (v4.0.114) still applies to encoder/length metrics; `time_sec` also guards against clock skew.
+
+### UI (Advanced tab card "✂️ Auto-cutoff shipment")
+- Radio group: **Length / Encoder pulses / Time (seconds)**.
+- Threshold input's live "in <unit>" label swaps with the metric — `Meter` / `encoder pulses` / `seconds`.
+- Save button posts `auto_cutoff_metric` + `auto_cutoff_threshold` together so the two never drift.
+
+## [4.0.153] - 2026-07-19 — Max-shipment-size auto-cutoff (operator-configurable)
+
+### What it does
+When the active shipment's length reaches a configured threshold, MVE closes it and opens a new shipment automatically. The new id follows the same date format as the frontend 🎲 button — `{prefix}{yymmddhhmmssX}` — e.g. `MR2607192045123` when the prefix is `MR`.
+
+### Config (Advanced tab → "✂️ Auto-cutoff shipment on length")
+| Field | Default | Notes |
+|---|---|---|
+| `max_shipment_length` | `-1` (disabled) | Threshold in the operator's display unit (Meter, Batch, mm, tile…). Compared against the same length the dashboard tile shows. |
+| `auto_shipment_id_prefix` | `MR` | Alphanumerics + `- _ .`, up to 16 chars. Prepended before the yymmddhhmmssX timestamp. |
+| `auto_cutoff_cooldown_sec` | `5` | Minimum seconds between two auto-cutoffs — a safety net so a jittery encoder can't fire the same cutoff twice. |
+
+Persisted via new endpoints `GET/POST /api/auto_cutoff_config` at [config_routes.py](vision_engine/routers/config_routes.py). Dual-writes DB + file like every other config (v3.22.0 pattern).
+
+### Guards (all short-circuit early — cheap on every tick)
+- Feature disabled (`max_shipment_length <= 0`).
+- No active shipment (`no_shipment` or empty).
+- Length is negative (v4.0.114 encoder-wrap in progress).
+- Cool-down not elapsed since the last cutoff.
+
+Never raises: any exception in the check is logged at warning and swallowed so a malformed config field can't kill the encoder loop.
+
+### Runtime
+Hook lives in `services/watcher.py:_maybe_auto_cutoff`; called from **both** encoder-tick branches (legacy `Encoder:` line + new `ENC:` line format) right after `self.encoder_value` updates. When it fires:
+1. Generates the new id.
+2. Rebases `shipment_start_encoder = self.encoder_value` (so length starts fresh at 0 next tick).
+3. Assigns `self.shipment = new_id`; propagates to Redis so the detection loop picks it up.
+4. Calls `persist_length_state(force=True)` so a crash between the cutoff and the next periodic tick doesn't lose the state.
+
+### UI
+Advanced tab card sits right below Encoder Calibration; the unit label echoes the operator's chosen `encoder_unit` (Meter/Batch/…) so the field reads `Max shipment length (in Batch)` for a batch-line site.
+
+## [4.0.152] - 2026-07-19 — CSV export: per-shipment ZIP when no specific shipment is selected
+
+### Old behaviour
+Click the CSV button on Charts with "All shipments" selected → single `detections_all_<window>.csv` with every detection from every shipment in the window jammed into one file. Excel choked, operators had to filter by shipment column by hand.
+
+### New behaviour (v4.0.152)
+Same URL, same button. The backend at [routers/timeline.py](vision_engine/routers/timeline.py) picks the format based on the `shipment` parameter:
+
+- **`shipment=<id>`**  →  streamed single CSV (unchanged).
+  Filename: `detections_<id>_<window>.csv`
+- **`shipment=`**  →  ZIP with one CSV per shipment inside.
+  Filename: `detections_all_<window>.zip`
+  Inner files: `detections_<shipment>_<window>.csv` (one per shipment id in the window, alphabetically sorted for stable order)
+
+### Details
+- Detection-row builder + column list extracted into `_detection_row` / `_CSV_COLUMNS` at [timeline.py](vision_engine/routers/timeline.py) so both output paths share the same schema. Preserves the v4.0.59 `length` column, the v3.21.12 `severity` / `impact` columns, and the `unwind` semantics.
+- Empty window returns a ZIP with a `README.txt` explaining what was searched, instead of a 0-byte file that looks like a failed download.
+- Server-side cursor + streaming preserved for the single-CSV path (no memory bloat on huge single-shipment exports). ZIP path buffers per-shipment rows in memory before building the archive — acceptable because the archive itself needs a central directory at the end.
+- Button tooltip updated at [static/status.html](vision_engine/static/status.html) to spell out the two behaviours.
+
+## [4.0.151] - 2026-07-19 — VERSION file is the single source of truth (no more container restart on file-only ships)
+
+### The old flow
+- Ship a static file (charts.js, status.html, VERSION)
+- `/health` still reports the old version → container restart needed
+- `/status` still injects the old cache-buster (because `app.version` was captured at FastAPI startup) → operator sees stale JS
+
+### The new flow
+Added `get_current_version(app_version)` helper in [health.py](vision_engine/routers/health.py) that reads the `VERSION` file on demand with a small mtime-based cache (looks in `./VERSION`, `/code/VERSION`, `../VERSION` in order; falls back to the FastAPI-captured `app.version` if none is readable).
+
+Wired into two places that surface the version to operators:
+- `/health` payload's `version` field (frontend title + top-left badge)
+- `/status` cache-buster rewrite (busts JS/CSS caches on every render)
+
+Net effect: bumping the `VERSION` file alone is enough. No container restart, no other file to edit. The 8 hardcoded `?v=4.0.XXX` strings sprinkled through `status.html` never mattered — the `/status` endpoint rewrites them at request time — and now the rewrite target follows the file, not the container's boot moment.
+
+## [4.0.150] - 2026-07-19 — Restore "Dots/Category/Bucket:" label before the dot-count selector
+
+v4.0.149 dropped both the "Buckets:" and "Dots/class:" toolbar labels. Operator asked for the single grouping label back so the meaning of the `100` selector stays obvious next to the raw `48` bucket count. Restored as `Dots/Category/Bucket:` (matches the semantic — max dots per class kept per bucket cell) at [static/status.html](vision_engine/static/status.html).
+
+## [4.0.149] - 2026-07-19 — Colour heatmap: direct pixel positioning (fixes right-cluster bug) + alpha bump + toolbar declutter
+
+### 1. TIME-axis heatmap cells no longer cluster on the right edge
+The plugin was calling `xScale.getPixelForValue(heatmapMin + bin*binWidth)` to place each cell. That works only when the payload's `t_min/t_max` and the chart's `_scatterXMin/_scatterXMax` are exactly in sync. In practice the two are computed from different `NOW()` reads (Postgres side vs browser side) so they drift by a fraction of a second, and Chart.js's linear-scale mapping for millisecond timestamps ended up putting all 48 bins into a narrow band on the right of the chart on the operator's reproducer (v4.0.148 on vteam12, time axis, 24 h window).
+
+Rewrote the plugin's positioning at [static/js/charts.js](vision_engine/static/js/charts.js) to skip `xScale` entirely and use direct chart-area math:
+
+```js
+const chartWidth = ca.right - ca.left;
+const binPixelWidth = chartWidth / heatmapBins;
+x = ca.left + cell.bin * binPixelWidth;
+w = binPixelWidth;
+```
+
+Bin K is now exactly at `chartArea.left + K * chartWidth / N_BINS`, always. 1:1 with the strip cell below regardless of any drift between the payload bounds and the chart X-axis bounds. Same fix applies to both encoder and time axes.
+
+### 2. Alpha bumped 0.35 → 0.55
+Low-ΔE cells were painting as green over dark background at 35 % opacity, effectively invisible. At 0.55 every cell reads clearly and the RGY bands still remain distinguishable.
+
+### 3. Toolbar declutter (operator ask)
+- Removed the wordy hint `"scatter + quality strip + ejection strip all use the selected axis"` — the three axis-toggle buttons carry the same meaning.
+- Removed the `"Buckets:"` and `"Dots/class:"` labels; the input controls stand on their own with their tooltip titles and `aria-label`s intact.
+
 ## [4.0.148] - 2026-07-18 — Restore v4.0.144 "stretch" behaviour for the colour heatmap
 
 Operator asked for the v4.0.144 look back: cells always fill the whole chart width, 1:1 with the strip below, no gaps where `_color` data is sparse. v4.0.146/147 was moving toward "honest" bin positioning (cells only where data exists), but the visual mismatch with the strip below wasn't what the operator wanted.

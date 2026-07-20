@@ -749,6 +749,107 @@ window.loadEncoderCalibration = loadEncoderCalibration;
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadEncoderCalibration, 1100));
 
 
+// v4.0.154 — Auto-cutoff configuration with metric selector.
+// Backend endpoints: GET/POST /api/auto_cutoff_config
+// Fields: auto_cutoff_metric ("encoder"|"time_sec"|"length"),
+//         auto_cutoff_threshold (float, -1 disables),
+//         auto_shipment_id_prefix (string, default "MR"),
+//         auto_cutoff_cooldown_sec (float, default 5).
+
+// Update the "in <unit>" label next to the threshold input based on which
+// metric radio is currently selected. Called on load and on every radio change.
+function _refreshAutoCutoffUnits() {
+    const metric = document.querySelector('input[name="auto-cutoff-metric"]:checked')?.value || 'length';
+    const el = document.getElementById('auto-cutoff-unit-echo');
+    if (!el) return;
+    if (metric === 'encoder') {
+        el.textContent = 'encoder pulses';
+    } else if (metric === 'time_sec') {
+        el.textContent = 'seconds';
+    } else {
+        // "length" — echo the operator's chosen display unit
+        const enc = (window._lengthCache && window._lengthCache.unit) || 'unit';
+        el.textContent = enc;
+    }
+}
+window._refreshAutoCutoffUnits = _refreshAutoCutoffUnits;
+
+async function loadAutoCutoffConfig() {
+    try {
+        const r = await fetch('/api/auto_cutoff_config');
+        if (!r.ok) return;
+        const d = await r.json();
+        const enEl  = document.getElementById('auto-cutoff-enabled-input');
+        const lenEl = document.getElementById('auto-cutoff-length-input');
+        const preEl = document.getElementById('auto-cutoff-prefix-input');
+        const cdEl  = document.getElementById('auto-cutoff-cooldown-input');
+        // v4.0.155 — explicit boolean toggle drives the enable state.
+        if (enEl) enEl.checked = !!d.auto_cutoff_enabled;
+        const metric = (d.auto_cutoff_metric || 'length');
+        const metricRadio = document.querySelector(`input[name="auto-cutoff-metric"][value="${metric}"]`);
+        if (metricRadio) metricRadio.checked = true;
+        // Threshold: prefer new field; fall back to legacy alias.
+        const thr = (d.auto_cutoff_threshold !== undefined && d.auto_cutoff_threshold !== null)
+            ? d.auto_cutoff_threshold
+            : d.max_shipment_length;
+        if (lenEl && thr !== undefined && thr !== null) lenEl.value = thr;
+        if (preEl && d.auto_shipment_id_prefix) preEl.value = d.auto_shipment_id_prefix;
+        if (cdEl  && d.auto_cutoff_cooldown_sec !== undefined) cdEl.value = d.auto_cutoff_cooldown_sec;
+        _refreshAutoCutoffUnits();
+    } catch (e) {}
+}
+
+async function saveAutoCutoffConfig() {
+    const enabled = !!document.getElementById('auto-cutoff-enabled-input')?.checked;
+    const metric = document.querySelector('input[name="auto-cutoff-metric"]:checked')?.value || 'length';
+    const lenRaw = (document.getElementById('auto-cutoff-length-input')?.value || '').trim();
+    const preRaw = (document.getElementById('auto-cutoff-prefix-input')?.value || '').trim();
+    const cdRaw  = (document.getElementById('auto-cutoff-cooldown-input')?.value || '').trim();
+    const resp   = document.getElementById('auto-cutoff-response');
+    const body = {
+        auto_cutoff_enabled: enabled,
+        auto_cutoff_metric: metric,
+    };
+    if (lenRaw !== '') {
+        const n = parseFloat(lenRaw);
+        if (Number.isFinite(n)) body.auto_cutoff_threshold = n;
+    }
+    if (preRaw !== '') body.auto_shipment_id_prefix = preRaw;
+    if (cdRaw !== '') {
+        const n = parseFloat(cdRaw);
+        if (Number.isFinite(n)) body.auto_cutoff_cooldown_sec = n;
+    }
+    try {
+        const r = await fetch('/api/auto_cutoff_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok) {
+            if (resp) {
+                if (!d.auto_cutoff_enabled) {
+                    resp.textContent = 'Saved. Auto-cutoff disabled.';
+                } else {
+                    const unit = metric === 'encoder' ? 'encoder pulses'
+                               : metric === 'time_sec' ? 'seconds'
+                               : ((window._lengthCache && window._lengthCache.unit) || 'unit');
+                    resp.textContent = `Saved. Enabled. Cut at ${d.auto_cutoff_threshold} ${unit} → new id: ${d.auto_shipment_id_prefix}<date>.`;
+                }
+                resp.className = 'control-response success';
+            }
+        } else {
+            if (resp) { resp.textContent = `Error: ${d.detail || 'failed'}`; resp.className = 'control-response error'; }
+        }
+    } catch (e) {
+        if (resp) { resp.textContent = `Error: ${e.message}`; resp.className = 'control-response error'; }
+    }
+}
+window.saveAutoCutoffConfig = saveAutoCutoffConfig;
+window.loadAutoCutoffConfig = loadAutoCutoffConfig;
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadAutoCutoffConfig, 1200));
+
+
 // 3.21.22 — AI Trainer config (Advanced tab). Same pattern as Encoder
 // Calibration: load on page open, save on button click. The api_key
 // field is write-only — the server never returns it; a saved key is
