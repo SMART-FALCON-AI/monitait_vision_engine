@@ -69,6 +69,58 @@ def get_current_version(app_version: str = "") -> str:
     return app_version or "dev"
 
 
+# v4.0.156 — auto-cutoff status slice for /api/status (feeds the Dashboard
+# badge next to the Shipment tile). Three fields, all read from
+# service_config with the same legacy-alias fallback used by
+# /api/auto_cutoff_config so an older config format still renders correctly.
+_VALID_CUTOFF_METRICS_STATUS = ("encoder", "time_sec", "length")
+
+
+def _auto_cutoff_status_slice(svc, procedures=None):
+    # threshold: new field wins, fall back to legacy alias
+    thr_raw = svc.get("auto_cutoff_threshold")
+    if thr_raw is None:
+        thr_raw = svc.get("max_shipment_length")
+    try:
+        threshold = float(thr_raw) if thr_raw is not None else 0.0
+    except (TypeError, ValueError):
+        threshold = 0.0
+    # enabled: explicit bool wins; legacy inference is "threshold > 0"
+    enabled_raw = svc.get("auto_cutoff_enabled")
+    if enabled_raw is None:
+        enabled = threshold > 0
+    else:
+        enabled = bool(enabled_raw)
+    metric = str(svc.get("auto_cutoff_metric") or "length").strip().lower()
+    if metric not in _VALID_CUTOFF_METRICS_STATUS:
+        metric = "length"
+    # 4.0.176 — surface rule-based cutoff procedures alongside the time /
+    # encoder / length metric so the Dashboard badge can show BOTH forms.
+    # `procedures` is passed by the caller (from
+    # `request.app.state.timeline_config.procedures`) because timeline_config
+    # lives at the root of prepared_query_data, NOT inside service_config,
+    # so load_service_config() doesn't include it.
+    cutoff_rules = []
+    try:
+        for _p in (procedures or []):
+            if not isinstance(_p, dict):
+                continue
+            if not _p.get("enabled", False):
+                continue
+            act = str(_p.get("action", "eject") or "eject").strip().lower()
+            if act == "shipment_close":
+                cutoff_rules.append(str(_p.get("name") or "Unnamed"))
+    except Exception:
+        pass
+    return {
+        "auto_cutoff_enabled": enabled,
+        "auto_cutoff_metric": metric,
+        "auto_cutoff_threshold": threshold,
+        "cutoff_rules": cutoff_rules,           # list of enabled rule names
+        "cutoff_rules_count": len(cutoff_rules),
+    }
+
+
 # v4.0.140 — build the encoder-calibration slice that both /api/status and
 # the SSE stream include. Reads the new `encoder_units_per_unit`, falls
 # back to legacy `encoder_units_per_meter` when unset (so a fresh upgrade
@@ -990,6 +1042,14 @@ def api_status(request: Request):
             # notice. Fields are always present; encoder_units_per_meter is
             # None when the operator hasn't calibrated yet (raw units shown).
             **_encoder_calibration_payload(_load_svc_cfg_for_status()),
+            # v4.0.156 — expose the current auto-cutoff config on /api/status
+            # so the Dashboard badge next to Shipment updates live (SSE-driven,
+            # no separate poll). Only the three fields the badge needs; the
+            # full config still lives at /api/auto_cutoff_config.
+            **_auto_cutoff_status_slice(
+                _load_svc_cfg_for_status(),
+                procedures=(getattr(request.app.state, 'timeline_config', {}) or {}).get('procedures'),
+            ),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
     except Exception as e:
@@ -1135,14 +1195,19 @@ async def status_stream(request: Request):
                     # only added it to /api/status (poll). The dashboard reads
                     # length from SSE — without this the length-cache stays at
                     # its ('units', 0) init and the tile shows "0 units" even
-                    # when Advanced tab has mm/1000 set. Same helper as
-                    # /api/status so identical values on both channels.
-                    **(lambda _svc: {
-                        "encoder_unit": str(_svc.get("encoder_unit") or "units"),
-                        "encoder_units_per_meter": (
-                            float(_svc.get("encoder_units_per_meter") or 0) or None
-                        ),
-                    })(_load_svc_cfg_for_status()),
+                    # when Advanced tab has mm/1000 set.
+                    # v4.0.157 — use the same helper as /api/status so both
+                    # channels emit identical field names (was inline lambda).
+                    **_encoder_calibration_payload(_load_svc_cfg_for_status()),
+                    # v4.0.157 — mirror auto-cutoff slice on SSE too. v4.0.156
+                    # added it to /api/status poll but the Dashboard reads
+                    # from SSE, so the badge next to Shipment never received
+                    # the auto_cutoff fields and stayed hidden. Same helper as
+                    # /api/status → identical values on both channels.
+                    **_auto_cutoff_status_slice(
+                _load_svc_cfg_for_status(),
+                procedures=(getattr(request.app.state, 'timeline_config', {}) or {}).get('procedures'),
+            ),
                     # Camera status
                     "cameras": {
                         name: {

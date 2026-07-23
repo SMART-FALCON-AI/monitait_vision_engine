@@ -950,6 +950,44 @@ def set_auto_cutoff_config(payload: Dict[str, Any]):
 
 
 # =============================================================================
+# Parent Object Color Check global feature toggle (4.0.159)
+# =============================================================================
+# Governs whether MVE emits the per-frame `_color` synthetic detection AND
+# whether the chart tab renders the colour heatmap + baseline/phase pickers.
+# Persisted as `parent_color_check_enabled` (bool) in service_config, defaulting
+# to False so operators explicitly opt in. Frontend reads via GET, writes via
+# POST, and also mirrors the value in /api/status so the chart tab knows what
+# to hide without a second request.
+
+@router.get("/api/color_config")
+def get_color_config():
+    try:
+        svc = load_service_config() or {}
+        return JSONResponse(content={
+            "parent_color_check_enabled": bool(svc.get("parent_color_check_enabled", False)),
+        })
+    except Exception as e:
+        logger.error(f"get_color_config error: {e}")
+        return JSONResponse(content={"parent_color_check_enabled": False})
+
+
+@router.post("/api/color_config")
+def set_color_config(payload: Dict[str, Any]):
+    try:
+        svc = load_service_config() or {}
+        if "parent_color_check_enabled" in payload:
+            svc["parent_color_check_enabled"] = bool(payload["parent_color_check_enabled"])
+        save_service_config(svc)
+        return JSONResponse(content={
+            "status": "ok",
+            "parent_color_check_enabled": bool(svc.get("parent_color_check_enabled", False)),
+        })
+    except Exception as e:
+        logger.error(f"set_color_config error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
 # Storage path (DATA_ROOT) endpoints (3.21.11)
 # =============================================================================
 # The raw_images bind-mount is `${DATA_ROOT:-.}/raw_images:/code/raw_images`.
@@ -1290,7 +1328,12 @@ def api_set_audio_settings(payload: Dict[str, Any]):
         #               from any class with role=parent; falls back to ['_root']
         #               when no class is flagged parent)
         #   "marker"  — encoder-axis landmark, not scored
-        _VALID_ROLES = {"context", "defect", "parent", "marker"}
+        # 4.0.179 — added `vertical_defect` and `horizontal_defect` roles.
+        # Chart-side these render as narrow rectangles (▮ vertical, ▬ horizontal)
+        # in the camera×encoder scatter so operators can distinguish defect
+        # orientation at a glance. Backend just tags them and lets class_groups
+        # + the scatter shape-map do the visual work.
+        _VALID_ROLES = {"context", "defect", "parent", "marker", "vertical_defect", "horizontal_defect"}
         def _clean_role(v):
             s = str(v or "").strip().lower()
             return s if s in _VALID_ROLES else "context"

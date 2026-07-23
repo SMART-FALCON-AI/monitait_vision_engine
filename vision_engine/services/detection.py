@@ -81,6 +81,28 @@ def _get_audio_settings_map():
     return _audio_settings_cache
 
 
+# 4.0.159 — global "Parent Object Color Check" feature flag.
+# When False: the per-frame `_color` synthetic detection is not emitted at all,
+# the chart-tab heatmap and baseline/phase pickers are hidden. Default False so
+# operators explicitly opt in (color drift is only meaningful on sites where a
+# parent-role class has been designated and lighting is stable enough for E to
+# be a useful signal).
+_color_feature_cache = {"enabled": False, "loaded_at": 0.0}
+
+def _get_color_feature_enabled() -> bool:
+    """Return the current 'Parent Object Color Check' flag; cached for _STORE_TTL."""
+    now = time.time()
+    if now - _color_feature_cache["loaded_at"] < _STORE_TTL:
+        return _color_feature_cache["enabled"]
+    try:
+        svc = cfg.load_service_config() or {}
+        _color_feature_cache["enabled"] = bool(svc.get("parent_color_check_enabled", False))
+    except Exception as e:
+        logger.warning(f"Failed to load parent_color_check_enabled: {e}")
+    _color_feature_cache["loaded_at"] = now
+    return _color_feature_cache["enabled"]
+
+
 def _auto_register_classes(yolo_res):
     """3.21.25 — first time a class is detected, give it a stub entry in
     audio_settings with show=False so it shows up as an unticked card in
@@ -418,6 +440,35 @@ def evaluate_eject_from_detections(detections_list, procedures):
                         and d.get('confidence', 0) >= min_conf]
             actual = len(obj_dets)
 
+            # 4.0.178 — shipment-life conditions. These evaluate against the
+            # WATCHER STATE (shipment_start_ts, shipment_start_encoder,
+            # encoder_value), not against the current frame's detections. Let
+            # operators compose rules like "close shipment only if it has been
+            # alive > 200 s AND encoder has advanced > 1000 pulses AND
+            # DYE_LINE count > 3" — prevents the chatter case where a per-
+            # frame detection would infinitely re-trigger.
+            if cond in ('shipment_time_greater', 'shipment_time_less',
+                        'shipment_encoder_greater', 'shipment_encoder_less'):
+                try:
+                    thr = float(rule.get('threshold', 0))
+                except (TypeError, ValueError):
+                    thr = 0.0
+                if _watcher is None:
+                    return False
+                if cond in ('shipment_time_greater', 'shipment_time_less'):
+                    start_ts = float(getattr(_watcher, 'shipment_start_ts', 0) or 0)
+                    if start_ts <= 0:
+                        return False   # no active shipment
+                    elapsed = time.time() - start_ts
+                    rule['_actual'] = round(elapsed, 1)
+                    return elapsed > thr if cond == 'shipment_time_greater' else elapsed < thr
+                # shipment_encoder_*
+                start_enc = int(getattr(_watcher, 'shipment_start_encoder', 0) or 0)
+                cur_enc = int(getattr(_watcher, 'encoder_value', 0) or 0)
+                delta = cur_enc - start_enc
+                rule['_actual'] = delta
+                return delta > thr if cond == 'shipment_encoder_greater' else delta < thr
+
             # Legacy conditions
             if cond == 'present':
                 return actual > 0
@@ -501,6 +552,18 @@ def evaluate_eject_from_detections(detections_list, procedures):
             obj = rule.get('object', '?')
             cond = rule.get('condition', 'count_equals')
 
+            # 4.0.178 — shipment-life conditions
+            if cond in ('shipment_time_greater', 'shipment_time_less'):
+                thr = rule.get('threshold', 0)
+                actual = rule.get('_actual', '?')
+                op = '>' if cond == 'shipment_time_greater' else '<'
+                return f"shipment time {actual}s {op} {thr}s"
+            if cond in ('shipment_encoder_greater', 'shipment_encoder_less'):
+                thr = rule.get('threshold', 0)
+                actual = rule.get('_actual', '?')
+                op = '>' if cond == 'shipment_encoder_greater' else '<'
+                return f"shipment encoder Δ {actual} {op} {thr}"
+
             if cond == 'color_delta':
                 for det in proc_dets:
                     if isinstance(det, dict) and det.get('name') == obj and '_delta_e' in det:
@@ -538,11 +601,42 @@ def evaluate_eject_from_detections(detections_list, procedures):
         results = [_eval_rule(r) for r in rules]
         triggered = all(results) if logic == 'all' else any(results)
         if triggered:
-            should_eject = True
             proc_name = proc.get('name', 'Unnamed')
             details = [_rule_detail(r, res) for r, res in zip(rules, results) if res]
             details = [d for d in details if d]
             reason = f"{proc_name}: {', '.join(details)}" if details else proc_name
+
+            # 4.0.175 — rule-based cutoff. When the procedure carries
+            # `action: "shipment_close"`, treat a rule match as a
+            # signal to close the current shipment + open a new one
+            # (same atomic rebase the time/encoder auto-cutoff uses,
+            # via _watcher.close_and_open_new_shipment). Default
+            # action is "eject" (existing behavior).
+            action = str(proc.get('action', 'eject') or 'eject').strip().lower()
+            if action == 'shipment_close':
+                try:
+                    if _watcher is not None:
+                        # 4.0.189 — pass procedure name as prefix override so
+                        # the new shipment id carries the rule's label instead
+                        # of the global "MR". Operator no longer maintains a
+                        # per-procedure Prefix field — dropped from the UI too.
+                        new_id = _watcher.close_and_open_new_shipment(
+                            reason=f"rule: {reason}",
+                            prefix_override=proc_name,
+                        )
+                        if new_id:
+                            logger.info(
+                                f"rule-based cutoff fired ({proc_name}): "
+                                f"new shipment {new_id}"
+                            )
+                except Exception as _sce:
+                    logger.warning(f"rule-based cutoff dispatch failed: {_sce}")
+                # rule-based cutoff procedures don't add to eject_reasons
+                # (they're a separate action type) and don't run the
+                # ejection-events DB writer below.
+                continue
+
+            should_eject = True
             eject_reasons.append(reason)
 
             # 3.21.10 — persist ejection event right here, at the eval point.
@@ -1278,8 +1372,23 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
         # files. Operators get the same image (rendered <1ms after first cache
         # warm-up) and editing is now the default UX (no separate ✏️ Annotate
         # button needed).
-        if yolo_res and len(yolo_res) > 0:
-            logger.info(f"Frame {frame_id}: {len(yolo_res)} detections recorded (model: {model_name_used}); annotated image will render on demand")
+        # 4.0.160 — enter the DB-write path whenever YOLO produced detections OR
+        # the global Parent Object Color Check toggle is on. Prior code gated
+        # this whole block on `yolo_res` alone, so on idle frames (line stopped
+        # / YOLO returns []), no `_color` row was ever emitted even with the
+        # feature on. Yolo-specific side effects (logger.info, audio events,
+        # per-class lab_color / area extraction) still guard on `yolo_res`
+        # separately so they no-op on empty frames.
+        _color_feature_on = _get_color_feature_enabled()
+        _has_yolo = bool(yolo_res) and len(yolo_res) > 0
+        if _has_yolo or _color_feature_on:
+            # 4.0.160 — normalise so downstream `for det in yolo_res:` is safe
+            # when we entered on the color-feature branch and inference produced
+            # None (or the pipeline manager path returned None).
+            if yolo_res is None:
+                yolo_res = []
+            if _has_yolo:
+                logger.info(f"Frame {frame_id}: {len(yolo_res)} detections recorded (model: {model_name_used}); annotated image will render on demand")
 
             # Attach camera ID to each detection for per-camera procedure filtering
             try:
@@ -1426,26 +1535,34 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                     if float(d.get("confidence") or 0.0) < _min_conf_for(cls, audio_map):
                         continue
                     filtered.append(d)
-                if filtered:
-                    # 4.0.27 — Color metric per frame. Append a synthetic
-                    # `_color` entry with the mean CIELAB L*a*b* + E so the
-                    # chart-tab background heatmap can show colour drift
-                    # per (camera, encoder bin) without an extra inference
-                    # pass. Phase index is parsed from frame_id (format
-                    # `<ts>_p<idx>_<cam>`) so the renderer can split phases
-                    # (lighting differs per phase so absolute Lab values do too).
-                    #
-                    # Region of measurement:
-                    #   • If any class is configured with role="parent" AND
-                    #     a detection of that class lands in this frame,
-                    #     measure on the LARGEST parent bbox. The parent
-                    #     class represents the physical product, so its
-                    #     bbox is the inspection region for colour drift.
-                    #   • Otherwise fall back to the whole frame (_root).
-                    #
-                    # Source noted on the entry (`source`: "parent" or
-                    # "_root") so the chart can label what's being measured.
-                    # Cheap: cv2.cvtColor + cv2.mean is ~1 ms on 1280x720.
+                # 4.0.159 — `_color` gated by the global "Parent Object Color
+                # Check" toggle (Advanced tab). Feature semantics:
+                #   • Toggle OFF → never emit `_color`; the chart heatmap +
+                #     baseline/phase pickers stay hidden on the frontend.
+                #   • Toggle ON and role="parent" designated on some class →
+                #     STRICT: emit `_color` only when a parent-role detection
+                #     is present in this frame (largest bbox wins). No _root
+                #     fallback — a missing parent means "no colour sample for
+                #     this frame" rather than "measure whatever's in view".
+                #   • Toggle ON but NO role="parent" designated anywhere →
+                #     fall back to whole-frame `_root` so the operator still
+                #     sees SOMETHING while wiring up their parent class.
+                # Parent lookup uses RAW yolo_res (not `filtered`): role is a
+                # MEASUREMENT designation, not a storage decision, so Store=
+                # False on the parent class no longer suppresses colour.
+                # 4.0.161 — multi-parent emission. When multiple classes carry
+                # role="parent" (e.g. `box` AND `PVB_FILM`), emit ONE `_color`
+                # PER parent class detected in the frame (largest bbox per
+                # class). The chart toolbar's "Parent class:" picker then
+                # filters which one to display; baseline math groups by
+                # (cam, phase, parent_class) so different physical products
+                # don't share a median.
+                # Prior code (v4.0.159/160) picked the single overall-largest
+                # bbox → consecutive frames alternated which parent got measured,
+                # breaking the baseline for both.
+                # `_root` fallback still applies when NO class has role=parent.
+                color_dets = []
+                if _get_color_feature_enabled():
                     try:
                         import re as _re_color
                         phase_idx = 0
@@ -1453,65 +1570,77 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                         if _pm:
                             phase_idx = int(_pm.group(1))
 
-                        # Pick parent class names (role=parent) and find
-                        # the largest matching detection on this frame.
                         parent_classes = {
                             cls for cls, cfg in (audio_map or {}).items()
                             if isinstance(cfg, dict) and cfg.get("role") == "parent"
                         }
-                        parent_det = None
-                        if parent_classes:
-                            parent_candidates = [
-                                d for d in filtered
-                                if isinstance(d, dict) and d.get("name") in parent_classes
-                            ]
-                            if parent_candidates:
-                                def _bbox_area(d):
-                                    return max(0.0, (d.get("xmax", 0) - d.get("xmin", 0))) * \
-                                           max(0.0, (d.get("ymax", 0) - d.get("ymin", 0)))
-                                parent_det = max(parent_candidates, key=_bbox_area)
-
                         H, W = image.shape[:2]
-                        if parent_det is not None:
-                            xmin = int(max(0, min(W, parent_det.get("xmin", 0))))
-                            ymin = int(max(0, min(H, parent_det.get("ymin", 0))))
-                            xmax = int(max(0, min(W, parent_det.get("xmax", W))))
-                            ymax = int(max(0, min(H, parent_det.get("ymax", H))))
-                            if xmax > xmin and ymax > ymin:
-                                region = image[ymin:ymax, xmin:xmax]
-                                source = "parent"
-                                parent_name = str(parent_det.get("name") or "")
-                                bbox = (xmin, ymin, xmax, ymax)
-                            else:
-                                region = image; source = "_root"
-                                parent_name = ""; bbox = (0, 0, W, H)
-                        else:
-                            region = image; source = "_root"
-                            parent_name = ""; bbox = (0, 0, W, H)
 
-                        # OpenCV BGR→LAB: L in 0..255 (L*255/100), a/b in
-                        # 0..255 (offset by +128). Convert back to CIE scale.
-                        lab_img = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
-                        L_mean, a_mean, b_mean, _ = cv2.mean(lab_img)
-                        L_cie = float(L_mean) * 100.0 / 255.0
-                        a_cie = float(a_mean) - 128.0
-                        b_cie = float(b_mean) - 128.0
-                        E_cie = (L_cie ** 2 + a_cie ** 2 + b_cie ** 2) ** 0.5
-                        filtered.append({
-                            "name": "_color",
-                            "L": round(L_cie, 2),
-                            "a": round(a_cie, 2),
-                            "b": round(b_cie, 2),
-                            "E": round(E_cie, 2),
-                            "phase": phase_idx,
-                            "source": source,                # "parent" | "_root"
-                            "parent_class": parent_name,     # name of the parent class used, or ""
-                            "confidence": 1.0,
-                            "xmin": bbox[0], "ymin": bbox[1],
-                            "xmax": bbox[2], "ymax": bbox[3],
-                        })
+                        def _bbox_area(d):
+                            return max(0.0, (d.get("xmax", 0) - d.get("xmin", 0))) * \
+                                   max(0.0, (d.get("ymax", 0) - d.get("ymin", 0)))
+
+                        # regions_to_measure: list of (region_np, source_str, parent_class, bbox_tuple)
+                        regions_to_measure = []
+                        if parent_classes:
+                            # Group candidates by class → largest per class
+                            by_class = {}
+                            for d in (yolo_res or []):
+                                if not isinstance(d, dict):
+                                    continue
+                                cn = d.get("name")
+                                if cn not in parent_classes:
+                                    continue
+                                if float(d.get("confidence") or 0.0) < _min_conf_for(cn, audio_map):
+                                    continue
+                                prev = by_class.get(cn)
+                                if prev is None or _bbox_area(d) > _bbox_area(prev):
+                                    by_class[cn] = d
+                            for cn, pd in by_class.items():
+                                xmin = int(max(0, min(W, pd.get("xmin", 0))))
+                                ymin = int(max(0, min(H, pd.get("ymin", 0))))
+                                xmax = int(max(0, min(W, pd.get("xmax", W))))
+                                ymax = int(max(0, min(H, pd.get("ymax", H))))
+                                if xmax > xmin and ymax > ymin:
+                                    regions_to_measure.append(
+                                        (image[ymin:ymax, xmin:xmax], "parent", cn, (xmin, ymin, xmax, ymax))
+                                    )
+                        else:
+                            # No parent designated → whole-frame fallback.
+                            regions_to_measure.append((image, "_root", "", (0, 0, W, H)))
+
+                        for region, source, parent_name, bbox in regions_to_measure:
+                            try:
+                                # OpenCV BGR→LAB: L in 0..255 (L*255/100), a/b in
+                                # 0..255 (offset by +128). Convert back to CIE scale.
+                                lab_img = cv2.cvtColor(region, cv2.COLOR_BGR2LAB)
+                                L_mean, a_mean, b_mean, _ = cv2.mean(lab_img)
+                                L_cie = float(L_mean) * 100.0 / 255.0
+                                a_cie = float(a_mean) - 128.0
+                                b_cie = float(b_mean) - 128.0
+                                E_cie = (L_cie ** 2 + a_cie ** 2 + b_cie ** 2) ** 0.5
+                                color_dets.append({
+                                    "name": "_color",
+                                    "L": round(L_cie, 2),
+                                    "a": round(a_cie, 2),
+                                    "b": round(b_cie, 2),
+                                    "E": round(E_cie, 2),
+                                    "phase": phase_idx,
+                                    "source": source,                # "parent" | "_root"
+                                    "parent_class": parent_name,     # class name, or "" for _root
+                                    "confidence": 1.0,
+                                    "xmin": bbox[0], "ymin": bbox[1],
+                                    "xmax": bbox[2], "ymax": bbox[3],
+                                })
+                            except Exception as _pe:
+                                logger.debug(f"per-region color compute failed for {frame_id}/{parent_name}: {_pe}")
                     except Exception as _ce:
                         logger.debug(f"color metric compute failed for {frame_id}: {_ce}")
+
+                if color_dets:
+                    filtered.extend(color_dets)
+
+                if filtered:
                     # 4.0.0 — `annotated_path` (the on-disk _DETECTED.jpg) no longer
                     # exists because the pipeline doesn't write a separate annotated
                     # file. We persist the RAW path instead; the viewer renders the

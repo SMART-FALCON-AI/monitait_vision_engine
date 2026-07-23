@@ -1097,6 +1097,70 @@ class ArduinoSocket:
         self._send_message(command)
         logger.debug(f"Set light mode: {mode} (command: {command.strip()})")
 
+    def close_and_open_new_shipment(self, reason: str = "manual", prefix_override: str | None = None):
+        """4.0.175 — atomic shipment rebase, reused by both the time/encoder
+        auto-cutoff AND the rule-based cutoff. Returns the new shipment
+        id on success, None if no-op (cooldown / no active shipment).
+
+        `reason` is a short human-readable string that ends up in the log
+        line, so operators can trace WHY the shipment was closed.
+
+        `prefix_override` (4.0.189) — when the caller passes a non-empty
+        string, use that as the id prefix instead of the global
+        `auto_shipment_id_prefix`. Rule-based cutoffs pass the procedure
+        name here so each rule's shipments are self-labelled without the
+        operator having to maintain a separate Prefix field per procedure.
+        Same sanitisation rules (alphanumeric + -_. only, first 16 chars).
+
+        Respects `auto_cutoff_cooldown_sec` (shared with the time/encoder
+        path) so a chattering rule can't churn shipments faster than the
+        cooldown allows.
+        """
+        try:
+            from config import load_service_config
+        except Exception:
+            return None
+        svc = load_service_config() or {}
+        ship = str(getattr(self, "shipment", "") or "")
+        if not ship or ship == "no_shipment":
+            return None
+        try:
+            cooldown = float(svc.get("auto_cutoff_cooldown_sec") or 5)
+        except (TypeError, ValueError):
+            cooldown = 5.0
+        now_ts = time.time()
+        if (now_ts - getattr(self, "_auto_cutoff_last_ts", 0)) < cooldown:
+            return None
+        self._auto_cutoff_last_ts = now_ts
+        _raw_pref = (prefix_override if prefix_override else svc.get("auto_shipment_id_prefix")) or "MR"
+        prefix = str(_raw_pref).strip()
+        prefix = "".join(c for c in prefix if c.isalnum() or c in "-_.")[:16] or "MR"
+        from datetime import datetime as _dt
+        _n = _dt.now()
+        yy = f"{_n.year % 100:02d}"; mm = f"{_n.month:02d}"; dd = f"{_n.day:02d}"
+        hh = f"{_n.hour:02d}"; mi = f"{_n.minute:02d}"; ss = f"{_n.second:02d}"
+        ds = f"{_n.microsecond // 100_000:d}"
+        new_id = f"{prefix}{yy}{mm}{dd}{hh}{mi}{ss}{ds}"
+        old_id = ship
+        old_start = int(getattr(self, "shipment_start_encoder", 0) or 0)
+        self.shipment_start_encoder = int(self.encoder_value or 0)
+        self.shipment_start_ts = now_ts
+        self.shipment = new_id
+        logger.info(
+            f"shipment cutoff [{reason}]: new shipment {new_id} "
+            f"(was {old_id}, start_enc {old_start} → {self.shipment_start_encoder})"
+        )
+        try:
+            if self.redis_connection:
+                self.redis_connection.redis_connection.set("shipment", new_id)
+        except Exception as _re:
+            logger.warning(f"cutoff: redis set failed: {_re}")
+        try:
+            self.persist_length_state(force=True)
+        except Exception as _pe:
+            logger.warning(f"cutoff: persist failed: {_pe}")
+        return new_id
+
     def _maybe_auto_cutoff(self):
         """v4.0.154 — configurable-metric auto-cutoff.
 

@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.150"></script>
+        <script src="/static/js/i18n.js?v=4.0.191"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -75,7 +75,12 @@
                         <!-- 3.25.0 — Shipment block enlarged + auto-generate button.
                              Generator format: yyyymmddXXX (XXX = chronological seq for today). -->
                         <div class="status-box" style="padding: 10px 12px; background: linear-gradient(135deg, rgba(59,130,246,0.10), rgba(15,23,42,0.4)); border: 1px solid rgba(59,130,246,0.35);">
-                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; letter-spacing: 0.5px; text-transform: uppercase;"><span data-i18n="shipment">Shipment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_shipment">Current shipment/batch ID. Click to edit. Click 🎲 to auto-generate a yyyymmddXXX ID.</span></span></div>
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; letter-spacing: 0.5px; text-transform: uppercase; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <span><span data-i18n="shipment">Shipment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_shipment">Current shipment/batch ID. Click to edit. Click 🎲 to auto-generate a yyyymmddXXX ID.</span></span></span>
+                                <!-- v4.0.156 — auto-cutoff on/off indicator. Rendered from /api/status by updateStatusUI (SSE-driven).
+                                     Grey when disabled; green with the active threshold + unit when enabled. -->
+                                <span id="auto-cutoff-badge" style="display:none; font-size:10px; letter-spacing:0.3px; padding:2px 7px; border-radius:10px; text-transform:none; font-weight:600;">Auto Cut-Off: —</span>
+                            </div>
                             <div id="shipment-value" style="display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 18px; font-weight: 700; color: var(--text-primary); line-height: 1.2;" onclick="editShipmentId()" title="Click to edit">
                                 <span id="shipment-text" style="word-break: break-all;">-</span>
                                 <span style="font-size: 13px; opacity: 0.7;">✏️</span>
@@ -1097,13 +1102,21 @@
                                 <button id="insight-axis-toggle-encoder" onclick="setInsightAxis('encoder')" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📏 Encoder</button>
                                 <button id="insight-axis-toggle-length" onclick="setInsightAxis('length')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;" title="Cumulative length across shipments — immune to PLC encoder resets">🧵 Length</button>
                                 <!-- v4.0.149 — removed the "scatter + quality strip + ejection strip all use the selected axis" hint; the axis-toggle buttons already imply it. -->
+                                <!-- 4.0.159 — Color baseline + Phase pills wrapped in `hm-color-toolbar`.
+                                     Hidden when the "Parent Object Color Check" toggle in the Advanced tab
+                                     is off (charts.js listens for `mve:color-check-toggled`). -->
+                                <span id="hm-color-toolbar" style="display:none; align-items:baseline; gap:4px; flex-wrap:wrap;">
                                 <span style="color:var(--text-secondary); margin-left:14px;">Color baseline:</span>
                                 <!-- 4.0.30 — heatmap baseline mode toggle. Stored as `mve_heatmap_baseline`
                                      in localStorage; the heatmap plugin recomputes ΔE on every render
                                      from the raw E values (no server round-trip). Modes whose data
                                      isn't available in the response disable themselves. -->
                                 <button id="hm-baseline-camera"          onclick="setHeatmapBaseline('camera')"          title="Each camera's median E across the visible window. Auto, no operator action."         style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📷 Camera</button>
-                                <button id="hm-baseline-shipment_start"  onclick="setHeatmapBaseline('shipment_start')"  title="Median E of the first 60 s of the active shipment. Requires a specific shipment selected." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🚀 Shipment start</button>
+                                <button id="hm-baseline-shipment_start"  onclick="setHeatmapBaseline('shipment_start')"  title="Median E of the first 30 samples of each row's own shipment. Best when the line runs consistent product from frame one." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🚀 Shipment start</button>
+                                <!-- 4.0.173 — shipment_avg mode. Uses the WHOLE shipment's median as baseline
+                                     instead of the first 30 samples. Preferred when the shipment start is
+                                     itself defective (e.g. bad splice, threading transient). -->
+                                <button id="hm-baseline-shipment_avg"    onclick="setHeatmapBaseline('shipment_avg')"    title="Median E across each row's ENTIRE shipment (not just the first 30 samples). Better when shipment starts are often defective." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📊 Shipment avg</button>
                                 <button id="hm-baseline-target"          onclick="setHeatmapBaseline('target')"          title="Operator-set per-camera L*a*b*. Configured under Process tab → Color Target."        style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🎯 Target</button>
                                 <button id="hm-baseline-reference_frame" onclick="setHeatmapBaseline('reference_frame')" title="L*a*b* at an operator-picked position on the chart. Click button → next chart click sets the reference point. Click again later to re-pick." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🖼️ Reference</button>
                                 <span id="hm-pick-hint" style="display:none; color:#fcd34d; font-style:italic; margin-left:8px; font-size:11px;">🎯 Click anywhere on the chart to set the colour reference point</span>
@@ -1114,6 +1127,35 @@
                                 <span style="color:var(--text-secondary); margin-left:14px;">Phase:</span>
                                 <span id="hm-phase-buttons" style="display:inline-flex; gap:4px; flex-wrap:wrap;">
                                     <button id="hm-phase-all" onclick="setHeatmapPhase('')" title="Show colour data from every capture phase combined." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🌐 All</button>
+                                </span>
+                                <!-- 4.0.177 — Colour scale toggle. `absolute` (default) uses fixed
+                                     CIELAB tolerance bands ≤2/≤5/≤10/>10 (green/yellow/orange/red).
+                                     `relative` normalises the same bands to the span's own max |Δ|
+                                     so a very stable shipment still exposes its worst few cells. -->
+                                <span style="color:var(--text-secondary); margin-left:14px;">Colour scale:</span>
+                                <button id="hm-scale-absolute" onclick="setHeatmapScale('absolute')" title="Fixed CIELAB tolerance bands: |Δ|≤2 green, ≤5 yellow, ≤10 orange, >10 red. Best for compliance thresholds." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📐 Absolute</button>
+                                <button id="hm-scale-relative" onclick="setHeatmapScale('relative')" title="Bands scaled to the span's largest |Δ|. Even a very stable window will spread across the four colour bands, exposing the relative outliers." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📊 Relative (span)</button>
+                                <!-- 4.0.185 — Colour-cell visibility toggle. Same
+                                     hide/show affordance the per-class chips give
+                                     for scatter dots, but for the whole ΔE heatmap
+                                     layer. Sticky in localStorage; the colorHeatmap
+                                     plugin early-returns when hidden so no refetch. -->
+                                <span style="color:var(--text-secondary); margin-left:14px;">Cells:</span>
+                                <button id="hm-cells-shown" onclick="setHeatmapCells('shown')" title="Show the ΔE heatmap layer behind the scatter dots." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">👁 Show</button>
+                                <button id="hm-cells-hidden" onclick="setHeatmapCells('hidden')" title="Hide the ΔE heatmap layer — scatter dots stay visible." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🚫 Hide</button>
+                                <!-- 4.0.161 — parent-class picker (heatmap-only). MVE
+                                     emits one `_color` per parent-role class detected
+                                     per frame; this pill picks which parent to view.
+                                     Buttons rendered from `parent_classes_available` in
+                                     /api/detection_charts. Choice stored in localStorage
+                                     as `mve_heatmap_parent_class`. Hidden alongside the
+                                     rest when the color feature is off. -->
+                                <span id="hm-parent-class-wrap" style="display:none; align-items:baseline; gap:4px; flex-wrap:wrap;">
+                                    <span style="color:var(--text-secondary); margin-left:14px;">Parent class:</span>
+                                    <span id="hm-parent-class-buttons" style="display:inline-flex; gap:4px; flex-wrap:wrap;">
+                                        <button id="hm-parent-class-all" onclick="setHeatmapParentClass('')" title="Show all parent classes collapsed (mixed baseline)." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🌐 All</button>
+                                    </span>
+                                </span>
                                 </span>
                                 <!-- v4.0.150 — restored a single grouping label "Dots/Category/Bucket:" before the dot-count selector; operator asked for it back after v4.0.149's bare inputs. Buckets input keeps no label (its number pattern is obvious). -->
                                 <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window." style="width:60px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:14px;" aria-label="Buckets across the visible window">
@@ -1136,6 +1178,10 @@
                                     <span title="Class in parent_object_list"><span style="color:#e2e8f0; font-size:14px;">◆</span> Parent</span>
                                     <span title="Class in marker_object_list (e.g. stitch)"><span style="color:#e2e8f0; font-size:14px;">▲</span> Marker</span>
                                     <span title="Everything else (unclassified)"><span style="color:#e2e8f0; font-size:14px;">✕</span> Context</span>
+                                    <!-- 4.0.180 — orientation-tagged defects. Narrow rectangle scales
+                                         with dot confidence (same as circle radius does). -->
+                                    <span title="Class role = vertical_defect: defect oriented along the length axis (X). Renders as a wide thin bar in harmony with the X-axis."><span style="display:inline-block; width:14px; height:3px; background:#e2e8f0; vertical-align:middle; margin:0 4px 3px 0;"></span>Vertical defect</span>
+                                    <span title="Class role = horizontal_defect: defect oriented across the width axis (Y), spans cameras. Renders as a tall thin bar."><span style="display:inline-block; width:3px; height:14px; background:#e2e8f0; vertical-align:middle; margin:0 4px 3px 0;"></span>Horizontal defect</span>
                                 </div>
                             </div>
                             <div id="insight-scatter-legend" style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-bottom:6px; font-size:11px; color:#cbd5e1; min-height:14px;"></div>
@@ -1143,7 +1189,7 @@
                             <!-- v4.0.113 — shipment lane strip: encoder/time range → shipment_id so operators can trace an anomaly back to the specific shipment. Lower visual weight (14px) than quality/ejection; sits BETWEEN the scatter and the quality strip so lanes read directly under the dots. Same margin scheme as #quality-strip-wrap; JS mirrors the same marginLeft/Right inset from scatter.chartArea so lane edges line up with the encoder scatter above. -->
                             <div id="shipment-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
                                 <div id="shipment-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">🚚 shipment lanes — <span style="color:#f97316">JS not loaded yet — Ctrl+Shift+R</span></div>
-                                <div id="shipment-strip" style="position:relative; display:block; height:14px; width:100%; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                <div id="shipment-strip" style="position:relative; display:block; min-height:14px; width:100%; border-radius:3px; background:rgba(15,23,42,0.5);"></div>
                             </div>
                             <!-- Strip wrap inset to match the scatter's plot area (JS sets marginLeft/Right from scatter.chartArea). -->
                             <div id="quality-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
@@ -1151,6 +1197,14 @@
                                 <div id="quality-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📏 quality by encoder — find spots on the material with the most issues</div>
                                 <div id="quality-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="quality-strip-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
+                                <!-- 4.0.162 — color-change strip. Per bucket, cell colour = |mean_E − mean_E_prev_bucket|.
+                                     Detects sudden colour drift between adjacent bins (regardless of absolute baseline).
+                                     Hidden entirely when the Parent Object Color Check feature is off (see charts.js
+                                     _mveApplyColorCheckVisibility) so the row disappears alongside the heatmap. -->
+                                <div id="color-change-strip-wrap" style="display:none; margin-top:6px;">
+                                    <div id="color-change-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">🎨 color change by encoder — how much each bucket differs from the previous one</div>
+                                    <div id="color-change-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                </div>
                                 <div id="ejection-strip-title" style="font-size:10px; color:var(--text-secondary); margin-top:6px; margin-bottom:2px;">⏏️ ejections by encoder — color = procedure; hover for breakdown</div>
                                 <div id="ejection-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 <div id="ejection-strip-legend" style="display:flex; flex-wrap:wrap; gap:8px; font-size:10px; color:var(--text-secondary); margin-top:3px;"></div>
@@ -1258,9 +1312,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.150"></script>
+            <script src="/static/js/iframes.js?v=4.0.191"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.150"></script>
+            <script src="/static/js/charts.js?v=4.0.191"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -1745,58 +1799,38 @@
                     </div>
                 </div>
 
-                <!-- v4.0.155 — Auto-cutoff with an explicit Enable toggle.
-                     Decouples on/off from the numeric threshold so a
-                     negative-length wrap window can't be confused with the
-                     disabled state. Metric radio (Length / Encoder / Time)
-                     picks the yardstick. When the active shipment's chosen
-                     metric reaches the threshold, MVE closes it and opens
-                     a new one with a `{prefix}{yymmddhhmmssX}` id (same
-                     date format the 🎲 button uses). -->
+                <!-- 4.0.179 — REMOVED "✂️ Auto-cutoff shipment" section. Superseded by
+                     ejection-rule procedures with Action = "✂️ Close shipment" (v4.0.175)
+                     + shipment-life gate conditions (v4.0.178). Prefix + cooldown
+                     now surface inside each shipment-close procedure card in
+                     Advanced-tab Rules. Backend `/api/auto_cutoff_config` endpoints
+                     stay in place for backward compat; nothing new writes the
+                     time/encoder/length metric anymore. Operators who had a
+                     time-based cutoff configured before this ship keep it running
+                     until they explicitly disable it via a config file edit or
+                     by curling POST /api/auto_cutoff_config {auto_cutoff_enabled: false}. -->
+
+                <!-- 4.0.159 — Parent Object Color Check global toggle. When
+                     OFF: MVE never emits `_color`, and the chart tab hides the
+                     colour heatmap, the "Color baseline" pills, and the phase
+                     pills. When ON: MVE measures CIELAB on the largest
+                     role="parent" detection per frame (strict — no _root
+                     fallback), or on the whole frame if no parent-role class
+                     is designated yet. -->
                 <div class="control-section">
-                    <h3>✂️ Auto-cutoff shipment</h3>
+                    <h3>🎨 Parent Object Color Check</h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
-                        Toggle <b>Enabled</b>, pick a metric (Length, Encoder pulses, or Time in seconds), and set a threshold. When the active shipment's metric reaches the threshold, MVE closes it and opens a new one with an id like <code style="background:rgba(15,23,42,0.6); padding:1px 6px; border-radius:3px;">{prefix}{yymmddhhmmssX}</code> — same date format the 🎲 button produces.
+                        Tracks colour drift by measuring CIELAB (L*a*b*) on the parent object's bounding box every frame. Turn this on after designating one class as <b>Role: 🌳 Parent</b> in the <b>Process</b> tab — MVE will measure that class's largest bbox. When off, the chart tab hides the colour heatmap and its baseline/phase pickers. Baseline is per <b>(camera, phase)</b>.
                     </div>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 3;">
                             <label style="cursor:pointer; display:inline-flex; align-items:center; gap:8px; padding:6px 0;">
-                                <input type="checkbox" id="auto-cutoff-enabled-input" style="width:16px; height:16px; cursor:pointer;">
-                                <span style="font-weight:600;">Enable auto-cutoff</span>
-                                <span style="font-size:11px; color:var(--text-secondary);">— when off, MVE never rewrites the shipment id automatically.</span>
+                                <input type="checkbox" id="color-check-enabled-input" style="width:16px; height:16px; cursor:pointer;">
+                                <span style="font-weight:600;">Enable Parent Object Color Check</span>
+                                <span style="font-size:11px; color:var(--text-secondary);">— off by default; opt-in per site.</span>
                             </label>
-                        </div>
-                        <div class="control-item" style="grid-column: span 3;">
-                            <div class="control-label">Metric</div>
-                            <div style="display:flex; gap:14px; flex-wrap:wrap; padding:6px 0;">
-                                <label style="cursor:pointer;">
-                                    <input type="radio" name="auto-cutoff-metric" value="length" checked onchange="_refreshAutoCutoffUnits()">
-                                    Length (in <span data-encoder-unit-echo>unit</span>)
-                                </label>
-                                <label style="cursor:pointer;">
-                                    <input type="radio" name="auto-cutoff-metric" value="encoder" onchange="_refreshAutoCutoffUnits()">
-                                    Encoder pulses (raw counts)
-                                </label>
-                                <label style="cursor:pointer;">
-                                    <input type="radio" name="auto-cutoff-metric" value="time_sec" onchange="_refreshAutoCutoffUnits()">
-                                    Time (seconds since shipment started)
-                                </label>
-                            </div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Threshold (in <span id="auto-cutoff-unit-echo">unit</span>)</div>
-                            <input type="number" class="control-input" id="auto-cutoff-length-input" step="0.01" placeholder="e.g. 500">
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Auto-generated shipment ID prefix</div>
-                            <input type="text" class="control-input" id="auto-cutoff-prefix-input" maxlength="16" placeholder="MR">
-                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Alphanumerics + <code>- _ .</code>, up to 16 chars.</div>
-                        </div>
-                        <div class="control-item">
-                            <div class="control-label">Cool-down between auto-cutoffs (seconds)</div>
-                            <input type="number" class="control-input" id="auto-cutoff-cooldown-input" min="0.5" step="0.5" placeholder="5">
-                            <button class="control-button" onclick="saveAutoCutoffConfig()" style="background:var(--primary-color); color:white; margin-top:8px;">Save auto-cutoff</button>
-                            <div id="auto-cutoff-response" class="control-response"></div>
+                            <button class="control-button" onclick="saveColorConfig()" style="background:var(--primary-color); color:white; margin-top:8px;">Save color check</button>
+                            <div id="color-config-response" class="control-response"></div>
                         </div>
                     </div>
                 </div>
@@ -2179,7 +2213,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.150">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.191">
         <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2220,10 +2254,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.150"></script>
-        <script src="/static/js/app-core.js?v=4.0.150"></script>
+        <script src="/static/js/audio.js?v=4.0.191"></script>
+        <script src="/static/js/app-core.js?v=4.0.191"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.150"></script>
-        <script src="/static/js/annotate.js?v=4.0.150"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.191"></script>
+        <script src="/static/js/annotate.js?v=4.0.191"></script>
     </body>
 </html>

@@ -24,6 +24,44 @@ let _insightCameraScatterEncoder = null;  // 3.25.13: kept (unused) to avoid tou
 // bucket dots. Same for every other camera. Caching the last good order
 // lets bucket dots reuse it and plot at the same Y-positions.
 let _lastCameraYOrder = [];
+
+// 4.0.180 — narrow-rectangle pointStyle for orientation-tagged defects.
+// Chart.js supports pointStyle: HTMLCanvasElement — it draws the canvas
+// centered at (x, y) using natural width/height (NOT scaled by `radius`).
+// So per-point sizes need their own canvas; we cache by (orientation,
+// rounded-size, color) to keep memory bounded even with hundreds of dots.
+const _narrowRectCache = new Map();
+function _narrowRectCanvas(orientation, radius, fillHex) {
+    const r = Math.max(3, Math.min(20, Math.round(Number(radius) || 6)));
+    const color = String(fillHex || '#94a3b8');
+    const key = orientation + ':' + r + ':' + color;
+    let cv = _narrowRectCache.get(key);
+    if (cv) return cv;
+    // 4.0.182 — sentinel names map to DEFECT ORIENTATION on the fabric, not
+    // shape orientation on the canvas. The chart's X-axis IS the fabric-length
+    // axis, so a "vertical defect" runs ALONG X → renders as a WIDE thin bar
+    // (in harmony with X-axis). A "horizontal defect" runs ACROSS the fabric
+    // (spans cameras on Y) → renders as a TALL thin bar (perpendicular to X).
+    let w, h;
+    if (orientation === 'vertical') {
+        w = Math.round(r * 2.4);                 // wide  (defect along fabric length)
+        h = Math.max(3, Math.round(r * 0.55));   // thin
+    } else {
+        w = Math.max(3, Math.round(r * 0.55));   // thin
+        h = Math.round(r * 2.4);                 // tall  (defect across fabric width)
+    }
+    cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const cctx = cv.getContext('2d');
+    cctx.fillStyle = color;
+    cctx.fillRect(0, 0, w, h);
+    cctx.strokeStyle = 'rgba(15, 23, 42, 0.55)';
+    cctx.lineWidth = 1;
+    cctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    _narrowRectCache.set(key, cv);
+    return cv;
+}
+window._narrowRectCanvas = _narrowRectCanvas;
 // v4.0.132 — cache shipment_length_offsets so the progressive-bucket
 // loader (`scatter_only=1` responses omit this heavy field) can still
 // project dots onto the length axis. Populated on every full-response
@@ -628,7 +666,11 @@ window.saveColorTarget = saveColorTarget;
 //     next chart click captures the position. Clicking the button when a
 //     reference IS set just activates the mode (no pick needed).
 async function setHeatmapBaseline(mode) {
-    const VALID = ['camera', 'shipment_start', 'target', 'reference_frame'];
+    // 4.0.174 — shipment_avg added; was missing here so clicks silently
+    // returned. No auto-shipment / config-check needed for shipment_avg:
+    // its delta is precomputed per cell (color_heatmap.cells.delta_from_avg)
+    // and works for the "All shipments" view too.
+    const VALID = ['camera', 'shipment_start', 'shipment_avg', 'target', 'reference_frame'];
     if (!VALID.includes(mode)) return;
 
     if (mode === 'shipment_start') {
@@ -711,6 +753,65 @@ function setHeatmapPhase(phase) {
     if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
 }
 window.setHeatmapPhase = setHeatmapPhase;
+
+// 4.0.177 — Colour scale mode: 'absolute' (default) uses fixed CIELAB
+// tolerance bands (≤2/≤5/≤10/>10). 'relative' normalises to the visible
+// span's max |Δ|. Sticky in localStorage; heatmap plugin reads the value
+// each render so no refetch is needed — just a chart update.
+function setHeatmapScale(mode) {
+    const v = (mode === 'relative') ? 'relative' : 'absolute';
+    localStorage.setItem('mve_heatmap_scale', v);
+    // Repaint pill state
+    const a = document.getElementById('hm-scale-absolute');
+    const r = document.getElementById('hm-scale-relative');
+    const on  = 'linear-gradient(135deg,#10b981,#047857)';
+    const off = 'rgba(51,65,85,0.5)';
+    if (a) { a.style.background = (v === 'absolute') ? on : off; a.style.color = (v === 'absolute') ? '#fff' : '#cbd5e1'; }
+    if (r) { r.style.background = (v === 'relative') ? on : off; r.style.color = (v === 'relative') ? '#fff' : '#cbd5e1'; }
+    if (_insightCameraScatter) { try { _insightCameraScatter.update('none'); } catch (_) {} }
+}
+window.setHeatmapScale = setHeatmapScale;
+// Restore sticky state at load
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+        const v = localStorage.getItem('mve_heatmap_scale') || 'absolute';
+        setHeatmapScale(v);
+    }, 800);
+});
+
+// 4.0.185 — Colour-cell visibility toggle. Operators asked for the same
+// hide/show affordance the per-class chips give for scatter dots, but for
+// the whole ΔE heatmap layer. Sticky in localStorage; the colorHeatmap
+// plugin (beforeDatasetsDraw) reads the flag on every paint and early-
+// returns when 'hidden', so no refetch is needed — just a chart update.
+function setHeatmapCells(mode) {
+    const v = (mode === 'hidden') ? 'hidden' : 'shown';
+    localStorage.setItem('mve_heatmap_cells', v);
+    const s = document.getElementById('hm-cells-shown');
+    const h = document.getElementById('hm-cells-hidden');
+    const on  = 'linear-gradient(135deg,#10b981,#047857)';
+    const off = 'rgba(51,65,85,0.5)';
+    if (s) { s.style.background = (v === 'shown')  ? on : off; s.style.color = (v === 'shown')  ? '#fff' : '#cbd5e1'; }
+    if (h) { h.style.background = (v === 'hidden') ? on : off; h.style.color = (v === 'hidden') ? '#fff' : '#cbd5e1'; }
+    if (_insightCameraScatter) { try { _insightCameraScatter.update('none'); } catch (_) {} }
+}
+window.setHeatmapCells = setHeatmapCells;
+document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+        const v = localStorage.getItem('mve_heatmap_cells') || 'shown';
+        setHeatmapCells(v);
+    }, 800);
+});
+
+// 4.0.161 — Parent-class filter (heatmap-only). Same shape as phase.
+// `parent_class=""` = All; `_root` = whole-frame fallback rows;
+// anything else = one specific parent-role class name.
+function setHeatmapParentClass(parentClass) {
+    const v = (parentClass == null) ? '' : String(parentClass);
+    localStorage.setItem('mve_heatmap_parent_class', v);
+    if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
+}
+window.setHeatmapParentClass = setHeatmapParentClass;
 
 // 4.0.35 — bucket count is shared across the colour heatmap, quality strip
 // and ejection strip so the three rows line up visually. Sticky in
@@ -820,6 +921,55 @@ function _renderPhaseButtons(available, activePhase) {
     }
 }
 window._renderPhaseButtons = _renderPhaseButtons;
+
+// 4.0.161 — parent-class picker. Wraps in #hm-parent-class-wrap which
+// stays hidden while `available` is empty or has ≤ 1 entry (single-parent
+// or _root-only sites don't need the picker). Buttons: leading "All",
+// then one per discovered parent_class name.
+function _renderParentClassButtons(available) {
+    const wrap = document.getElementById('hm-parent-class-wrap');
+    const btns = document.getElementById('hm-parent-class-buttons');
+    if (!wrap || !btns) return;
+    const list = (available || []).filter(x => x != null);
+    // Hide the whole row when there's nothing meaningful to pick between.
+    if (list.length <= 1) {
+        wrap.style.display = 'none';
+        return;
+    }
+    wrap.style.display = window._mveColorCheckEnabled === true ? 'inline-flex' : 'none';
+    const sel = (localStorage.getItem('mve_heatmap_parent_class') || '');
+    const allBtn = document.getElementById('hm-parent-class-all');
+    btns.innerHTML = '';
+    if (allBtn) btns.appendChild(allBtn);
+    const setBtnActive = (btn, isActive) => {
+        if (!btn) return;
+        btn.style.background = isActive
+            ? 'linear-gradient(135deg,#10b981,#047857)'
+            : 'rgba(51,65,85,0.5)';
+        btn.style.color = isActive ? '#fff' : '#cbd5e1';
+    };
+    setBtnActive(allBtn, sel === '');
+    for (const pc of list) {
+        const pcStr = String(pc);
+        const id = 'hm-parent-class-' + pcStr.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const btn = document.createElement('button');
+        btn.id = id;
+        btn.textContent = pcStr === '_root' ? '🖼 whole frame' : pcStr;
+        btn.title = pcStr === '_root'
+            ? 'Whole-frame LAB samples (fallback when no parent class is designated).'
+            : 'Show only _color rows measured on ' + pcStr + ' bboxes.';
+        btn.style.cssText = 'border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;';
+        btn.onclick = () => setHeatmapParentClass(pcStr);
+        setBtnActive(btn, sel === pcStr);
+        btns.appendChild(btn);
+    }
+    // Reset selection if it dropped out of the window's data.
+    if (sel && !list.map(String).includes(sel)) {
+        localStorage.setItem('mve_heatmap_parent_class', '');
+        setBtnActive(allBtn, true);
+    }
+}
+window._renderParentClassButtons = _renderParentClassButtons;
 
 // 4.0.32 — fired by the chart's onClick when pick mode is on. Posts the
 // click X (encoder count or epoch-ms) plus a ±5% window to the backend so
@@ -1339,6 +1489,86 @@ window.mveLoaderEnd   = mveLoaderEnd;
 // still render from their own fast endpoints.
 let _progressiveLadderTicket = 0;
 
+// 4.0.163 — progressive colour-cell cache. `refreshDetectionInsights` seeds
+// this from the initial /api/detection_charts response's color_heatmap.cells;
+// the per-bucket loader below merges slice cells into it (dedupe key =
+// `${cam}|${bin}`) and forces a chart update after each merge so cells fill
+// in newest-first alongside the scatter dots.
+let _progressiveColorCells = new Map();       // key -> cell
+let _progressiveColorRange = null;            // {axis, lo, hi, n_bins}
+let _progressiveColorAxis = 'encoder';
+
+function _seedProgressiveColorCache(data, axisMode) {
+    // 4.0.165 — the initial /api/detection_charts?window=1h call returns
+    // color cells for a 1h SLICE but bin numbers 0..47 which the chart
+    // plugin spreads across the FULL X-axis width. That painted the entire
+    // chart at load and made per-bucket loading invisible. Fix: DO NOT
+    // seed cells from the initial payload. Start empty and let the
+    // ladder loop fill in newest→oldest via bin_ref bounds anchored to
+    // the TARGET window (not the 1h hydrate).
+    _progressiveColorCells = new Map();
+    const useEnc = (axisMode === 'encoder');
+    const raw = useEnc ? (data.color_heatmap || {}) : (data.color_heatmap_time || {});
+    const bins = Math.max(1, Number(raw.n_bins) || 48);
+    // Compute bin_ref for the FULL target window, not the 1h hydrate.
+    // Time axis: [now - target_ms, now]. Encoder: fall back to the 1h payload's
+    // enc_min/enc_max (better fix is queued for v4.0.166 alongside the length
+    // reset-aware CTE — encoder needs a lightweight full-range probe).
+    let lo, hi;
+    if (useEnc) {
+        lo = Number(raw.enc_min) || 0;
+        hi = Number(raw.enc_max) || 0;
+    } else {
+        const winSel = document.getElementById('insight-window');
+        const target = (winSel && winSel.value) || '24h';
+        const targetMs = (typeof _windowToMs === 'function') ? _windowToMs(target) : 24 * 3600 * 1000;
+        hi = Date.now();
+        lo = hi - targetMs;
+    }
+    _progressiveColorRange = {
+        axis: useEnc ? 'encoder' : 'time',
+        lo: lo, hi: hi, n_bins: bins,
+    };
+    _progressiveColorAxis = useEnc ? 'encoder' : 'time';
+}
+
+async function _extendColorHeatmapFromBucket(sinceMs, untilMs, shipment) {
+    if (!_progressiveColorRange || _progressiveColorRange.hi <= _progressiveColorRange.lo) return;
+    const phase = localStorage.getItem('mve_heatmap_phase') || '';
+    const parentClass = localStorage.getItem('mve_heatmap_parent_class') || '';
+    const bins = _progressiveColorRange.n_bins;
+    const url = '/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
+                '&until_ms=' + Math.floor(untilMs) +
+                '&shipment=' + encodeURIComponent(shipment) +
+                '&scatter_only=1' +
+                '&include_color_slice=1' +
+                '&color_axis=' + encodeURIComponent(_progressiveColorRange.axis) +
+                '&bin_ref_lo=' + _progressiveColorRange.lo +
+                '&bin_ref_hi=' + _progressiveColorRange.hi +
+                '&bins=' + bins +
+                '&phase=' + encodeURIComponent(phase) +
+                '&parent_class=' + encodeURIComponent(parentClass);
+    let data;
+    try {
+        const r = await fetch(url);
+        data = await r.json();
+    } catch (e) {
+        console.warn('[progressive color] fetch failed:', e);
+        return;
+    }
+    const slice = data.color_slice || {};
+    const cells = Array.isArray(slice.cells) ? slice.cells : [];
+    if (!cells.length) return;
+    for (const c of cells) {
+        _progressiveColorCells.set(`${c.cam}|${c.bin}`, c);
+    }
+    // Push merged cells back into the raw heatmap payload the plugin reads.
+    if (_insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap) {
+        _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values());
+        try { _insightCameraScatter.update('none'); } catch (_e) {}
+    }
+}
+
 async function refreshAdvancedCharts() {
     const winSel = document.getElementById('insight-window');
     const target = (winSel && winSel.value) || '24h';
@@ -1418,6 +1648,13 @@ async function refreshAdvancedCharts() {
     // Each fetch covers exactly `bucketMs` — the same width one
     // Quality/Ejection strip cell covers underneath. Operator sees dots
     // appear ONE strip-cell-width-per-fetch.
+    //
+    // 4.0.164 — colour cells now stream too. After each bucket's DOTS
+    // land we fire `_extendColorHeatmapFromBucket` for the same slice,
+    // which fetches per-bucket colour cells (bin-aligned to the full
+    // window via `bin_ref_lo/hi` from the initial payload) and merges
+    // them into the progressive cache. Chart re-paints so cells fill
+    // in newest→oldest alongside the dots.
     let endMs = nowMs;
     const stopMs = nowMs - targetMs;
     let bucketCount = 0;
@@ -1429,6 +1666,14 @@ async function refreshAdvancedCharts() {
 
             const sinceMs = Math.max(stopMs, endMs - bucketMs);
             await _extendScatterFromBucket(sinceMs, endMs, shipment, minConf);
+            // Colour cells for the same slice (fire-and-forget-ish: we
+            // await so successive buckets don't stack fetches, but each
+            // call is fast — just the two aggregation CTEs on a narrow
+            // time window).
+            if (window._mveColorCheckEnabled === true) {
+                try { await _extendColorHeatmapFromBucket(sinceMs, endMs, shipment); }
+                catch (_e) { /* per-bucket colour failures are non-fatal */ }
+            }
             endMs = sinceMs;
             bucketCount += 1;
         }
@@ -1706,6 +1951,10 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
         parent:  'rectRot',
         marker:  'triangle',
         context: 'crossRot',
+        // 4.0.180 — same sentinels as the base renderer; resolved by the
+        // dataset scriptable pointStyle to a per-size canvas.
+        vertical_defect:   '_narrow:vertical',
+        horizontal_defect: '_narrow:horizontal',
     };
     const _bucketPointStyleFor = (cls) =>
         _SHAPE_BY_GROUP_B[_lastClassGroups[cls] || 'context'];
@@ -1745,9 +1994,33 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf) {
                 // dataset builder so bucket-appended dots share the shape
                 // scheme (defect=circle, parent=diamond, marker=triangle,
                 // context=cross).
-                pointStyle:      (ctx) => (ctx.raw && ctx.raw.pointStyle) || 'circle',
-                pointRadius:     (ctx) => (ctx.raw && ctx.raw.r) || 5,
-                pointHoverRadius:(ctx) => ((ctx.raw && ctx.raw.r) || 5) + 2,
+                pointStyle:      (ctx) => {
+                    const ps = ctx.raw && ctx.raw.pointStyle;
+                    if (typeof ps === 'string' && ps.indexOf('_narrow:') === 0) {
+                        // 4.0.180 — vertical / horizontal narrow-rectangle
+                        // pointStyle. Colour from the dataset's borderColor
+                        // (already reflects the class palette). Size scales
+                        // with the point's own `r` (confidence-normalised).
+                        const orient = ps.slice(8);
+                        const col = (ctx.dataset && ctx.dataset.borderColor) || '#94a3b8';
+                        return _narrowRectCanvas(orient, (ctx.raw.r || 6), col);
+                    }
+                    return ps || 'circle';
+                },
+                // 4.0.187 — cap circle radius at 60% of the raw confidence-scaled
+                // r so a max-confidence circle draws at diameter = 1.2r, which is
+                // exactly half the narrow-defect bar's long dimension (2.4r). Bars
+                // keep the full r so orientation stays legible at a glance.
+                pointRadius:     (ctx) => {
+                    const r  = (ctx.raw && ctx.raw.r) || 5;
+                    const ps = ctx.raw && ctx.raw.pointStyle;
+                    return (typeof ps === 'string' && ps.indexOf('_narrow:') === 0) ? r : (r * 0.6);
+                },
+                pointHoverRadius:(ctx) => {
+                    const r  = (ctx.raw && ctx.raw.r) || 5;
+                    const ps = ctx.raw && ctx.raw.pointStyle;
+                    return ((typeof ps === 'string' && ps.indexOf('_narrow:') === 0) ? r : (r * 0.6)) + 2;
+                },
                 showLine: false,
             };
             _insightCameraScatter.data.datasets.push(ds);
@@ -1833,6 +2106,8 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             const baseline = localStorage.getItem('mve_heatmap_baseline') || 'camera';
             // 4.0.34 — phase filter is heatmap-only. Empty string = all phases.
             const phase = localStorage.getItem('mve_heatmap_phase') || '';
+            // 4.0.161 — parent_class filter (heatmap-only). Empty = all parents collapsed.
+            const parentClass = localStorage.getItem('mve_heatmap_parent_class') || '';
             // 4.0.35 — single bucket count drives heatmap + quality + ejection strips.
             const bins = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
             const r = await fetch('/api/detection_charts?window=' + encodeURIComponent(window) +
@@ -1840,6 +2115,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                                   '&min_conf=' + minConf +
                                   '&baseline=' + encodeURIComponent(baseline) +
                                   '&phase=' + encodeURIComponent(phase) +
+                                  '&parent_class=' + encodeURIComponent(parentClass) +
                                   '&bins=' + bins +
                                   '&dot_cap=' + _dotCap());
             data = await r.json();
@@ -2023,6 +2299,11 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             parent:  'rectRot',   // rotated square == diamond
             marker:  'triangle',
             context: 'crossRot',
+            // 4.0.180 — sentinel strings resolved to canvas elements
+            // per-point in the scriptable pointStyle so the narrow rectangle
+            // scales with the point's confidence-based radius.
+            vertical_defect:   '_narrow:vertical',
+            horizontal_defect: '_narrow:horizontal',
         };
         const _pointStyleFor = (cls) => _SHAPE_BY_GROUP[_classGroups[cls] || 'context'];
         _lastClassGroups = _classGroups;   // cache for _extendScatterFromBucket
@@ -2041,9 +2322,33 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             // v4.0.134 — scatter-type per-point styling. Scriptable options
             // pull pointStyle + pointRadius off each point's raw data so
             // every dot can have its own shape and size in one dataset.
-            pointStyle:      (ctx) => (ctx.raw && ctx.raw.pointStyle) || 'circle',
-            pointRadius:     (ctx) => (ctx.raw && ctx.raw.r) || 5,
-            pointHoverRadius:(ctx) => ((ctx.raw && ctx.raw.r) || 5) + 2,
+            pointStyle:      (ctx) => {
+                // 4.0.182 — resolve `_narrow:*` sentinels to a per-size canvas.
+                // Missing this branch on this dataset builder (only the
+                // progressive-bucket path had it in v4.0.180) is why TB dots
+                // in the INITIAL 1h fetch still rendered as circles despite
+                // role=vertical_defect being set on the class.
+                const ps = ctx.raw && ctx.raw.pointStyle;
+                if (typeof ps === 'string' && ps.indexOf('_narrow:') === 0) {
+                    const orient = ps.slice(8);
+                    const col = (ctx.dataset && ctx.dataset.borderColor) || '#94a3b8';
+                    return _narrowRectCanvas(orient, (ctx.raw.r || 6), col);
+                }
+                return ps || 'circle';
+            },
+            // 4.0.187 — same 60%-of-r cap for the initial-dataset builder as
+            // in the bucket-loader above. Kept identical so circles aren't a
+            // different size before vs. after the first bucket refresh.
+            pointRadius:     (ctx) => {
+                const r  = (ctx.raw && ctx.raw.r) || 5;
+                const ps = ctx.raw && ctx.raw.pointStyle;
+                return (typeof ps === 'string' && ps.indexOf('_narrow:') === 0) ? r : (r * 0.6);
+            },
+            pointHoverRadius:(ctx) => {
+                const r  = (ctx.raw && ctx.raw.r) || 5;
+                const ps = ctx.raw && ctx.raw.pointStyle;
+                return ((typeof ps === 'string' && ps.indexOf('_narrow:') === 0) ? r : (r * 0.6)) + 2;
+            },
             showLine: false,
         }));
         // 4.0.44 — title + legend rendered as HTML siblings ABOVE the canvas
@@ -2053,9 +2358,21 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         try {
             const _titleEl = document.getElementById('insight-scatter-title');
             if (_titleEl) {
-                _titleEl.textContent = (axisMode === 'time')
+                // 4.0.173 — append "measuring <parent_class>" so operators can
+                // see which parent-role class the colour cells were computed
+                // against. Falls back to "_root" (whole frame) when no class
+                // is designated as role=parent on this site.
+                let measTag = '';
+                if (window._mveColorCheckEnabled === true) {
+                    const pc = (localStorage.getItem('mve_heatmap_parent_class') || '').trim();
+                    const avail = Array.isArray(data.parent_classes_available) ? data.parent_classes_available : [];
+                    let m = pc || (avail.length === 1 ? avail[0] : 'all parents');
+                    if (m === '_root') m = 'whole frame (no parent class set)';
+                    measTag = ' · 🎨 measuring: ' + m;
+                }
+                _titleEl.textContent = ((axisMode === 'time')
                     ? 'Camera × time — hover for image, click dot to open the exact frame'
-                    : 'Camera × encoder (roll position) — hover for image, click dot for the exact frame';
+                    : 'Camera × encoder (roll position) — hover for image, click dot for the exact frame') + measTag;
             }
             const _legendEl = document.getElementById('insight-scatter-legend');
             if (_legendEl) {
@@ -2104,7 +2421,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // which OTHER modes have data available right now, so we can enable
         // /disable the toggle buttons. `color_baseline` is a flat
         // `{cam_id: {E, L, a, b}}` map for the selected mode.
-        const _ALL_BASELINES = ['camera', 'shipment_start', 'target', 'reference_frame'];
+        const _ALL_BASELINES = ['camera', 'shipment_start', 'shipment_avg', 'target', 'reference_frame'];
         const _availableBaselineModes = new Set(data.color_baseline_modes || ['camera']);
         const _activeBaselineMode = data.color_baseline_mode || 'camera';
         const _activeBaselineMap  = data.color_baseline || {};
@@ -2138,6 +2455,13 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             Array.isArray(data.phases_available) ? data.phases_available : [],
             (typeof data.phase === 'string') ? data.phase : '',
         );
+        // 4.0.161 — parent-class picker. Hidden entirely when the site
+        // has ≤ 1 parent-class in the window (single-parent or _root-only).
+        _renderParentClassButtons(
+            Array.isArray(data.parent_classes_available) ? data.parent_classes_available : [],
+        );
+        // 4.0.162 — colour-change strip (sits between quality + ejection strips).
+        try { _renderColorChangeStrip(axisMode, data); } catch (_e) { /* non-fatal */ }
 
         // 4.0.29c — pick the heatmap variant that matches the current axis.
         // Backend returns BOTH binned-by-encoder and binned-by-time forms so
@@ -2147,6 +2471,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         const _hmRaw = (axisMode === 'encoder')
             ? (data.color_heatmap || {})
             : (data.color_heatmap_time || {});
+        // 4.0.164 — seed the progressive colour-cell cache with whatever the
+        // initial (1h) payload returned. The bucket ladder below will merge
+        // older-window cells into this same cache as it walks newest→oldest.
+        try { _seedProgressiveColorCache(data, axisMode); } catch (_e) {}
         const heatmapCells = Array.isArray(_hmRaw.cells) ? _hmRaw.cells : [];
         const heatmapMin = (axisMode === 'encoder')
             ? (_hmRaw.enc_min != null ? Number(_hmRaw.enc_min) : null)
@@ -2161,8 +2489,26 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         const heatmapBins = Math.max(1, Number(_hmRaw.n_bins) || 32);
         const heatmapBoundsCollapsed = (heatmapEncMin != null && heatmapEncMax != null &&
                                         heatmapEncMax === heatmapEncMin);
+        // 4.0.161 — read the feature flag from THIS response first (server
+        // is authoritative and can't race with loadColorConfig's background
+        // fetch). Falls back to window._mveColorCheckEnabled === true only
+        // when the payload doesn't carry the field (older MVE). Also mirror
+        // the payload value into the window flag so the Advanced-tab toggle
+        // and the toolbar-visibility handler agree with what the chart shows.
+        const _colorEnabledFromPayload = (typeof data.parent_color_check_enabled === 'boolean')
+            ? data.parent_color_check_enabled
+            : (window._mveColorCheckEnabled === true);
+        if (typeof data.parent_color_check_enabled === 'boolean') {
+            window._mveColorCheckEnabled = data.parent_color_check_enabled;
+        }
+        // 4.0.169 — when the Parent Object Color Check feature is ON, register
+        // the heatmap plugin unconditionally (was: gated on `heatmapCells > 0`).
+        // Empty (cam, bin) slots now paint a subtle "no data" tile so the strip
+        // feels continuous across the whole window instead of vanishing on the
+        // stretch where no `_color` rows exist (e.g. shipments captured before
+        // color-check was toggled on). Actual data cells overlay on top.
         const heatmapActive = (
-            heatmapCells.length > 0 &&
+            _colorEnabledFromPayload &&
             heatmapEncMin != null && heatmapEncMax != null
         );
         const _heatmapPlugins = heatmapActive ? [{
@@ -2172,10 +2518,68 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 const xScale = chart.scales && chart.scales.x;
                 const yScale = chart.scales && chart.scales.y;
                 if (!ctx || !xScale || !yScale) return;
+                // 4.0.185 — operator can hide the whole ΔE cell layer via the
+                // "Cells: 👁 Show / 🚫 Hide" pill without dropping the scatter dots.
+                if ((localStorage.getItem('mve_heatmap_cells') || 'shown') === 'hidden') return;
                 const ca = chart.chartArea;
+                // 4.0.164 — read cells from the mutable __mveHeatmap cache
+                // so the progressive per-bucket loader can push new cells
+                // without recreating the chart. Falls back to the closure-
+                // captured array on the first render before __mveHeatmap
+                // is attached.
+                const _liveCells = (chart.data && chart.data.__mveHeatmap && Array.isArray(chart.data.__mveHeatmap.cells))
+                    ? chart.data.__mveHeatmap.cells
+                    : heatmapCells;
                 const binWidth = (heatmapEncMax - heatmapEncMin) / heatmapBins;
+                // 4.0.177 — colour scale mode. In 'relative' mode we normalise the
+                // 2/5/10 CIELAB tolerance bands to the span's own max |Δ|, so
+                // a very stable window (all cells |Δ|<2) still spreads across
+                // green/yellow/orange/red and exposes its worst few cells.
+                const _colorScaleMode = (localStorage.getItem('mve_heatmap_scale') || 'absolute');
+                let _spanMaxAbs = 0;
+                if (_colorScaleMode === 'relative') {
+                    for (const c of _liveCells) {
+                        const base = _activeBaselineMap[String(c.cam)];
+                        const cellE = Number(c.E) || 0;
+                        const dv = (_activeBaselineMode === 'shipment_avg' && Number.isFinite(Number(c.delta_from_avg)))
+                            ? Number(c.delta_from_avg)
+                            : Number(c.delta_e) || 0;
+                        const d = (base && Number.isFinite(base.E))
+                            ? Math.abs(cellE - Number(base.E))
+                            : Math.abs(dv);
+                        if (d > _spanMaxAbs) _spanMaxAbs = d;
+                    }
+                    if (_spanMaxAbs <= 0) _spanMaxAbs = 1; // avoid div-by-zero → falls back to absolute-ish
+                }
                 ctx.save();
-                for (const cell of heatmapCells) {
+                // 4.0.169 — paint a subtle "no data" tile at every (cam, bin)
+                // slot that has no `_color` sample yet. Overlaid data cells
+                // repaint on top with their actual hue below. Operator sees
+                // a continuous strip across the whole window even in stretches
+                // where MVE was off or color-check hadn't been enabled yet.
+                if (ca && heatmapBins > 0) {
+                    const cw = ca.right - ca.left;
+                    const bw = cw / heatmapBins;
+                    const covered = new Set();
+                    for (const c of _liveCells) covered.add(String(c.cam) + '|' + String(c.bin));
+                    // Iterate visible cameras (Y-axis rows) × all bins
+                    ctx.fillStyle   = 'rgba(148, 163, 184, 0.10)';
+                    ctx.strokeStyle = 'rgba(15, 23, 42, 0.35)';
+                    ctx.lineWidth   = 0.5;
+                    for (const [cam, idx] of idxByCam.entries()) {
+                        const yT = yScale.getPixelForValue(idx - 0.5);
+                        const yB = yScale.getPixelForValue(idx + 0.5);
+                        const y  = Math.min(yT, yB);
+                        const h  = Math.abs(yB - yT);
+                        for (let b = 0; b < heatmapBins; b++) {
+                            if (covered.has(String(cam) + '|' + b)) continue;
+                            const x = ca.left + b * bw;
+                            ctx.fillRect(x, y, bw, h);
+                            ctx.strokeRect(x + 0.25, y + 0.25, bw - 0.5, h - 0.5);
+                        }
+                    }
+                }
+                for (const cell of _liveCells) {
                     const idx = idxByCam.has(cell.cam) ? idxByCam.get(cell.cam) : null;
                     if (idx == null) continue;
                     let x, y, w, h;
@@ -2219,16 +2623,33 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     // 4.0.30 — ΔE against the server-computed baseline for the
                     // active mode. Bands aligned to industrial CIELAB tolerances:
                     // ≤2 green, ≤5 yellow, ≤10 orange, >10 red.
+                    // 4.0.173 — shipment_avg mode uses per-cell `delta_from_avg`
+                    // (whole-shipment median baseline) instead of the SQL's
+                    // default `delta_e` (which is per-shipment-start).
                     const base = _activeBaselineMap[String(cell.cam)];
                     const cellE = Number(cell.E) || 0;
+                    const _cellDefaultDelta = (_activeBaselineMode === 'shipment_avg' && Number.isFinite(Number(cell.delta_from_avg)))
+                        ? Number(cell.delta_from_avg)
+                        : Number(cell.delta_e) || 0;
                     const de = (base && Number.isFinite(base.E))
                         ? Math.abs(cellE - Number(base.E))
-                        : Math.abs(Number(cell.delta_e) || 0);
+                        : Math.abs(_cellDefaultDelta);
+                    // 4.0.177 — pick bands based on colour-scale mode.
+                    // Absolute (default): fixed 2/5/10 CIELAB tolerance bands.
+                    // Relative: same 20%/50%/100% shape but on the span's own max.
+                    let _b1, _b2, _b3;
+                    if (_colorScaleMode === 'relative') {
+                        _b1 = _spanMaxAbs * 0.20;
+                        _b2 = _spanMaxAbs * 0.50;
+                        _b3 = _spanMaxAbs * 1.00;   // > b3 shouldn't happen since spanMax is our max
+                    } else {
+                        _b1 = 2; _b2 = 5; _b3 = 10;
+                    }
                     let hue;
-                    if (de <= 2)       hue = 120;          // green
-                    else if (de <= 5)  hue = 60;           // yellow
-                    else if (de <= 10) hue = 30;           // orange
-                    else               hue = 0;            // red
+                    if (de <= _b1)       hue = 120;        // green
+                    else if (de <= _b2)  hue = 60;         // yellow
+                    else if (de <= _b3)  hue = 30;         // orange
+                    else                 hue = 0;          // red
                     // v4.0.149 — alpha bumped 0.35 → 0.55 so low-ΔE cells
                     // (green over the dark chart background) are visible,
                     // not just the loud red/orange ones.
@@ -2242,6 +2663,36 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     ctx.strokeStyle = 'rgba(15, 23, 42, 0.55)';
                     ctx.lineWidth = 0.5;
                     ctx.strokeRect(x + 0.25, y + 0.25, w - 0.5, h - 0.5);
+                    // 4.0.170 — inline signed Δ label (↑0.3 / ↓0.5), same idea
+                    // as the color-change strip below. Signed value: prefer
+                    // baseline_map delta (E - baseline.E) when the operator
+                    // has picked Camera / Shipment start / Target /
+                    // Reference mode; falls back to the SQL's `delta_e`
+                    // (per-shipment-start signed avg since v4.0.163).
+                    // Hidden when the cell is too narrow (< 18 px) or too
+                    // short (< 12 px), or when |Δ| < 0.05 (noise floor).
+                    const signedDelta = (base && Number.isFinite(base.E))
+                        ? (cellE - Number(base.E))
+                        : _cellDefaultDelta;
+                    if (Math.abs(signedDelta) >= 0.05 && w >= 18 && h >= 12) {
+                        const mag = Math.abs(signedDelta);
+                        const valStr = mag >= 10 ? mag.toFixed(0) : mag.toFixed(1);
+                        const label = (signedDelta > 0 ? '↑' : '↓') + valStr;
+                        // 4.0.172 — bumped contrast: 11 px (was 9), full-opacity
+                        // white halo outline (was 0.75), full-black ink (was
+                        // 0.95). Operator reported labels felt washed out
+                        // against green/orange hues at 9 px + 0.75 halo.
+                        ctx.font = '700 11px system-ui, -apple-system, sans-serif';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'top';
+                        const labelY = y + 3;
+                        ctx.strokeStyle = 'rgba(255, 255, 255, 1)';
+                        ctx.lineWidth = 3;
+                        ctx.lineJoin = 'round';
+                        ctx.strokeText(label, x + w / 2, labelY);
+                        ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+                        ctx.fillText(label, x + w / 2, labelY);
+                    }
                 }
                 // 4.0.32 — vertical marker at the operator-picked reference
                 // point. Only painted when the axis matches what was picked
@@ -2317,7 +2768,25 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             // supports per-point pointStyle for the defect/parent/marker/
             // context shape scheme while keeping the same {x,y,r} data shape.
             type: 'scatter',
-            data: { datasets },
+            // 4.0.164 — expose the mutable heatmap cache to the colorHeatmap
+            // plugin via chart.data. The progressive loader replaces
+            // chart.data.__mveHeatmap.cells and calls chart.update('none')
+            // per bucket to repaint newest→oldest.
+            //
+            // 4.0.165 — start EMPTY. Prior code seeded from the 1h hydrate
+            // payload's heatmapCells which painted the full chart width at
+            // load (bin K → K/N*width regardless of what time it represents)
+            // and made per-bucket loading visually invisible. Progressive
+            // ladder now populates cells one bucket at a time, newest→oldest,
+            // bin-aligned to the FULL target window (see _seedProgressiveColorCache).
+            data: Object.assign({ datasets }, {
+                __mveHeatmap: {
+                    cells: [],
+                    encMin: (_progressiveColorRange && _progressiveColorRange.lo) || heatmapEncMin,
+                    encMax: (_progressiveColorRange && _progressiveColorRange.hi) || heatmapEncMax,
+                    bins: (_progressiveColorRange && _progressiveColorRange.n_bins) || heatmapBins,
+                },
+            }),
             plugins: _heatmapPlugins,
             options: {
                 responsive: true, maintainAspectRatio: false,
@@ -2387,6 +2856,15 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     // 4, 3) instead of the bare numeric sort 1, 2, 3, 4, 5, 6.
                     y: {
                         title: { display: true, text: 'Camera', color: '#94a3b8' },
+                        // 4.0.172 — pin the Y range to the full camera_y_order
+                        // so hiding all dots of a class via the legend can't
+                        // drop that class's exclusive cameras from the axis.
+                        // Operator reported: click TB in legend → cam 3 row
+                        // disappeared because cam 3 only had TB dots + a
+                        // colour-cell row; Chart.js auto-scaled Y to fit the
+                        // remaining datasets, taking the colour cells with it.
+                        min: -0.5,
+                        max: Math.max(0.5, (camOrder && camOrder.length ? camOrder.length : 1) - 0.5),
                         ticks: {
                             color: '#94a3b8', stepSize: 1, precision: 0,
                             callback: (v) => {
@@ -2571,10 +3049,12 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
     clipped.sort((a, b) => a.clipLo - b.clipLo);
     // Greedy lane assignment. Each lane tracks the max clipHi seen so
     // far; a span goes into the first lane whose max is <= this span's
-    // clipLo. If none fits, open a new lane. Cap at 5 lanes — extras
-    // wrap back to lane 0 (they'll overlap visually, but the tooltip
-    // still resolves the ambiguity).
-    const MAX_LANES = 5;
+    // clipLo. If none fits, open a new lane. 4.0.166 — cap removed. On
+    // razin the auto-cutoff can produce 10+ overlapping shipments in a
+    // 24 h window; the prior MAX_LANES=5 pushed extras back into lane 0
+    // where they visually collapsed into unreadable slivers. Better to
+    // let the strip grow taller (compact lane height keeps total height
+    // reasonable) so EVERY shipment gets its own readable row.
     const laneHi = []; // laneHi[i] = highest clipHi placed in lane i
     for (const c of clipped) {
         let placed = false;
@@ -2582,15 +3062,21 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
             if (laneHi[i] <= c.clipLo) { c.lane = i; laneHi[i] = c.clipHi; placed = true; break; }
         }
         if (!placed) {
-            if (laneHi.length < MAX_LANES) { c.lane = laneHi.length; laneHi.push(c.clipHi); }
-            else { c.lane = 0; laneHi[0] = Math.max(laneHi[0], c.clipHi); }
+            c.lane = laneHi.length;
+            laneHi.push(c.clipHi);
         }
     }
     const nLanes = Math.max(1, laneHi.length);
-    // v4.0.115 — taller lanes (22 px) so the full shipment ID stays
-    // legible inside the bordered box, matching the mockup the operator
-    // sketched. Height grows with lane count so overlaps never overflow.
-    const laneH  = 22;
+    // 4.0.166 — compact lane height (14 px, was 22) + smaller font so
+    // 10+ overlapping shipments still fit in a reasonable strip height
+    // (14 * 12 = 168 px total for a razin-scale swim-lane view). Font
+    // shrinks proportionally so the label stays readable.
+    // 4.0.167 — defensive: reassert position:relative and override any
+    // stale cached inline height/overflow before painting so the older
+    // overflow:hidden state from cached status.html can't clip lane ≥ 2.
+    const laneH  = 14;
+    strip.style.position = 'relative';
+    strip.style.overflow = 'visible';
     strip.style.height = (nLanes * laneH) + 'px';
     const html = clipped.map(({ sp, clipLo, clipHi, lane }) => {
         const leftPct  = ((clipLo - axisMin) / range) * 100;
@@ -2639,14 +3125,14 @@ function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
              + 'data-label-med="'  + labelMed.replace(/"/g, '&quot;')  + '" '
              + 'data-label-tail="' + labelTail.replace(/"/g, '&quot;') + '" '
              + 'title="' + tip + '" '
-             + 'style="position:absolute; top:' + top + 'px; height:' + (laneH - 2) + 'px; '
+             + 'style="position:absolute; top:' + top + '; height:' + (laneH - 1) + 'px; '
              + 'left:' + leftPct + '%; width:' + widthPct + '%; '
-             + 'background:' + bg + '; border:2px solid ' + border + '; '
-             + 'box-sizing:border-box; border-radius:4px; overflow:hidden; '
+             + 'background:' + bg + '; border:1px solid ' + border + '; '
+             + 'box-sizing:border-box; border-radius:3px; overflow:hidden; '
              + 'display:flex; align-items:center; justify-content:center; '
-             + 'font-size:11px; color:' + text + '; font-weight:700; letter-spacing:0.3px; '
+             + 'font-size:9px; color:' + text + '; font-weight:700; letter-spacing:0.2px; line-height:1; '
              + 'text-shadow:0 1px 2px rgba(0,0,0,0.55); cursor:default;">'
-             + '<span class="mve-ship-label" style="pointer-events:none; padding:0 6px; '
+             + '<span class="mve-ship-label" style="pointer-events:none; padding:0 4px; '
              + 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + labelFull + '</span>'
              + '</div>';
     }).join('');
@@ -2726,11 +3212,11 @@ function _relayoutShipmentStripLabels() {
         const full = el.getAttribute('data-label-full') || '';
         const med  = el.getAttribute('data-label-med')  || full;
         const tail = el.getAttribute('data-label-tail') || full;
-        // Rough char-width heuristic: ~7 px per char at 11 px font.
-        if (px < 20)                     { lbl.style.display = 'none'; }
-        else if (px < 45)                { lbl.style.display = ''; lbl.textContent = tail; }
-        else if (px < full.length * 8)   { lbl.style.display = ''; lbl.textContent = med;  }
-        else                             { lbl.style.display = ''; lbl.textContent = full; }
+        // 4.0.167 — updated for 9 px font (was 11 px). Char width ~5.5 px.
+        if (px < 14)                       { lbl.style.display = 'none'; }
+        else if (px < 32)                  { lbl.style.display = ''; lbl.textContent = tail; }
+        else if (px < full.length * 6)     { lbl.style.display = ''; lbl.textContent = med;  }
+        else                               { lbl.style.display = ''; lbl.textContent = full; }
     });
 }
 window._relayoutShipmentStripLabels = _relayoutShipmentStripLabels;
@@ -4275,6 +4761,102 @@ async function _loadEjectionAxis(axis, win) {
 }
 
 
+// 4.0.164 — colour-change strip. Fed from `data.color_change_strip` (encoder
+// axis) or `data.color_change_strip_time` (time axis). Each bucket cell's
+// colour = SIGNED delta_prev normalized to the span's max |delta|:
+//   • positive delta (E went UP → warmer/lighter) → warm ramp (yellow→red)
+//   • negative delta (E went DOWN → cooler/darker) → cool ramp (cyan→blue)
+//   • ~zero delta → near-white/neutral
+// Biggest |delta| in the span gets the deepest saturation. Empty bins →
+// transparent slot so positions align with quality + ejection strips 1:1.
+// Prior v4.0.162 used |delta| thresholds (green/yellow/orange/red) which
+// hid whether the shift was warming or cooling. Direction matters — a
+// yellowing product ≠ a darkening one.
+function _colorChangeColor(delta, maxAbs) {
+    if (delta == null || !Number.isFinite(delta)) return 'transparent';
+    if (!Number.isFinite(maxAbs) || maxAbs <= 0) {
+        return 'rgba(148,163,184,0.35)';   // neutral gray (no variation in span)
+    }
+    // Clamp to [-1, +1] normalized by span max.
+    const f = Math.max(-1, Math.min(1, delta / maxAbs));
+    const mag = Math.abs(f);
+    // alpha ramps 0.35..0.9 with magnitude so tiny shifts stay quiet.
+    const alpha = (0.35 + 0.55 * mag).toFixed(2);
+    if (f >= 0) {
+        // warm: interpolate from near-neutral (yellow-orange) at f=~0 to red at f=1.
+        // Endpoints: (250,204,21) yellow → (239,68,68) red.
+        const r = Math.round(250 - (250 - 239) * mag);
+        const g = Math.round(204 - (204 -  68) * mag);
+        const b = Math.round( 21 - ( 21 -  68) * mag);
+        return `rgba(${r},${g},${b},${alpha})`;
+    } else {
+        // cool: neutral cyan at f=~0 → deep blue at f=-1.
+        // Endpoints: (103,232,249) cyan → (59,130,246) blue.
+        const r = Math.round(103 - (103 -  59) * mag);
+        const g = Math.round(232 - (232 - 130) * mag);
+        const b = Math.round(249 - (249 - 246) * mag);
+        return `rgba(${r},${g},${b},${alpha})`;
+    }
+}
+function _renderColorChangeStrip(axisMode, data) {
+    const wrap = document.getElementById('color-change-strip-wrap');
+    const strip = document.getElementById('color-change-strip');
+    if (!wrap || !strip) return;
+    const enabled = (typeof data?.parent_color_check_enabled === 'boolean')
+        ? data.parent_color_check_enabled
+        : (window._mveColorCheckEnabled === true);
+    if (!enabled) { wrap.style.display = 'none'; return; }
+    const payload = (axisMode === 'encoder')
+        ? (data.color_change_strip || {})
+        : (data.color_change_strip_time || {});
+    const nBins = Math.max(1, Number(payload.n_bins) || 48);
+    const cells = Array.isArray(payload.cells) ? payload.cells : [];
+    if (!cells.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+    const byBin = new Map();
+    let maxAbs = 0;
+    for (const c of cells) {
+        byBin.set(Number(c.bin), c);
+        const a = Math.abs(Number(c.delta_prev) || 0);
+        if (a > maxAbs) maxAbs = a;
+    }
+    const html = [];
+    for (let i = 0; i < nBins; i++) {
+        const c = byBin.get(i);
+        if (!c) {
+            html.push('<div style="flex:1; background:transparent;" title="no colour samples in this bucket"></div>');
+        } else {
+            // 4.0.164 — pass the span's max |Δ| so the divergent colour ramp
+            // is normalized within THIS chart's visible cells (biggest jump
+            // in the span always paints deepest, regardless of absolute
+            // magnitude — matches operator's "find max/min in span" ask).
+            const bg = _colorChangeColor(Number(c.delta_prev), maxAbs);
+            const dp = Number(c.delta_prev) || 0;
+            const arrow = dp > 0 ? '↑ warmer' : dp < 0 ? '↓ cooler' : '→ same';
+            const tip = `bin ${i}\nΔ from prev: ${dp >= 0 ? '+' : ''}${dp} (${arrow})\nmean E: ${c.E}\nsamples: ${c.n}\nspan max |Δ|: ${maxAbs.toFixed(2)}`;
+            // 4.0.166 — inline label: arrow + rounded value inside the cell,
+            // same idea as the ▲/▼ badges on the shipment-score bars. Hidden
+            // when |Δ| < 0.05 (noise) so quiet buckets stay clean. Text
+            // clipped by overflow:hidden if the cell narrows below ~24 px.
+            let label = '';
+            if (Math.abs(dp) >= 0.05) {
+                const mag = Math.abs(dp);
+                const val = mag >= 10 ? mag.toFixed(0) : mag.toFixed(1);
+                label = (dp > 0 ? '↑' : '↓') + val;
+            }
+            html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.85); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g,'&quot;')}">${label}</div>`);
+        }
+    }
+    strip.innerHTML = html.join('');
+    // Match the encoder/time label under the quality strip.
+    const title = document.getElementById('color-change-strip-title');
+    if (title) title.textContent = (axisMode === 'time')
+        ? '🎨 color change by time — warmer = E went up · cooler = E went down · deepest = biggest jump in span'
+        : '🎨 color change by encoder — warmer = E went up · cooler = E went down · deepest = biggest jump in span';
+}
+window._renderColorChangeStrip = _renderColorChangeStrip;
+
+
 async function _loadQualityHeatmap(axis, win) {
     // 3.25.13 — unified IDs (single strip regardless of axis).
     const stripId = 'quality-strip';
@@ -4533,4 +5115,38 @@ document.addEventListener('DOMContentLoaded', function () {
             setTimeout(refreshDetectionInsights, 150);
         });
     }
+});
+
+// 4.0.159 — Hide the "Color baseline" + "Phase" pill row in the chart toolbar
+// when the global "Parent Object Color Check" toggle is off. app-core.js's
+// loadColorConfig fires this event on page load AND whenever the operator
+// saves the Advanced-tab checkbox. Refresh the chart on the flip so the
+// heatmap layer appears / disappears without a manual reload.
+function _mveApplyColorCheckVisibility(enabled) {
+    const bar = document.getElementById('hm-color-toolbar');
+    if (bar) bar.style.display = enabled ? 'inline-flex' : 'none';
+    // 4.0.161 — also hide the parent-class picker (even if it would
+    // otherwise be visible because of ≥ 2 discovered parent classes).
+    const pc = document.getElementById('hm-parent-class-wrap');
+    if (pc && !enabled) pc.style.display = 'none';
+    // 4.0.162 — hide the colour-change strip when the feature is off.
+    // When it comes back on, next refresh's _renderColorChangeStrip
+    // reveals it if the payload carries cells.
+    const ccs = document.getElementById('color-change-strip-wrap');
+    if (ccs && !enabled) ccs.style.display = 'none';
+    if (typeof refreshDetectionInsights === 'function') {
+        try { refreshDetectionInsights(); } catch (_) {}
+    }
+}
+document.addEventListener('mve:color-check-toggled', function (ev) {
+    _mveApplyColorCheckVisibility(!!(ev && ev.detail && ev.detail.enabled));
+});
+// Cover the case where charts.js loads AFTER app-core.js already fired the
+// event (window._mveColorCheckEnabled will be set).
+document.addEventListener('DOMContentLoaded', function () {
+    setTimeout(function () {
+        if (typeof window._mveColorCheckEnabled === 'boolean') {
+            _mveApplyColorCheckVisibility(window._mveColorCheckEnabled);
+        }
+    }, 1400);
 });

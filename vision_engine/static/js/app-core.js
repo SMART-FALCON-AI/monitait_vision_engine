@@ -51,6 +51,60 @@ function updateStatusUI(data) {
             window._lengthCache.upu = Number.isFinite(_v) && _v > 0 ? _v : 0;
         }
     }
+    // v4.0.156 — Auto-cutoff on/off badge next to Shipment. Reads three
+    // fields the backend now exposes on /api/status: auto_cutoff_enabled,
+    // auto_cutoff_metric, auto_cutoff_threshold. Grey when disabled,
+    // green with the active threshold + unit when enabled.
+    try {
+        const badge = document.getElementById('auto-cutoff-badge');
+        if (badge && (data.auto_cutoff_enabled !== undefined)) {
+            const enabled = !!data.auto_cutoff_enabled;
+            const metric = data.auto_cutoff_metric || 'length';
+            const thr = Number(data.auto_cutoff_threshold);
+            // 4.0.176 — rule-based cutoff procedures (procedures with
+            // action=shipment_close) run INDEPENDENTLY of the time/encoder
+            // metric. Backend surfaces them as `cutoff_rules` (array of
+            // names). Badge shows the union so operators see BOTH sources
+            // active at once, e.g. "Auto Cut-Off: on (1800 sec) + rules:
+            // MyRuleA, MyRuleB".
+            const rules = Array.isArray(data.cutoff_rules) ? data.cutoff_rules : [];
+            const rulesActive = rules.length > 0;
+            badge.style.display = 'inline-block';
+            if (enabled || rulesActive) {
+                const parts = [];
+                if (enabled) {
+                    let unit;
+                    if (metric === 'encoder')       unit = 'pulses';
+                    else if (metric === 'time_sec') unit = 'sec';
+                    else                            unit = (window._lengthCache && window._lengthCache.unit) || 'unit';
+                    const val = Number.isFinite(thr) ? thr : 0;
+                    parts.push(`${val} ${unit}`);
+                }
+                if (rulesActive) {
+                    const shown = rules.slice(0, 3).join(', ');
+                    const suffix = rules.length > 3 ? ` +${rules.length - 3}` : '';
+                    parts.push(`rules: ${shown}${suffix}`);
+                }
+                badge.textContent = `Auto Cut-Off: on (${parts.join(' + ')})`;
+                badge.style.background = 'rgba(34,197,94,0.20)';
+                badge.style.color = '#86efac';
+                badge.style.border = '1px solid rgba(34,197,94,0.55)';
+                const timeDesc = enabled
+                    ? `time/encoder cutoff fires when ${metric === 'length' ? 'length' : metric === 'encoder' ? 'encoder pulses' : 'seconds elapsed'} reaches ${Number.isFinite(thr) ? thr : 0}`
+                    : 'time/encoder cutoff disabled';
+                const ruleDesc = rulesActive
+                    ? `Rule-based cutoff enabled: ${rules.join(', ')}`
+                    : 'No rule-based cutoff procedures enabled';
+                badge.title = `${timeDesc}. ${ruleDesc}.`;
+            } else {
+                badge.textContent = 'Auto Cut-Off: off';
+                badge.style.background = 'rgba(148,163,184,0.15)';
+                badge.style.color = '#94a3b8';
+                badge.style.border = '1px solid rgba(148,163,184,0.35)';
+                badge.title = 'Auto-cutoff disabled. Enable in Advanced tab (time/encoder/length) or add a rule-based procedure (Advanced → Rules → Action: Close shipment).';
+            }
+        }
+    } catch (_e) {}
     document.getElementById('encoder-value').textContent = data.encoder_value || 0;
     // 4.0.54 — Length = encoder_value - shipment_start_encoder. Server clamps
     // to 0 when shipment is inactive so this line stays simple.
@@ -697,6 +751,24 @@ async function loadEncoderCalibration() {
         // so the operator sees "how many encoder pulses per 1 Batch" the
         // moment they type in the label field.
         _refreshEncoderUnitLabels();
+        // 4.0.190 — also seed window._lengthCache so consumers that render
+        // BEFORE the first /api/status SSE tick (rule editor's shipment
+        // Length input, quality strip axis, formatLength) get the operator's
+        // real unit + upu instead of falling back to "units" / 0. Symptom
+        // before this: operator sets unit=Meters, upu=1000; opens Process
+        // tab; shipment-Length input still says "10000 units" because
+        // renderProcedures ran before SSE seeded the cache.
+        if (d.encoder_unit) window._lengthCache.unit = d.encoder_unit;
+        if (upu !== null && upu !== undefined) {
+            const _v = Number(upu);
+            window._lengthCache.upu = Number.isFinite(_v) && _v > 0 ? _v : 0;
+        }
+        // Re-render the procedure editor if it's mounted so the operator
+        // sees the unit label swap from "units" → "Meters" as soon as the
+        // fetch resolves. No-op if the Process tab hasn't been visited yet.
+        if (typeof renderProcedures === 'function') {
+            try { renderProcedures(); } catch (_) {}
+        }
     } catch (e) {}
 }
 
@@ -848,6 +920,81 @@ async function saveAutoCutoffConfig() {
 window.saveAutoCutoffConfig = saveAutoCutoffConfig;
 window.loadAutoCutoffConfig = loadAutoCutoffConfig;
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadAutoCutoffConfig, 1200));
+
+// 4.0.179 — cache the auto_cutoff_config globally so the procedure card
+// (in audio.js) can render the prefix / cooldown fields with real values
+// when Action = "Close shipment" is picked, without each card doing its
+// own fetch. Legacy loadAutoCutoffConfig() above still writes into the
+// removed DOM inputs — it silently no-ops when those inputs don't exist.
+async function _cacheAutoCutoffConfig() {
+    try {
+        const r = await fetch('/api/auto_cutoff_config');
+        if (!r.ok) return;
+        const d = await r.json();
+        window._acfCache = {
+            auto_shipment_id_prefix: d.auto_shipment_id_prefix || 'T',
+            auto_cutoff_cooldown_sec: d.auto_cutoff_cooldown_sec != null ? d.auto_cutoff_cooldown_sec : 5,
+        };
+        if (typeof renderProcedures === 'function') {
+            try { renderProcedures(); } catch (_) {}
+        }
+    } catch (e) { /* non-fatal */ }
+}
+window._cacheAutoCutoffConfig = _cacheAutoCutoffConfig;
+document.addEventListener('DOMContentLoaded', () => setTimeout(_cacheAutoCutoffConfig, 1400));
+
+
+// 4.0.159 — Parent Object Color Check global toggle. Backing endpoint:
+// GET/POST /api/color_config { parent_color_check_enabled: bool }. When the
+// flag flips, we also broadcast a 'mve:color-check-toggled' event so the
+// chart tab can hide/show its heatmap + baseline/phase pickers immediately
+// without a page reload.
+async function loadColorConfig() {
+    try {
+        const r = await fetch('/api/color_config');
+        if (!r.ok) return;
+        const d = await r.json();
+        const el = document.getElementById('color-check-enabled-input');
+        if (el) el.checked = !!d.parent_color_check_enabled;
+        window._mveColorCheckEnabled = !!d.parent_color_check_enabled;
+        document.dispatchEvent(new CustomEvent('mve:color-check-toggled', {
+            detail: { enabled: !!d.parent_color_check_enabled },
+        }));
+    } catch (e) {}
+}
+
+async function saveColorConfig() {
+    const enabled = !!document.getElementById('color-check-enabled-input')?.checked;
+    const resp = document.getElementById('color-config-response');
+    try {
+        const r = await fetch('/api/color_config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ parent_color_check_enabled: enabled }),
+        });
+        const d = await r.json();
+        if (r.ok) {
+            window._mveColorCheckEnabled = !!d.parent_color_check_enabled;
+            document.dispatchEvent(new CustomEvent('mve:color-check-toggled', {
+                detail: { enabled: !!d.parent_color_check_enabled },
+            }));
+            if (resp) {
+                resp.textContent = d.parent_color_check_enabled
+                    ? 'Saved. Colour check enabled — cells appear in the Charts tab as data arrives.'
+                    : 'Saved. Colour check disabled — heatmap and baseline/phase pickers hidden.';
+                resp.className = 'control-response success';
+            }
+        } else if (resp) {
+            resp.textContent = `Error: ${d.detail || 'failed'}`;
+            resp.className = 'control-response error';
+        }
+    } catch (e) {
+        if (resp) { resp.textContent = `Error: ${e.message}`; resp.className = 'control-response error'; }
+    }
+}
+window.saveColorConfig = saveColorConfig;
+window.loadColorConfig = loadColorConfig;
+document.addEventListener('DOMContentLoaded', () => setTimeout(loadColorConfig, 1200));
 
 
 // 3.21.22 — AI Trainer config (Advanced tab). Same pattern as Encoder

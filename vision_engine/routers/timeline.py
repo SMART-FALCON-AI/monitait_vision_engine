@@ -3135,7 +3135,7 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
 
 
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -3427,6 +3427,121 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "until_ms": int(until_ms) if _use_slice else 0,
                 "shipment": shipment,
             }
+            # 4.0.163 — bucketed newest-first color loader. When the
+            # progressive scatter loader passes `include_color_slice=1`, this
+            # slice ALSO returns colour cells for the same time window, binned
+            # against the FULL window's range (`bin_ref_lo` / `bin_ref_hi` sent
+            # by the client — from the initial /api/detection_charts response's
+            # color_heatmap.enc_min/enc_max or color_heatmap_time.t_min/t_max).
+            # Client merges these cells into its progressive cache and
+            # triggers a chart repaint per bucket, so operators see colour
+            # cells fill in incrementally alongside scatter dots (newest →
+            # oldest) instead of waiting for one big blob.
+            if int(include_color_slice or 0) and _use_slice:
+                try:
+                    _N_BINS_SLICE = max(4, min(192, int(bins) if bins else 48))
+                    _axis = str(color_axis or "encoder").strip().lower()
+                    _lo = float(bin_ref_lo or 0.0)
+                    _hi = float(bin_ref_hi or 0.0)
+                    _color_slice_cells = []
+                    if _hi > _lo:
+                        _phase_local = (phase or "").strip()
+                        _phase_cl_local = " AND elem->>'phase' = %s" if _phase_local else ""
+                        _phase_ar_local = [_phase_local] if _phase_local else []
+                        _parent_local = (parent_class or "").strip()
+                        _parent_cl_local = " AND elem->>'parent_class' = %s" if _parent_local else ""
+                        _parent_ar_local = [_parent_local] if _parent_local else []
+                        _slice_cur = conn.cursor()
+                        if _axis == "time":
+                            _slice_cur.execute(
+                                f"""
+                                WITH color_rows AS (
+                                    SELECT EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
+                                        (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                                        (elem->>'L')::float AS L, (elem->>'E')::float AS E,
+                                        (elem->>'phase') AS phase
+                                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                                    WHERE time >= to_timestamp(%s / 1000.0)
+                                      AND time <  to_timestamp(%s / 1000.0)
+                                      {ship_clause}
+                                      AND elem->>'name' = '_color'
+                                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                                      {_phase_cl_local}{_parent_cl_local}
+                                ),
+                                binned AS (
+                                    SELECT cr.cam, cr.phase,
+                                           LEAST({_N_BINS_SLICE} - 1, GREATEST(0,
+                                                FLOOR(((cr.t_ms - %s) * {_N_BINS_SLICE}) / (%s - %s))))::int AS bin,
+                                           cr.L, cr.E
+                                    FROM color_rows cr
+                                ),
+                                cam_phase_baselines AS (
+                                    SELECT cam, phase, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                                    FROM binned GROUP BY cam, phase
+                                )
+                                SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
+                                       AVG(b.E - cpb.base_E)::float
+                                FROM binned b JOIN cam_phase_baselines cpb
+                                     ON cpb.cam = b.cam AND cpb.phase IS NOT DISTINCT FROM b.phase
+                                GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
+                                """,
+                                [int(since_ms), int(until_ms)] + ([shipment] if shipment else []) + _phase_ar_local + _parent_ar_local + [_lo, _hi, _lo],
+                            )
+                        else:
+                            _slice_cur.execute(
+                                f"""
+                                WITH color_rows AS (
+                                    SELECT encoder_value AS enc,
+                                        (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
+                                        (elem->>'L')::float AS L, (elem->>'E')::float AS E,
+                                        (elem->>'phase') AS phase
+                                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                                    WHERE time >= to_timestamp(%s / 1000.0)
+                                      AND time <  to_timestamp(%s / 1000.0)
+                                      {ship_clause}
+                                      AND elem->>'name' = '_color'
+                                      AND encoder_value IS NOT NULL
+                                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                                      {_phase_cl_local}{_parent_cl_local}
+                                ),
+                                binned AS (
+                                    SELECT cr.cam, cr.phase,
+                                           LEAST({_N_BINS_SLICE} - 1, GREATEST(0,
+                                                FLOOR(((cr.enc - %s)::numeric * {_N_BINS_SLICE}) / (%s - %s))))::int AS bin,
+                                           cr.L, cr.E
+                                    FROM color_rows cr
+                                ),
+                                cam_phase_baselines AS (
+                                    SELECT cam, phase, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                                    FROM binned GROUP BY cam, phase
+                                )
+                                SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
+                                       AVG(b.E - cpb.base_E)::float
+                                FROM binned b JOIN cam_phase_baselines cpb
+                                     ON cpb.cam = b.cam AND cpb.phase IS NOT DISTINCT FROM b.phase
+                                GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
+                                """,
+                                [int(since_ms), int(until_ms)] + ([shipment] if shipment else []) + _phase_ar_local + _parent_ar_local + [_lo, _hi, _lo],
+                            )
+                        for cam, bin_idx, mL, mE, n, de in _slice_cur.fetchall():
+                            _color_slice_cells.append({
+                                "cam": int(cam or 0), "bin": int(bin_idx or 0),
+                                "L": round(mL or 0, 2), "E": round(mE or 0, 2),
+                                "delta_e": round(de or 0, 2), "n": int(n or 0),
+                            })
+                        _slice_cur.close()
+                    _payload["color_slice"] = {
+                        "axis": _axis,
+                        "since_ms": int(since_ms),
+                        "until_ms": int(until_ms),
+                        "n_bins": _N_BINS_SLICE,
+                        "bin_ref_lo": _lo,
+                        "bin_ref_hi": _hi,
+                        "cells": _color_slice_cells,
+                    }
+                except Exception as _cse:
+                    logger.debug(f"color_slice compute failed: {_cse}")
+                    _payload["color_slice"] = {"cells": []}
             _endpoint_cache_put(_cache_key, _payload)
             return JSONResponse(content=_payload)
 
@@ -3484,6 +3599,25 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         _phase = (phase or "").strip()
         _phase_clause = " AND elem->>'phase' = %s" if _phase else ""
         _phase_args = [_phase] if _phase else []
+        # 4.0.161 — parent_class filter (heatmap-only). Multiple classes can
+        # carry role="parent" (`box` AND `PVB_FILM` etc.); each frame emits
+        # ONE `_color` per parent detected. The operator picks which parent
+        # to view via the toolbar's "Parent class:" pills. Empty = show
+        # every parent collapsed (back-compat when only one parent exists
+        # OR when a site is using the whole-frame `_root` fallback).
+        _parent = (parent_class or "").strip()
+        _parent_clause = " AND elem->>'parent_class' = %s" if _parent else ""
+        _parent_args = [_parent] if _parent else []
+        # 4.0.161 — snapshot the feature flag once at request time so the
+        # response payload can carry it back to the frontend without a
+        # second /api/color_config round-trip.
+        try:
+            from config import load_service_config as _lsc_color
+            _color_feature_enabled_snapshot = bool(
+                (_lsc_color() or {}).get("parent_color_check_enabled", False)
+            )
+        except Exception:
+            _color_feature_enabled_snapshot = False
         try:
             # 4.0.35 — bucket count is now user-configurable from the chart
             # toolbar. Same value powers the colour heatmap and is echoed to
@@ -3509,8 +3643,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     WHERE time > NOW() - INTERVAL %s {ship_clause}
                       AND elem->>'name' = '_color'
                       AND encoder_value IS NOT NULL
-                      {_phase_clause}""",
-                [interval] + ([shipment] if shipment else []) + _phase_args,
+                      {_phase_clause}{_parent_clause}""",
+                [interval] + ([shipment] if shipment else []) + _phase_args + _parent_args,
             )
             row = _hm_cur.fetchone()
             _color_enc_lo = int(row[0]) if row and row[0] is not None else None
@@ -3521,7 +3655,9 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     f"""
                     WITH color_rows AS (
                         SELECT
+                            shipment,
                             encoder_value AS enc,
+                            time,
                             (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
                             (elem->>'L')::float AS L,
                             (elem->>'E')::float AS E,
@@ -3531,31 +3667,82 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                           AND elem->>'name' = '_color'
                           AND encoder_value IS NOT NULL
                           AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
-                          {_phase_clause}
+                          {_phase_clause}{_parent_clause}
+                    ),
+                    -- 4.0.163 — per-(shipment, cam, phase) START baseline.
+                    -- Each row scored against ITS OWN shipment's first 30 colour
+                    -- samples (not the window-wide median). Prior code used the
+                    -- window-wide median which mixed multiple physical products
+                    -- across 24h (30+ shipments on razin) → every bin landed far
+                    -- from that bogus mixed median → chart all-red regardless of
+                    -- actual drift. Now each cell answers the real question
+                    -- ("has THIS shipment's colour drifted from its own start?").
+                    ranked AS (
+                        SELECT shipment, cam, phase, time, E,
+                               ROW_NUMBER() OVER (PARTITION BY shipment, cam, phase ORDER BY time) AS rn
+                        FROM color_rows
+                    ),
+                    shipment_start_baselines AS (
+                        SELECT shipment, cam, phase,
+                               percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM ranked WHERE rn <= 30
+                        GROUP BY shipment, cam, phase
+                    ),
+                    -- 4.0.173 — per-(shipment, cam, phase) WHOLE-shipment median.
+                    -- Operator ask: "shipment start may be defective; give me
+                    -- shipment average as an alternative baseline". Same shape
+                    -- as shipment_start_baselines but no rn cap.
+                    shipment_avg_baselines AS (
+                        SELECT shipment, cam, phase,
+                               percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM color_rows
+                        GROUP BY shipment, cam, phase
+                    ),
+                    -- Fallback baseline for shipments too new to have 30 rows yet
+                    -- (rare: shipments <5s old). Per (cam, phase) window median.
+                    cam_phase_fallback AS (
+                        SELECT cam, phase, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM color_rows GROUP BY cam, phase
                     ),
                     binned AS (
-                        SELECT cr.cam,
+                        SELECT cr.shipment, cr.cam, cr.phase,
                                LEAST({N_BINS} - 1, GREATEST(0,
                                     FLOOR(((cr.enc - %s)::numeric * {N_BINS}) / (%s - %s))))::int AS bin,
                                cr.L, cr.E
                         FROM color_rows cr
-                    ),
-                    cam_baselines AS (
-                        SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
-                        FROM binned GROUP BY cam
                     )
                     SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
-                           AVG(b.E)::float - MAX(cb.base_E)::float
-                    FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
+                           AVG(b.E - COALESCE(ssb.base_E, cpf.base_E))::float AS delta_from_start,
+                           AVG(b.E - COALESCE(sab.base_E, cpf.base_E))::float AS delta_from_avg
+                    FROM binned b
+                    LEFT JOIN shipment_start_baselines ssb
+                         ON ssb.shipment = b.shipment
+                        AND ssb.cam = b.cam
+                        AND ssb.phase IS NOT DISTINCT FROM b.phase
+                    LEFT JOIN shipment_avg_baselines sab
+                         ON sab.shipment = b.shipment
+                        AND sab.cam = b.cam
+                        AND sab.phase IS NOT DISTINCT FROM b.phase
+                    LEFT JOIN cam_phase_fallback cpf
+                         ON cpf.cam = b.cam
+                        AND cpf.phase IS NOT DISTINCT FROM b.phase
                     GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
                     """,
-                    [interval] + ([shipment] if shipment else []) + _phase_args +
+                    [interval] + ([shipment] if shipment else []) + _phase_args + _parent_args +
                     [_color_enc_lo, _color_enc_hi, _color_enc_lo],
                 )
-                for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
+                for row in _hm_cur.fetchall():
+                    # 4.0.173 — SQL now returns (cam, bin, L, E, n, delta_from_start, delta_from_avg).
+                    # Back-compat unpack: also accept the legacy 6-column shape.
+                    if len(row) >= 7:
+                        cam, bin_idx, mL, mE, n, de, davg = row[:7]
+                    else:
+                        cam, bin_idx, mL, mE, n, de = row[:6]; davg = de
                     cells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
                                   "L": round(mL or 0, 2), "E": round(mE or 0, 2),
-                                  "delta_e": round(de or 0, 2), "n": int(n or 0)})
+                                  "delta_e": round(de or 0, 2),
+                                  "delta_from_avg": round(davg or 0, 2),
+                                  "n": int(n or 0)})
             # Payload enc_min/enc_max from FULL inference range → frontend
             # spreads the N cells across the chart's full width.
             _hm_cur.execute(
@@ -3571,6 +3758,40 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "enc_max": int(row[1]) if row and row[1] is not None else None,
                 "n_bins": N_BINS, "cells": cells,
             }
+            # 4.0.162 — color-change strip. Aggregate the per-(cam,bin) cells
+            # into per-bin mean E across cameras, then compute |mean_E − mean_E_prev|
+            # for each adjacent pair. Frontend paints one cell per bucket
+            # between the quality strip and the ejection strip. Detects sudden
+            # colour drift between adjacent buckets regardless of absolute
+            # baseline (a solid-red heatmap can still show smooth transitions
+            # here if the drift is gradual; a lime-green heatmap can show a
+            # sharp step here if two consecutive buckets differ a lot).
+            color_change_strip_enc = {"n_bins": N_BINS, "cells": []}
+            try:
+                by_bin_enc = {}
+                for c in cells:
+                    b = int(c.get("bin") or 0)
+                    e = float(c.get("E") or 0)
+                    n = int(c.get("n") or 0)
+                    if b not in by_bin_enc:
+                        by_bin_enc[b] = {"sum_E_weighted": 0.0, "n": 0}
+                    by_bin_enc[b]["sum_E_weighted"] += e * n
+                    by_bin_enc[b]["n"] += n
+                prev_E = None
+                ccs_cells = []
+                for b in range(N_BINS):
+                    agg = by_bin_enc.get(b)
+                    if not agg or agg["n"] <= 0:
+                        prev_E = None  # gap — reset chain so next non-empty bin has no delta
+                        continue
+                    mE = agg["sum_E_weighted"] / agg["n"]
+                    d = 0.0 if prev_E is None else (mE - prev_E)
+                    ccs_cells.append({"bin": b, "E": round(mE, 2),
+                                      "delta_prev": round(d, 2), "n": agg["n"]})
+                    prev_E = mE
+                color_change_strip_enc["cells"] = ccs_cells
+            except Exception as _cce:
+                logger.debug(f"color_change_strip (encoder) compute failed: {_cce}")
             # Time-binned twin — v4.0.149 honest positioning: bins 0..N-1
             # computed against the FIXED chart window `[now - interval, now]`.
             # Bin K represents the actual time slice under strip cell K.
@@ -3589,38 +3810,84 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 _hm_cur.execute(
                     f"""
                     WITH color_rows AS (
-                        SELECT EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
+                        SELECT
+                            shipment,
+                            time,
+                            EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
                             (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
-                            (elem->>'L')::float AS L, (elem->>'E')::float AS E
+                            (elem->>'L')::float AS L, (elem->>'E')::float AS E,
+                            (elem->>'phase') AS phase
                         FROM inference_results, LATERAL jsonb_array_elements(detections) elem
                         WHERE time > NOW() - INTERVAL %s {ship_clause}
                           AND elem->>'name' = '_color'
                           AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
-                          {_phase_clause}
+                          {_phase_clause}{_parent_clause}
+                    ),
+                    -- 4.0.163 — per-(shipment, cam, phase) START baseline.
+                    -- See encoder-heatmap CTE above for rationale.
+                    ranked AS (
+                        SELECT shipment, cam, phase, time, E,
+                               ROW_NUMBER() OVER (PARTITION BY shipment, cam, phase ORDER BY time) AS rn
+                        FROM color_rows
+                    ),
+                    shipment_start_baselines AS (
+                        SELECT shipment, cam, phase,
+                               percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM ranked WHERE rn <= 30
+                        GROUP BY shipment, cam, phase
+                    ),
+                    -- 4.0.173 — per-(shipment, cam, phase) whole-shipment median.
+                    shipment_avg_baselines AS (
+                        SELECT shipment, cam, phase,
+                               percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM color_rows GROUP BY shipment, cam, phase
+                    ),
+                    cam_phase_fallback AS (
+                        SELECT cam, phase, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                        FROM color_rows GROUP BY cam, phase
                     ),
                     binned AS (
-                        SELECT cr.cam,
+                        SELECT cr.shipment, cr.cam, cr.phase,
                                LEAST({N_BINS} - 1, GREATEST(0,
                                     FLOOR(((cr.t_ms - %s) * {N_BINS}) / (%s - %s))))::int AS bin,
                                cr.L, cr.E
                         FROM color_rows cr
-                    ),
-                    cam_baselines AS (
-                        SELECT cam, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
-                        FROM binned GROUP BY cam
                     )
                     SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
-                           AVG(b.E)::float - MAX(cb.base_E)::float
-                    FROM binned b JOIN cam_baselines cb ON cb.cam = b.cam
+                           AVG(b.E - COALESCE(ssb.base_E, cpf.base_E))::float AS delta_from_start,
+                           AVG(b.E - COALESCE(sab.base_E, cpf.base_E))::float AS delta_from_avg
+                    FROM binned b
+                    LEFT JOIN shipment_start_baselines ssb
+                         ON ssb.shipment = b.shipment
+                        AND ssb.cam = b.cam
+                        AND ssb.phase IS NOT DISTINCT FROM b.phase
+                    LEFT JOIN shipment_avg_baselines sab
+                         ON sab.shipment = b.shipment
+                        AND sab.cam = b.cam
+                        AND sab.phase IS NOT DISTINCT FROM b.phase
+                    LEFT JOIN cam_phase_fallback cpf
+                         ON cpf.cam = b.cam
+                        AND cpf.phase IS NOT DISTINCT FROM b.phase
                     GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
                     """,
-                    [interval] + ([shipment] if shipment else []) + _phase_args +
-                    [_color_t_lo, _color_t_hi, _color_t_lo],
+                    [interval] + ([shipment] if shipment else []) + _phase_args + _parent_args +
+                    [_t_min, _t_max, _t_min],
                 )
-                for cam, bin_idx, mL, mE, n, de in _hm_cur.fetchall():
+                # 4.0.161 — was `_color_t_lo/_color_t_hi` (never defined
+                # anywhere in this module). The whole try: block silently
+                # failed, so `tcells` stayed [] and Time-axis heatmap
+                # showed no cells. The actual computed variables at 3585-
+                # 3586 are `_t_min` and `_t_max`; use those.
+                for row in _hm_cur.fetchall():
+                    if len(row) >= 7:
+                        cam, bin_idx, mL, mE, n, de, davg = row[:7]
+                    else:
+                        cam, bin_idx, mL, mE, n, de = row[:6]; davg = de
                     tcells.append({"cam": int(cam or 0), "bin": int(bin_idx or 0),
                                    "L": round(mL or 0, 2), "E": round(mE or 0, 2),
-                                   "delta_e": round(de or 0, 2), "n": int(n or 0)})
+                                   "delta_e": round(de or 0, 2),
+                                   "delta_from_avg": round(davg or 0, 2),
+                                   "n": int(n or 0)})
             # Payload t_min/t_max = FIXED chart window (matches strip range,
             # matches Chart.js `_scatterXMin`/`_scatterXMax` at [now-interval,
             # now]). Frontend spreads bins 0..N-1 across this range.
@@ -3635,6 +3902,33 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "t_max": float(row[1]) if row and row[1] is not None else None,
                 "n_bins": N_BINS, "cells": tcells,
             }
+            # 4.0.162 — time-axis color-change strip (mirrors encoder version).
+            color_change_strip_time = {"n_bins": N_BINS, "cells": []}
+            try:
+                by_bin_t = {}
+                for c in tcells:
+                    b = int(c.get("bin") or 0)
+                    e = float(c.get("E") or 0)
+                    n = int(c.get("n") or 0)
+                    if b not in by_bin_t:
+                        by_bin_t[b] = {"sum_E_weighted": 0.0, "n": 0}
+                    by_bin_t[b]["sum_E_weighted"] += e * n
+                    by_bin_t[b]["n"] += n
+                prev_E = None
+                ccs_cells_t = []
+                for b in range(N_BINS):
+                    agg = by_bin_t.get(b)
+                    if not agg or agg["n"] <= 0:
+                        prev_E = None
+                        continue
+                    mE = agg["sum_E_weighted"] / agg["n"]
+                    d = 0.0 if prev_E is None else (mE - prev_E)
+                    ccs_cells_t.append({"bin": b, "E": round(mE, 2),
+                                        "delta_prev": round(d, 2), "n": agg["n"]})
+                    prev_E = mE
+                color_change_strip_time["cells"] = ccs_cells_t
+            except Exception as _ccte:
+                logger.debug(f"color_change_strip (time) compute failed: {_ccte}")
             _hm_cur.close()
         except Exception as _he:
             logger.debug(f"color heatmap pre-aggregation failed: {_he}")
@@ -3658,6 +3952,28 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             _ph_cur.close()
         except Exception as _pe:
             logger.debug(f"phases_available discovery failed: {_pe}")
+
+        # 4.0.161 — discover the parent classes with _color data in this
+        # window. Same idea as phases_available: NOT filtered by the current
+        # parent_class selection so the operator can always switch.
+        # Empty string parent_class means source="_root" (whole-frame
+        # fallback); we surface that as "_root" in the list so the picker
+        # can show it as a distinct choice.
+        parent_classes_available = []
+        try:
+            _pc_cur = conn.cursor()
+            _pc_cur.execute(
+                f"""SELECT DISTINCT COALESCE(NULLIF(elem->>'parent_class', ''), '_root') AS pc
+                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                    WHERE time > NOW() - INTERVAL %s {ship_clause}
+                      AND elem->>'name' = '_color'
+                    ORDER BY 1""",
+                [interval] + ([shipment] if shipment else []),
+            )
+            parent_classes_available = [r[0] for r in _pc_cur.fetchall() if r and r[0]]
+            _pc_cur.close()
+        except Exception as _pce:
+            logger.debug(f"parent_classes_available discovery failed: {_pce}")
 
         # 4.0.24 — propagate the dashboard's camera column ordering into the
         # chart so the scatter Y-axis matches the timeline grid the operator
@@ -3735,7 +4051,9 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # We always tell the frontend which modes COULD work right now
             # so it can grey-out / enable the toggle buttons accordingly,
             # without computing values for unused modes.
-            color_baseline_modes = ["camera"]   # always available when there's any _color data
+            # 4.0.173 — "shipment_avg" mode always available; frontend reads
+            # per-cell `delta_from_avg` from color_heatmap cells.
+            color_baseline_modes = ["camera", "shipment_avg"]
             try:
                 from config import load_service_config as _lsc
                 _svc = _lsc() or {}
@@ -4024,6 +4342,14 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 if _role == "marker":
                     class_groups[_c] = "marker"
                     continue
+                # 4.0.180 — orientation-tagged defects. Frontend renders these
+                # as narrow rectangles on the scatter (▮ vertical, ▬ horizontal).
+                if _role == "vertical_defect":
+                    class_groups[_c] = "vertical_defect"
+                    continue
+                if _role == "horizontal_defect":
+                    class_groups[_c] = "horizontal_defect"
+                    continue
                 # Legacy bulk lists — kept for sites that still use them.
                 if _c in _parents_cg:
                     class_groups[_c] = "parent"
@@ -4049,8 +4375,20 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             "camera_y_order": camera_y_order,
             "color_heatmap": color_heatmap,
             "color_heatmap_time": color_heatmap_time,
+            # 4.0.162 — per-bucket colour-change strips. Encoder + time variants.
+            "color_change_strip": (locals().get("color_change_strip_enc") or {"n_bins": 0, "cells": []}),
+            "color_change_strip_time": (locals().get("color_change_strip_time") or {"n_bins": 0, "cells": []}),
             "phases_available": phases_available,
             "phase": _phase,
+            # 4.0.161 — same shape as phases_available. Frontend renders
+            # one pill per entry in the toolbar and stores the choice in
+            # localStorage as `mve_heatmap_parent_class`.
+            "parent_classes_available": parent_classes_available,
+            "parent_class": _parent,
+            # 4.0.161 — surface the "Parent Object Color Check" toggle here so
+            # the frontend heatmap plugin doesn't race with loadColorConfig's
+            # background fetch. Falls back to False on any read error.
+            "parent_color_check_enabled": _color_feature_enabled_snapshot,
             "bins": N_BINS,
             "hidden_by_process": _hidden_by_process,
             "color_baseline": color_baseline,

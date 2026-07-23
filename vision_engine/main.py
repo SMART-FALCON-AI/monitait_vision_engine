@@ -214,8 +214,40 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     # Without this, "no_shipment after restart" investigations have nothing to
     # grep for in the logs.
     cur_ship = str(config.get("current_shipment") or "").strip()
+    # 4.0.191 — fall back to the length-state sidecar when the DB singleton
+    # has no `current_shipment` OR has the sentinel "no_shipment". The
+    # watcher writes `.env.length_state.json` every 5 s AND on every
+    # shipment change (persist_length_state), so it's a much fresher record
+    # of "what shipment was running when we stopped" than the DB config
+    # row (which only updates when the operator explicitly changes the
+    # shipment id). Symptom before this fix: `docker restart` on a running
+    # line came back with shipment=no_shipment even though length_state.json
+    # on disk still held the real id — operator had to POST it back through
+    # /api/config manually.
+    if not cur_ship or cur_ship == "no_shipment":
+        try:
+            _ls_path = "/code/.env.length_state.json"
+            if os.path.exists(_ls_path):
+                with open(_ls_path) as _lf:
+                    _ls = json.load(_lf)
+                _fallback_ship = str(_ls.get("shipment", "") or "").strip()
+                _fallback_sse  = _ls.get("shipment_start_encoder")
+                if _fallback_ship and _fallback_ship != "no_shipment":
+                    logger.info(
+                        f"[SHIPMENT-RESTORE] DB current_shipment='{cur_ship}' — "
+                        f"falling back to length_state.json: shipment={_fallback_ship}, "
+                        f"shipment_start_encoder={_fallback_sse}"
+                    )
+                    cur_ship = _fallback_ship
+                    # Only seed shipment_start_encoder from the sidecar when
+                    # the DB config didn't already carry one. Preserves the
+                    # existing behaviour when both sources agree.
+                    if "shipment_start_encoder" not in config and _fallback_sse is not None:
+                        config["shipment_start_encoder"] = int(_fallback_sse)
+        except Exception as _lse:
+            logger.warning(f"[SHIPMENT-RESTORE] length_state fallback read failed: {_lse}")
     if not cur_ship:
-        logger.info("[SHIPMENT-RESTORE] no current_shipment in saved config — staying at default 'no_shipment'")
+        logger.info("[SHIPMENT-RESTORE] no current_shipment in saved config AND length_state fallback empty — staying at default 'no_shipment'")
     elif cur_ship == "no_shipment":
         logger.info("[SHIPMENT-RESTORE] saved config explicitly says 'no_shipment' — not restoring")
     elif watcher_inst is None:

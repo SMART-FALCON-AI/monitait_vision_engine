@@ -449,10 +449,17 @@ function updateObjectsList() {
                 <select onchange="updateObjectRole('${safeName}', this.value)"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; cursor: pointer;"
                     title="Role of this class in the system.">
-                    <option value="context" ${role==='context'?'selected':''}>📋 Context</option>
-                    <option value="defect"  ${role==='defect' ?'selected':''}>⚠️ Defect</option>
-                    <option value="parent"  ${role==='parent' ?'selected':''}>🌳 Parent</option>
-                    <option value="marker"  ${role==='marker' ?'selected':''}>📍 Marker</option>
+                    <option value="context"           ${role==='context'           ?'selected':''}>📋 Context</option>
+                    <option value="defect"            ${role==='defect'            ?'selected':''}>⚠️ Defect</option>
+                    <option value="parent"            ${role==='parent'            ?'selected':''}>🌳 Parent</option>
+                    <option value="marker"            ${role==='marker'            ?'selected':''}>📍 Marker</option>
+                    <!-- 4.0.180 — orientation-tagged defects. Render as narrow
+                         rectangles on the scatter (▮ vertical, ▬ horizontal)
+                         so operators can distinguish defect orientation at a
+                         glance while keeping them counted as defects for the
+                         quality score. -->
+                    <option value="vertical_defect"   ${role==='vertical_defect'   ?'selected':''}>▬ Vertical defect</option>
+                    <option value="horizontal_defect" ${role==='horizontal_defect' ?'selected':''}>▮ Horizontal defect</option>
                 </select>
                 <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; margin-left: 6px;">Min conf:</span>
                 <input type="number" value="${confidence}" min="0" max="100" step="1"
@@ -508,27 +515,78 @@ function updateObjectsList() {
 }
 
 // Per-class server sync: mirror localStorage toggles into /api/audio_settings
-// so an AI agent (or another browser) can read/change them. Fire-and-forget;
-// failure to sync logs but doesn't block the UI.
+// (DB-backed singleton) so an AI agent or another browser can read/change them.
+// 4.0.186 — was fire-and-forget with silent-fail. On a flaky reverse-SSH tunnel
+// (typical remote-site scenario) the POST would drop, the UI kept the correct
+// local state, but the DB never learned about the change. Symptom: role dropdown
+// shows "Horizontal defect" but chart draws a circle because backend never got
+// the update. Now: retry up to 3× with backoff + read-back verify + a subtle
+// warning banner if the change still isn't reflected on the server.
 async function syncObjectAudioToServer(objectName) {
     const payload = {
         class_name: objectName,
         show: audioSettings.showObjects[objectName] === true,
         narrate: !!audioSettings.narrateObjects[objectName],
         beep: !!audioSettings.enabledObjects[objectName],
-        min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100,  // UI uses 0-100, server uses 0-1
-        severity: audioSettings.severityObjects?.[objectName] ?? 0,  // 3.21.12 — 0-100, per-class impact weight
-        role:    audioSettings.roleObjects?.[objectName] || 'context', // 4.0.26 — context | defect | parent | marker
-        color_e: !!audioSettings.colorEObjects?.[objectName],         // 3.22.2 — track CIELAB ΔE drift over time
-        area:    !!audioSettings.areaObjects?.[objectName],           // 3.22.3 — show bbox-area percentiles on the card
+        min_confidence: (audioSettings.objectConfidence[objectName] ?? 1) / 100,
+        severity: audioSettings.severityObjects?.[objectName] ?? 0,
+        role:    audioSettings.roleObjects?.[objectName] || 'context',
+        color_e: !!audioSettings.colorEObjects?.[objectName],
+        area:    !!audioSettings.areaObjects?.[objectName],
     };
-    try {
-        await fetch('/api/audio_settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-    } catch (e) { console.error('audio_settings POST failed:', e); }
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const r = await fetch('/api/audio_settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload),
+                keepalive: true,
+            });
+            if (r && r.ok) {
+                // Read-back verify — the fetch above can succeed at the transport
+                // layer yet the write can still be a no-op in a stale-session
+                // race. Pull audio_settings, confirm the role we sent is what
+                // the server now reports for this class. If not, retry.
+                try {
+                    const g = await fetch('/api/audio_settings', { cache: 'no-store' });
+                    if (g && g.ok) {
+                        const j = await g.json();
+                        const server = (j && j.audio_settings && j.audio_settings[objectName]) || {};
+                        if (String(server.role || '') === String(payload.role || '')) {
+                            _clearAudioSyncBanner(objectName);
+                            return;
+                        }
+                    }
+                } catch (_) { /* read-back failed → treat as retry */ }
+            }
+        } catch (e) {
+            console.warn('audio_settings POST attempt', attempt, 'failed:', e);
+        }
+        await new Promise(res => setTimeout(res, 250 * attempt));
+    }
+    console.error('audio_settings sync failed for', objectName, '— all 3 retries exhausted');
+    _showAudioSyncBanner(objectName, payload.role);
+}
+
+// 4.0.186 — banner surfaces persistent per-class sync failures so the operator
+// sees "your change didn't reach the server" instead of a silent divergence
+// between the UI and the DB singleton.
+function _showAudioSyncBanner(objectName, attemptedRole) {
+    let el = document.getElementById('mve-audio-sync-banner');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'mve-audio-sync-banner';
+        el.style.cssText = 'position:fixed; top:52px; right:16px; z-index:9999; background:#7f1d1d; color:#fee2e2; padding:8px 12px; border-radius:5px; font-size:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5); max-width:320px; line-height:1.4;';
+        document.body.appendChild(el);
+    }
+    el.textContent = '⚠️ ' + objectName + ' → "' + attemptedRole + '" did not reach the server after 3 retries. Click 💾 Save All Configuration to force a full sync.';
+}
+function _clearAudioSyncBanner(objectName) {
+    const el = document.getElementById('mve-audio-sync-banner');
+    if (!el) return;
+    if (!objectName || (el.textContent && el.textContent.includes(objectName))) {
+        el.remove();
+    }
 }
 
 // Toggle show/hide bounding box for object
@@ -571,7 +629,10 @@ window.updateObjectSeverity = updateObjectSeverity;
 // Setting role=Parent also forces severity to 0 so the impact-score numbers
 // stay clean even if the operator had set a non-zero severity earlier.
 function updateObjectRole(objectName, value) {
-    const VALID = ['context', 'defect', 'parent', 'marker'];
+    // 4.0.180 — added vertical_defect + horizontal_defect. Without these
+    // in VALID, the dropdown selection silently coerced back to 'context'
+    // and the icon "reverted" as if nothing was picked.
+    const VALID = ['context', 'defect', 'parent', 'marker', 'vertical_defect', 'horizontal_defect'];
     const role = VALID.includes(value) ? value : 'context';
     if (!audioSettings.roleObjects) audioSettings.roleObjects = {};
     audioSettings.roleObjects[objectName] = role;
@@ -1148,7 +1209,21 @@ function updateRuleField(procId, ruleIndex, field, value) {
     } else {
         proc.rules[ruleIndex][field] = value;
     }
-    if (field === 'condition' || field === 'reference_mode') renderProcedures();
+    // 4.0.187 — auto-snap condition when the object switches between "shipment"
+    // (shipment-life rules) and a real class (per-detection rules). Otherwise
+    // the condition dropdown re-renders with a value that isn't in its option
+    // list and the rule looks broken until the operator manually changes it.
+    if (field === 'object') {
+        const cur = String(proc.rules[ruleIndex].condition || '');
+        const goingShipment = (value === 'shipment');
+        const isShipCond   = cur.startsWith('shipment_');
+        if (goingShipment && !isShipCond) {
+            proc.rules[ruleIndex].condition = 'shipment_encoder_greater';
+        } else if (!goingShipment && isShipCond) {
+            proc.rules[ruleIndex].condition = 'count_greater';
+        }
+    }
+    if (field === 'condition' || field === 'reference_mode' || field === 'object') renderProcedures();
 }
 
 async function captureColorReference(className) {
@@ -1183,7 +1258,34 @@ function renderProcedures() {
             const cond = rule.condition || 'count_equals';
             const isColor = cond === 'color_delta';
             const isArea = cond.startsWith('area_');
-            const isCount = !isColor && !isArea;
+            // 4.0.178 — shipment-life conditions (evaluate against watcher
+            // state, not the current frame). No object / min_confidence apply.
+            const isShipTime  = cond === 'shipment_time_greater'    || cond === 'shipment_time_less';
+            const isShipEnc   = cond === 'shipment_encoder_greater' || cond === 'shipment_encoder_less';
+            const isShipLife  = isShipTime || isShipEnc;
+            const isCount = !isColor && !isArea && !isShipLife;
+            // 4.0.179 — Length input converts operator's unit → encoder pulses
+            // on save (and back on render), so operators type "5 Meters" and
+            // the backend stores 5 * upu pulses. Time input stays raw seconds.
+            const _upu  = Number((window._lengthCache || {}).upu)  || 0;
+            const _unit = String((window._lengthCache || {}).unit || 'units');
+            const _dispVal = (() => {
+                if (!isShipEnc) return rule.threshold != null ? rule.threshold : 200;
+                const raw = Number(rule.threshold || 0);
+                return (_upu > 0 && Number.isFinite(raw)) ? +(raw / _upu).toFixed(2) : raw;
+            })();
+            const _defaultShip = isShipTime ? 200 : 1000;
+            const _dispDefault = isShipTime ? _defaultShip : (_upu > 0 ? +(_defaultShip / _upu).toFixed(2) : _defaultShip);
+            const _stepShip = isShipTime ? 10 : (_upu > 0 ? 0.1 : 100);
+            const _saveExpr = isShipTime
+                ? 'parseFloat(this.value)'
+                : `(parseFloat(this.value) || 0) * ${_upu > 0 ? _upu : 1}`;
+            const shipInput = !isShipLife ? '' : `
+                <input type="number" value="${rule.threshold != null ? _dispVal : _dispDefault}" min="0" step="${_stepShip}"
+                    onchange="updateRuleField('${proc.id}', ${ri}, 'threshold', ${_saveExpr})"
+                    title="${isShipTime ? 'Seconds since the current shipment started' : 'Cumulative length in the current shipment (operator unit; stored internally as encoder pulses via encoder_units_per_unit)'}"
+                    style="width: 65px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                <span style="font-size: 10px; color: var(--text-secondary);">${isShipTime ? 'sec' : _unit}</span>`;
             const countInput = !isCount ? '' : `
                 <input type="number" value="${rule.count != null ? rule.count : 1}" min="0" step="1"
                     onchange="updateRuleField('${proc.id}', ${ri}, 'count', this.value)"
@@ -1212,42 +1314,57 @@ function renderProcedures() {
                         style="padding: 2px 6px; background: rgba(34,197,94,0.3); color: #22c55e; border: 1px solid rgba(34,197,94,0.4); border-radius: 4px; cursor: pointer; font-size: 10px;"
                         title="Capture current color as fixed reference">Capture</button>
                 ` : ''}`;
+            // 4.0.187 — "shipment" pseudo-object. When picked, the condition
+            // dropdown collapses to only Length/Time conditions (evaluated
+            // against the watcher, not a class detection). When any real
+            // class is picked, only Count/Area/ColorΔE remain. Migration:
+            // a saved rule whose condition is a shipment_* value implies
+            // object='shipment', so pre-4.0.187 rules render correctly.
+            const _isShipObj = (rule.object === 'shipment') || isShipLife;
             return `
             <div style="display: flex; gap: 6px; align-items: center; padding: 6px; background: rgba(15, 23, 42, 0.4); border-radius: 4px; flex-wrap: wrap;">
-                <select onchange="updateRuleField('${proc.id}', ${ri}, 'object', this.value)"
-                    title="Target object class to monitor"
+                <select onchange="updateRuleField('${proc.id}', ${ri}, 'object', this.value); if(typeof renderProcedures==='function') renderProcedures();"
+                    title="Target: 'shipment' evaluates against the running shipment (time / length). Any other option evaluates against per-frame class detections."
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; min-width: 100px;">
+                    <option value="shipment" ${_isShipObj ? 'selected' : ''}>📦 shipment</option>
                     ${(() => {
-                        // Always include the rule's saved object even if no live detection
-                        // has populated detectedObjectClasses for it yet. Otherwise the
-                        // dropdown renders empty on a fresh page-load (rules look unbound).
                         const names = new Set(detectedObjectClasses);
-                        if (rule.object) names.add(rule.object);
+                        if (rule.object && rule.object !== 'shipment') names.add(rule.object);
                         return Array.from(names).sort().map(name =>
                             '<option value="' + name + '" ' + (rule.object === name ? 'selected' : '') + '>' + name + '</option>'
                         ).join('');
                     })()}
                 </select>
-                <select onchange="updateRuleField('${proc.id}', ${ri}, 'condition', this.value)"
-                    title="Condition type: Count = number of objects, Area = bounding box size in pixels, Color ΔE = color difference from reference"
+                <select onchange="updateRuleField('${proc.id}', ${ri}, 'condition', this.value); if(typeof renderProcedures==='function') renderProcedures();"
+                    title="${_isShipObj ? 'Shipment-life conditions: elapsed time or accumulated length since the current shipment opened.' : 'Per-detection conditions: object count, bbox area, or CIELAB colour drift.'}"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
-                    <option value="count_equals" ${cond === 'count_equals' ? 'selected' : ''}>Count =</option>
-                    <option value="count_greater" ${cond === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
-                    <option value="count_less" ${cond === 'count_less' ? 'selected' : ''}>Count &lt;</option>
-                    <option value="area_greater" ${cond === 'area_greater' ? 'selected' : ''}>Area &gt;</option>
-                    <option value="area_less" ${cond === 'area_less' ? 'selected' : ''}>Area &lt;</option>
-                    <option value="area_equals" ${cond === 'area_equals' ? 'selected' : ''}>Area =</option>
-                    <option value="color_delta" ${cond === 'color_delta' ? 'selected' : ''}>Color ΔE &gt;</option>
+                    ${_isShipObj ? `
+                        <option value="shipment_encoder_greater" ${cond === 'shipment_encoder_greater' ? 'selected' : ''}>Length &gt;</option>
+                        <option value="shipment_encoder_less"    ${cond === 'shipment_encoder_less'    ? 'selected' : ''}>Length &lt;</option>
+                        <option value="shipment_time_greater"    ${cond === 'shipment_time_greater'    ? 'selected' : ''}>Time &gt;</option>
+                        <option value="shipment_time_less"       ${cond === 'shipment_time_less'       ? 'selected' : ''}>Time &lt;</option>
+                    ` : `
+                        <option value="count_equals"  ${cond === 'count_equals'  ? 'selected' : ''}>Count =</option>
+                        <option value="count_greater" ${cond === 'count_greater' ? 'selected' : ''}>Count &gt;</option>
+                        <option value="count_less"    ${cond === 'count_less'    ? 'selected' : ''}>Count &lt;</option>
+                        <option value="area_greater"  ${cond === 'area_greater'  ? 'selected' : ''}>Area &gt;</option>
+                        <option value="area_less"     ${cond === 'area_less'     ? 'selected' : ''}>Area &lt;</option>
+                        <option value="area_equals"   ${cond === 'area_equals'   ? 'selected' : ''}>Area =</option>
+                        <option value="color_delta"   ${cond === 'color_delta'   ? 'selected' : ''}>Color ΔE &gt;</option>
+                    `}
                 </select>
                 ${countInput}
                 ${areaInput}
                 ${colorControls}
-                <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
-                <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
-                    onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"
-                    title="Minimum detection confidence (%) — only detections above this threshold are considered"
-                    style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
-                <span style="font-size: 11px; color: var(--text-secondary);">%</span>
+                ${shipInput}
+                ${_isShipObj ? '' : `
+                    <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
+                    <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
+                        onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"
+                        title="Minimum detection confidence (%) — only detections above this threshold are considered"
+                        style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                    <span style="font-size: 11px; color: var(--text-secondary);">%</span>
+                `}
                 <button onclick="removeRule('${proc.id}', ${ri})"
                     style="padding: 2px 6px; background: rgba(239,68,68,0.3); color: #ef4444; border: 1px solid rgba(239,68,68,0.4); border-radius: 4px; cursor: pointer; font-size: 11px;"
                     title="Remove rule">X</button>
@@ -1286,11 +1403,40 @@ function renderProcedures() {
                                 style="width: 48px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
                         </label>
                         <select onchange="updateProcedureField('${proc.id}', 'logic', this.value)"
-                            title="Rule logic: ANY = eject if at least one rule matches (OR), ALL = eject only if every rule matches (AND)"
+                            title="Rule logic: ANY = fire if at least one rule matches (OR), ALL = fire only if every rule matches (AND)"
                             style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                             <option value="any" ${proc.logic === 'any' ? 'selected' : ''}>ANY rule (OR)</option>
                             <option value="all" ${proc.logic === 'all' ? 'selected' : ''}>ALL rules (AND)</option>
                         </select>
+                        <!-- 4.0.175 — action selector. Default 'eject' preserves
+                             legacy behavior; 'shipment_close' turns the procedure
+                             into a rule-based auto-cutoff that closes the current
+                             shipment and opens a new one with the auto-cutoff
+                             prefix (Advanced tab → Auto-cutoff shipment). Cooldown
+                             is shared with the time/encoder auto-cutoff. -->
+                        <span style="font-size: 10px; color: var(--text-secondary);">Action:</span>
+                        <select onchange="updateProcedureField('${proc.id}', 'action', this.value); saveProcedures(); if(typeof renderProcedures==='function') renderProcedures();"
+                            title="What happens when the rule matches. 'Eject' fires the GPIO ejector. 'Close shipment' closes the current shipment id and opens a new one (same rebase as the time-based auto-cutoff)."
+                            style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
+                            <option value="eject" ${(!proc.action || proc.action === 'eject') ? 'selected' : ''}>⏏️ Eject</option>
+                            <option value="shipment_close" ${proc.action === 'shipment_close' ? 'selected' : ''}>✂️ Close shipment</option>
+                        </select>
+                        ${proc.action === 'shipment_close' ? `
+                            <!-- 4.0.189 — Prefix input dropped. Backend now
+                                 uses the procedure's NAME as the new shipment
+                                 id prefix (sanitised: alphanumerics + - _ .,
+                                 capped at 16 chars). One less field to keep
+                                 in sync per procedure; no more "MR" default
+                                 leaking through. Cooldown stays because it's
+                                 global — one cooldown applies across every
+                                 shipment_close procedure + the legacy path. -->
+                            <span style="font-size: 10px; color: var(--text-secondary);" title="Global cooldown between two consecutive shipment closes (seconds). Applies across every shipment_close procedure + the legacy time/encoder cutoff.">Cooldown:</span>
+                            <input type="number" value="${(window._acfCache && window._acfCache.auto_cutoff_cooldown_sec) || 5}" min="0.5" step="0.5"
+                                onchange="if(!window._acfCache)window._acfCache={}; window._acfCache.auto_cutoff_cooldown_sec=parseFloat(this.value)||5; fetch('/api/auto_cutoff_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_cutoff_cooldown_sec:parseFloat(this.value)||5})});"
+                                title="Global. Minimum seconds between two consecutive shipment closes (any source — this rule, other rules, or the legacy time-based cutoff). Prevents chattering close-and-reopen cycles."
+                                style="width: 48px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                            <span style="font-size: 10px; color: var(--text-secondary);">sec</span>
+                        ` : ''}
                         <span style="font-size: 10px; color: var(--text-secondary);">Cams:</span>
                         <input type="text" value="${(proc.cameras || []).join(',')}"
                             onchange="updateProcedureField('${proc.id}', 'cameras', this.value.split(',').map(s=>parseInt(s.trim())).filter(n=>!isNaN(n)))"

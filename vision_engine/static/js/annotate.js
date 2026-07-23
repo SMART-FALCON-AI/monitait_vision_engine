@@ -485,6 +485,12 @@ window.submitAnnotations = submitAnnotations;
 function _renderClassMapPanel(mveClasses, unmapped) {
     const el = document.getElementById('annotate-classmap');
     if (!el) return;
+    // v4.0.158 — defensive filter: drop any underscore-prefixed class names
+    // (synthetic math-inference outputs like `_color`, `_stitch`). Two
+    // upstream call sites already filter, but if any future caller forgets,
+    // this belt-and-suspenders keeps the operator from ever seeing synthetic
+    // classes in the "unmapped" panel.
+    unmapped = (unmapped || []).filter(n => n && !String(n).startsWith('_'));
     if (!unmapped.length) {
         el.style.display = 'none';
         el.innerHTML = '';
@@ -531,8 +537,15 @@ async function saveClassMapAndRemount() {
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
         _annotateClassMap = d.class_map || next;
+        // v4.0.158 — mirror the underscore-prefix filter from the initial-open
+        // pass (line ~156). Prior code only filtered empty strings here, so
+        // synthetic math-inference classes (`_color`, `_stitch`, …) that got
+        // filtered on modal open would REAPPEAR in the unmapped list the
+        // moment the operator clicked "Save mapping + reload prefill".
         const mveClasses = Array.from(new Set(
-            (_annotateFrame.detections || []).map(d => String(d.name || '')).filter(Boolean)
+            (_annotateFrame.detections || [])
+                .map(d => String(d.name || ''))
+                .filter(n => n && !n.startsWith('_'))
         ));
         const unmapped = mveClasses.filter(c => !_annotateClassMap[c]);
         _renderClassMapPanel(mveClasses, unmapped);
