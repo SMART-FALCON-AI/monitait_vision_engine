@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.222] - 2026-07-27 — Score-per-shipment self-heals on tab-open; shipment hover shows length/start-end/score/verdict
+
+- **Score-per-shipment blank on Charts open (fleet-wide).** `switchTab('grafana')` never actually triggered a load, and the chart was often built while the tab was hidden (canvas 0×0 → Chart.js draws nothing) → it came up blank until a manual Refresh. Added `_ensureScorePerShipmentLoaded()` — a watchdog fired from `switchTab('grafana')` at 350/1200/3000 ms: if the chart already has data it just `resize()`+`update()`s it (the 0×0 case), otherwise it force-loads. Operator asked for exactly this ("check if Score-per-shipment doesn't exist and load it").
+- **Richer shipment-lane hover.** Hovering a shipment block showed only its id. Now it shows verdict + score, length (encoder span + unit), the encoder/time start→end (computed from the bins it spans), detection count, and top defects — pulled from the per-shipment META cached from `/api/quality/shipments`.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_ensureScorePerShipmentLoaded`; `window._mveShipmentMeta` cache; `_shipmentHoverText` + rich cell titles in `_paintShipmentStrip`.
+- `vision_engine/static/js/audio.js` — `switchTab('grafana')` fires the watchdog.
+- `vision_engine/static/status.html` — cache-busters → 4.0.222.
+
 ## [4.0.221] - 2026-07-27 — Shipment lane coloured by VERDICT; colour-change strip brightened to match the others
 
 Operator: *"(1) colour the shipment lane by the verdict of that shipment; (2) why are the colour-change cells not as bright as the others?"*

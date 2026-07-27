@@ -1782,6 +1782,39 @@ function _stripTipIcon(desc) {
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return '<span class="info-tooltip-sm">i<span class="info-tooltip-text">' + safe + '</span></span>';
 }
+// v4.0.222 — rich hover text for a shipment lane block. Operator: "hovering a
+// shipment should show more than the name — length, start/end, score…". Pulls
+// per-shipment META cached from /api/quality/shipments (score/verdict/length/
+// detections/top-defects) and computes the encoder-or-time start→end from the
+// bins the shipment occupies. Multi-line (native title honours \n).
+function _shipmentHoverText(sh, minBin, maxBin, nbins, axis, lo, hi) {
+    const lines = [String(sh)];
+    const m = (window._mveShipmentMeta || {})[String(sh)];
+    if (m) {
+        if (m.verdict != null || m.score != null) {
+            const sc = (m.score != null && isFinite(m.score)) ? ('  ·  score ' + Number(m.score).toFixed(1)) : '';
+            lines.push((m.verdict || '—') + sc);
+        }
+        if (m.encoder_span != null && isFinite(m.encoder_span)) {
+            lines.push('length: ' + Math.round(m.encoder_span).toLocaleString() + ' ' + (m.encoder_unit || ''));
+        }
+    }
+    if (isFinite(lo) && isFinite(hi) && hi > lo && nbins > 0) {
+        const sv = lo + (minBin / nbins) * (hi - lo);
+        const ev = lo + ((maxBin + 1) / nbins) * (hi - lo);
+        if (axis === 'time') {
+            const f = (t) => new Date(t).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+            lines.push('time: ' + f(sv) + '  →  ' + f(ev));
+        } else {
+            lines.push('encoder: ' + Math.round(sv).toLocaleString() + '  →  ' + Math.round(ev).toLocaleString());
+        }
+    }
+    if (m) {
+        if (m.rows != null && isFinite(m.rows)) lines.push(Number(m.rows).toLocaleString() + ' detections');
+        if (Array.isArray(m.top_defects) && m.top_defects.length) lines.push('top: ' + m.top_defects.slice(0, 3).join(', '));
+    }
+    return lines.join('\n');
+}
 function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
     const strip = document.getElementById('shipment-strip');
     if (!strip) return;
@@ -1794,6 +1827,15 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
         const c = cells[i];
         owner.push((c && c.shipment) ? String(c.shipment) : null);
     }
+    // v4.0.222 — first/last bin each shipment occupies, for the hover start→end.
+    const shRange = {};
+    for (let i = 0; i < nbins; i++) {
+        const s = owner[i];
+        if (!s) continue;
+        if (!shRange[s]) shRange[s] = [i, i];
+        else if (i > shRange[s][1]) shRange[s][1] = i;
+    }
+    const _escAttr = (t) => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     const cellHtml = [];
     for (let i = 0; i < nbins; i++) {
         const sh = owner[i];
@@ -1809,7 +1851,9 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
         // begins. A shipment's OWN width stays a single flat block.
         const boundary = (i + 1 < nbins) && owner[i + 1] && owner[i + 1] !== sh;
         const sep = boundary ? ' box-shadow: inset -1px 0 0 rgba(2,6,23,0.55);' : '';
-        cellHtml.push('<div title="' + sh.replace(/"/g, '&quot;') + '" style="flex:1 1 0; height:100%; background:' + bg + ';' + sep + '"></div>');
+        const r = shRange[sh] || [i, i];
+        const tip = _escAttr(_shipmentHoverText(sh, r[0], r[1], nbins, axis, lo, hi));
+        cellHtml.push('<div title="' + tip + '" style="flex:1 1 0; height:100%; background:' + bg + ';' + sep + '"></div>');
     }
     // Centred ID overlay on same-shipment runs ≥3 bins wide.
     const labelHtml = [];
@@ -5177,6 +5221,36 @@ async function loadScorePerShipment(force) {
 }
 window.loadScorePerShipment = loadScorePerShipment;
 
+// v4.0.222 — self-healing watchdog for the Score-per-shipment card. Operator:
+// "when I open the Charts tab it doesn't show — have a flag that checks if
+// Score-per-shipment doesn't exist and loads it." Two failure modes it fixes:
+//   1) the chart was BUILT while the Charts tab was hidden → its canvas was 0×0
+//      → Chart.js drew nothing → it stays blank until a manual Refresh. Here we
+//      just resize()+update() it (data is already in memory — no refetch).
+//   2) it never loaded at all (tab-open never triggered loadScorePerShipment) →
+//      force a load.
+// Called from switchTab('grafana') at a few delays so it survives the canvas-
+// layout + first-fetch races. Safe to call repeatedly (no spam: resizes when it
+// already has data, and won't stack a fetch while one is in flight).
+function _ensureScorePerShipmentLoaded() {
+    try {
+        const canvas = document.getElementById('quality-shipments-chart');
+        if (!canvas) return;
+        const inst = (window.Chart && Chart.getChart) ? Chart.getChart(canvas) : null;
+        const hasData = inst && inst.data && Array.isArray(inst.data.datasets)
+            && inst.data.datasets.some(ds => Array.isArray(ds.data) && ds.data.length > 0);
+        if (hasData) {
+            // Rendered blank because the canvas was 0×0 while hidden → just redraw.
+            try { inst.resize(); inst.update('none'); } catch (_e) {}
+        } else if (!_scorePerShipmentInFlight) {
+            // Never populated (or genuinely empty) → (re)load. force=true bypasses
+            // the _scorePerShipmentLoaded guard so a prior blank render can't block it.
+            try { loadScorePerShipment(true); } catch (_e) {}
+        }
+    } catch (_e) { /* watchdog is best-effort */ }
+}
+window._ensureScorePerShipmentLoaded = _ensureScorePerShipmentLoaded;
+
 async function _loadQualityShipmentsChart(win) {
     const canvas = document.getElementById('quality-shipments-chart');
     if (!canvas) return;
@@ -5208,7 +5282,21 @@ async function _loadQualityShipmentsChart(win) {
         // no extra backend cost. Repaint the lane once so it recolours immediately.
         try {
             window._mveShipmentVerdicts = window._mveShipmentVerdicts || {};
-            for (const s of rows) { if (s && s.shipment != null && s.verdict) window._mveShipmentVerdicts[String(s.shipment)] = String(s.verdict); }
+            // v4.0.222 — also cache full per-shipment META so the shipment-lane
+            // hover can show length / start-end / score / verdict, not just the id.
+            window._mveShipmentMeta = window._mveShipmentMeta || {};
+            for (const s of rows) {
+                if (s && s.shipment != null) {
+                    const id = String(s.shipment);
+                    if (s.verdict) window._mveShipmentVerdicts[id] = String(s.verdict);
+                    window._mveShipmentMeta[id] = {
+                        score: s.score, verdict: s.verdict,
+                        encoder_span: s.encoder_span, encoder_unit: s.encoder_unit,
+                        first_t: s.first_t, last_t: s.last_t,
+                        rows: s.rows, top_defects: s.top_defects
+                    };
+                }
+            }
             if (typeof _repaintProgressiveStrips === 'function') _repaintProgressiveStrips();
         } catch (_vmap) {}
         // v4.0.140 — 2-line labels: line 1 = shipment ID, line 2 = length

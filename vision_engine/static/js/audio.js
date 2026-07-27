@@ -1693,6 +1693,20 @@ function switchTab(tabName) {
         setTimeout(() => loadChatHistory(), 100);
     }
 
+    // v4.0.222 — Charts tab: the Score-per-shipment card renders BLANK on open
+    // (its canvas is 0×0 while the tab is hidden, so Chart.js draws nothing, and
+    // switchTab never actually triggered a load). Run the self-healing watchdog
+    // at a few delays now that the tab is visible — it resizes the chart if the
+    // data is already there, or force-loads it if it never loaded. Operator asked
+    // for exactly this: "check if Score-per-shipment doesn't exist and load it."
+    if (tabName === 'grafana') {
+        [350, 1200, 3000].forEach(function (ms) {
+            setTimeout(function () {
+                try { if (typeof _ensureScorePerShipmentLoaded === 'function') _ensureScorePerShipmentLoaded(); } catch (_e) {}
+            }, ms);
+        });
+    }
+
     // Lazy-load/unload iframes for gallery and grafana tabs
     if (typeof loadIframeForTab === 'function') {
         loadIframeForTab(tabName);
