@@ -7,6 +7,623 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.221] - 2026-07-27 — Shipment lane coloured by VERDICT; colour-change strip brightened to match the others
+
+Operator: *"(1) colour the shipment lane by the verdict of that shipment; (2) why are the colour-change cells not as bright as the others?"*
+
+- **Shipment lane → verdict colour.** Each bin was coloured by a per-id golden-angle hue (a rainbow). Now it's coloured by the shipment's **verdict**: green = RELEASE, amber = RE-INSPECT, red = HOLD, grey = PENDING/NO_DATA. Verdicts are reused from the Score-per-shipment data (`/api/quality/shipments`) that the tab already loads — no extra backend cost — cached in `window._mveShipmentVerdicts` and the lane repaints when they arrive. Fallback to the per-id hue while verdicts are still loading or for a shipment outside the fetched set. A thin divider is drawn at each shipment boundary so two adjacent same-verdict shipments (both green, say) still read as separate blocks.
+- **Colour-change brightness.** `_colorChangeColor` ramped alpha 0.35→0.90 (translucent, dim vs the fully-opaque quality/shipment strips). Now 0.78→1.0 so the cells are as vivid as their neighbours; magnitude is still shown by the yellow→red / cyan→blue hue ramp.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_shipVerdictColor` + `window._mveShipmentVerdicts` (populated in `_loadQualityShipmentsChart`); `_paintShipmentStrip` colours by verdict + boundary divider; `_colorChangeColor` alpha 0.78–1.0.
+- `vision_engine/static/status.html` — shipment tooltip text updated; cache-busters → 4.0.221.
+
+## [4.0.220] - 2026-07-27 — Stale-HTML root cause fixed (no-cache for /static/*.html); colour-change row back to flex (vertical-centre)
+
+A multi-agent audit confirmed the colour-change strip is **already left-aligned** in v4.0.219 source — the operator's "not aligned" was a browser showing a **cached v4.0.218 page**. Root cause found: `status.html` is reachable at `/static/status.html` via the `StaticFiles` mount, which sends **no `Cache-Control`** (only ETag/Last-Modified), so browsers heuristically cache the HTML document. The `GET /status` route already sent no-cache; the mount did not. Fix: a `StaticFiles` subclass stamps `no-cache, no-store, must-revalidate` on `*.html` responses only — versioned JS/CSS stay cacheable. Also: the colour-change row resolved to `display:block` (no `.mve-strip-row` CSS rule + `display=''`), dropping `align-items:center`; the 14px strip sat top-aligned next to the 16px strips and *read* as offset. Now set to `display:flex`.
+
+### Files
+- `vision_engine/main.py` — `_NoCacheHTMLStaticFiles` subclass; mount uses it (no-cache for `*.html` only).
+- `vision_engine/static/js/charts.js` — colour-change row shown with `display:flex` (was `''`→block).
+- `vision_engine/static/status.html` — cache-busters → 4.0.220.
+
+## [4.0.219] - 2026-07-27 — Strip alignment made bulletproof: legends absolute-positioned in the gutter, every strip is exactly the plot width
+
+Operator (all-caps furious): *"MAKE SURE ALL CHARTS ARE IN SYNC — the colour-change is more LEFT than the others, align those charts!"*
+
+The 4.0.217/218 attempts sized each legend column to `chartArea.left`, but the colour-change strip is `display:none` until enabled, so at align time it kept its natural (narrower) legend width and its strip started ~one gutter too far left. Fix: the legend icons are now `position:absolute; right:100%` — **out of flow, in the left gutter** — so they can't push any strip sideways. Every strip is 100% of `#quality-strip-wrap`, and JS insets the wrap to EXACTLY `[chartArea.left, chartArea.right]`. Result: every strip (even one revealed later) starts and ends on the same x as the scatter dots, bin-for-bin.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_alignStripToScatter` insets the wrap to the plot area only (no per-legend width juggling).
+- `vision_engine/static/status.html` — `.mve-strip-legend` absolute in the gutter; strips are full plot-width; cache-busters → 4.0.219.
+
+### Note (not a bug)
+The shipment lane showing a *different colour per bin* on vteam12 is correct: the test box mints a new shipment id every ~30 min (`T2607271000261`, `T2607270930261`, …), so a 24h view (~30 min/bin) has one distinct shipment per bin. Same id → same colour still holds; a shorter window makes each shipment span several bins and read as one solid block.
+
+## [4.0.218] - 2026-07-27 — Shipment lane no longer "sticks to the left edge" (drop out-of-domain rows, don't clamp); strips reordered shipment-first; tooltips match the app; stale per-strip time axis nuked
+
+Operator (furious): *"why does the shipment have two — one at the beginning and one at the end? I fucking hate your idea of sticking every shipment to the left end. Fill it one by one from the newest (right) toward the left, like the other strips."* Plus: *"the icons should be LEFT of each chart; remove the 01:06 PM time entirely; put the shipment first (top) and the ejection below it; and why is this tooltip a different design than the rest of the app?"*
+
+- **Stuck-to-the-left fix (root cause).** `_dc_shipment_cells` binned with `LEAST(N-1, GREATEST(0, FLOOR(...)))` — a **clamp**. The time WHERE-window (e.g. now−24h) is wider than the scatter's dot-domain `[lo,hi]`, so every shipment row older than `lo` collapsed into bin 0 and every row newer than `hi` into bin N−1 → a phantom block glued to each edge. Now it uses a raw `FLOOR` + `WHERE bucket >= 0 AND bucket < N` — rows outside the scatter's domain are **dropped**, not smeared, so the lane fills right→left in lock-step with the dots and never sticks to an edge.
+- **Reorder.** Strip stack is now, top→bottom: **shipment → quality → colour-change → ejection** (shipment first, ejection last/below).
+- **Tooltips.** The strip info icons now use the app's own `.info-tooltip-sm` component (global `#global-tooltip` popup) instead of a native `title=` bubble, so they look identical to the dashboard's tooltips.
+- **Stale axis.** The per-strip time/encoder axis line under the quality strip is fully removed, and `_paintQualityStrip` now also `.remove()`s any `#quality-strip-axis` left behind in a browser-cached old HTML.
+
+### Files
+- `vision_engine/routers/timeline.py` — `_dc_shipment_cells`: drop out-of-domain rows instead of clamping to edge bins.
+- `vision_engine/static/js/charts.js` — `_stripTipIcon` helper (app tooltip markup); `_si`, colour-change + shipment title setters switched to it; `_paintQualityStrip` removes the stale axis element + no longer paints axis labels.
+- `vision_engine/static/status.html` — strip stack reordered shipment-first/ejection-last; legends use `.info-tooltip-sm`; cache-busters → 4.0.218.
+
+## [4.0.217] - 2026-07-27 — Shipment lane is now a BACKEND bin-strip on the SAME API as the scatter (guaranteed x-sync); legend moved LEFT of every strip; per-strip axis line removed
+
+Operator: *"why is the shipment colour-full? … put the legend LEFT of each chart not on top, so it gets more compact; remove the time/encoder below the quality-by — that legend is already above on the scatter"* and *"do it from scratch, do each bin like the others in the same time … each bin related to each shipment should get the same colour."*
+
+**Shipment lane → backend bins.** The lane used to be re-derived on the client from the scatter's *dots* (`_renderShipmentStripFromScatterDots`). But the dots are `LIMIT`-capped per bucket — a sparse sample, not a full census of each bin — so a bin's "biggest shipment" could disagree with the true dominant shipment and the lane drifted. Now the lane is computed **server-side** by `_dc_shipment_cells` over the *identical* `[lo,hi]/N_BINS` domain the colour heatmap + scatter use (`GROUP BY bucket, shipment`, dominant shipment per bin), shipped as `shipment_heatmap[_time]` (main payload) + `shipment_slice` (per-bucket stream). The client just paints it (`_paintShipmentStrip`) newest→oldest in lock-step with quality/ejection/colour — so a vertical guideline at bin K hits the same data in every layer. Each shipment keeps a stable colour (`_shipHue`, golden-angle), so **every bin of a shipment shares its colour** — adjacent same-shipment bins read as one solid bar with a centred ID overlay on runs ≥3 bins.
+
+**Legend moved LEFT.** Every strip is now a flex row: a compact legend column (emoji + hover ⓘ) sitting in the scatter's **left-axis gutter**, then the strip filling the plot area. `_alignStripToScatter` sizes each `.mve-strip-legend` to `chartArea.left` and the wrap's right margin to `containerW − chartArea.right`, so each strip still begins exactly at the plot area → bin cells line up cell-for-cell with the dots. The per-strip **axis line under the quality strip was removed** (that encoder/time legend already lives above the scatter).
+
+### Files
+- `vision_engine/routers/timeline.py` — new `_dc_shipment_cells` helper; `shipment_heatmap`/`shipment_heatmap_time` in the main payload; `shipment_slice` in the per-bucket slice.
+- `vision_engine/static/js/charts.js` — `_progressiveShipmentCells` accumulator; `_shipHue` + `_paintShipmentStrip`; shipment wired into `_repaintProgressiveStrips`, `_renderStripsFromPayload`, `_extendStripsFromBucket`, and the seed/reset paths; `_renderShipmentStripFromScatterDots` retired to a thin delegate (repaints the backend strip) so legacy callers stop re-deriving from the dots; ladder's dots-derived re-render calls removed; `_alignStripToScatter` sizes the left legend columns.
+- `vision_engine/static/status.html` — strip stack rebuilt as legend-left rows; `quality-strip-axis` removed; cache-busters → 4.0.217.
+
+## [4.0.216] - 2026-07-27 — Compact strip stack: emoji + hover-ⓘ titles, shipment lane moved BELOW the others
+
+Operator wanted the strips compact — *"make it compact, icon + ⓘ beside each item, and put the shipment lane below."* Each strip title collapsed to just its emoji + a hover ⓘ (full text in the tooltip); the shipment lane moved LAST (below quality/colour/ejection). Also fixed a *"shipment bins don't show"* first-paint case by deriving the lane domain from the dots when `window._mveUnifiedX` isn't published yet, plus an explicit cell height. (Superseded by 4.0.217's backend-bin lane + left legend.)
+
+### Files
+- `vision_engine/static/js/charts.js`, `vision_engine/static/status.html` — compact titles, shipment-lane ordering, first-paint domain fallback.
+
+## [4.0.215] - 2026-07-27 — Shipment lane renders as edge-to-edge bin cells (flex:1 per bin)
+
+The binned shipment lane switched from value-positioned bars to one `flex:1` cell per bin (solid colour keyed to the bin's shipment), matching the quality/colour/ejection strips exactly, with ID overlays on wide same-shipment runs. (Superseded by 4.0.217's backend-computed bins.)
+
+### Files
+- `vision_engine/static/js/charts.js` — `_renderShipmentStripFromScatterDots` cell-based render.
+
+## [4.0.214] - 2026-07-27 — Shipment lane is now BINNED like the other strips (each bin → its biggest shipment), so it can't drift from the scatter
+
+Operator: *"make the shipment lane like the other strips with bins; each bin might have one or two shipments — give the bin to the biggest shipment in that bin. Without that sync the chart is useless — we can't tell which dot belongs to which shipment."*
+
+The lane used **value-based** positioning (`leftPct = (x−min)/range`), which could drift from the bin-based quality/colour/ejection strips + the scatter. Now `_renderShipmentStripFromScatterDots` splits the scatter's own `window._mveUnifiedX` `[xMin,xMax]` into `bins` bins (the SAME bins everything else uses), counts each shipment's dots per bin, and awards each bin to the shipment with the most dots in it. Bars snap to bin edges, so a dot in bin K sits inside its shipment's bar in bin K — guaranteed x-sync with the dots and the other strips.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_renderShipmentStripFromScatterDots` rewritten to bin + dominant-shipment-per-bin (replaces value-based `_renderShipmentStrip` layout for the dots-derived path).
+
+## [4.0.213] - 2026-07-26 — Colour-change ↑/↓ numbers now show for a PICKED shipment too
+
+Operator: *"where are the colour-change numbers? when I choose a specific shipment they disappear, but for 24h they show."*
+
+`_recomputeColorChangeFromProgressive` skipped picked shipments (it only read the *streamed* `_progressiveColorCells`, which stay empty for a pick since colour isn't streamed for one shipment). Now it reads from `__mveHeatmap.cells` — the SAME cells the colour heatmap actually paints — which is populated for both cases (streamed for all-shipments, Core's full-span set for a pick). So the ↑/↓ Δ labels render in both modes.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_recomputeColorChangeFromProgressive` reads `__mveHeatmap.cells`, picked-skip removed.
+
+## [4.0.211] - 2026-07-26 — The LAST two desynced strips (colour-change + shipment lane) now come from the scatter's own data too — all five layers on one API
+
+Operator: *"these two are not in sync in x-axis which leads to bad UX"* … *"update the whole part of scatter, shipment lane, quality-by, colour-by, ejections-by from the same API so all data is synced"* → **two APIs total: Score-per-shipment on its own; everything else on `/api/detection_charts`.**
+
+v4.0.210 moved quality + ejection onto the scatter's endpoint, which made the two *remaining* separately-sourced strips stand out as misaligned:
+
+- **Colour-change strip** (`↑/↓` Δ-between-buckets) was painted from Core's 1h-hydrate payload — 1h of data spread across the full 24h width. Now **recomputed from the same streamed `_progressiveColorCells`** the colour heatmap uses (`_recomputeColorChangeFromProgressive`), so it fills newest→oldest and bin K covers the exact same x-range as scatter bin K. The `↑/↓` number labels are preserved.
+- **Shipment lane** was already dots-derived (v4.0.207) but a leftover `/api/shipment_spans` fallback (and an early Core paint from `data.shipment_spans`) drew stretched, full-width lanes over a *different* [min,max] than the scatter before the dots loaded — the "lane sticks to the start" bug. Both removed: the lane is now **purely a function of the scatter's own dots**, blank until they stream in, growing left in lock-step.
+
+Net: scatter dots, shipment lane, quality, colour (heatmap + change), and ejection all derive from **one `/api/detection_charts` call-graph** — a vertical guideline hits the same encoder/time in every layer, by construction. Score-per-shipment keeps its own `/api/quality/shipments` API (window-independent last-N view). The bottom pie/bar charts are untouched.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_recomputeColorChangeFromProgressive` wired into `_repaintProgressiveStrips`; `_refreshShipmentStripStandalone` + `_repaintShipmentStripFromCache` + Core early-paint all switched to dots-only (`_renderShipmentStripFromScatterDots`), `/api/shipment_spans` lane fallback removed.
+
+## [4.0.210] - 2026-07-26 — Quality + ejection strips now come from the SAME API as the scatter (one query, one binning, zero possible misalignment) + streamed newest→oldest + lane-overflow + score-per-shipment reload fixes
+
+Operator (emphatic): *"get the quality/color/ejection data from the EXACT SAME api that you get the scatter data, so you don't misalign"* … *"get the shipment for the lane from the scatter too."*
+
+### One API for every strip
+v4.0.209 pinned the separate `/api/quality/*` endpoints to the scatter's range via `lo`/`hi` — aligned, but still *two* APIs that could drift on a timing race. Now the quality and ejection strips are computed **inside `/api/detection_charts`** (the scatter's own endpoint), in the same query, using the **identical** bounds + `N_BINS` + `FLOOR((val−lo)*N/(hi−lo))` bin formula the colour heatmap uses. So quality cell K, ejection cell K, colour cell K and scatter bin K all cover the exact same encoder/time range — a vertical guideline hits the same data in every layer, by construction.
+
+- Backend: `_dc_quality_cells` / `_dc_ejection_cells` helpers; `detection_charts` gains `quality_heatmap[_time]` + `ejection_heatmap[_time]` in the main payload (picked-shipment + periodic single fetch) and `quality_slice` + `ejection_slice` in the per-bucket slice (all-shipments streaming). Gated on `include_strips=1`. *(Verified on vteam12: color/quality/ejection share identical `t_min/t_max`; a 30-min slice over a 24h domain lands in bin 47.)*
+- Frontend: strips render from the detection_charts payload/slices (`_paintQualityStrip` / `_paintEjectionStrip` / `_extendStripsFromBucket` / `_renderStripsFromPayload`); the separate `/api/quality/*` fetches are gone from the render path.
+
+### Strips stream newest→oldest (no more "blink")
+Because the strips now ride the same per-bucket ladder as the dots + colour + shipment lanes, they fill in newest→oldest in lock-step instead of appearing all at once. (Shipment lanes already derived from the scatter dots since v4.0.207.)
+
+### Shipment lane no longer overflows the plot's right edge
+The `minSlice` min-visible widening pushed the newest shipment's lane box past `axisMax` (and `#shipment-strip` is `overflow:visible`), so it painted beyond the scatter. Now clamped to `axisMax` with the slice shifted left — flush against the right edge.
+
+### Score-per-shipment loads on reload
+It only loaded on a genuine *click* of the Charts-tab button, so a page reload (restoring the tab without a click) left the card empty. Now `loadScorePerShipment(false)` also fires from `refreshDetectionInsights` (once-guarded, gated on `_chartsTabActive()`), and `audio.js` restores the (no-longer-iframe) Charts tab on reload.
+
+### Files
+- `vision_engine/routers/timeline.py` — `_dc_quality_cells`, `_dc_ejection_cells`, `_dc_load_severity`; `include_strips` param; main-payload + slice quality/ejection.
+- `vision_engine/static/js/charts.js` — strip paint/stream/render helpers; ladder + 1h + picked wiring; `refreshQualityCharts` → detection_charts; removed pre-ladder strip paint; score-per-shipment load; lane clamp.
+- `vision_engine/static/js/audio.js` — restore the Charts tab on reload.
+
+## [4.0.209] - 2026-07-26 — One source of truth for the x-domain: quality + ejection strips now bin over the SCATTER's exact range (vertical guideline hits the same data in every layer)
+
+Operator: *"so please make sure we have one single source of API"* … *"I want to be sure any vertical guideline I draw points to the exact same data, encoder or time."*
+
+The quality strip and the ejection strip each computed their **own** `MIN/MAX` range (`/api/quality/heatmap`, `/api/quality/ejection_axis`) — a different range than the scatter's. So the same column position meant different encoder/time values in the scatter vs. the strips: a vertical guideline hit *different* data in each layer (proven: kiancord scatter 27M–30M vs quality strip 9M–30M; khoy scatter 10.1M–11.3M vs quality strip 4.5M–11.3M).
+
+Now the scatter's `window._mveUnifiedX = {xMin, xMax, bins}` is the **single source of truth for the x-domain**. Both strip endpoints take optional `lo`/`hi` params; when set they bucket over that EXACT range (encoder units, or epoch-ms for time) with the same bin count, and exclude rows outside `[lo,hi]` so edge buckets aren't inflated by clamping. Bucket K of every strip now covers the identical value-range as scatter bucket K and colour-heatmap cell K — so a vertical line at value V lands in the same bucket across dots, colour, quality AND ejection.
+
+### Files
+- `vision_engine/routers/timeline.py` — `quality_heatmap` + `quality_ejection_axis`: new `lo`/`hi` params; bucket over the explicit domain (both encoder + time axes) with an out-of-range exclusion clause.
+- `vision_engine/static/js/charts.js` — new `_stripRangeQS(axis)` helper emits `&lo=&hi=&shipment=` from `window._mveUnifiedX` (guarded to axisMode match); `_loadQualityHeatmap` + `_loadEjectionAxis` append it so `bins`, `lo`, `hi` all come from the one unified domain.
+
+## [4.0.208] - 2026-07-26 — Shipment picker shows a dropdown-caret so operators know it opens a list
+
+The shipment picker became an `<input>` (v4.0.198, for search) and lost the `<select>`'s dropdown arrow, so operators didn't realise it was a picker. Added a caret (down-chevron SVG, URL-encoded data URI) on the right edge + `cursor:pointer`, so it reads as a dropdown.
+
+### Files
+- `vision_engine/static/status.html` — caret background on `#insight-shipment`; cache-busters.
+
+## [4.0.207] - 2026-07-26 — Shipment lanes derived from the scatter's own dots (guaranteed in-sync; kills the "switches to 24h" clobber) + click-a-score-bar loads that shipment
+
+### Shipment lanes now come from the scatter, not a separate API
+Operator: *"show the shipment lane based on the data inside the scatter chart so we're sure they're in sync on the x-axis … this way you only call one API rather than two that derive separately."* Exactly.
+
+The lanes used to come from `/api/shipment_spans` (its own window + its own `LIMIT 200000` raw-row cap that returned only ~5 shipments on a busy 24h window). New `_renderShipmentStripFromScatterDots()` builds each lane's `[min,max]` from the dots ALREADY on the scatter (every dot carries `ship` + `x`), in the exact `[_uxMin,_uxMax]` domain the scatter draws. So:
+- lanes span EXACTLY the encoder/time range the dots occupy — no lane-vs-scatter range mismatch;
+- lanes fill newest→oldest in lock-step with the progressive dot ladder;
+- the 30s standalone refresher no longer re-fetches `shipment_spans` when the scatter has dots, so it can't "suddenly switch the lane from 6h to 24h" anymore (that was the timer clobbering the strip with a window-based fetch).
+
+Wired into: Core render, the progressive ladder (per-bucket + on completion), the axis-toggle repaint, and the standalone refresher (dots-present → derive; only falls back to a fetch before the first scatter render).
+
+### Click a Score-per-shipment bar → load that shipment
+Operator: *"when I click a shipment in Score-per-shipment, put it in the search field so we can see its details."* The bar chart's `onClick` now sets the shipment picker to the clicked shipment and fires the normal pick flow (loads its dots/colour, hides the timeframe).
+
+### Next (acknowledged, not in this ship)
+Operator also asked to unify the **quality**, **colour**, and **ejection** strips onto ONE bucketed API loaded newest→oldest like the scatter (today: `/api/quality/heatmap` + `/api/quality/ejection_axis` are separate fetches). That's a larger backend+frontend refactor — next phase.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_renderShipmentStripFromScatterDots`; Core/ladder/standalone/axis-toggle wiring; score-bar onClick.
+- `VERSION`, `CHANGELOG.md`, cache-busters.
+
+
+## [4.0.206] - 2026-07-25 — Charts toolbar: shipment picker clears on click for a new search; Target + Shipment-start baselines removed
+
+- **Shipment picker click-to-clear**: focusing the picker now clears the field (remembering the prior value) so the operator can immediately type a new search / see all options; clicking away without picking restores the previous selection. (operator: "when I click the dropdown put it ready to a new search.")
+- **Removed** the `🚀 Shipment start` and `🎯 Target` colour-baseline buttons per operator request — the row is now `📷 Camera · 📊 Shipment avg · 🖼️ Reference`. The modes still exist in `setHeatmapBaseline`/backend for any stored value; the button-styling loop already null-guards missing buttons, so nothing breaks.
+- (Bundles the v4.0.205 picked-shipment colour seed.)
+
+Known follow-up (next pass): replace the native `<datalist>` with a custom dropdown so the list renders BELOW the input (native datalist can't be repositioned), move Cells 👁/🚫 beside the defect legend, add per-colour-class hide/unhide, and fit the toolbar on one line.
+
+### Files
+- `vision_engine/static/status.html` — picker onfocus/onblur; removed 2 baseline buttons; cache-busters.
+- `VERSION`, `CHANGELOG.md`.
+
+
+## [4.0.205] - 2026-07-25 — Picked shipment: colour heatmap fills again (Core seeds the full set)
+
+v4.0.204 skipped the ladder's per-bucket colour streaming for a picked shipment (it was wiping the set) — but Core builds `__mveHeatmap.cells: []` EMPTY by design (v4.0.165, since the all-shipments ladder fills it progressively). So with the ladder colour skipped AND Core empty, a picked shipment showed NO colour at all.
+
+Fix: for a PICKED shipment, Core now seeds `__mveHeatmap.cells` with the full colour set from its own fetch (`heatmapCells` — the backend slices `/api/detection_charts` over the whole shipment span, so it already covers every bin). All-shipments still starts empty and fills via the ladder. One line: `cells: shipment ? heatmapCells : []`.
+
+Net: pick a shipment → colour fills every bin immediately (matching the dots); all-shipments 24h unchanged.
+
+### Files
+- `vision_engine/static/js/charts.js` — seed `__mveHeatmap.cells` for picked shipments.
+- `VERSION`, `CHANGELOG.md`, cache-busters.
+
+
+## [4.0.204] - 2026-07-25 — Picked-shipment colour heatmap fills every bin (stop the per-bucket colour stream from wiping Core's full set)
+
+Operator (dots now spread correctly across the span): *"the colour cell just updates these two bins … I think when we select a specific shipment you are updating the same bucket multiple times."* Precisely right.
+
+### Root cause
+The progressive ladder calls `_extendColorHeatmapFromBucket` per bucket. That function (line ~1637) does `__mveHeatmap.cells = Array.from(_progressiveColorCells.values())` — it **replaces** the heatmap's cells with only the cells the ladder has accumulated so far. For a PICKED shipment, Core's initial fetch already returns the colour cells for the WHOLE span (v4.0.200 slices `/api/detection_charts` over `[t_min, t_max]` → 96 cells across all 48 bins). The ladder then immediately **wiped** those 96 cells and rebuilt them two bins at a time — so the operator saw colour in only the couple of buckets it had re-streamed.
+
+### Fix
+Skip per-bucket colour streaming when a shipment is picked — Core's fetch already has the complete colour set, and the dots ladder no longer touches `__mveHeatmap.cells`, so the full colour persists across all bins. Per-bucket streaming stays for the ALL-SHIPMENTS ladder (there Core only hydrates a 1h slice, so streaming genuinely fills in older buckets).
+
+One line: `if (window._mveColorCheckEnabled === true && !shipment)`.
+
+### Files
+- `vision_engine/static/js/charts.js` — skip `_extendColorHeatmapFromBucket` for picked shipments.
+- `VERSION`, `CHANGELOG.md`, cache-busters.
+
+
+## [4.0.203] - 2026-07-25 — Picked-shipment dots spread across the span (per-bucket ladder), dot_cap "10" option, Score-per-shipment spinner + no double-render
+
+### Picked-shipment dots were clustering at the right — root cause proven
+The backend's `camera_scatter` is `ORDER BY time DESC LIMIT dot_cap` → the **newest N** dots, not stratified. Probe on vteam12 (shipment T2607251202321, 30-min span):
+```
+dot_cap=100:  100 dots, span-decile distribution {8:10, 9:90}   ← newest 100, jammed right
+dot_cap=750:  750 dots, span-decile distribution {2..9}         ← spread (≈all 715 dots fit)
+colour cells = 96 across all 48 bins in BOTH                    ← colour data always correct
+```
+So at a low dot_cap the single fetch returns only the newest dots. The operator's read was exactly right: **dot_cap is PER BUCKET.**
+
+Fix: a picked shipment now goes back through the **progressive bin-by-bin ladder** (it was switched to a single fetch in v4.0.201). The ladder splits the shipment's `[t_min, t_max]` into `bins` slices and fetches up to `dot_cap` dots FOR EACH slice → dots spread across the whole span, streamed newest→oldest with the loading badge. The v4.0.201 "jamming right" that motivated removing the ladder was actually the Core render race (no ticket guard) stamping a stale wide axis — fixed in v4.0.202 — so the ladder now lands its dots on the correct span.
+
+### "10" added to Dots/Category/Bucket + floor lowered 100 → 10
+New `10` option (before `100/500/750/1500/3000`). Both the frontend `_dotCap()`/`setDotCap` clamps and the backend `dot_cap` clamp floored at 100, which silently forced "10" back up; lowered to 10. Tooltip updated to explain dot_cap is per-bucket. With the ladder, `10` = up to 10 dots per bucket = a fast, sparse, EVEN view across the span.
+
+### Score-per-shipment: no more multi-render + a loading spinner
+Operator: *"the score-per-shipment showed up multiple times … and for a moment there is nothing, I don't know if it's loading or broke."*
+- **In-flight guard**: rapid/overlapping callers (tab-open + a long-window refresh + DOMContentLoaded races) previously stacked destroy+recreate renders → the card visibly re-rendered several times. `loadScorePerShipment` now collapses any concurrent call into the one already running (on top of the existing once-guard).
+- **Loading spinner**: a centred "Loading score per shipment…" overlay covers the fetch gap so a blank card never reads as "broken".
+- Long-window path now calls it un-forced (it's window-independent — no reason to re-fetch when switching between long windows).
+
+### Files
+- `vision_engine/static/js/charts.js` — picked-shipment → ladder; `_dotCap` floor 10; `loadScorePerShipment` in-flight guard + spinner.
+- `vision_engine/static/status.html` — "10" dot option; per-bucket tooltip; cache-busters.
+- `vision_engine/routers/timeline.py` — `dot_cap` clamp floor 10.
+- `VERSION`, `CHANGELOG.md`.
+
+
+## [4.0.202] - 2026-07-25 — Charts tab: fix the picked-shipment dot-clustering race, decouple Score-per-shipment from the window, stop double-refreshing
+
+A full audit of `charts.js`'s refresh/query call-graph (operator: *"check the whole code of chart.js, I think somewhere there are redundant or problematic queries that refresh multiple times, or orphan charts"*) found three real defects. All fixed here.
+
+### 1. Picked-shipment dots clustered at one edge = a render race (root cause, finally)
+`_refreshAdvancedChartsCore` had **no generation guard** while `refreshAdvancedCharts` bumps `_progressiveLadderTicket` on every call. So when two refreshes overlap — pick shipment A then quickly B, or change the window then pick a shipment — whichever `/api/detection_charts` fetch **resolved last** won the `destroy()` + `new Chart()` + `window._mveUnifiedX` write. A stale Core then stamped the WRONG fixed axis domain (e.g. the sliding `[now-window, now]`) while the visible dots occupied only the shipment's narrow sub-range → dots jammed against one edge. The backend was always correct (proven: dots stratified evenly across the whole span, colour cells in every bin); this was purely the frontend last-writer-wins race.
+
+Fix: Core now captures the ticket on entry and **bails after its fetch resolves if a newer refresh has started** — before touching the chart or the shared axis domain. Mirrors the guard `_extendScatterFromBucket` already had.
+
+### 2. Score-per-shipment decoupled from the window (last N, always)
+Operator: *"show the last N shipments regardless of the window; remove the 'window 6h' entirely."* The card is a fleet-of-last-N view that never depended on the window or the picked shipment, yet it was:
+- fetched on **every** window/shipment change (via `refreshDetectionInsights → refreshQualityCharts`), and
+- fetched **twice** each time (once at the umbrella, once again inside `refreshAdvancedCharts`).
+
+Now: `_loadQualityShipmentsChart` is removed from the per-refresh `refreshQualityCharts` and moved to a dedicated `loadScorePerShipment(force)` that loads **once** on the first Charts-tab open and re-runs **only** on its own ⟳ Refresh button or when the shipment-count input changes. It fetches `/api/quality/shipments?n=N&window=all`; the backend gained a `window=all` (90-day lookback, `ORDER BY … DESC LIMIT n` already returns the most-recent N). Subtitle now reads `· last N shipments · color = verdict` — no window.
+
+### 3. Stop the double strip fetch
+`refreshAdvancedCharts` also called `refreshQualityCharts()` even though its only caller (`refreshDetectionInsights`) already did. Removed the redundant call → the quality-heatmap + ejection strips fetch **once** per refresh instead of twice (and no longer race each other).
+
+### Also
+- The picked-shipment path now shows the scatter "Loading dots…" spinner during its single fetch (operator: "no loading icon appears").
+
+### Known orphan (flagged, not touched this ship)
+`refreshQualityCharts` is **defined twice** — the first (`_qualPareto`/`_qualCamera`/`_qualHeatmap`/`_qualLatency`, ~line 3860) is dead code shadowed by the active one, so its four canvases never render. Deleting it (~130 lines) is a separate cleanup pass to avoid risk in this fix.
+
+### Files
+- `vision_engine/static/js/charts.js` — Core ticket guard; `loadScorePerShipment`; window-independent Score card; removed redundant `refreshQualityCharts` call; scatter spinner.
+- `vision_engine/static/status.html` — Score-card Refresh + count wired to `loadScorePerShipment`; subtitle text; cache-busters.
+- `vision_engine/routers/timeline.py` — `/api/quality/shipments` `window=all`.
+- `VERSION`, `CHANGELOG.md`.
+
+
+## [4.0.201] - 2026-07-25 — Picked-shipment dots FILL the span (bulletproof axis; dropped the flaky ladder)
+
+Operator, rightly frustrated: picking a shipment still jammed the dots against the right edge instead of filling the plot.
+
+### The diagnosis (measured on vteam12, not guessed)
+Probed the actual endpoint for the picked shipment: the **backend was already perfect** — Core's single fetch returned 750 dots stratified **evenly across the whole 30-minute span** (distribution across 10 span-slices: 53/82/84/89/89/83/92/87/91), and `shipment_spans` carried the correct `[t_min, t_max]`; the dots occupied 13%→100% of that span. So the clustering was **100% a frontend axis bug** — the axis wasn't actually being set to the span, so the spread-out dots got squeezed to the right.
+
+### The fix
+1. **Bulletproof axis for a picked shipment.** Instead of the fragile "find the span by matching the shipment id, else fall back to the sliding [now−window, now]" logic (the fallback is what jammed the dots right), the axis is now the **union of the shipment_spans bound AND the actual dot extent**: `min = leftmost of (span start, first dot)`, `max = rightmost of (span end, last dot)`. This is exactly the operator's spec ("min = most-left number in the span, max = most-right") and it works whether shipment_spans is present or not — no fallback that can collapse the axis.
+2. **Dropped the progressive ladder for a picked shipment.** It was added to stream bin-by-bin but kept fighting the axis and re-jamming dots. Since the backend (v4.0.200) already slices over the shipment's real span and returns dots across the whole thing + colour over all bins in ~0.5 s, a single clean Core fetch fills the plot correctly. The ladder stays for the all-shipments windowed view.
+
+Net: pick a shipment → dots spread across the full plot (left edge = shipment start, right edge = shipment end), colour cells fill every bin (v4.0.200), lane synced (v4.0.199). One fast fetch, no streaming artifacts.
+
+### Files
+- `vision_engine/static/js/charts.js` — union axis for picked shipment; picked-shipment path is a single Core fetch.
+- Full backend in tarball per [[feedback_ship_full_backend_always]]. `VERSION`, `CHANGELOG.md`, cache-busters.
+
+## [4.0.200] - 2026-07-25 — Kill the 90-day guard: a picked shipment bins every panel over its REAL span (colour heatmap fixed)
+
+Operator: *"why do you have that 90-day filter? we have a specific shipment number, why do you limit to that? what are you guarding?"* — and separately: picking a shipment showed *"only two bins have colour"* even though the DB has colour in every bucket.
+
+### What the 90-day guard was, and why it was wrong
+v4.0.196 overrode `interval = "90 days"` whenever a shipment was picked, to make the shipment's data surface regardless of the operator's window. The intent was a "safety net" against a full-table scan. But **there is nothing to guard**: `inference_results` has an index on `(shipment, time)`, so `WHERE shipment = X` is already a bounded index lookup — a mistyped id returns 0 rows instantly; it cannot scan the whole table. The guard was pure downside:
+- It **cut off shipments older than 90 days** (they returned nothing).
+- Every **time-bucketed panel binned over the 90-day window**, so a 30-minute shipment's data all fell into the last of 48 bins. Confirmed against the DB: shipment T2607241715330 has `_color` in **61/61** 30-second buckets (964 colour rows), yet the endpoint returned `color_heatmap_time` with **2 cells, both in bin 47**, because it was binning 30 minutes of data across a 90-day range.
+
+### The fix — a picked shipment drives slice-mode over its real span
+`GET /api/detection_charts`:
+1. When a specific shipment is picked (and the caller didn't already pass a slice), resolve its actual `[MIN(time), MAX(time)]` with a single indexed query and set `since_ms`/`until_ms` to it → `_use_slice` turns on → **every slice-aware query (scatter + colour heatmap) bins over exactly the shipment's duration.**
+2. The colour-time block (`color_heatmap_time`) is now slice-aware in all three spots that hardcoded `NOW() - INTERVAL`: the bin-bounds, the `_color`-rows WHERE predicate, and the payload `t_min/t_max`. So its cells span the shipment and fill the strip.
+3. For any non-slice-aware query still keyed on `interval`, the interval is widened to `3650 days` so a shipment of ANY age is included — again bounded by the shipment index, not a full scan.
+
+Net: pick a shipment → the colour heatmap (and the scatter) span the shipment's real start→end, cells in every bucket that has colour data, no collapse, and shipments older than 90 days work again.
+
+### Also in this ship (v4.0.199 frontend, bundled)
+Progressive bin-by-bin loading over a picked shipment's own `[t_min,t_max]` with the loading spinner, shipment lane synced to the span, and bucket dots respecting the effective (stationary-flipped) axis. (Full detail under 4.0.199 below.)
+
+### Follow-up still queued
+The quality-strip and ejection-strip endpoints (`/api/quality/heatmap`, `/api/quality/ejection_axis`) still carry the v4.0.196 `interval = "90 days"` override — same collapse risk for a picked shipment. Next backend pass gives them the same span-resolution. (Not in this ship; the reported bug was the colour heatmap.)
+
+### Files
+- `vision_engine/routers/timeline.py` — span-resolve + slice-drive for a picked shipment; colour-time block made slice-aware (3 spots).
+- `vision_engine/static/js/charts.js` — v4.0.199 progressive per-shipment ladder.
+- Full backend in tarball per [[feedback_ship_full_backend_always]]. `VERSION`, `CHANGELOG.md`, cache-busters.
+
+## [4.0.199] - 2026-07-25 — Picked shipment loads progressively bin-by-bin over its own span (fills the plot, lane synced)
+
+Operator: *"when i choose a shipment, the loading icon doesn't appear and buckets are not showing. it should be like this: find the start and stop of shipment, divide it based on the buckets number, and load bin by bin — don't forget we need loading dot — meanwhile."* And: *"the shipment lane is not in sync with scatter, look at the end, the shipment is out of scope."*
+
+### The problem
+A picked shipment took the single-fetch Core path (`dot_cap=750`, newest rows first), so the dots clustered at the RIGHT edge of the plot (the newest ~750) and never filled the shipment's span. No progressive spinner, no bin-by-bin fill. And because the axis was set from those clustered dots (or the sliding window), the shipment lane strip and the scatter disagreed on the domain.
+
+### The fix — one unified progressive ladder for both modes
+`refreshAdvancedCharts` restructured:
+- **1h + all-shipments** → single fast Core fetch (unchanged).
+- **Everything else** (all-shipments over a window OR a specific shipment) → the progressive bin-by-bin ladder.
+- For a **picked shipment**, the ladder range is the shipment's OWN `[t_min, t_max]` (fetched from `/api/shipment_spans?shipment=…`, ~70 ms), divided into `bins` buckets. It streams newest→oldest with the "Loading dots — newest first" badge mounted the whole time, exactly as the operator described. Core runs first to set up the chart + axis (from the span) + strips, then the ladder fills every bucket.
+- For **all-shipments**, the ladder range stays `[now−window, now]` (unchanged behaviour, restored after the v4.0.198 regression).
+
+### Lane sync
+Because Core now feeds `_renderShipmentStrip` the same `[t_min, t_max]` the scatter axis uses (v4.0.198 axis-from-span), and the standalone strip refresher fetches only the picked shipment's span, the shipment lane bar spans exactly the scatter — no more "out of scope at the end."
+
+### Bucket dots respect the effective axis
+`_extendScatterFromBucket` now reads `window._mveUnifiedX.axisMode` (the axis Core actually resolved, after the stationary-line guard) instead of the raw `_insightAxis`. Previously, on a stopped line the guard flipped Core to the time axis but the bucket loader stayed on encoder → its dots piled at x=0. Now both agree.
+
+### Ladder guards
+- Cancels cleanly via the ladder ticket if the operator changes the window OR the shipment mid-stream.
+- Late in-flight buckets from a superseded run can't pollute the new chart (v4.0.198 ticket guard).
+
+### Multi-select compare — acknowledged, scoped next
+Operator asked for checkboxes beside each shipment to compare multiple. That's a real feature and the RIGHT UX. It needs (a) a custom checkbox dropdown (also fixes the native-datalist cosmetic complaint), (b) backend `shipment = ANY(%s)` across the shipment-aware endpoints, and (c) per-shipment colour rendering + N progressive ladders. Building it as the next dedicated version rather than half-shipping.
+
+### Files
+- `vision_engine/static/js/charts.js` — unified progressive ladder, per-shipment span range, effective-axis bucket dots.
+- Full backend in tarball per [[feedback_ship_full_backend_always]]. `VERSION`, `CHANGELOG.md`, cache-busters.
+
+## [4.0.198] - 2026-07-25 — Charts: shipment-first searchable picker, timeframe hides on pick, no stale dots, purged images hidden
+
+Operator spec, verbatim: *"put the dropdown (search … needed) first, and default is all shipments, in front of that the timeframe is available … if the user choose a specific shipment, the timeframe disappear, this is it!"* Plus: *"those dots are from all shipments and remained there, and i'm waiting for the load of selected shipment long!"* and *"if the detection [image] is not available, simply doesn't show the image."*
+
+### 1. Shipment picker first + searchable (status.html)
+- The Shipment control now comes FIRST, before the timeframe.
+- `#insight-shipment` changed from a `<select>` to an `<input list="insight-shipment-list">` + `<datalist>` → native substring **search** (type any part of a shipment id to filter). Empty = "All shipments". A ✕ button clears back to All.
+- Every existing consumer reads `.value` — identical for an input, so no downstream breakage. The dropdown-population code now writes `<option>`s into the datalist (newest-first) instead of the select.
+
+### 2. Timeframe hides when a specific shipment is picked
+- The Window preset (and its long-window note) are wrapped in `#insight-timeframe-group`. New `_syncTimeframeVisibility()` hides the whole group when `#insight-shipment` is non-empty, shows it for All shipments. Wired to the picker's `onchange` (`_onShipmentPicked`), the clear button (`_clearShipment`), and DOMContentLoaded. Matches the operator's mental model: pick a shipment → you get ALL its data (window is irrelevant, per the v4.0.196 backend override), so the window control disappears.
+
+### 3. No more stale dots / endless spinner when switching to a shipment (charts.js)
+Root cause: switching from All-shipments (progressive loader running, "Loading dots — newest first" badge mounted) to a specific shipment routed to the single-fetch Core path early, but:
+- the progressive loader's badge was never unmounted (its finally-block skips unmount once the ladder ticket no longer matches) → **orphaned spinner spinning forever** over a chart that had actually finished;
+- an in-flight bucket fetch from the cancelled progressive run could still push **stale all-shipments dots** onto the freshly-rebuilt picked-shipment chart.
+
+Fixes in `refreshAdvancedCharts`:
+- On the picked-shipment / 1h branch: `_unmountScatterLoader()` immediately, and clear the existing datasets' data so stale dots vanish while the (measured ~0.5 s) picked-shipment fetch runs.
+- `_extendScatterFromBucket` now takes the ladder `ticket` and bails before mutating the chart if the ticket was superseded — a late bucket can no longer pollute the new chart.
+
+(Backend timing measured on vteam12: picked-shipment `/api/detection_charts` = **0.5 s**, 750 dots. The "waiting long" was entirely the orphaned-spinner illusion, not a slow query.)
+
+### 4. Axis derived from the shipment's authoritative span, not the incremental dots (charts.js)
+v4.0.197 set the axis from the dot extent at render time — but for All-shipments the progressive loader adds older dots AFTER Core renders, so the axis collapsed to the 1h-hydrate window (operator saw a 4-minute x-axis on a 24h view). Now the unified domain comes from a COMPLETE source:
+- specific shipment → its full extent from `shipment_spans` (`t_min/t_max` on time, `enc_min/enc_max` on encoder) — complete even when dots are capped/progressive → the picked shipment fills the span;
+- All-shipments time → the sliding `[now−window, now]` so progressive dots have room;
+- All-shipments encoder/length → heatmap `enc_min/enc_max` (full range).
+
+### 5. Purged images: hide, don't show a broken box (charts.js)
+Old shipments' JPEGs get purged from disk by retention while their detection rows persist in the DB (that's why an old shipment's dots render but their thumbnails 404). Both image handlers (hover preview + drawer) now: try annotated → fall back to raw ONCE → on final failure **hide the `<img>` entirely** and leave a one-line "🗒️ image no longer stored (data kept)" caption, instead of a faded broken box + repeated 404 spam.
+
+### Deferred to the next ship (told the operator)
+- **Multi-select shipment comparison** — needs a custom multi-select component AND backend `shipment IN (...)` across ~10 endpoints (they take a single `shipment` param today). Not half-shipped.
+- **Custom time-range picker (datetime from/to)** — needs `since_ms/until_ms` wired through every panel, not just the scatter.
+
+### Files
+- `vision_engine/static/status.html` — control reorder, searchable datalist, timeframe group, clear button, cache-busters.
+- `vision_engine/static/js/charts.js` — picker handlers, visibility sync, orphan-spinner + stale-dot fixes, ticket guard, axis-from-span, image-hide.
+- Full backend in tarball per [[feedback_ship_full_backend_always]]. `VERSION`, `CHANGELOG.md`.
+
+## [4.0.197] - 2026-07-24 — Unified Charts x-axis: dots fill the span, all strips align, stationary line auto-falls-back to time
+
+Three connected operator reports, one root fix:
+1. *"when i choose a specific shipment it doesn't fill the span"* — picked an old shipment, dots didn't fill the plot.
+2. *"the scatter data covers all span … start = first data, end = max"* + *"all charts pointing same x axis, no offset"* — scatter / colour heatmap / quality strip / ejection strip / shipment lanes each derived their own x-domain, so they drifted.
+3. *"no data showing in the scatter"* on vteam12 — the stationary test-box encoder collapsed the encoder axis to `[0,0]`.
+
+### The diagnosis (via a 6-agent axis-mapping pass over charts.js + timeline.py)
+Two positioning philosophies coexisted and disagreed on the domain:
+- **Value-based** (scatter dots + shipment lane bars): value E → pixel `(E−min)/(max−min)`.
+- **Full-width-spread** (ΔE heatmap cells, quality strip, ejection strip): index-based, spread edge-to-edge across the plot area regardless of value.
+
+And the axis min/max came from THREE different encoder populations:
+- axis pinned to `color_heatmap.enc_min/enc_max` = **full-inference** range (every row incl. idle frames);
+- ΔE cells binned over the **_color-only** range;
+- scatter dots = **non-synthetic detections** — a third range.
+
+So dots under-filled the axis, cells were force-spread to the edges, and the lane strip fell back to a span-derived domain when the heatmap bounds were null/collapsed. Result: offset everywhere, and on an old picked shipment (time axis pinned to `[now−window, now]`) the dots landed 42 days off-screen → "doesn't fill the span".
+
+### The fix — one canonical domain from the actual dot extent
+`static/js/charts.js`, `_refreshAdvancedChartsCore`:
+1. **Stationary-line guard.** `axisMode` is now `let`; before building `points`, if the encoder dots have zero width (`max <= min`, e.g. every `encoder_value === 0` on a stopped/unwired line) the render auto-flips `axisMode` to `time`. Render-time only — does NOT touch the operator's `_insightAxis` toggle, so the axis returns to encoder automatically once the line moves. Fixes the blank vteam12 scatter.
+2. **Unified domain `_uxMin/_uxMax`.** Computed once from `min/max` over the returned dots' x for the active axis (time → real dot time-extent, falling back to the sliding window only when there are no dots; encoder/length → dot extent, falling back to heatmap bounds). Padded 1% each side so edge dots aren't clipped; positive-span guarded. Exposed as `window._mveUnifiedX = {axisMode, xMin, xMax, bins}`.
+3. **Scatter axis pinned to it.** All three `xScaleCfg` branches (time / length / encoder) now use `min: _uxMin, max: _uxMax` instead of `_scatterXMin/_scatterXMax` or `heatmapEncMin/heatmapEncMax`. The axis can never be `undefined`/auto-fit again → the old-shipment case now spans the shipment's own extent and the dots fill it.
+4. **Shipment lane strip fed the same domain.** The main-render `_renderShipmentStrip(...)` call passes `_uxMin/_uxMax` (per active axis) instead of the heatmap/sliding-window bounds, so lane bar edges sit exactly under the dots — zero offset. The standalone strip refresher (`_refreshShipmentStripStandalone`) and the cache-repaint also consume `window._mveUnifiedX` when its axisMode matches.
+5. **Quality + ejection strips use the heatmap's bin count.** Both `_bk` reads now prefer `window._mveUnifiedX.bins` over the sticky `mve_bucket_count`, so their flex cells edge-align with the ΔE heatmap cells (was 48 vs 32 → only agreed at 0%/100%).
+
+### Also in this ship: the v4.0.196 endpoint sweep (shipment picker ignores window)
+Every shipment-aware endpoint now overrides the window to a 90-day safety net when a specific shipment is picked, so picking a shipment older than the window shows its data instead of an empty panel: `/api/detection_charts`, `/api/shipment_spans`, `/api/shipment_quality_score` (+ `/trend`, `/report.pdf`), `/api/quality/ejection_axis`, `/api/quality/heatmap`, `/api/ejection_stats`, `/api/production_stats`, `/api/quality_charts`. "All shipments" (empty param) still respects the operator's window — zero change on the common path.
+
+### Follow-up (backend, queued — NOT in this ship)
+Endpoint alignment is now edge-to-edge + bucket-boundary aligned. Pixel-perfect INTERIOR alignment additionally needs the quality/ejection/ΔE-cell binning to bucket over the SAME `[enc_min,enc_max]` the axis uses (each endpoint currently computes its own MIN/MAX). Tracked for a backend pass.
+
+### Test on vteam12 (canary)
+1. **Stationary line:** load Charts on Encoder axis → should auto-show data on the time axis (title reads "Camera × time") instead of a blank encoder chart. Click Encoder explicitly stays blank (operator override) — that's expected on a stopped line.
+2. **Old shipment fills span:** pick a shipment from days ago → scatter dots fill the full width, x-axis spans the shipment's own start→end, every panel populated.
+3. **Alignment:** the shipment lane bar for a shipment starts/ends exactly under its first/last dot; quality + ejection cells line up column-for-column with the dots above.
+
+### Files
+- `vision_engine/static/js/charts.js` — unified domain + stationary guard + strip feeds + bin-count sync.
+- `vision_engine/routers/timeline.py` — the 9-endpoint window override (v4.0.196).
+- `vision_engine/static/status.html` — cache-busters.
+- Full backend in tarball per [[feedback_ship_full_backend_always]]. `VERSION`, `CHANGELOG.md`.
+
+## [4.0.196] - 2026-07-24 — Charts tab: specific-shipment dropdown pick ignores the time window + shipment strip filters to the picked shipment
+
+### Second follow-up (operator test on vteam12 canary)
+*"when i choose a specific shipment, why shipment lane is showing all shipments? just show data related to that shipment in the shipment lane."*
+
+Correct — the standalone `/api/shipment_spans` endpoint didn't accept a shipment param. It always returned every shipment in the window. So the shipment strip painted the full lane view even when the scatter above it was scoped to one. Two-part fix in the same v4.0.196:
+
+1. **Backend** — `/api/shipment_spans` now accepts optional `shipment=` query param. When set, filters the CTE to that shipment via `AND shipment = %s` and widens the interval to 90 days (mirrors the same override the detection_charts endpoint got). Payload becomes a single-span array with exactly the picked shipment.
+2. **Frontend** — `_refreshShipmentStripStandalone` in `charts.js` now reads `document.getElementById('insight-shipment').value` and appends `&shipment=<id>` to the fetch URL when non-empty.
+
+Result: pick a shipment → scatter, heatmap, quality strip, ejections **and** the lane strip all agree, all show only that shipment.
+
+### Original change (line 3190)
+
+Customer complaint (via operator): *"I can't see any data when I choose a specific shipment."* The dropdown showed the shipment, they picked it, chart went empty.
+
+### Root cause
+`GET /api/detection_charts` in `routers/timeline.py` is the endpoint that feeds the ENTIRE Charts tab (scatter, heatmap, shipment strip, quality strip, ejections). It has ~30 SQL queries; every single one ANDs the operator's chosen time window with the shipment filter:
+
+```sql
+WHERE time > NOW() - INTERVAL <window> AND shipment = <picked_shipment>
+```
+
+Consequence: pick a shipment older than the window → every query returns zero rows → empty everything. If the picked shipment ran 30 h ago and the window is at its default 24 h, nothing shows even though the operator explicitly asked for THAT shipment. Nonsensical from the operator's mental model — they picked the shipment BY NAME, they don't want the window to also filter it out.
+
+### Fix (one line)
+Right after resolving `interval` from `window`, override it to a wide safety net when `shipment` is set:
+
+```python
+if shipment:
+    interval = "90 days"
+```
+
+Because `interval` is the shared variable every WHERE clause reads, one override at the top propagates to all ~30 downstream queries automatically. The `shipment = %s` filter still applies, so the payload is exactly the picked shipment's rows regardless of age.
+
+### Why 90 days, not "no filter"
+Safety net. A rogue caller passing a mistyped shipment id shouldn't be able to trigger a full-hypertable scan (sites like khoy sit at 1.5 M rows / 24 h — a 24-month unbounded scan would be expensive). 90 days covers every realistic shipment lifetime and hard-caps the worst case.
+
+### "All shipments" (empty shipment param) — unchanged
+The `if shipment:` guards the override. When the dropdown is at its "All shipments" default, `shipment` is empty, the override is skipped, `interval` stays at whatever the operator picked (24 h / 6 h / etc.). Zero behaviour change on the common path.
+
+### What this does NOT fix (queued for v4.0.197)
+- **Shipment-lane strip x-axis offset** vs the scatter's x-axis. Strip derives its own axis min/max from spans instead of reading `_insightCameraScatter.scales.x.min/max` at render time. Frontend-only fix, queued.
+- **Full `/dev/video*` codebase audit** — the remaining rescan / hot-plug code paths in `services/watcher.py` still work in raw-path terms internally; v4.0.195 fixed the config-source normalisation but the rescan logic could still enumerate `/dev/video*` on new plugs. Not a runtime bug (rescan feeds by-path back through the normaliser) but worth a full pass.
+
+### Test procedure on vteam12 (per canary rule)
+1. Load Charts tab. Set window to 1 h. Pick a specific shipment older than 1 h from the dropdown.
+2. Scatter should populate with that shipment's dots (not empty). Same for heatmap, quality strip.
+3. Toggle back to "All shipments" — scatter should shrink to only the last 1 h's data (window is respected again).
+4. Change window to 6 h with a shipment still picked — should show the SAME data (window is being overridden, window pick has no effect while a shipment is selected). This is intentional per the operator's spec.
+
+## [4.0.195] - 2026-07-24 — Boot-time PCI by-path normalization for camera sources (permanent fix)
+
+Operator on kiancord, third or fourth time in the session raising it: *"look, we have discussed about this before, we agreed that we should work on pci path rather than videoX and also make sure at the boot, it doesn't grab by old configs — I need you fix this, so that every time don't we have to do it by your temporary fix."* Fair. Every previous session was a hand-rewrite of the DB config for that one site, and a fresh docker restart on kiancord would potentially re-break because the config on disk still had raw `/dev/videoN` — and this time it was actually one camera on the WRONG port (`:8` instead of `:7`), which meant the same camera was silently failing every boot.
+
+### Root cause (recap of the memory-rule reason)
+`service_config.cameras[<id>].source` was storing raw `/dev/videoN`. That number is **kernel plug-order enumeration** and shifts on every reboot / USB re-plug / hub blip. `/dev/v4l/by-path/pci-0000:00:14.0-usb-0:<port>:1.0-video-indexN` symlinks are **stable** — bound to the physical USB port, not the enumeration order. Same 6 Global Shutter cameras on kiancord (bus 001, devices 2/3/10/11/12/18): kernel gave them different `/dev/videoN` indices this boot vs. last boot, but `by-path/…-usb-0:1:1.0-video-index0` always points to the port `:1` camera regardless.
+
+### Fix
+Two enforcement points, both wired into `apply_config_settings` in `main.py` (the hot path for BOTH startup AND every `/api/cameras/config/upload` call):
+
+**1. New helper — `services/camera.py::normalize_camera_sources_to_by_path(svc)`**
+
+For each entry in `svc["cameras"]`:
+- If `source` is already `/dev/v4l/by-path/pci-...` → no-op.
+- If `source` is `rtsp://`, `http://`, `basler://`, empty, or any non-`/dev/videoN` → no-op.
+- If `source` is raw `/dev/videoN`:
+  - Resolve via `_by_path_for_video_node(source)` (already existed since v4.0.138).
+  - If a by-path resolves to it this boot → rewrite the source in-place to the by-path.
+  - If NOT (dead node this boot) → leave the config alone and log a WARN. Operator sees "camera disconnected" in the UI instead of a silent rewrite to nothing.
+- Returns `{cam_id: (old_source, new_source), ...}` for whatever actually changed. Empty dict when idempotent.
+
+**2. Hook in `main.py::apply_config_settings`**
+
+Runs BEFORE any camera-open code in the function body. When the normaliser returns changes:
+- Emit a `[CAM-NORMALIZE]` INFO log listing each rewrite (`cam 4: /dev/video6 -> /dev/v4l/by-path/pci-0000:00:14.0-usb-0:7:1.0-video-index0`).
+- Persist the upgraded config to the DB singleton via `save_data_file(full_data)`. Next boot reads the by-path form directly — no re-run of the normaliser needed.
+
+### Why this stops the "same cameras always fail" pattern
+Before the fix, on every boot:
+1. Config says `cam 4 source = /dev/video6`.
+2. Kernel enumeration this boot puts `/dev/video6` at USB port `:3` (a hub), not the camera.
+3. cv2 opens `/dev/video6` → grabs the wrong device (or nothing).
+4. Silent failure. `_V4L_BY_PATH_MEMO` never gets a chance to help because it's populated AFTER a successful open — no open, no memo.
+
+After the fix:
+1. Config initially says `cam 4 source = /dev/video6`.
+2. Boot runs `apply_config_settings` → normaliser sees `/dev/video6`, resolves via `/dev/v4l/by-path/*` → finds `pci-0000:00:14.0-usb-0:7:1.0-video-index0`.
+3. In-memory config's cam 4 source is upgraded to that by-path. Persisted to DB.
+4. Camera opens the by-path → cv2 follows the symlink to today's `/dev/video6`.
+5. Next boot, kernel might put that same camera at `/dev/video8` — doesn't matter. Config still says by-path `:7`. Symlink still resolves to whatever `/dev/videoN` the kernel picked. Camera opens.
+
+**The config on disk becomes self-healing across reboots.** No more per-site hand-fixes.
+
+### Also fixes `/api/cameras/config/upload`
+Because `apply_config_settings` is called on every upload too, an operator uploading a legacy config bundle with raw `/dev/videoN` values gets it auto-normalised on the way in. Same code path, same guarantee.
+
+### Files
+- `vision_engine/services/camera.py` — new `normalize_camera_sources_to_by_path()`; no other changes.
+- `vision_engine/main.py` — normaliser invocation at the top of `apply_config_settings`, before any existing setting is applied.
+- `vision_engine/static/status.html` — cache-busters bumped.
+- Full backend included in tarball per [[feedback_ship_full_backend_always]].
+- `VERSION`, `CHANGELOG.md`.
+
+### Test on vteam12 before ripple
+1. Load vteam12 `/api/cameras/config` — note current sources.
+2. Manually POST a config that puts one camera on raw `/dev/videoN` via `/api/cameras/config/upload`.
+3. Watch container log for `[CAM-NORMALIZE] cam <id>: /dev/videoN -> /dev/v4l/by-path/...`.
+4. GET config back → confirm the source is now by-path.
+5. Container restart → confirm the config on disk is still by-path (no regression) and the camera opens.
+
+## [4.0.194] - 2026-07-24 — "Last N hours" dropdown remembers your choice across page refreshes
+
+Operator: *"seems that it just decided to switch to 24 hours although the selection is 6 hours."* The scatter/lane bug was fixed in v4.0.192 (the standalone shipment-strip refresher now reads the dropdown value at fetch-time), but the dropdown itself still HTML-defaulted to `<option value="24h" selected>`. Every hard-refresh snapped you back to 24h regardless of your last pick.
+
+### Fix
+Sticky `mve_insight_window` in `localStorage`, restored on DOMContentLoaded — same pattern as `mve_heatmap_scale` (v4.0.177) and `mve_heatmap_cells` (v4.0.185). Also kicks `refreshDetectionInsights()` once after restoring so the chart matches the restored value on first paint.
+
+### Guard against stale values
+Reads the actual `<option>` list at restore-time and refuses to apply a value that isn't in the option list. Protects against a saved value from an older build (say "12h" if we ever remove that option) forcing the select into an invalid state — falls through to the HTML default (24h) if the saved value can't be found.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_initInsightWindowSticky` + DOMContentLoaded hook. ~25 lines.
+- `vision_engine/static/status.html` — cache-busters bumped.
+- Full backend included in the tarball per [[feedback_ship_full_backend_always]] — no backend changes, just insurance.
+- `VERSION`, `CHANGELOG.md`.
+
+## [4.0.193] - 2026-07-24 — Full backend catch-up to kiancord (rule-based cutoff evaluator + badge + prefix override)
+
+Operator on kiancord: created procedure `TBS` with `Action: Close shipment`, two rules combined with `ANY (OR)` — `TB count > 1 min 30%` OR `📦 shipment Length > 500 m`. Dashboard badge missing entirely — no `Auto Cut-Off: on (rules: TBS)` text at all.
+
+### Root cause — same shape as v4.0.184's khoy incident, worse
+Kiancord's backend was audited: **every** shipment-cutoff-related file returned grep count `0` for the feature markers.
+
+    services/detection.py     shipment_encoder_greater    0     ❌
+    services/detection.py     shipment_close (dispatch)   0     ❌
+    services/watcher.py       close_and_open_new_ship     0     ❌
+    routers/health.py         cutoff_rules (badge)        0     ❌
+    routers/timeline.py       vertical_defect             0     ❌
+    routers/config_routes.py  vertical_defect             0     ❌
+
+Kiancord had been missing the ENTIRE backend delta from v4.0.176 through v4.0.191 — the rule-based cutoff evaluator, the shipment-close action dispatch, `close_and_open_new_shipment`, the badge emitter that surfaces `cutoff_rules` on `/api/status`, and the `class_groups` mapper for the vertical/horizontal_defect roles. Frontend v4.0.192 was up to date because tarballs I built earlier for kiancord only bundled `main.py` + `static/*` — no `services/*` or `routers/*`. So the operator saw a full-featured Process tab UI on kiancord, saved TBS with all its shipment-life conditions, but every read + write of that rule hit an old backend that didn't recognise `condition == "shipment_encoder_greater"`, didn't dispatch `action == "shipment_close"`, and didn't emit `cutoff_rules` on status. Rule saved, evaluated to nothing, no badge, no fire.
+
+### Fix — full-backend catch-up ripple
+v4.0.193 ships the current backend state (identical to what vteam12 + khoy have been running) to kiancord:
+
+- `services/detection.py` — shipment-life condition evaluator (`shipment_time_greater/less`, `shipment_encoder_greater/less`), shipment_close action dispatch with `prefix_override=proc_name` (v4.0.189).
+- `services/watcher.py` — `close_and_open_new_shipment(reason, prefix_override=None)` public method.
+- `routers/health.py` — `_auto_cutoff_status_slice(svc, procedures=...)` emitting `cutoff_rules` for enabled shipment_close procedures.
+- `routers/timeline.py` — `class_groups` mapping for `vertical_defect` / `horizontal_defect` roles.
+- `routers/config_routes.py` — `_VALID_ROLES` gained the two orientation roles.
+- `main.py` — shipment auto-restore from `.env.length_state.json` (v4.0.191).
+
+### Also shipping to vteam12 + khoy for parity
+Even though they already had everything, ripping the same tarball across all three sites now gives one clean version fence: all three sites will report `/health.version = "4.0.193"` running identical backend. Makes future ripple gaps way easier to spot.
+
+### Reinforcing the memory rule that keeps failing
+[[feedback_backend_ripple_check]] was saved after v4.0.184. Re-hit the exact same landmine with kiancord because when I built the v4.0.192 tarball I was focused on the shipment-lane dropdown bug (pure frontend) and just… forgot backend parity was still incomplete on kiancord. New rule: **every install tarball MUST include the current backend files as a matter of policy**, not "as needed based on this version's diff." Cost is +200 KB per tarball, benefit is no more silent backend-behind-frontend drift on sites that missed earlier ripples. Reminder saved to memory as [[feedback_ship_full_backend_always]].
+
+### Test on kiancord after ship
+1. Restart landed → wait 20 sec.
+2. Dashboard `SHIPMENT` badge should show `Auto Cut-Off: on (rules: TBS)`.
+3. When the running shipment either passes 500 m OR sees `TB` count > 1 above 30 % conf, shipment id rolls to `TBS<yymmddhhmmssX>`.
+4. `docker logs monitait_vision_engine` should show `shipment cutoff [rule: TBS: ...]: new shipment TBS...`.
+
+## [4.0.192] - 2026-07-24 — Shipment-lane strip honours the "Last N hours" dropdown
+
+Operator on khoy: *"i think when i change the time, the shipment lane is not correct."* Correct — the scatter and heatmap re-fetched at the picked window (6h/24h/etc.) but the standalone shipment-strip refresher [`_refreshShipmentStripStandalone`](vision_engine/static/js/charts.js#L3156) hardcoded `?window=24h`. Switching from 24h → 6h left the lane strip stuck showing 24h of shipments while everything else above it moved to 6h. Two data sources on the same page disagreeing about what "last N hours" means.
+
+### Fix (5 lines)
+Read `document.getElementById('insight-window').value` before the fetch, mirror it to the query string, fall through to `'24h'` if the dropdown isn't mounted yet (defensive — first render on very early ticks).
+
+### Everything else already tracks the dropdown
+`refreshDetectionInsights` (the big fetch that feeds the scatter, heatmap, quality-per-encoder strip) already reads `insight-window` — it's just this standalone lane refresher that was on its own timer + hardcoded window. Now the two agree.
+
+### Files
+- `vision_engine/static/js/charts.js` — 5 lines added + 1 line changed.
+- `vision_engine/static/status.html` — cache-busters bumped.
+- `VERSION`, `CHANGELOG.md`.
+
 ## [4.0.191] - 2026-07-23 — Shipment auto-restore on container restart falls back to length_state.json
 
 ### The bug

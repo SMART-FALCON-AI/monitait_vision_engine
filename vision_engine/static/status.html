@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.191"></script>
+        <script src="/static/js/i18n.js?v=4.0.221"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -979,28 +979,40 @@
                     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
                         <h4 style="margin:0; color: var(--text-primary);">📊 Detection Insights</h4>
                         <div style="display:flex; align-items:center; gap:8px;">
-                            <span style="font-size:12px; color:var(--text-secondary);">Window:</span>
-                            <!-- v4.0.103 — added 30d + 90d options. Backend `_windows` map already
-                                 supported 1h/6h/24h/7d/30d/90d, but the UI only exposed 24h + 7d,
-                                 so operators had no way to reach the longer horizons even after
-                                 v4.0.103 unblocked them. -->
-                            <select id="insight-window" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
-                                <option value="1h">Last 1 hour</option>
-                                <option value="6h">Last 6 hours</option>
-                                <option value="24h" selected>Last 24 hours</option>
-                                <option value="7d">Last 7 days</option>
-                                <option value="30d">Last 30 days</option>
-                                <option value="90d">Last 90 days</option>
-                                <option value="120d">Last 120 days</option>
-                                <option value="1y">Last 1 year</option>
-                            </select>
-                            <span id="insight-long-window-note" style="display:none; font-size:11px; color:#f97316; font-style:italic; margin-left:8px;">
-                                📊 Long window — only Score-per-shipment loaded (other panels skipped for performance)
+                            <!-- 4.0.198 — Shipment picker FIRST (operator spec). Searchable via
+                                 native datalist: type any substring to filter the list. Empty =
+                                 "All shipments". When a specific shipment is chosen, the whole
+                                 timeframe group hides (the shipment's full data is shown
+                                 regardless of window). `#insight-shipment` is now an <input>, not
+                                 a <select> — every consumer reads `.value` identically, and the
+                                 population code writes <option>s into the datalist instead. -->
+                            <span style="font-size:12px; color:var(--text-secondary);">Shipment:</span>
+                            <input id="insight-shipment" list="insight-shipment-list" placeholder="All shipments" autocomplete="off"
+                                   onchange="_onShipmentPicked()"
+                                   onfocus="this.dataset.prev=this.value; this.value=''; try{this.setAttribute('list','insight-shipment-list');}catch(_){}"
+                                   onblur="if(!this.value && this.dataset.prev){ this.value=this.dataset.prev; }"
+                                   title="Click to start a new search (the field clears so you can type). Leave empty for All shipments. Picking one shows ALL its data and hides the timeframe."
+                                   style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; min-width:180px; cursor:pointer;">
+                            <datalist id="insight-shipment-list"></datalist>
+                            <button id="insight-shipment-clear" onclick="_clearShipment()" title="Back to All shipments"
+                                    style="padding:3px 7px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px; display:none;">✕</button>
+                            <!-- Timeframe group — hidden when a specific shipment is picked. -->
+                            <span id="insight-timeframe-group" style="display:inline-flex; align-items:center; gap:8px;">
+                                <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Window:</span>
+                                <select id="insight-window" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
+                                    <option value="1h">Last 1 hour</option>
+                                    <option value="6h">Last 6 hours</option>
+                                    <option value="24h" selected>Last 24 hours</option>
+                                    <option value="7d">Last 7 days</option>
+                                    <option value="30d">Last 30 days</option>
+                                    <option value="90d">Last 90 days</option>
+                                    <option value="120d">Last 120 days</option>
+                                    <option value="1y">Last 1 year</option>
+                                </select>
+                                <span id="insight-long-window-note" style="display:none; font-size:11px; color:#f97316; font-style:italic; margin-left:4px;">
+                                    📊 Long window — only Score-per-shipment loaded (other panels skipped for performance)
+                                </span>
                             </span>
-                            <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Shipment:</span>
-                            <select id="insight-shipment" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; min-width:140px;">
-                                <option value="">All shipments</option>
-                            </select>
                             <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Min conf:</span>
                             <input id="insight-min-conf" type="range" min="0" max="100" step="1" value="0"
                                    oninput="document.getElementById('insight-min-conf-val').textContent=this.value+'%'"
@@ -1112,12 +1124,14 @@
                                      from the raw E values (no server round-trip). Modes whose data
                                      isn't available in the response disable themselves. -->
                                 <button id="hm-baseline-camera"          onclick="setHeatmapBaseline('camera')"          title="Each camera's median E across the visible window. Auto, no operator action."         style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📷 Camera</button>
-                                <button id="hm-baseline-shipment_start"  onclick="setHeatmapBaseline('shipment_start')"  title="Median E of the first 30 samples of each row's own shipment. Best when the line runs consistent product from frame one." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🚀 Shipment start</button>
                                 <!-- 4.0.173 — shipment_avg mode. Uses the WHOLE shipment's median as baseline
                                      instead of the first 30 samples. Preferred when the shipment start is
                                      itself defective (e.g. bad splice, threading transient). -->
                                 <button id="hm-baseline-shipment_avg"    onclick="setHeatmapBaseline('shipment_avg')"    title="Median E across each row's ENTIRE shipment (not just the first 30 samples). Better when shipment starts are often defective." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📊 Shipment avg</button>
-                                <button id="hm-baseline-target"          onclick="setHeatmapBaseline('target')"          title="Operator-set per-camera L*a*b*. Configured under Process tab → Color Target."        style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🎯 Target</button>
+                                <!-- 4.0.206 — "🚀 Shipment start" and "🎯 Target" baseline buttons removed per
+                                     operator request. `setHeatmapBaseline` still accepts those modes for any
+                                     stored localStorage value, but the operator now chooses between Camera,
+                                     Shipment avg, and Reference only. -->
                                 <button id="hm-baseline-reference_frame" onclick="setHeatmapBaseline('reference_frame')" title="L*a*b* at an operator-picked position on the chart. Click button → next chart click sets the reference point. Click again later to re-pick." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🖼️ Reference</button>
                                 <span id="hm-pick-hint" style="display:none; color:#fcd34d; font-style:italic; margin-left:8px; font-size:11px;">🎯 Click anywhere on the chart to set the colour reference point</span>
                                 <!-- 4.0.34 — phase filter (heatmap-only). Buttons are rendered dynamically from
@@ -1160,7 +1174,8 @@
                                 <!-- v4.0.150 — restored a single grouping label "Dots/Category/Bucket:" before the dot-count selector; operator asked for it back after v4.0.149's bare inputs. Buckets input keeps no label (its number pattern is obvious). -->
                                 <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window." style="width:60px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:14px;" aria-label="Buckets across the visible window">
                                 <span style="color:var(--text-secondary); margin-left:14px;">Dots/Category/Bucket:</span>
-                                <select id="hm-dot-cap" onchange="setDotCap(this.value)" title="Maximum scatter dots kept per class (newest first). Higher = denser chart but slower pan/zoom." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:6px;" aria-label="Dots per class per bucket">
+                                <select id="hm-dot-cap" onchange="setDotCap(this.value)" title="Max scatter dots kept per class PER BUCKET. The span is split into buckets and each loads up to this many dots, so a low value gives a sparse-but-even view across the whole shipment; higher = denser but slower pan/zoom." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:6px;" aria-label="Dots per class per bucket">
+                                    <option value="10">10</option>
                                     <option value="100">100</option>
                                     <option value="500">500</option>
                                     <option value="750" selected>750</option>
@@ -1186,28 +1201,49 @@
                             </div>
                             <div id="insight-scatter-legend" style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-bottom:6px; font-size:11px; color:#cbd5e1; min-height:14px;"></div>
                             <div style="min-height:300px; min-width:0; overflow:hidden;"><canvas id="insight-camera-scatter"></canvas></div>
-                            <!-- v4.0.113 — shipment lane strip: encoder/time range → shipment_id so operators can trace an anomaly back to the specific shipment. Lower visual weight (14px) than quality/ejection; sits BETWEEN the scatter and the quality strip so lanes read directly under the dots. Same margin scheme as #quality-strip-wrap; JS mirrors the same marginLeft/Right inset from scatter.chartArea so lane edges line up with the encoder scatter above. -->
-                            <div id="shipment-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
-                                <div id="shipment-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">🚚 shipment lanes — <span style="color:#f97316">JS not loaded yet — Ctrl+Shift+R</span></div>
-                                <div id="shipment-strip" style="position:relative; display:block; min-height:14px; width:100%; border-radius:3px; background:rgba(15,23,42,0.5);"></div>
-                            </div>
-                            <!-- Strip wrap inset to match the scatter's plot area (JS sets marginLeft/Right from scatter.chartArea). -->
+                            <!-- v4.0.217 — COMPACT strip stack, legend on the LEFT of each strip.
+                                 Operator: "put the legend left of each chart not on top, so it gets more
+                                 compact" + "remove the time/encoder below the quality by — that legend is
+                                 already above on the scatter". So every strip is now a flex ROW: a small
+                                 legend column (emoji + hover ⓘ) sitting in the scatter's LEFT-AXIS GUTTER,
+                                 then the strip filling the rest. JS (_alignStripToScatter) sizes each
+                                 .mve-strip-legend to chartArea.left and the wrap's right margin to
+                                 (containerW - chartArea.right), so each strip begins exactly at the plot
+                                 area and its bin cells line up cell-for-cell with the dots above.
+                                 Order: quality → colour → ejection → shipment lane LAST. -->
+                            <!-- v4.0.218 — order top→bottom: SHIPMENT FIRST, then quality, colour, ejection
+                                 LAST (operator: "put the shipment first chart from top, and the ejection
+                                 chart below the shipment"). Legend icon LEFT of every strip, in the scatter's
+                                 left-axis gutter (JS sizes .mve-strip-legend = chartArea.left). The per-strip
+                                 time axis is GONE (that legend is already above the scatter). Info icon uses
+                                 the app's own .info-tooltip-sm component so its tooltip matches the rest of
+                                 the app (global #global-tooltip popup) instead of a native title= bubble. -->
+                            <!-- v4.0.218b — every strip is 100% of this wrap, and the wrap is inset by JS
+                                 to EXACTLY the scatter plot area, so every strip starts + ends on the same x
+                                 as the dots. The legend icon is position:absolute (right:100%) in the left
+                                 gutter, OUT OF FLOW, so it can never push a strip sideways — that's what
+                                 guarantees the colour-change strip (revealed late) still aligns. -->
                             <div id="quality-strip-wrap" style="margin-top:4px; transition: margin 120ms ease;">
-                                <!-- 3.26.0 — default axis is encoder; setInsightAxis() swaps these on toggle. -->
-                                <div id="quality-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">📏 quality by encoder — find spots on the material with the most issues</div>
-                                <div id="quality-strip" style="display:flex; height:18px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
-                                <div id="quality-strip-axis" style="display:flex; justify-content:space-between; font-size:10px; color:var(--text-secondary); margin-top:2px;"></div>
-                                <!-- 4.0.162 — color-change strip. Per bucket, cell colour = |mean_E − mean_E_prev_bucket|.
-                                     Detects sudden colour drift between adjacent bins (regardless of absolute baseline).
-                                     Hidden entirely when the Parent Object Color Check feature is off (see charts.js
-                                     _mveApplyColorCheckVisibility) so the row disappears alongside the heatmap. -->
-                                <div id="color-change-strip-wrap" style="display:none; margin-top:6px;">
-                                    <div id="color-change-strip-title" style="font-size:10px; color:var(--text-secondary); margin-bottom:2px;">🎨 color change by encoder — how much each bucket differs from the previous one</div>
-                                    <div id="color-change-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                <!-- shipment lane FIRST (top). -->
+                                <div class="mve-strip-row" style="position:relative; display:flex; align-items:center;">
+                                    <div class="mve-strip-legend" id="shipment-strip-title" style="position:absolute; right:100%; top:0; bottom:0; margin-right:5px; display:flex; align-items:center; font-size:11px; color:var(--text-secondary); white-space:nowrap; overflow:visible;">🚚 <span class="info-tooltip-sm">i<span class="info-tooltip-text">shipment lanes — each bin is its dominant shipment, coloured by that shipment's verdict (green=release, amber=re-inspect, red=hold, grey=pending). Binned to the scatter, in sync with the dots + strips.</span></span></div>
+                                    <div id="shipment-strip" style="flex:1 1 0; min-width:0; position:relative; display:flex; min-height:16px; height:16px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
                                 </div>
-                                <div id="ejection-strip-title" style="font-size:10px; color:var(--text-secondary); margin-top:6px; margin-bottom:2px;">⏏️ ejections by encoder — color = procedure; hover for breakdown</div>
-                                <div id="ejection-strip" style="display:flex; height:14px; width:100%; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
-                                <div id="ejection-strip-legend" style="display:flex; flex-wrap:wrap; gap:8px; font-size:10px; color:var(--text-secondary); margin-top:3px;"></div>
+                                <!-- 3.26.0 — default axis is encoder; setInsightAxis() swaps the emoji on toggle. -->
+                                <div class="mve-strip-row" style="position:relative; display:flex; align-items:center; margin-top:3px;">
+                                    <div class="mve-strip-legend" id="quality-strip-title" style="position:absolute; right:100%; top:0; bottom:0; margin-right:5px; display:flex; align-items:center; font-size:11px; color:var(--text-secondary); white-space:nowrap; overflow:visible;">📏 <span class="info-tooltip-sm">i<span class="info-tooltip-text">quality by encoder — find spots on the material with the most issues</span></span></div>
+                                    <div id="quality-strip" style="flex:1 1 0; min-width:0; display:flex; height:16px; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                </div>
+                                <div id="color-change-strip-wrap" class="mve-strip-row" style="position:relative; display:none; align-items:center; margin-top:3px;">
+                                    <div class="mve-strip-legend" id="color-change-strip-title" style="position:absolute; right:100%; top:0; bottom:0; margin-right:5px; display:flex; align-items:center; font-size:11px; color:var(--text-secondary); white-space:nowrap; overflow:visible;">🎨 <span class="info-tooltip-sm">i<span class="info-tooltip-text">color change by encoder — how much each bucket differs from the previous one</span></span></div>
+                                    <div id="color-change-strip" style="flex:1 1 0; min-width:0; display:flex; height:14px; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                </div>
+                                <!-- ejection LAST (below the shipment + quality + colour). -->
+                                <div class="mve-strip-row" style="position:relative; display:flex; align-items:center; margin-top:3px;">
+                                    <div class="mve-strip-legend" id="ejection-strip-title" style="position:absolute; right:100%; top:0; bottom:0; margin-right:5px; display:flex; align-items:center; font-size:11px; color:var(--text-secondary); white-space:nowrap; overflow:visible;">⏏️ <span class="info-tooltip-sm">i<span class="info-tooltip-text">ejections by encoder — color = procedure; hover for breakdown</span></span></div>
+                                    <div id="ejection-strip" style="flex:1 1 0; min-width:0; display:flex; height:14px; gap:1px; border-radius:3px; overflow:hidden; background:rgba(15,23,42,0.5);"></div>
+                                </div>
+                                <div id="ejection-strip-legend" style="display:flex; flex-wrap:wrap; gap:8px; font-size:10px; color:var(--text-secondary); margin-top:2px; padding-left:4px;"></div>
                             </div>
                         </div>
                         <!-- 3.25.7 — Secondary diagnostics (less load-bearing at-a-glance): pushed below the scatters. -->
@@ -1227,9 +1263,9 @@
                             <label style="color:var(--text-secondary); font-size:11px;">Shipments:
                                 <input id="sqs-shipments" type="number" min="5" max="200" step="1" value="30"
                                        style="width:56px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid var(--border-color,#334155); border-radius:3px; padding:1px 4px; font-size:11px;"
-                                       onchange="if(this.value){localStorage.setItem('mve_sqs_count',String(Math.max(5,Math.min(200,parseInt(this.value)||30))));refreshQualityCharts();}">
+                                       onchange="if(this.value){localStorage.setItem('mve_sqs_count',String(Math.max(5,Math.min(200,parseInt(this.value)||30))));loadScorePerShipment(true);}">
                             </label>
-                            <span id="sqs-subtitle" style="color:var(--text-secondary); font-size:11px;">· window 24h · color = verdict</span>
+                            <span id="sqs-subtitle" style="color:var(--text-secondary); font-size:11px;">· last 30 shipments · color = verdict</span>
                             <span class="info-tooltip-sm" style="margin-left:6px;">i
                                 <span class="info-tooltip-text">
                                     <b>Absolute (solid bar)</b> — calibrated score 100 × (1 − impact/unit). Comparable across time and sites — doesn't move because you calibrated the fleet.<br><br>
@@ -1237,7 +1273,7 @@
                                     <b>Color</b> — verdict: green = RELEASE, amber = RE-INSPECT, red = HOLD, grey = pending.
                                 </span>
                             </span>
-                            <button onclick="refreshQualityCharts()" style="background:rgba(51,65,85,0.6); color:#fff; border:none; padding:3px 8px; cursor:pointer; font-size:11px; border-radius:3px;">⟳ Refresh</button>
+                            <button onclick="loadScorePerShipment(true)" style="background:rgba(51,65,85,0.6); color:#fff; border:none; padding:3px 8px; cursor:pointer; font-size:11px; border-radius:3px;">⟳ Refresh</button>
                         </div>
                     </div>
                     <div style="position:relative; min-height:160px;"><canvas id="quality-shipments-chart"></canvas></div>
@@ -1312,9 +1348,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.191"></script>
+            <script src="/static/js/iframes.js?v=4.0.221"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.191"></script>
+            <script src="/static/js/charts.js?v=4.0.221"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -2213,7 +2249,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.191">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.221">
         <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2254,10 +2290,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.191"></script>
-        <script src="/static/js/app-core.js?v=4.0.191"></script>
+        <script src="/static/js/audio.js?v=4.0.221"></script>
+        <script src="/static/js/app-core.js?v=4.0.221"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.191"></script>
-        <script src="/static/js/annotate.js?v=4.0.191"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.221"></script>
+        <script src="/static/js/annotate.js?v=4.0.221"></script>
     </body>
 </html>

@@ -1155,6 +1155,13 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours",
                 "7d": "7 days", "30d": "30 days", "90d": "90 days"}
     interval = _windows.get(window, "24 hours")
+    # 4.0.196 — same override as /api/detection_charts + /api/shipment_spans.
+    # A specific shipment being picked means the operator wants THAT shipment's
+    # data regardless of the "Last N hours" preset. Widen to 90 days so an
+    # older shipment (customer picked one from days back) still returns rows
+    # instead of an empty Quality Score panel + "no data in this window yet."
+    if shipment:
+        interval = "90 days"
     ship_clause = "AND shipment = %s" if shipment else ""
     base_params = [interval] + ([shipment] if shipment else [])
 
@@ -2109,6 +2116,19 @@ def shipment_quality_score_trend(
         "7d":  "14 hours",
     }
     bucket = _bucket_for.get(window, "2 hours")
+    # 4.0.196 — same override as the other shipment-aware endpoints. A
+    # picked shipment means "show this shipment's trend regardless of the
+    # window preset." Widen to 90 days and let the buckets span the
+    # shipment's actual duration (bucket width also widens to keep the
+    # bucket count in the same ballpark for an older long shipment).
+    if shipment:
+        interval = "90 days"
+        # A 90-day trend split into 12 buckets = 7.5 days/bucket — too
+        # coarse. Recompute bucket size dynamically based on the picked
+        # shipment's actual first_ts → last_ts span at query time. Below
+        # the CTE runs, we let Postgres decide via time_bucket(). For now
+        # a reasonable default that scales with buckets param:
+        bucket = "1 day"
 
     ship_clause = "AND shipment = %s" if shipment else ""
     base_params = [interval] + ([shipment] if shipment else [])
@@ -2311,6 +2331,12 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
         # renders Score-per-shipment for these values.
         "120d": "120 days",
         "1y":   "365 days",
+        # 4.0.202 — "all": the Score-per-shipment card is window-INDEPENDENT
+        # (operator: "show the last N shipments regardless of the window").
+        # ORDER BY ... DESC LIMIT n already returns the most recent N, so a
+        # generous 90-day lookback covers the last N for any active line while
+        # keeping the GROUP BY bounded (statement_timeout guards the rest).
+        "all":  "90 days",
     }
     interval = _windows.get(window, "30 days")
     # v4.0.103 — clamp n: <=0 → uncapped (5000 max), else clamp to [1, 5000]
@@ -2502,6 +2528,8 @@ def quality_ejection_axis(
     window: str = "24h",
     buckets: int = 48,
     shipment: str = "",
+    lo: float = 0.0,
+    hi: float = 0.0,
 ):
     """Return per-bucket ejection event counts grouped by procedure_name.
 
@@ -2522,12 +2550,22 @@ def quality_ejection_axis(
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
+    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
+    if shipment:
+        interval = "90 days"
     # 4.0.39 — raise cap from 120 to 192 so the strip can match the colour
     # heatmap's max (N_BINS=192 in detection_charts). At 120 the heatmap had
     # more cells than the quality / ejection strip below it and the columns
     # didn't line up at high bucket counts.
     buckets = max(8, min(192, int(buckets)))
     axis_l = (axis or "time").lower()
+    # v4.0.209 — SINGLE SOURCE OF X-DOMAIN. When the caller passes an explicit
+    # [lo, hi] range (the scatter's exact window._mveUnifiedX domain), bucket
+    # over THAT range instead of computing our own MIN/MAX. Guarantees a
+    # vertical guideline at position X hits the same bucket in the scatter,
+    # colour heatmap, quality strip AND this ejection strip. For encoder, lo/hi
+    # are encoder units; for time, lo/hi are epoch-milliseconds.
+    _explicit = (hi > lo)
 
     cells = []
     try:
@@ -2557,23 +2595,14 @@ def quality_ejection_axis(
                 # Fallback: if inference_results has no encoder rows in the
                 # window, fall through to the ejection-events range so the
                 # strip still shows SOMETHING rather than empty.
-                cur.execute(
-                    f"""
-                    SELECT MIN(encoder_value), MAX(encoder_value)
-                    FROM inference_results
-                    WHERE time > NOW() - INTERVAL %s
-                      AND encoder_value IS NOT NULL
-                      {ship_clause}
-                    """,
-                    [interval, *params],
-                )
-                enc_min, enc_max = cur.fetchone() or (None, None)
-                if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
-                    # Fall back to ejection_events range (prior behaviour).
+                if _explicit:
+                    # Bucket over the scatter's exact encoder domain.
+                    enc_min = int(lo); enc_max = int(hi)
+                else:
                     cur.execute(
                         f"""
                         SELECT MIN(encoder_value), MAX(encoder_value)
-                        FROM ejection_events
+                        FROM inference_results
                         WHERE time > NOW() - INTERVAL %s
                           AND encoder_value IS NOT NULL
                           {ship_clause}
@@ -2581,17 +2610,34 @@ def quality_ejection_axis(
                         [interval, *params],
                     )
                     enc_min, enc_max = cur.fetchone() or (None, None)
-                if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
-                    cur.close()
-                    note = "no ejection events in window" if enc_min is None else \
-                           "encoder reports no pulses on ejection events"
-                    return JSONResponse(content={
-                        "axis": "encoder", "buckets": [],
-                        "shipment": shipment, "note": note,
-                    })
-                enc_min = int(enc_min); enc_max = int(enc_max)
+                    if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
+                        # Fall back to ejection_events range (prior behaviour).
+                        cur.execute(
+                            f"""
+                            SELECT MIN(encoder_value), MAX(encoder_value)
+                            FROM ejection_events
+                            WHERE time > NOW() - INTERVAL %s
+                              AND encoder_value IS NOT NULL
+                              {ship_clause}
+                            """,
+                            [interval, *params],
+                        )
+                        enc_min, enc_max = cur.fetchone() or (None, None)
+                    if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
+                        cur.close()
+                        note = "no ejection events in window" if enc_min is None else \
+                               "encoder reports no pulses on ejection events"
+                        return JSONResponse(content={
+                            "axis": "encoder", "buckets": [],
+                            "shipment": shipment, "note": note,
+                        })
+                    enc_min = int(enc_min); enc_max = int(enc_max)
                 span = enc_max - enc_min
                 width = max(1, span // buckets)
+                # v4.0.209 — when an explicit domain is set, EXCLUDE rows outside
+                # [enc_min, enc_max] so edge buckets aren't inflated by clamping.
+                _erng_sql = "AND encoder_value BETWEEN %s AND %s " if _explicit else ""
+                _erng_args = [enc_min, enc_max] if _explicit else []
                 cur.execute(
                     f"""
                     SELECT bucket, procedure_name, COUNT(*) AS n
@@ -2604,11 +2650,12 @@ def quality_ejection_axis(
                       FROM ejection_events
                       WHERE time > NOW() - INTERVAL %s
                         AND encoder_value IS NOT NULL
+                        {_erng_sql}
                         {ship_clause}
                     ) src
                     GROUP BY bucket, procedure_name
                     """,
-                    [buckets, enc_min, width, interval, *params],
+                    [buckets, enc_min, width, interval, *_erng_args, *params],
                 )
                 bd_data: dict = {}
                 for b, name, n in cur.fetchall():
@@ -2641,7 +2688,12 @@ def quality_ejection_axis(
             # of MIN/MAX of ejection_events, so the strip's X-axis aligns with the
             # scatter (which spans the full window). Empty buckets at the edges
             # just render transparent.
-            cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
+            if _explicit:
+                # lo/hi are epoch-milliseconds — bucket over the scatter's exact
+                # time domain so the ejection strip lines up 1:1 with the scatter.
+                cur.execute("SELECT to_timestamp(%s), to_timestamp(%s)", [lo / 1000.0, hi / 1000.0])
+            else:
+                cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
             t_min, t_max = cur.fetchone() or (None, None)
             if not t_min or not t_max:
                 cur.close()
@@ -2650,6 +2702,10 @@ def quality_ejection_axis(
                     "shipment": shipment, "note": "no time window",
                 })
 
+            # v4.0.209 — with an explicit domain, exclude rows outside [t_min,t_max]
+            # so edge buckets aren't inflated by clamping.
+            _trng_sql = "AND time BETWEEN %s AND %s " if _explicit else ""
+            _trng_args = [t_min, t_max] if _explicit else []
             cur.execute(
                 f"""
                 SELECT bucket, procedure_name, COUNT(*) AS n
@@ -2662,11 +2718,12 @@ def quality_ejection_axis(
                     procedure_name
                   FROM ejection_events
                   WHERE time > NOW() - INTERVAL %s
+                    {_trng_sql}
                     {ship_clause}
                 ) src
                 GROUP BY bucket, procedure_name
                 """,
-                [buckets, t_min, t_max, t_min, buckets, interval, *params],
+                [buckets, t_min, t_max, t_min, buckets, interval, *_trng_args, *params],
             )
             bd_time: dict = {}
             for b, name, n in cur.fetchall():
@@ -2715,6 +2772,8 @@ def quality_heatmap(
     window: str = "24h",
     buckets: int = 48,
     shipment: str = "",
+    lo: float = 0.0,
+    hi: float = 0.0,
 ):
     """3.25.4 — 1D quality heatmap. `axis`: "time" or "encoder".
 
@@ -2730,12 +2789,21 @@ def quality_heatmap(
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
+    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
+    if shipment:
+        interval = "90 days"
     # 4.0.39 — raise cap from 120 to 192 so the strip can match the colour
     # heatmap's max (N_BINS=192 in detection_charts). At 120 the heatmap had
     # more cells than the quality / ejection strip below it and the columns
     # didn't line up at high bucket counts.
     buckets = max(8, min(192, int(buckets)))
     axis_l = (axis or "time").lower()
+    # v4.0.209 — SINGLE SOURCE OF X-DOMAIN (same as quality_ejection_axis). An
+    # explicit [lo, hi] range (the scatter's window._mveUnifiedX domain) makes
+    # this strip bucket over the SAME range as the scatter/colour heatmap, so a
+    # vertical guideline hits the same data in every layer. encoder → encoder
+    # units; time → epoch-milliseconds.
+    _explicit = (hi > lo)
 
     # pull per-class severity from audio_settings
     try:
@@ -2783,31 +2851,38 @@ def quality_heatmap(
                 params.append(f"{shipment}/%")
 
             if axis_l == "encoder":
-                cur.execute(
-                    f"""
-                    SELECT MIN(encoder_value), MAX(encoder_value)
-                    FROM inference_results
-                    WHERE time > NOW() - INTERVAL %s
-                      AND encoder_value IS NOT NULL
-                      {ship_clause}
-                    """,
-                    [interval, *params],
-                )
-                enc_min, enc_max = cur.fetchone() or (None, None)
-                if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
-                    cur.close()
-                    # Differentiate "no encoder at all" from "encoder reports all zeros"
-                    # — the second one means the encoder is wired but not pulsing
-                    # (line stopped, hardware unplugged, calibration missing).
-                    note = "encoder reports no pulses (line not moving or encoder unwired)" \
-                           if (enc_min == 0 and enc_max == 0) else "no encoder data in window"
-                    return JSONResponse(content={
-                        "axis": "encoder", "buckets": [],
-                        "shipment": shipment, "note": note,
-                    })
-                enc_min = int(enc_min); enc_max = int(enc_max)
+                if _explicit:
+                    enc_min = int(lo); enc_max = int(hi)
+                else:
+                    cur.execute(
+                        f"""
+                        SELECT MIN(encoder_value), MAX(encoder_value)
+                        FROM inference_results
+                        WHERE time > NOW() - INTERVAL %s
+                          AND encoder_value IS NOT NULL
+                          {ship_clause}
+                        """,
+                        [interval, *params],
+                    )
+                    enc_min, enc_max = cur.fetchone() or (None, None)
+                    if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
+                        cur.close()
+                        # Differentiate "no encoder at all" from "encoder reports all zeros"
+                        # — the second one means the encoder is wired but not pulsing
+                        # (line stopped, hardware unplugged, calibration missing).
+                        note = "encoder reports no pulses (line not moving or encoder unwired)" \
+                               if (enc_min == 0 and enc_max == 0) else "no encoder data in window"
+                        return JSONResponse(content={
+                            "axis": "encoder", "buckets": [],
+                            "shipment": shipment, "note": note,
+                        })
+                    enc_min = int(enc_min); enc_max = int(enc_max)
                 span = enc_max - enc_min
                 width = max(1, span // buckets)
+                # v4.0.209 — exclude rows outside the explicit domain so edge
+                # buckets aren't inflated by LEAST/GREATEST clamping.
+                _erng_sql = "AND encoder_value BETWEEN %s AND %s " if _explicit else ""
+                _erng_args = [enc_min, enc_max] if _explicit else []
                 # v4.0.111 — extend WHERE with the "Show" filter so classes the
                 # operator hid in Process tab don't reach top_class or score.
                 _hp_sql = ""
@@ -2829,6 +2904,7 @@ def quality_heatmap(
                       FROM inference_results, LATERAL jsonb_array_elements(detections) det
                       WHERE time > NOW() - INTERVAL %s
                         AND encoder_value IS NOT NULL
+                        {_erng_sql}
                         AND (det->>'name') IS NOT NULL
                         -- v4.0.110 — skip synthetic entries (`_color`, `_lab`, etc.).
                         -- Without this the quality-strip's top_class showed
@@ -2845,7 +2921,7 @@ def quality_heatmap(
                     ) src
                     GROUP BY bucket, name
                     """,
-                    [buckets, enc_min, width, interval, *_hp_args, *params],
+                    [buckets, enc_min, width, interval, *_erng_args, *_hp_args, *params],
                 )
                 bucket_data: dict = {}
                 for b, name, n, ac in cur.fetchall():
@@ -2881,12 +2957,20 @@ def quality_heatmap(
             # ----- TIME axis -----
             # 3.25.13 — same alignment fix as quality_ejection_axis: bucket the
             # full window so the strip matches the scatter X-axis 1:1.
-            cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
+            if _explicit:
+                # lo/hi are epoch-milliseconds — bucket over the scatter's exact
+                # time domain so the quality strip lines up 1:1 with the scatter.
+                cur.execute("SELECT to_timestamp(%s), to_timestamp(%s)", [lo / 1000.0, hi / 1000.0])
+            else:
+                cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
             t_min, t_max = cur.fetchone() or (None, None)
             if not t_min or not t_max:
                 cur.close()
                 return JSONResponse(content={"axis": "time", "buckets": [], "shipment": shipment})
 
+            # v4.0.209 — exclude rows outside the explicit domain (no edge clamp).
+            _trng_sql = "AND time BETWEEN %s AND %s " if _explicit else ""
+            _trng_args = [t_min, t_max] if _explicit else []
             # v4.0.111 — same Show-filter wiring as the encoder path.
             _hp_sql_t = ""
             _hp_args_t = []
@@ -2907,6 +2991,7 @@ def quality_heatmap(
                     det
                   FROM inference_results, LATERAL jsonb_array_elements(detections) det
                   WHERE time > NOW() - INTERVAL %s
+                    {_trng_sql}
                     AND (det->>'name') IS NOT NULL
                     -- v4.0.110 — same synthetic filter as the encoder path.
                     AND COALESCE(det->>'name', '') !~ '^_'
@@ -2915,7 +3000,7 @@ def quality_heatmap(
                 ) src
                 GROUP BY bucket, name
                 """,
-                [buckets, t_min, t_max, t_min, buckets, interval, *_hp_args_t, *params],
+                [buckets, t_min, t_max, t_min, buckets, interval, *_trng_args, *_hp_args_t, *params],
             )
             bucket_data2: dict = {}
             for b, name, n, ac in cur.fetchall():
@@ -3134,8 +3219,218 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
                 pass
 
 
+# ---------------------------------------------------------------------------
+# v4.0.210 — SINGLE SOURCE OF TRUTH for the Charts-tab strips. The quality and
+# ejection strips used to come from their OWN endpoints (/api/quality/heatmap,
+# /api/quality/ejection_axis) which each computed their OWN MIN/MAX range → they
+# could never be *guaranteed* aligned with the scatter. Operator (emphatically):
+# "get the quality/color/ejection data from the EXACT SAME api that you get the
+# scatter data, so you don't misalign." These two helpers compute the quality
+# score and ejection counts per bin using the IDENTICAL bounds + bin formula the
+# colour heatmap uses inside /api/detection_charts (FLOOR((val-lo)*N/(hi-lo))),
+# so quality cell K, ejection cell K, colour cell K and scatter bin K ALL cover
+# the exact same encoder/time range. One query, one binning, zero drift.
+def _dc_quality_cells(cur, axis, lo, hi, n_bins, time_sql, time_args,
+                      ship_sql, ship_args, sev_map, hidden, scale):
+    """Severity-weighted quality score per bin over [lo, hi] with n_bins.
+
+    Returns a DENSE list [{bucket, score, top_class, n}] for bins 0..n_bins-1
+    (bin 0 = oldest/leftmost). Mirrors /api/quality/heatmap's math but bins over
+    the caller's exact [lo, hi] (the colour heatmap's payload bounds). axis is
+    'encoder' (lo/hi in encoder units) or 'time' (lo/hi in epoch-milliseconds).
+    """
+    cells = []
+    try:
+        lo = float(lo); hi = float(hi)
+    except (TypeError, ValueError):
+        return cells
+    if not (hi > lo):
+        return cells
+    val = "encoder_value" if axis == "encoder" else "(EXTRACT(EPOCH FROM time) * 1000.0)"
+    notnull = "AND encoder_value IS NOT NULL " if axis == "encoder" else ""
+    hp_sql = " AND (det->>'name') <> ALL(%s)" if hidden else ""
+    hp_args = [hidden] if hidden else []
+    cur.execute(
+        f"""
+        SELECT bucket, name, COUNT(*) AS n, AVG((det->>'confidence')::float) AS avg_conf
+        FROM (
+          SELECT LEAST({n_bins} - 1, GREATEST(0,
+                 FLOOR((({val} - %s)::numeric * {n_bins}) / (%s - %s))))::int AS bucket,
+                 (det->>'name') AS name, det
+          FROM inference_results, LATERAL jsonb_array_elements(detections) det
+          WHERE {time_sql}
+            {notnull}
+            AND (det->>'name') IS NOT NULL
+            AND COALESCE(det->>'name', '') !~ '^_'
+            {hp_sql}
+            {ship_sql}
+        ) src
+        GROUP BY bucket, name
+        """,
+        [lo, hi, lo] + list(time_args) + hp_args + list(ship_args),
+    )
+    bd = {}
+    for b, name, n, ac in cur.fetchall():
+        try:
+            b = int(b if b is not None else 0)
+        except (TypeError, ValueError):
+            continue
+        n = int(n or 0); ac = float(ac or 0)
+        sev = sev_map.get(name, 0)
+        impact = sev * ac * n
+        e = bd.setdefault(b, {"n": 0, "impact": 0.0, "top_class": None, "top_count": 0})
+        e["n"] += n
+        e["impact"] += impact
+        if n > e["top_count"]:
+            e["top_count"] = n
+            e["top_class"] = name
+    for b in range(n_bins):
+        e = bd.get(b, {"n": 0, "impact": 0.0, "top_class": None})
+        score = max(0.0, 100.0 - e["impact"] * 0.0001 * scale)
+        cells.append({"bucket": b, "n": e["n"],
+                      "score": round(score, 1), "top_class": e["top_class"]})
+    return cells
+
+
+def _dc_ejection_cells(cur, axis, lo, hi, n_bins, time_sql, time_args, ship_sql, ship_args):
+    """Ejection-event counts per bin over [lo, hi] with n_bins. DENSE list
+    [{bucket, n, top_procedure, by_procedure}] for bins 0..n_bins-1. Same bounds
+    + bin formula as _dc_quality_cells and the colour heatmap → guaranteed
+    aligned. Sources ejection_events (shipment column, encoder_value / time)."""
+    cells = []
+    try:
+        lo = float(lo); hi = float(hi)
+    except (TypeError, ValueError):
+        return cells
+    if not (hi > lo):
+        return cells
+    val = "encoder_value" if axis == "encoder" else "(EXTRACT(EPOCH FROM time) * 1000.0)"
+    notnull = "AND encoder_value IS NOT NULL " if axis == "encoder" else ""
+    cur.execute(
+        f"""
+        SELECT bucket, procedure_name, COUNT(*) AS n
+        FROM (
+          SELECT LEAST({n_bins} - 1, GREATEST(0,
+                 FLOOR((({val} - %s)::numeric * {n_bins}) / (%s - %s))))::int AS bucket,
+                 procedure_name
+          FROM ejection_events
+          WHERE {time_sql}
+            {notnull}
+            {ship_sql}
+        ) src
+        GROUP BY bucket, procedure_name
+        """,
+        [lo, hi, lo] + list(time_args) + list(ship_args),
+    )
+    bd = {}
+    for b, name, n in cur.fetchall():
+        try:
+            b = int(b if b is not None else 0)
+        except (TypeError, ValueError):
+            continue
+        n = int(n or 0)
+        pname = str(name) if name is not None else "(unknown)"
+        e = bd.setdefault(b, {"n": 0, "by_procedure": {}})
+        e["n"] += n
+        e["by_procedure"][pname] = e["by_procedure"].get(pname, 0) + n
+    for b in range(n_bins):
+        e = bd.get(b, {"n": 0, "by_procedure": {}})
+        top = max(e["by_procedure"].items(), key=lambda kv: kv[1])[0] if e["by_procedure"] else None
+        cells.append({"bucket": b, "n": e["n"],
+                      "top_procedure": top, "by_procedure": e["by_procedure"]})
+    return cells
+
+
+def _dc_shipment_cells(cur, axis, lo, hi, n_bins, time_sql, time_args, ship_sql, ship_args):
+    """DOMINANT shipment per bin over [lo, hi] — same bounds + bin formula as the
+    quality / ejection / colour cells, so the shipment lane bins line up 1:1 with
+    the scatter + the other strips and stream the same way. Returns a DENSE list
+    [{bucket, shipment, n}] (shipment=None, n=0 for empty bins). Operator: "do the
+    shipment lane like the other strips with bins — each bin gets the biggest
+    shipment in it; every bin of one shipment must share the same colour" (the
+    frontend hues by shipment id, so a shipment that spans bins K..K+3 paints one
+    solid bar)."""
+    cells = []
+    try:
+        lo = float(lo); hi = float(hi)
+    except (TypeError, ValueError):
+        return cells
+    if not (hi > lo):
+        return cells
+    val = "encoder_value" if axis == "encoder" else "(EXTRACT(EPOCH FROM time) * 1000.0)"
+    notnull = "AND encoder_value IS NOT NULL " if axis == "encoder" else ""
+    # v4.0.218 — DROP rows outside [lo,hi] instead of CLAMPING them into the edge
+    # bins. The time WHERE-window (e.g. now-24h) is usually WIDER than the
+    # scatter's dot-domain [lo,hi]; with a LEAST/GREATEST clamp every row older
+    # than lo collapsed into bin 0 and every row newer than hi into bin N-1, so a
+    # shipment painted a phantom block STUCK at the left edge (and another at the
+    # right) even though no dot for it sits there. Operator: "I fucking hate your
+    # idea of sticking every shipment to the left end — why does it have two, at
+    # the beginning and the end?" Raw FLOOR + a bucket-range filter keeps only the
+    # bins that actually fall on the scatter, so the lane fills right→left in
+    # lock-step with the dots and never smears to an edge.
+    cur.execute(
+        f"""
+        SELECT bucket, shipment, COUNT(*) AS n
+        FROM (
+          SELECT FLOOR((({val} - %s)::numeric * {n_bins}) / (%s - %s))::int AS bucket,
+                 shipment
+          FROM inference_results
+          WHERE {time_sql}
+            {notnull}
+            AND shipment IS NOT NULL AND shipment <> ''
+            {ship_sql}
+        ) src
+        WHERE bucket >= 0 AND bucket < {n_bins}
+        GROUP BY bucket, shipment
+        """,
+        [lo, hi, lo] + list(time_args) + list(ship_args),
+    )
+    bd = {}
+    for b, sh, n in cur.fetchall():
+        try:
+            b = int(b if b is not None else 0)
+        except (TypeError, ValueError):
+            continue
+        n = int(n or 0)
+        e = bd.setdefault(b, {})
+        e[sh] = e.get(sh, 0) + n
+    for b in range(n_bins):
+        counts = bd.get(b)
+        if counts:
+            top_sh, top_n = max(counts.items(), key=lambda kv: kv[1])
+            cells.append({"bucket": b, "shipment": top_sh, "n": int(top_n)})
+        else:
+            cells.append({"bucket": b, "shipment": None, "n": 0})
+    return cells
+
+
+def _dc_load_severity():
+    """Load {class: severity}, hidden-class list, and score scale once for the
+    strip helpers. Mirrors /api/quality/heatmap's audio_settings read."""
+    try:
+        from config import load_service_config as _load_svc
+        svc = _load_svc() or {}
+        sev_map = {
+            k: int(v.get("severity") or 0)
+            for k, v in (svc.get("audio_settings") or {}).items()
+            if isinstance(v, dict)
+        }
+        try:
+            scale = float(svc.get("score_scale_factor") or 1.0)
+        except (TypeError, ValueError):
+            scale = 1.0
+        hidden = sorted([
+            str(cls) for cls, cfg in (svc.get("audio_settings") or {}).items()
+            if isinstance(cfg, dict) and cfg.get("show") is False
+        ])
+        return sev_map, hidden, scale
+    except Exception:
+        return {}, [], 1.0
+
+
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -3167,7 +3462,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
     # v4.0.80 — clamp dot_cap to [100, 5000]. UI options top out at 3000 but
     # the safe max is 5000; anything higher lets a huge scatter noticeably
     # slow Chart.js pan/zoom.
-    dot_cap = max(100, min(5000, int(dot_cap or 750)))
+    dot_cap = max(10, min(5000, int(dot_cap or 750)))   # 4.0.203 — floor 100→10 (per-bucket)
 
     # v4.0.75 — TTL cache lookup. All params contribute to the key so
     # different dashboards with different filters get different cached
@@ -3188,6 +3483,54 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         "7d":  ("7 days",   "6 hours"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
+
+    # 4.0.200 — when a specific shipment is picked, drive the ENTIRE endpoint
+    # through slice-mode over the shipment's ACTUAL [MIN(time), MAX(time)]
+    # instead of a time window.
+    #
+    # Background: v4.0.196 overrode `interval = "90 days"` when a shipment was
+    # picked, so the shipment's data would surface regardless of the operator's
+    # window. That was wrong on two counts the operator caught:
+    #   (a) it CUT shipments older than 90 days (they returned nothing), and
+    #   (b) every time-bucketed panel (colour heatmap, quality/ejection strips)
+    #       binned over the 90-day window, so a 30-minute shipment collapsed
+    #       into ONE bin at the right edge ("only two bins have colour").
+    # A specific shipment is already fully bounded by the (shipment, time)
+    # index — there is nothing to "guard" with a time window; `shipment = X`
+    # alone is a safe, bounded index lookup for a shipment of any age. So:
+    # resolve the shipment's real span here and set since_ms/until_ms to it,
+    # which flips `_use_slice` on below → every query (scatter, colour heatmap,
+    # bins) runs over exactly the shipment's duration. Only do this when the
+    # caller didn't already pass an explicit slice (progressive bucket loader).
+    if shipment and not (bool(since_ms) and bool(until_ms)):
+        try:
+            from services.db import get_db_connection as _gdc_s, release_db_connection as _rdc_s
+            _sconn = _gdc_s()
+            if _sconn is not None:
+                try:
+                    _scur = _sconn.cursor()
+                    _scur.execute(
+                        "SELECT EXTRACT(EPOCH FROM MIN(time)) * 1000.0, "
+                        "       EXTRACT(EPOCH FROM MAX(time)) * 1000.0 "
+                        "FROM inference_results WHERE shipment = %s",
+                        [shipment],
+                    )
+                    _sr = _scur.fetchone()
+                    _scur.close()
+                    if _sr and _sr[0] is not None and _sr[1] is not None and float(_sr[1]) > float(_sr[0]):
+                        since_ms = int(float(_sr[0]))
+                        until_ms = int(float(_sr[1])) + 1000   # +1s so the last row is included
+                finally:
+                    _rdc_s(_sconn)
+        except Exception as _spe:
+            logger.debug(f"shipment-span resolve failed: {_spe}")
+        # Slice-aware queries (scatter, colour heatmap) now bin over the exact
+        # span via since_ms/until_ms. Any query in this endpoint that is NOT
+        # slice-aware still uses `interval`; widen it so it includes a shipment
+        # of ANY age (the shipment filter + (shipment,time) index keep it a
+        # bounded index scan — the wide interval only removes the age cut, it
+        # doesn't cause a full-table scan).
+        interval = "3650 days"
 
     # v4.0.74 — bucket-slice mode. When since_ms + until_ms are both provided
     # the request describes a specific epoch-anchored slice. Swap the time
@@ -3542,6 +3885,56 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 except Exception as _cse:
                     logger.debug(f"color_slice compute failed: {_cse}")
                     _payload["color_slice"] = {"cells": []}
+            # v4.0.210 — quality + ejection SLICE. Streamed per bucket by the
+            # progressive ladder EXACTLY like color_slice, so the quality and
+            # ejection strips fill newest→oldest in lock-step with the dots AND
+            # come from the SAME endpoint/binning as the scatter. Gated on
+            # include_strips so unrelated scatter_only fetches skip the cost.
+            if int(include_strips or 0) and _use_slice:
+                try:
+                    _s_axis = str(color_axis or "encoder").strip().lower()
+                    _s_lo = float(bin_ref_lo or 0.0)
+                    _s_hi = float(bin_ref_hi or 0.0)
+                    _s_nbins = max(4, min(192, int(bins) if bins else 48))
+                    _s_time_sql = "time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)"
+                    _s_time_args = [int(since_ms), int(until_ms)]
+                    _s_ship_sql = ship_clause  # "AND shipment = %s" or ""
+                    _s_ship_args = [shipment] if shipment else []
+                    _s_cur = conn.cursor()
+                    try:
+                        _sev_map, _hidden, _scale = _dc_load_severity()
+                        _q_cells = _dc_quality_cells(
+                            _s_cur, _s_axis, _s_lo, _s_hi, _s_nbins,
+                            _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args,
+                            _sev_map, _hidden, _scale)
+                        _e_cells = _dc_ejection_cells(
+                            _s_cur, _s_axis, _s_lo, _s_hi, _s_nbins,
+                            _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args)
+                        _sh_cells = _dc_shipment_cells(
+                            _s_cur, _s_axis, _s_lo, _s_hi, _s_nbins,
+                            _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args)
+                    finally:
+                        _s_cur.close()
+                    _payload["quality_slice"] = {
+                        "axis": _s_axis, "since_ms": int(since_ms), "until_ms": int(until_ms),
+                        "n_bins": _s_nbins, "bin_ref_lo": _s_lo, "bin_ref_hi": _s_hi,
+                        "cells": _q_cells,
+                    }
+                    _payload["ejection_slice"] = {
+                        "axis": _s_axis, "since_ms": int(since_ms), "until_ms": int(until_ms),
+                        "n_bins": _s_nbins, "bin_ref_lo": _s_lo, "bin_ref_hi": _s_hi,
+                        "cells": _e_cells,
+                    }
+                    _payload["shipment_slice"] = {
+                        "axis": _s_axis, "since_ms": int(since_ms), "until_ms": int(until_ms),
+                        "n_bins": _s_nbins, "bin_ref_lo": _s_lo, "bin_ref_hi": _s_hi,
+                        "cells": _sh_cells,
+                    }
+                except Exception as _qse:
+                    logger.debug(f"quality/ejection/shipment slice compute failed: {_qse}")
+                    _payload["quality_slice"] = {"cells": []}
+                    _payload["ejection_slice"] = {"cells": []}
+                    _payload["shipment_slice"] = {"cells": []}
             _endpoint_cache_put(_cache_key, _payload)
             return JSONResponse(content=_payload)
 
@@ -3797,14 +4190,27 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # Bin K represents the actual time slice under strip cell K.
             # Empty slices produce no cell — honest gap, matches the chart
             # X-axis (`_scatterXMin`/`_scatterXMax`) and the strip below.
-            _hm_cur.execute(
-                f"""SELECT EXTRACT(EPOCH FROM (NOW() - INTERVAL %s)) * 1000.0,
-                           EXTRACT(EPOCH FROM NOW()) * 1000.0""",
-                [interval],
-            )
-            row = _hm_cur.fetchone()
-            _t_min = float(row[0]) if row and row[0] is not None else None
-            _t_max = float(row[1]) if row and row[1] is not None else None
+            # 4.0.200 — in slice mode (specific shipment OR progressive bucket)
+            # bin over the EXACT slice [since_ms, until_ms] so the colour cells
+            # span the shipment's real duration instead of the whole window.
+            # `_ct_clause` / `_ct_params` are the matching row-filter predicate
+            # used by the colour CTE below so its rows come from the same range.
+            if _use_slice:
+                _t_min = float(since_ms)
+                _t_max = float(until_ms)
+                _ct_clause = "time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)"
+                _ct_params = [since_ms, until_ms]
+            else:
+                _hm_cur.execute(
+                    f"""SELECT EXTRACT(EPOCH FROM (NOW() - INTERVAL %s)) * 1000.0,
+                               EXTRACT(EPOCH FROM NOW()) * 1000.0""",
+                    [interval],
+                )
+                row = _hm_cur.fetchone()
+                _t_min = float(row[0]) if row and row[0] is not None else None
+                _t_max = float(row[1]) if row and row[1] is not None else None
+                _ct_clause = "time > NOW() - INTERVAL %s"
+                _ct_params = [interval]
             tcells = []
             if _t_min is not None and _t_max is not None and _t_max > _t_min:
                 _hm_cur.execute(
@@ -3818,7 +4224,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                             (elem->>'L')::float AS L, (elem->>'E')::float AS E,
                             (elem->>'phase') AS phase
                         FROM inference_results, LATERAL jsonb_array_elements(detections) elem
-                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                        WHERE {_ct_clause} {ship_clause}
                           AND elem->>'name' = '_color'
                           AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
                           {_phase_clause}{_parent_clause}
@@ -3870,7 +4276,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                         AND cpf.phase IS NOT DISTINCT FROM b.phase
                     GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
                     """,
-                    [interval] + ([shipment] if shipment else []) + _phase_args + _parent_args +
+                    _ct_params + ([shipment] if shipment else []) + _phase_args + _parent_args +
                     [_t_min, _t_max, _t_min],
                 )
                 # 4.0.161 — was `_color_t_lo/_color_t_hi` (never defined
@@ -3888,20 +4294,28 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                                    "delta_e": round(de or 0, 2),
                                    "delta_from_avg": round(davg or 0, 2),
                                    "n": int(n or 0)})
-            # Payload t_min/t_max = FIXED chart window (matches strip range,
-            # matches Chart.js `_scatterXMin`/`_scatterXMax` at [now-interval,
-            # now]). Frontend spreads bins 0..N-1 across this range.
-            _hm_cur.execute(
-                f"""SELECT EXTRACT(EPOCH FROM (NOW() - INTERVAL %s)) * 1000.0,
-                           EXTRACT(EPOCH FROM NOW()) * 1000.0""",
-                [interval],
-            )
-            row = _hm_cur.fetchone()
-            color_heatmap_time = {
-                "t_min": float(row[0]) if row and row[0] is not None else None,
-                "t_max": float(row[1]) if row and row[1] is not None else None,
-                "n_bins": N_BINS, "cells": tcells,
-            }
+            # Payload t_min/t_max = the SAME range the cells were binned over
+            # (matches the strip range and Chart.js x-scale). 4.0.200 — in
+            # slice mode that's the shipment's real [since_ms, until_ms], so
+            # the cells span the shipment's duration instead of collapsing
+            # into the last bin of a 90-day window.
+            if _use_slice:
+                color_heatmap_time = {
+                    "t_min": float(since_ms), "t_max": float(until_ms),
+                    "n_bins": N_BINS, "cells": tcells,
+                }
+            else:
+                _hm_cur.execute(
+                    f"""SELECT EXTRACT(EPOCH FROM (NOW() - INTERVAL %s)) * 1000.0,
+                               EXTRACT(EPOCH FROM NOW()) * 1000.0""",
+                    [interval],
+                )
+                row = _hm_cur.fetchone()
+                color_heatmap_time = {
+                    "t_min": float(row[0]) if row and row[0] is not None else None,
+                    "t_max": float(row[1]) if row and row[1] is not None else None,
+                    "n_bins": N_BINS, "cells": tcells,
+                }
             # 4.0.162 — time-axis color-change strip (mirrors encoder version).
             color_change_strip_time = {"n_bins": N_BINS, "cells": []}
             try:
@@ -3932,6 +4346,76 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             _hm_cur.close()
         except Exception as _he:
             logger.debug(f"color heatmap pre-aggregation failed: {_he}")
+
+        # v4.0.210 — quality + ejection heatmaps in the MAIN payload, binned
+        # over the SAME bounds + N_BINS the colour heatmap exposes (enc_min/
+        # enc_max, t_min/t_max) using the SAME FLOOR bin formula. This is the
+        # single-fetch path (picked shipment Core fetch, 1h all-shipments single
+        # fetch) — the strips render straight from data.quality_heatmap /
+        # data.ejection_heatmap with a GUARANTEED-identical x-domain to the
+        # scatter and colour heatmap. The all-shipments ladder instead streams
+        # the *_slice variants (above). Gated on include_strips.
+        quality_heatmap = {"enc_min": None, "enc_max": None, "n_bins": N_BINS, "cells": []}
+        quality_heatmap_time = {"t_min": None, "t_max": None, "n_bins": N_BINS, "cells": []}
+        ejection_heatmap = {"enc_min": None, "enc_max": None, "n_bins": N_BINS, "cells": []}
+        ejection_heatmap_time = {"t_min": None, "t_max": None, "n_bins": N_BINS, "cells": []}
+        shipment_heatmap = {"enc_min": None, "enc_max": None, "n_bins": N_BINS, "cells": []}
+        shipment_heatmap_time = {"t_min": None, "t_max": None, "n_bins": N_BINS, "cells": []}
+        if int(include_strips or 0):
+            try:
+                if _use_slice:
+                    _mn_time_sql = "time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)"
+                    _mn_time_args = [int(since_ms), int(until_ms)]
+                else:
+                    _mn_time_sql = "time > NOW() - INTERVAL %s"
+                    _mn_time_args = [interval]
+                _mn_ship_sql = ship_clause
+                _mn_ship_args = [shipment] if shipment else []
+                _sev_map_m, _hidden_m, _scale_m = _dc_load_severity()
+                _enc_lo = color_heatmap.get("enc_min")
+                _enc_hi = color_heatmap.get("enc_max")
+                _tm_lo = color_heatmap_time.get("t_min")
+                _tm_hi = color_heatmap_time.get("t_max")
+                _mn_cur = conn.cursor()
+                try:
+                    if _enc_lo is not None and _enc_hi is not None:
+                        quality_heatmap = {
+                            "enc_min": _enc_lo, "enc_max": _enc_hi, "n_bins": N_BINS,
+                            "cells": _dc_quality_cells(_mn_cur, "encoder", _enc_lo, _enc_hi, N_BINS,
+                                                       _mn_time_sql, _mn_time_args, _mn_ship_sql, _mn_ship_args,
+                                                       _sev_map_m, _hidden_m, _scale_m),
+                        }
+                        ejection_heatmap = {
+                            "enc_min": _enc_lo, "enc_max": _enc_hi, "n_bins": N_BINS,
+                            "cells": _dc_ejection_cells(_mn_cur, "encoder", _enc_lo, _enc_hi, N_BINS,
+                                                        _mn_time_sql, _mn_time_args, _mn_ship_sql, _mn_ship_args),
+                        }
+                        shipment_heatmap = {
+                            "enc_min": _enc_lo, "enc_max": _enc_hi, "n_bins": N_BINS,
+                            "cells": _dc_shipment_cells(_mn_cur, "encoder", _enc_lo, _enc_hi, N_BINS,
+                                                        _mn_time_sql, _mn_time_args, _mn_ship_sql, _mn_ship_args),
+                        }
+                    if _tm_lo is not None and _tm_hi is not None:
+                        quality_heatmap_time = {
+                            "t_min": _tm_lo, "t_max": _tm_hi, "n_bins": N_BINS,
+                            "cells": _dc_quality_cells(_mn_cur, "time", _tm_lo, _tm_hi, N_BINS,
+                                                       _mn_time_sql, _mn_time_args, _mn_ship_sql, _mn_ship_args,
+                                                       _sev_map_m, _hidden_m, _scale_m),
+                        }
+                        ejection_heatmap_time = {
+                            "t_min": _tm_lo, "t_max": _tm_hi, "n_bins": N_BINS,
+                            "cells": _dc_ejection_cells(_mn_cur, "time", _tm_lo, _tm_hi, N_BINS,
+                                                        _mn_time_sql, _mn_time_args, _mn_ship_sql, _mn_ship_args),
+                        }
+                        shipment_heatmap_time = {
+                            "t_min": _tm_lo, "t_max": _tm_hi, "n_bins": N_BINS,
+                            "cells": _dc_shipment_cells(_mn_cur, "time", _tm_lo, _tm_hi, N_BINS,
+                                                        _mn_time_sql, _mn_time_args, _mn_ship_sql, _mn_ship_args),
+                        }
+                finally:
+                    _mn_cur.close()
+            except Exception as _mse:
+                logger.debug(f"main quality/ejection/shipment heatmap compute failed: {_mse}")
 
         # 4.0.34 — discover the phases that actually have _color data in this
         # window so the UI can render exactly the right buttons. NOT filtered
@@ -4375,6 +4859,19 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             "camera_y_order": camera_y_order,
             "color_heatmap": color_heatmap,
             "color_heatmap_time": color_heatmap_time,
+            # v4.0.210 — quality + ejection strips from the SAME endpoint +
+            # binning as the scatter/colour. Empty {cells:[]} unless
+            # include_strips=1. The frontend renders the strips straight from
+            # these so a vertical guideline hits the same data in every layer.
+            "quality_heatmap": (locals().get("quality_heatmap") or {"n_bins": 0, "cells": []}),
+            "quality_heatmap_time": (locals().get("quality_heatmap_time") or {"n_bins": 0, "cells": []}),
+            "ejection_heatmap": (locals().get("ejection_heatmap") or {"n_bins": 0, "cells": []}),
+            "ejection_heatmap_time": (locals().get("ejection_heatmap_time") or {"n_bins": 0, "cells": []}),
+            # v4.0.217 — shipment lane as a proper bin-strip: dominant shipment per
+            # bin, same bounds/bins as the others → the lane streams + syncs like
+            # quality/ejection instead of being derived from the sparse dots.
+            "shipment_heatmap": (locals().get("shipment_heatmap") or {"n_bins": 0, "cells": []}),
+            "shipment_heatmap_time": (locals().get("shipment_heatmap_time") or {"n_bins": 0, "cells": []}),
             # 4.0.162 — per-bucket colour-change strips. Encoder + time variants.
             "color_change_strip": (locals().get("color_change_strip_enc") or {"n_bins": 0, "cells": []}),
             "color_change_strip_time": (locals().get("color_change_strip_time") or {"n_bins": 0, "cells": []}),
@@ -4422,7 +4919,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
 
 
 @router.get("/api/shipment_spans")
-def shipment_spans_endpoint(request: Request, window: str = "1h"):
+def shipment_spans_endpoint(request: Request, window: str = "1h", shipment: str = ""):
     """v4.0.119 — Standalone lightweight endpoint that ONLY returns the
     shipment_spans list. The Charts-tab dashboard uses `window=24h` on
     `/api/detection_charts`, which on vteam12 takes >30 s to run all
@@ -4433,6 +4930,13 @@ def shipment_spans_endpoint(request: Request, window: str = "1h"):
     This endpoint isolates the strip data so the frontend can fetch it
     IMMEDIATELY on page load and paint the strip regardless of what the
     rest of the dashboard is doing.
+
+    4.0.196 — accepts optional `shipment` param. When set, the endpoint
+    returns exactly ONE span (the picked shipment) and widens the
+    time filter to 90 days so an older shipment still surfaces. Mirrors
+    the /api/detection_charts fix so the shipment strip painted by
+    the standalone refresher matches what the operator asked for
+    instead of continuing to render every shipment in the window.
     """
     _windows_map = {
         "1h":  "1 hour",
@@ -4441,7 +4945,11 @@ def shipment_spans_endpoint(request: Request, window: str = "1h"):
         "7d":  "7 days",
     }
     interval = _windows_map.get(window, "1 hour")
+    if shipment:
+        interval = "90 days"
     empty = {"shipment_spans": [], "window": window}
+    _ship_where = "AND shipment = %s" if shipment else ""
+    _ship_params = [interval] + ([shipment] if shipment else [])
     conn = None
     try:
         from services.db import get_db_connection
@@ -4451,13 +4959,14 @@ def shipment_spans_endpoint(request: Request, window: str = "1h"):
         cur = conn.cursor()
         cur.execute("SET LOCAL statement_timeout = 8000")
         cur.execute(
-            """
+            f"""
             WITH recent AS (
                 SELECT shipment, encoder_value, time
                 FROM inference_results
                 WHERE time > NOW() - INTERVAL %s
                   AND shipment IS NOT NULL
                   AND shipment <> ''
+                  {_ship_where}
                 ORDER BY time DESC
                 LIMIT 200000
             )
@@ -4472,7 +4981,7 @@ def shipment_spans_endpoint(request: Request, window: str = "1h"):
             ORDER BY MIN(time) ASC
             LIMIT 200
             """,
-            (interval,),
+            tuple(_ship_params),
         )
         spans = []
         for _s, _e_min, _e_max, _t_min, _t_max, _n in cur.fetchall():
@@ -4548,6 +5057,9 @@ def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
         "7d":  ("7 days",   "6 hours"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
+    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
+    if shipment:
+        interval = "90 days"
     empty = {"by_procedure": {}, "timeline": [], "total": 0,
              "shipments": [], "window": window, "shipment": shipment}
     ship_clause = "AND shipment = %s" if shipment else ""
@@ -4634,6 +5146,9 @@ def production_stats(request: Request, window: str = "24h", shipment: str = ""):
         "7d":  ("7 days",   "6 hours"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
+    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
+    if shipment:
+        interval = "90 days"
     bucket_seconds = {"1h": 60, "6h": 300, "24h": 1800, "7d": 21600}.get(window, 1800)
     empty = {"timeline": [], "total_ok": 0, "total_ng": 0, "total_units": 0,
              "reject_rate_overall": 0.0, "eject_over_total": 0.0,
@@ -4772,6 +5287,9 @@ def quality_charts(request: Request, window: str = "24h", shipment: str = "", mi
         "7d":  ("7 days",   "6 hours"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
+    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
+    if shipment:
+        interval = "90 days"
     GW, GH = 32, 20
     empty = {"by_class": {}, "by_camera": {},
              "heatmap": {"gw": GW, "gh": GH, "max": 0, "cells": []},

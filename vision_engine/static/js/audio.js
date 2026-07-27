@@ -1710,9 +1710,16 @@ function switchTab(tabName) {
 }
 
 // Restore last selected tab on page load (skip iframe tabs to prevent blocking)
+// v4.0.210 — 'grafana' (the Charts tab) is NO LONGER an iframe (removed in
+// 3.15.3 — it's native Chart.js now), so it was being needlessly EXCLUDED from
+// restore. That's why a reload-while-on-Charts left the tab on Dashboard and
+// the Score-per-shipment card never got its click-triggered load. Restore it
+// like any normal tab so the tab-open handlers (refreshDetectionInsights +
+// loadScorePerShipment) fire on reload. Only the true iframe tab ('gallery')
+// stays skipped.
 document.addEventListener('DOMContentLoaded', function() {
     const savedTab = localStorage.getItem('selectedTab');
-    const iframeTabs = ['gallery', 'grafana'];
+    const iframeTabs = ['gallery'];
     if (savedTab && !iframeTabs.includes(savedTab)) {
         const tabButton = document.querySelector(`.tab-button[onclick="switchTab('${savedTab}')"]`);
         if (tabButton) {

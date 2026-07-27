@@ -78,8 +78,31 @@ app = FastAPI(
 
 # Mount static files
 from fastapi.staticfiles import StaticFiles
+
+
+# v4.0.220 — the dashboard HTML (static/status.html) is reachable BOTH via the
+# GET /status route (which already sends no-cache) AND directly at
+# /static/status.html through this mount, where StaticFiles sends only ETag +
+# Last-Modified and NO Cache-Control. RFC 7234 heuristic freshness then lets the
+# browser reuse a STALE cached HTML document (the versioned ?v= busters only
+# refresh the JS/CSS it pulls in, never the HTML document URL). That is why edits
+# kept "not landing" until a hard refresh. Stamp no-cache on *.html only, so the
+# HTML always revalidates while the versioned JS/CSS/vendor assets stay cacheable.
+class _NoCacheHTMLStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        try:
+            if str(path).lower().endswith(".html"):
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+        except Exception:
+            pass
+        return response
+
+
 try:
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+    app.mount("/static", _NoCacheHTMLStaticFiles(directory="static"), name="static")
 except Exception as e:
     logger.warning(f"Could not mount static directory: {e}")
 
@@ -108,6 +131,36 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     global SERIAL_MODE
 
     settings_applied = {}
+
+    # 4.0.195 — normalise raw /dev/videoN camera sources to their stable
+    # /dev/v4l/by-path/pci-... equivalents BEFORE any camera-open code
+    # runs. Per [[feedback_cameras_pci_path_always]], the invariant is
+    # that config never stores a raw /dev/videoN — that number is kernel-
+    # plug-order and shifts across boots, causing the "same cameras
+    # always fail" bug on kiancord. Runs on EVERY boot and every
+    # /api/cameras/config/upload since apply_config_settings is on the
+    # hot path for both. Idempotent — no-op when nothing to change.
+    try:
+        from services.camera import normalize_camera_sources_to_by_path
+        _cam_changes = normalize_camera_sources_to_by_path(config)
+        if _cam_changes:
+            logger.info(
+                f"[CAM-NORMALIZE] upgraded {len(_cam_changes)} camera source(s) "
+                f"from raw /dev/videoN to /dev/v4l/by-path"
+            )
+            for _cid, (_old, _new) in _cam_changes.items():
+                logger.info(f"[CAM-NORMALIZE]   cam {_cid}: {_old}  ->  {_new}")
+            # Persist to DB so the next boot reads the by-path form directly.
+            try:
+                from config import save_data_file
+                _payload = full_data if isinstance(full_data, dict) else {}
+                _payload["service_config"] = config
+                if not save_data_file(_payload):
+                    logger.warning("[CAM-NORMALIZE] save_data_file returned False — DB may be unreachable; in-memory config still upgraded")
+            except Exception as _pe:
+                logger.warning(f"[CAM-NORMALIZE] persist failed: {_pe}")
+    except Exception as _ne:
+        logger.warning(f"[CAM-NORMALIZE] normalise failed: {_ne}")
 
     # Apply inference module configuration
     if "inference" in config:

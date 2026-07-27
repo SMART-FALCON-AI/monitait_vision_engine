@@ -227,6 +227,70 @@ def _find_replacement_v4l_path(current_path: str) -> Optional[str]:
     return None
 
 
+def normalize_camera_sources_to_by_path(svc: Dict[str, Any]) -> Dict[str, tuple]:
+    """4.0.195 — Rewrite raw `/dev/videoN` in `service_config.cameras[*].source`
+    to their `/dev/v4l/by-path/pci-...` equivalents.
+
+    Called at boot from main.py's `apply_saved_config` BEFORE cameras are
+    opened. The `/dev/v4l/by-path` directory is populated by udev at OS boot
+    and reflects the physical USB port→video-node mapping for THIS run.
+    Rewriting the raw path to the by-path form makes the persisted source
+    stable against kernel-plug-order renumbering across future boots — a
+    port :7 camera that came up as /dev/video6 today and /dev/video8 tomorrow
+    still opens correctly because the by-path binds to the USB port, not
+    the enumeration order.
+
+    Args:
+        svc: service_config dict (modified in place).
+
+    Returns:
+        Dict[cam_id -> (old_source, new_source)] for each camera actually
+        rewritten. Callers use this to decide whether to persist to DB
+        (skip the write when nothing changed — idempotent).
+
+    Safety:
+      - Only rewrites when a stable by-path symlink currently resolves to
+        the raw source. If the raw path is dead this boot, leave it
+        untouched — the operator sees a real "camera disconnected" error
+        rather than a silent rewrite to nothing.
+      - Skips non-USB sources (rtsp://, http://, basler://, empty).
+      - Skips sources that are already a by-path form.
+      - Never rewrites metadata siblings (video-index1) — those aren't the
+        capture nodes an operator would have configured.
+    """
+    changes: Dict[str, tuple] = {}
+    cams = svc.get("cameras") if isinstance(svc, dict) else None
+    if not isinstance(cams, dict):
+        return changes
+    for cam_id, cfg in cams.items():
+        if not isinstance(cfg, dict):
+            continue
+        src = cfg.get("source")
+        if not isinstance(src, str):
+            continue
+        # Already a by-path form → nothing to do.
+        if src.startswith("/dev/v4l/by-path/"):
+            continue
+        # Only handle raw /dev/videoN. Everything else (rtsp, http, basler,
+        # empty) passes through untouched.
+        if not (src.startswith("/dev/video") and src[len("/dev/video"):].isdigit()):
+            continue
+        bp = _by_path_for_video_node(src)
+        if not bp:
+            # No stable symlink resolves to this raw node right now — likely
+            # dead this boot. Leave the config alone so the operator sees
+            # the disconnect surface up in the UI instead of a silent
+            # rewrite to a non-existent path.
+            logger.warning(
+                f"[CAM-NORMALIZE] cam {cam_id}: source={src} has no /dev/v4l/by-path "
+                f"symlink resolving to it — likely disconnected. Leaving config unchanged."
+            )
+            continue
+        cfg["source"] = bp
+        changes[str(cam_id)] = (src, bp)
+    return changes
+
+
 def _load_persisted_usb_sources_ordered() -> List[str]:
     """v4.0.143 — return the list of USB camera sources from persistence,
     ordered by cam ID (1, 2, 3, ...). Each source is:
