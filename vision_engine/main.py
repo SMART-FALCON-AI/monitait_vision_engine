@@ -671,6 +671,7 @@ from routers.commands import router as commands_router
 from routers.websocket import router as ws_router
 from routers.notifications import router as notifications_router  # 3.24.0
 from routers.anomaly import router as anomaly_router  # 4.0.50 — anomaly baseline plumbing
+from routers.knowledge import router as knowledge_router  # 4.0.224 — knowledge RAG proxy + kb_* helpers
 
 app.include_router(health_router)
 app.include_router(cameras_router)
@@ -683,6 +684,7 @@ app.include_router(ai_router)
 app.include_router(ai_trainer_router)  # 3.21.22 — AI Trainer integration
 app.include_router(notifications_router)  # 3.24.0 — Telegram + AI usage
 app.include_router(anomaly_router)  # 4.0.50 — /api/anomaly/{build-baseline,baseline}
+app.include_router(knowledge_router)  # 4.0.224 — /api/kb/** proxy + /api/knowledge/status (before commands catch-all)
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 

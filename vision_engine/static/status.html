@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.222"></script>
+        <script src="/static/js/i18n.js?v=4.0.263"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -37,7 +37,7 @@
                     <button class="tab-button active" onclick="switchTab('dashboard')">📊 <span data-i18n="tab_dashboard">Dashboard</span></button>
                     <button class="tab-button" onclick="switchTab('grafana')">📈 <span data-i18n="tab_charts">Charts</span></button>
                     <button class="tab-button" onclick="switchTab('ai')">🤖 <span data-i18n="tab_ai">AI Assistant</span></button>
-                    <button class="tab-button" onclick="switchTab('gallery')">🖼️ <span data-i18n="tab_gallery">Gallery</span></button>
+                    <button class="tab-button" onclick="switchTab('knowledge')">📚 <span>Knowledge</span></button>
                     <button class="tab-button" onclick="switchTab('hardware')">🔧 <span data-i18n="tab_hardware">Hardware</span></button>
                     <button class="tab-button" onclick="switchTab('cameras')">📷 <span data-i18n="tab_cameras">Cameras</span></button>
                     <button class="tab-button" onclick="switchTab('infrastructure')">🔮 <span data-i18n="tab_inference">Inference</span></button>
@@ -964,13 +964,20 @@
             </div>
             <!-- End Inference Tab -->
 
-            <!-- Gallery Tab (iframe created dynamically - no static iframe in DOM) -->
-            <div id="tab-gallery" class="tab-content">
-                <div id="gallery-iframe-container" style="width: 100%; height: calc(100vh - 120px); min-height: 400px;">
-                    <!-- iframe injected dynamically by loadIframeForTab() -->
-                </div>
+            <!-- Gallery Tab + PiGallery2 service removed in v4.0.225 (operator:
+                 "remove the pigallery and Gallery tab entirely"). The RAG-backed
+                 Knowledge tab below is the replacement image/doc surface. -->
+
+            <!-- v4.0.225 — Knowledge Tab: file upload / browse / search for the RAG
+                 assistant. Same-origin iframe → reaches /api/kb/** through MVE's
+                 proxy with no CORS; a JS error inside it can't take down the
+                 dashboard the operator runs the line from. -->
+            <div id="tab-knowledge" class="tab-content">
+                <iframe src="/static/knowledge.html?v=4.0.263"
+                        style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
+                        title="Knowledge"></iframe>
             </div>
-            <!-- End Gallery Tab -->
+            <!-- End Knowledge Tab -->
 
             <!-- Grafana Tab (iframe created dynamically - no static iframe in DOM) -->
             <div id="tab-grafana" class="tab-content">
@@ -1031,12 +1038,16 @@
                                 <option value="large" data-i18n="size_large">Large (900×580)</option>
                                 <option value="xlarge" data-i18n="size_xlarge">X-Large (1200×780)</option>
                             </select>
-                            <button onclick="refreshDetectionInsights()" style="padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px;">Refresh</button>
+                            <!-- 4.0.245 — Apply / Refresh relocated to the END of the X-axis toolbar row (after Dots/bucket), per operator. -->
+
                         </div>
                     </div>
                     <!-- 3.21.14 — Shipment Quality Score card with encoder-span normalization.
                          Updates with the Window / Shipment / Min-conf selectors above. -->
-                    <div id="shipment-quality-card" style="margin-bottom:15px; padding:14px 18px; background:linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4)); border:1px solid rgba(51,65,85,0.7); border-radius:8px;">
+                    <!-- 4.0.245 — hidden by default (was flashing on load before _reorderChartsTab
+                         hid it). Superseded by the Score-per-shipment panel; kept in DOM only because
+                         several helpers still reference its #sqs-* nodes. -->
+                    <div id="shipment-quality-card" style="display:none; margin-bottom:15px; padding:14px 18px; background:linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4)); border:1px solid rgba(51,65,85,0.7); border-radius:8px;">
                         <div style="display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;">
                             <div style="display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;">
                                 <div>
@@ -1108,17 +1119,36 @@
                              same X-axis so the operator can scan a column vertically. -->
                         <div style="grid-column: 1 / -1; min-width:0; order:1;">
                             <div style="display:flex; align-items:center; gap:6px; margin-bottom:6px; font-size:11px; flex-wrap:wrap;">
-                                <span style="color:var(--text-secondary);">X-axis:</span>
-                                <!-- 3.26.0 — default is now 📏 Encoder; 📍 Time can still be toggled. -->
-                                <button id="insight-axis-toggle-time" onclick="setInsightAxis('time')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📍 Time</button>
-                                <button id="insight-axis-toggle-encoder" onclick="setInsightAxis('encoder')" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📏 Encoder</button>
-                                <button id="insight-axis-toggle-length" onclick="setInsightAxis('length')" style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;" title="Cumulative length across shipments — immune to PLC encoder resets">🧵 Length</button>
+                                <!-- 4.0.244 — toolbar collapsed to compact dropdowns (operator: "make them
+                                     all dropdowns in one line, with tooltips"). Each <select> drives the SAME
+                                     setter the pill-buttons called; the originals are kept in a display:none
+                                     wrapper so code that styles-them-by-id (_setAxisToggleUI, setHeatmapScale,
+                                     setHeatmapCells, setHeatmapBaseline) keeps working untouched. -->
+                                <label style="color:var(--text-secondary);">X-axis:
+                                    <select id="insight-axis-select" onchange="setInsightAxis(this.value)" title="Horizontal axis shared by the scatter and every strip. Time = wall-clock. Encoder = roll position (conveyor count). Length = cumulative length across shipments (immune to PLC encoder resets)." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
+                                        <option value="time">📍 Time</option>
+                                        <option value="encoder" selected>📏 Encoder</option>
+                                        <option value="length">🧵 Length</option>
+                                    </select>
+                                </label>
+                                <span style="display:none;">
+                                    <button id="insight-axis-toggle-time" onclick="setInsightAxis('time')">Time</button>
+                                    <button id="insight-axis-toggle-encoder" onclick="setInsightAxis('encoder')">Encoder</button>
+                                    <button id="insight-axis-toggle-length" onclick="setInsightAxis('length')">Length</button>
+                                </span>
                                 <!-- v4.0.149 — removed the "scatter + quality strip + ejection strip all use the selected axis" hint; the axis-toggle buttons already imply it. -->
                                 <!-- 4.0.159 — Color baseline + Phase pills wrapped in `hm-color-toolbar`.
                                      Hidden when the "Parent Object Color Check" toggle in the Advanced tab
                                      is off (charts.js listens for `mve:color-check-toggled`). -->
                                 <span id="hm-color-toolbar" style="display:none; align-items:baseline; gap:4px; flex-wrap:wrap;">
-                                <span style="color:var(--text-secondary); margin-left:14px;">Color baseline:</span>
+                                <label style="color:var(--text-secondary); margin-left:8px;">Baseline:
+                                    <select id="hm-baseline-select" onchange="setHeatmapBaseline(this.value)" title="Reference the colour ΔE is measured against. Camera = each camera's median across the window (auto). Shipment avg = median across each row's ENTIRE shipment. Reference = an operator-clicked point on the chart." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
+                                        <option value="camera">📷 Camera</option>
+                                        <option value="shipment_avg" selected>📊 Shipment avg</option>
+                                        <option value="reference_frame">🖼️ Reference</option>
+                                    </select>
+                                </label>
+                                <span style="display:none;">
                                 <!-- 4.0.30 — heatmap baseline mode toggle. Stored as `mve_heatmap_baseline`
                                      in localStorage; the heatmap plugin recomputes ΔE on every render
                                      from the raw E values (no server round-trip). Modes whose data
@@ -1133,30 +1163,51 @@
                                      stored localStorage value, but the operator now chooses between Camera,
                                      Shipment avg, and Reference only. -->
                                 <button id="hm-baseline-reference_frame" onclick="setHeatmapBaseline('reference_frame')" title="L*a*b* at an operator-picked position on the chart. Click button → next chart click sets the reference point. Click again later to re-pick." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🖼️ Reference</button>
+                                </span>
                                 <span id="hm-pick-hint" style="display:none; color:#fcd34d; font-style:italic; margin-left:8px; font-size:11px;">🎯 Click anywhere on the chart to set the colour reference point</span>
                                 <!-- 4.0.34 — phase filter (heatmap-only). Buttons are rendered dynamically from
                                      phases_available in /api/detection_charts. Active choice is stored as
                                      `mve_heatmap_phase` in localStorage. Scatter / quality strip / ejection strip
                                      are intentionally NOT filtered — phase is a colour-channel concept. -->
-                                <span style="color:var(--text-secondary); margin-left:14px;">Phase:</span>
-                                <span id="hm-phase-buttons" style="display:inline-flex; gap:4px; flex-wrap:wrap;">
-                                    <button id="hm-phase-all" onclick="setHeatmapPhase('')" title="Show colour data from every capture phase combined." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🌐 All</button>
+                                <label style="color:var(--text-secondary); margin-left:8px;">Phase:
+                                    <select id="hm-phase-select" onchange="setHeatmapPhase(this.value)" title="Filter the colour data to one capture phase (p0, p1, …) or All. Options are populated from the phases present in the window." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
+                                        <option value="">🌐 All</option>
+                                    </select>
+                                </label>
+                                <!-- 4.0.262 — Phase is a dropdown now; the original dynamic buttons are kept
+                                     hidden so setHeatmapPhase / _renderPhaseButtons keep working untouched. -->
+                                <span id="hm-phase-buttons" style="display:none;">
+                                    <button id="hm-phase-all" onclick="setHeatmapPhase('')">All</button>
                                 </span>
                                 <!-- 4.0.177 — Colour scale toggle. `absolute` (default) uses fixed
                                      CIELAB tolerance bands ≤2/≤5/≤10/>10 (green/yellow/orange/red).
                                      `relative` normalises the same bands to the span's own max |Δ|
                                      so a very stable shipment still exposes its worst few cells. -->
-                                <span style="color:var(--text-secondary); margin-left:14px;">Colour scale:</span>
-                                <button id="hm-scale-absolute" onclick="setHeatmapScale('absolute')" title="Fixed CIELAB tolerance bands: |Δ|≤2 green, ≤5 yellow, ≤10 orange, >10 red. Best for compliance thresholds." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📐 Absolute</button>
-                                <button id="hm-scale-relative" onclick="setHeatmapScale('relative')" title="Bands scaled to the span's largest |Δ|. Even a very stable window will spread across the four colour bands, exposing the relative outliers." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">📊 Relative (span)</button>
+                                <label style="color:var(--text-secondary); margin-left:8px;">Scale:
+                                    <select id="hm-scale-select" onchange="setHeatmapScale(this.value)" title="Absolute = fixed CIELAB tolerance bands (|Δ|≤2 green, ≤5 yellow, ≤10 orange, >10 red) — best for compliance thresholds. Relative = bands scaled to the span's largest |Δ| so even a stable window exposes its worst cells." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
+                                        <option value="absolute" selected>📐 Absolute</option>
+                                        <option value="relative">📊 Relative (span)</option>
+                                    </select>
+                                </label>
+                                <span style="display:none;">
+                                    <button id="hm-scale-absolute" onclick="setHeatmapScale('absolute')">Absolute</button>
+                                    <button id="hm-scale-relative" onclick="setHeatmapScale('relative')">Relative</button>
+                                </span>
                                 <!-- 4.0.185 — Colour-cell visibility toggle. Same
                                      hide/show affordance the per-class chips give
                                      for scatter dots, but for the whole ΔE heatmap
                                      layer. Sticky in localStorage; the colorHeatmap
                                      plugin early-returns when hidden so no refetch. -->
-                                <span style="color:var(--text-secondary); margin-left:14px;">Cells:</span>
-                                <button id="hm-cells-shown" onclick="setHeatmapCells('shown')" title="Show the ΔE heatmap layer behind the scatter dots." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">👁 Show</button>
-                                <button id="hm-cells-hidden" onclick="setHeatmapCells('hidden')" title="Hide the ΔE heatmap layer — scatter dots stay visible." style="background:rgba(51,65,85,0.5); color:#cbd5e1; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🚫 Hide</button>
+                                <label style="color:var(--text-secondary); margin-left:8px;">Cells:
+                                    <select id="hm-cells-select" onchange="setHeatmapCells(this.value)" title="Show or hide the ΔE colour-heatmap layer behind the scatter dots. Hiding keeps the dots visible." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
+                                        <option value="shown" selected>👁 Show</option>
+                                        <option value="hidden">🚫 Hide</option>
+                                    </select>
+                                </label>
+                                <span style="display:none;">
+                                    <button id="hm-cells-shown" onclick="setHeatmapCells('shown')">Show</button>
+                                    <button id="hm-cells-hidden" onclick="setHeatmapCells('hidden')">Hide</button>
+                                </span>
                                 <!-- 4.0.161 — parent-class picker (heatmap-only). MVE
                                      emits one `_color` per parent-role class detected
                                      per frame; this pill picks which parent to view.
@@ -1172,8 +1223,10 @@
                                 </span>
                                 </span>
                                 <!-- v4.0.150 — restored a single grouping label "Dots/Category/Bucket:" before the dot-count selector; operator asked for it back after v4.0.149's bare inputs. Buckets input keeps no label (its number pattern is obvious). -->
-                                <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window." style="width:60px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:14px;" aria-label="Buckets across the visible window">
-                                <span style="color:var(--text-secondary); margin-left:14px;">Dots/Category/Bucket:</span>
+                                <label style="color:var(--text-secondary); margin-left:8px;">Buckets:
+                                <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window." style="width:56px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;" aria-label="Buckets across the visible window">
+                                </label>
+                                <span style="color:var(--text-secondary); margin-left:8px;" title="Max dots kept per CLASS (category) per bucket — e.g. 10 stitch + 10 weft-up + 10 warp-up in each time/encoder bucket.">Dots/Category/Bucket:</span>
                                 <select id="hm-dot-cap" onchange="setDotCap(this.value)" title="Max scatter dots kept per class PER BUCKET. The span is split into buckets and each loads up to this many dots, so a low value gives a sparse-but-even view across the whole shipment; higher = denser but slower pan/zoom." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:6px;" aria-label="Dots per class per bucket">
                                     <option value="10">10</option>
                                     <option value="100">100</option>
@@ -1183,6 +1236,8 @@
                                     <option value="3000">3000</option>
                                 </select>
                                 <span id="hm-dot-cap-warn" style="display:none; color:#fcd34d; margin-left:6px; font-size:11px;" title="Chart.js pan/zoom slows noticeably above ~3000 dots per class.">⚠ slow</span>
+                                <!-- 4.0.245 — Apply / Refresh moved here (end of toolbar row, after Dots/bucket). -->
+                                <button onclick="refreshDetectionInsights()" title="Apply the current Shipment / Window / Min-conf selection and reload every chart on this tab." style="padding:4px 10px; font-size:11px; cursor:pointer; background:linear-gradient(135deg,#3b82f6,#2563eb); color:#fff; border:none; border-radius:4px; font-weight:600; margin-left:14px;">🔄 Apply / Refresh</button>
                             </div>
                             <!-- 4.0.44 — title + legend lifted OUT of Chart.js so the colour heatmap (which paints inside chartArea) can't reach them. -->
                             <!-- v4.0.135 — title + shape legend in a single row so it takes ONE line, not two. -->
@@ -1258,7 +1313,12 @@
                 <!-- 3.25.4 — Score per shipment (the time/encoder strips moved into Detection Insights). -->
                 <div id="quality-charts-panel" style="margin-bottom: 15px; padding: 14px 18px; background: linear-gradient(135deg, rgba(15,23,42,0.6), rgba(30,41,59,0.4)); border: 1px solid rgba(51,65,85,0.7); border-radius: 8px;">
                     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
-                        <h4 style="margin:0; color: var(--text-primary);">📊 Score per shipment</h4>
+                        <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+                            <h4 style="margin:0; color: var(--text-primary);">📊 Score per shipment</h4>
+                            <!-- v4.0.243 — trend across the shown shipments (older third vs newer third
+                                 of the RELATIVE scores): improving / degrading / stable. Set by loadScorePerShipment. -->
+                            <span id="sqs-list-trend" title="Trend across the shown shipments — older third vs newer third of the relative scores" style="font-size:13px; font-weight:700; padding:3px 12px; border-radius:12px; background:rgba(71,85,105,0.5); color:var(--text-primary); display:none;">—</span>
+                        </div>
                         <div style="display:flex; gap:6px; align-items:center; font-size:12px;">
                             <label style="color:var(--text-secondary); font-size:11px;">Shipments:
                                 <input id="sqs-shipments" type="number" min="5" max="200" step="1" value="30"
@@ -1327,30 +1387,19 @@
 
 
 
-                <!-- Defect Diagnostics — from inference_results (Pareto, heatmap, camera, latency), 3.18.0 -->
-                <div id="quality-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
-                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
-                        <h4 style="margin:0; color: var(--text-primary);">🔬 Defect Diagnostics</h4>
-                        <span id="quality-total" style="font-size:12px; color:var(--text-secondary);"></span>
-                    </div>
-                    <div id="quality-empty" style="display:none; padding:20px; text-align:center; color:var(--text-secondary); font-size:13px;">
-                        No stored detections in this window. Enable <b>Store</b> on a class to populate these diagnostics.
-                    </div>
-                    <div id="quality-charts" style="display:grid; grid-template-columns: 1fr 1fr; gap:15px;">
-                        <div style="min-height:280px;"><canvas id="quality-pareto-chart"></canvas></div>
-                        <div style="min-height:280px;"><canvas id="quality-camera-chart"></canvas></div>
-                        <div style="min-height:320px; grid-column: 1 / -1;"><canvas id="quality-heatmap-chart"></canvas></div>
-                        <div style="min-height:260px; grid-column: 1 / -1;"><canvas id="quality-latency-chart"></canvas></div>
-                    </div>
-                </div>
+                <!-- v4.0.232 — "🔬 Defect Diagnostics" panel removed (operator: "remove
+                     this section entirely, I don't get it"). Its four canvases never
+                     rendered anyway: the refreshQualityCharts() that populated them was a
+                     DUPLICATE, dead-shadowed by the strip-refresher of the same name, so
+                     the panel shipped permanently blank. Removed the markup + the dead JS. -->
 
                 <!-- Future custom Grafana embed hook (text removed per request, 3.16.2).
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.222"></script>
+            <script src="/static/js/iframes.js?v=4.0.263"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.222"></script>
+            <script src="/static/js/charts.js?v=4.0.263"></script>
             <!-- End Grafana Tab -->
 
             <!-- AI Assistant Tab -->
@@ -2249,7 +2298,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.222">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.263">
         <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2290,10 +2339,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.222"></script>
-        <script src="/static/js/app-core.js?v=4.0.222"></script>
+        <script src="/static/js/audio.js?v=4.0.263"></script>
+        <script src="/static/js/app-core.js?v=4.0.263"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.222"></script>
-        <script src="/static/js/annotate.js?v=4.0.222"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.263"></script>
+        <script src="/static/js/annotate.js?v=4.0.263"></script>
     </body>
 </html>

@@ -7,6 +7,212 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.246 – 4.0.263] - 2026-07-31 — Charts loader rebuilt correctly + shipment tooltip fixes
+
+Long debugging arc (vteam12 stationary + khoy/kiancord real-encoder lines) that ended with the Charts tab loading correctly on both flat-encoder and moving lines.
+
+### The loader (the core fix)
+- **Bucket-by-bucket, newest→oldest carpet restored** and made robust: retry-on-reset per bucket, no blank-to-zero, and a 1.5s debounce so a tab-visible SSE reconnect can't nuke a just-loaded chart with rapid duplicate re-fires.
+- **Strip binning axis-sync (the root bug).** The v4.0.234 change keyed strip cells by an absolute *encoder* position (`_encOf`); on a flat-encoder line every bucket collapsed to bin 0 (the "leftmost bucket updated again and again"). Worse, the ladder's auto-widen read the axis from a possibly-undefined `_mveUnifiedX`, fell back to the `_insightAxis` **encoder default**, and silently rewrote `_progressiveColorRange.axis` to `encoder` with *time* bounds mid-load (`[core] stripAxis=time` → `[ladder] stripAxis=encoder`). Fixed: auto-widen now reads the scatter's real effective axis (`__mveAxis`); `_encOf` falls back to the bin index when the range is degenerate; the colour heatmap skips when every cell lands in one bin.
+- **Data-extent bucketing.** New cheap backend `range_only` probe (indexed `MIN/MAX(time)` + `MIN/MAX(encoder_value)`) so the axis spans the *actual data* of the selected axis (time or encoder), not `[now-window, now]` which is mostly empty when the line ran only recently. Encoder min/max seeds the encoder-axis domain; flat encoder → falls back to time.
+- **Axis labels:** time shows **date + time** on every tick; encoder shows raw encoder values; length shows the Advanced-tab unit.
+
+### Toolbar + tooltip
+- Toolbar pill-groups (X-axis, Baseline, Scale, Cells, **Phase**) → compact **dropdowns** with tooltips; Refresh → 🔄 Apply/Refresh moved after Dots/Category/Bucket; "Dots/Category/Bucket" label restored (N dots per *class* per bucket).
+- **Shipment tooltip:** Length now divides the raw encoder span by encoder-units-per-unit (real metres, was raw counts); **encoder start→end** shown alongside the time range (backend `/api/quality/shipments` now returns per-shipment `encoder_min`/`encoder_max`).
+- FOUC fix (hidden superseded score card); defaults baseline→shipment_avg, phase→p0.
+
+### Files
+- `static/js/charts.js` — loader, auto-widen axis-sync, strip degenerate-range guard, date+time ticks, dropdowns, tooltip.
+- `static/status.html` — dropdown toolbar, labels, cache-busters.
+- `routers/timeline.py` — `range_only` MIN/MAX probe; `quality_shipments` returns `encoder_min`/`encoder_max`.
+
+### Deployed
+vteam12 (192.168.1.106), khoy (2225), kiancord (2226) all on 4.0.263 (backend restart applied). hashtgerd / razin not yet updated.
+
+## [4.0.245] - 2026-07-30 — Dots diagnostic + FOUC fix + toolbar defaults/relocation
+
+Operator: charts tab "flashes the old quality card then jumps", "no detections in the chart", plus default/placement tweaks.
+- **Dots diagnostic**: server-side data is fully valid (751 dots, valid x/y/cls, `camera_y_order`, both TB/WIR `show:true`) and the shipment lane derived from these same dots IS populated — so the missing dots are a live *draw* issue, not data. Added a one-shot `[dots-diag]` console log after the scatter render (datasets + visibility + first-point pixel position + chartArea) to pin it down from the browser.
+- **FOUC**: `#shipment-quality-card` (the superseded "Shipment Quality Score / Trend over window" block) now `display:none` by default so it no longer flashes before `_reorderChartsTab` runs.
+- **Defaults** (fresh browser only, explicit choice always wins): baseline → **Shipment avg**, phase → **p0** (seeded into localStorage at load); X-axis already defaults to Encoder.
+- **Apply / Refresh** moved from the top header to the END of the X-axis toolbar row (after Dots/bucket).
+
+### Files
+- `static/js/charts.js` — `_seedHeatmapDefaults()` (baseline=shipment_avg, phase=0); one-shot dots diagnostic after scatter render.
+- `static/status.html` — hide `#shipment-quality-card`; baseline `<select>` default → shipment_avg; Apply/Refresh relocated; cache-busters → 4.0.245.
+
+## [4.0.244] - 2026-07-30 — Charts toolbar collapsed to compact dropdowns (operator: "make them all dropdowns in one line, with tooltips")
+
+The scatter toolbar's five pill-button groups (X-axis, Color baseline, Colour scale, Cells — plus tidied Buckets / Dots-per-bucket) are now compact `<select>` dropdowns on a single line, each with a descriptive `title=` tooltip. Every dropdown drives the SAME setter the old buttons called (`setInsightAxis`, `setHeatmapBaseline`, `setHeatmapScale`, `setHeatmapCells`); the original buttons are retained in a `display:none` wrapper so the existing style-by-id code (`_setAxisToggleUI`, the per-render baseline highlighter, the dynamic phase/parent-class renderers) keeps working untouched. The X-axis / Scale / Cells / Baseline dropdowns now stay in sync with the effective state — notably the X-axis dropdown follows the stationary-line guard (shows **Time** when encoder/length falls back). **Refresh → 🔄 Apply / Refresh** (blue, clearer that it applies the current Shipment/Window/Min-conf).
+
+### Files
+- `static/status.html` — toolbar rewrite (dropdowns + hidden button wrappers + tooltips), Apply/Refresh rename, cache-busters → 4.0.244.
+- `static/js/charts.js` — `_setAxisToggleUI` + `setHeatmapScale` + `setHeatmapCells` + per-render baseline sync now also set the matching `<select>` value.
+
+## [4.0.236 – 4.0.243] - 2026-07-30 — Charts-tab rebuild: per-bucket carpet loader, row-bounded score-per-shipment, ↑/↓ delta strips, layout reorder
+
+Consolidated entry for the charts-tab overhaul driven by operator feedback on vteam12:
+- **Score-per-shipment** moved to the top of the tab, backed by a single row-bounded SQL query (`ORDER BY last_t DESC LIMIT N` over the last 2M rows, **no time window** — the window was removed front and back); per-shipment **Improving / Degrading / Stable** trend chip in the header (relative-score based).
+- **Per-bucket carpet loader**: newest→oldest, each bucket fills the scatter then its strips before advancing; encoder/length x-axis **auto-widens** to fit all loaded dots (no domain query — `quality_score`/`shipment_spans` time out on heavy lines); strip cells re-bin over the growing domain via absolute-encoder tags.
+- **Quality + Ejection strips** now show **↑/↓ score/ejection deltas vs the previous bucket** (up = red/worsening, down = green/improving), matching the colour-change strip.
+- Removed the scatter **trend line** (operator: "annoying") and the standalone "Shipment Quality Score + Trend over window" section; **Calibrate** moved to the Advanced tab beside the `score_scale_factor` Set button; **shipment-lane click selects that shipment**; PDF button beside CSV.
+- AI Assistant executes DB/search tools instead of printing the call as text (`tools`/`tool_calls`) and renders markdown.
+
+## [4.0.235] - 2026-07-30 — Score-per-shipment + shipment-hover meta: bounded scan (were `window=all` → timeout → "NO DATA")
+
+Operator: *"why is score-per-shipment blank?"* Answer: the card and the shipment-hover meta both fetch `/api/quality/shipments?window=all`, which scans the ENTIRE `inference_results` table. On a heavy line (khoy) that times out and returns empty → "NO DATA". (The charts were fine because they only ever query narrow per-bucket slices.) Bounded both to `window=24h` — a heavy line makes far more than N shipments in a day so "last N" is unchanged, and the scan is ~30× smaller.
+
+### Files
+- `vision_engine/static/js/charts.js` — `loadScorePerShipment` + `_ensureShipmentMetaLoaded` → `window=24h`.
+- `vision_engine/static/status.html` — cache-busters → 4.0.235.
+
+## [4.0.234] - 2026-07-30 — Per-bucket load: each bucket fills scatter + all 4 strips together, before the next
+
+Operator's exact model (with a drawing): *"for each bucket — fill the scatter of that bucket, then the shipment lane, then quality, then colour-change, then ejection — and once that bucket is done entirely, go to the next bucket."* 4.0.233's two-pass (whole scatter, then whole strips) was wrong. Reverted to **one pass**: per bucket, newest→oldest, load the dots then all four strips for that same bucket, then advance.
+
+The catch this exposed: the strips are backend-binned by index, and the scatter x-axis auto-widens as older buckets stream in — so a bin index captured while the axis was narrow no longer maps to the right slice. Fixed by tagging every strip/colour cell with its **absolute encoder centre** at fetch time; `_repaintProgressiveStrips` re-bins by encoder over the current (growing) domain, so each bucket's strips stay locked to its scatter dots as the axis expands. Cells with no encoder tag (the picked-shipment single-fetch path) fall back to their raw bin index.
+
+### Files
+- `vision_engine/static/js/charts.js` — single-pass ladder; `_extendStripsFromBucket` tags cells with `_enc`; `_repaintProgressiveStrips` re-bins by encoder; colour heatmap cells re-binned likewise.
+- `vision_engine/static/status.html` — cache-busters → 4.0.234.
+
+## [4.0.233] - 2026-07-30 — Scatter auto-widens (no range query); strips load AFTER the scatter, not ahead of it
+
+Self-verified the real root cause of the strips-full-while-scatter-crawls desync: on a heavy line **`shipment_quality_score` TIMES OUT and returns `encoder_min/max = null`** for 6d/7d (and `shipment_spans` caps at 200k rows), so 4.0.231's domain fetch got nothing → the axis fell back to the narrow 1h range → the strips dense-filled that tiny range while the ladder walked past it. No backend query reliably gives the window's encoder span on khoy.
+
+Fix (no range query at all):
+- **Scatter auto-widens.** `_extendScatterFromBucket` now grows the encoder/length x-axis to fit ALL loaded dots after each bucket, so the whole window's shipments appear as the ladder streams older/lower-encoder dots newest→oldest. `_progressiveColorRange` tracks the same range.
+- **Strips load AFTER the scatter, per-bucket** (operator: *"unless the scatter is loaded completely, how did you go to the strips?"*). The ladder is now two passes: pass 1 fills the scatter to completion; pass 2 then fills the strips newest→oldest over the final auto-widened domain. The strips can never run ahead of the scatter, and each fetch stays small.
+- Removed the useless `shipment_quality_score` domain fetch from the loader (it only stalled the load).
+
+Known-separate: score-per-shipment is empty on khoy because `/api/quality/shipments?window=all` also times out on the heavy table — a backend-scan issue, tracked separately.
+
+### Files
+- `vision_engine/static/js/charts.js` — auto-widen in `_extendScatterFromBucket`; two-pass ladder; removed the domain fetch.
+- `vision_engine/static/status.html` — cache-busters → 4.0.233.
+
+## [4.0.232] - 2026-07-30 — Removed dead "Defect Diagnostics" panel + its dead duplicate function
+
+Operator: *"remove this section entirely, I don't get it."* The 🔬 Defect Diagnostics panel (Pareto / defects-by-camera / location-heatmap / latency canvases) always shipped **blank**: the `refreshQualityCharts()` that populated it was a **duplicate top-level declaration**, dead-shadowed by the strip-refresher of the same name (function hoisting → the later one wins), so the panel's canvases were never touched and `/api/quality_charts` was never called.
+
+- **status.html** — removed the `#quality-insight-panel` markup (4 canvases).
+- **charts.js** — removed the dead duplicate `refreshQualityCharts` (139 lines, the Pareto/camera/heatmap/latency builder). The live strip-refresher `refreshQualityCharts` is the only one left; all call sites already resolved to it.
+
+### Files
+- `vision_engine/static/status.html`, `vision_engine/static/js/charts.js`, cache-busters → 4.0.232.
+
+## [4.0.231] - 2026-07-30 — Window load shows ALL shipments (uncapped encoder span) + pure bucket-by-bucket (no 1h-hydrate paint)
+
+Operator: *"I selected 6d and only one shipment showed"* and *"blank everything, then load bin-by-bin, no whole."* Two fixes to the all-shipments window load:
+
+- **Uncapped encoder domain.** The window's encoder span came from `/api/shipment_spans`, whose scan is **capped at 200k rows** (≈ 2h on khoy's throughput) — so a 6d/7d window collapsed to just the most-recent shipment. Switched to `/api/shipment_quality_score`'s `encoder_min`/`encoder_max`, an **uncapped MIN/MAX over the window** (cached, fast). On khoy 6d: shipment_spans gave `56.0M→57.3M` (1 shipment); quality-score gives `26.4M→57.3M` (the full span, all shipments).
+- **No whole-payload paint.** For an all-shipments window load `data` is the light **1h hydrate**; Core was painting all four strips from it (cells binned over the last hour but laid out full-width → smeared/misaligned) and plotting its 1h dots, then the ladder cleared+restreamed them (the blank/snap + colour-change-ahead-of-others). Now the hydrate only **builds the chart** (axis domain + camera Y-order + strip domain); its dots are **blanked** and the strips are **not** seeded from it. The progressive ladder owns all four strips + the scatter, filling **purely bucket-by-bucket newest→oldest** over the full-window domain. A **picked shipment** is unchanged (single full-span load, strips painted from its payload).
+
+Builds on 4.0.230's race coalescing (uncoordinated triggers no longer restart the ladder mid-load; 60s strip refresher gated).
+
+### Files
+- `vision_engine/static/js/charts.js` — encoder domain from `shipment_quality_score`; `_refreshAdvancedChartsCore` gates strip paint on `!preloadedData`; hydrate dots blanked for window loads.
+- `vision_engine/static/status.html` — cache-busters → 4.0.231.
+
+## [4.0.230] - 2026-07-30 — Charts race fix: strips no longer blank/snap at end of load; uncoordinated refresh triggers coalesced
+
+Operator (correct): *"I think this is a race condition."* A multi-agent audit of charts.js confirmed it. The Charts scatter+strips are driven by **many uncoordinated triggers** that each tear down the scatter and restart the whole progressive ladder, plus a 60s timer that wipes the strip accumulators mid-load:
+
+- **A** trainer-colour fetch completion (`_loadTrainerClassColors`), **B** Charts-tab click (+150ms), **C** `mve:color-check-toggled` event (~1200ms, from app-core `loadColorConfig`), **D** its DOMContentLoaded re-apply (+1400ms) — all call `refreshDetectionInsights` → `refreshAdvancedCharts`, each bumping the ladder ticket and rebuilding the chart.
+- **F** the 60s `refreshQualityCharts` timer wipes `_progressiveQualityCells`/`_progressiveEjectionCells`/`_progressiveShipmentCells` and re-streams with the **live** ladder ticket — so on a heavy machine (khoy, full load ≈ 60s) it fires right at the end and **blanks the quality/shipment strips** while colour-change (persistent source) stays full. That's the reported "goes blank at the end."
+
+Fixes (frontend-only):
+- **Coalesce identical re-fires.** `refreshAdvancedCharts` now computes a load key (window|shipment|axis|bins|colour-check|min-conf|baseline|phase|parent-class); if a ladder for the **same** view is already in flight (`_ladderActive`), a redundant trigger folds into it instead of restarting. A genuine change (different key) still restarts. The gate is released in a `try/finally` that covers every exit path.
+- **Gate the 60s strip refresher.** It's a no-op while `_ladderActive`, so it can never wipe accumulators the ladder is still filling.
+- **No-wipe periodic refresh.** When it does run (load settled), it overwrites each bin in place instead of clearing first — no ~1.3s blank flash on heavy machines.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_ladderActive`/`_lastLoadKey` coalesce gate in `refreshAdvancedCharts`; `refreshQualityCharts` gated + no-wipe.
+- `vision_engine/static/status.html` — cache-busters → 4.0.230.
+
+### Known follow-ups (from the audit, deferred — transient/self-healing, not the blank)
+- 1h-hydrate strips smeared across full width until the ladder re-bins (`_renderStripsFromPayload` at Core); seed-then-wipe ordering; duplicate dead `refreshQualityCharts` (4480, Pareto/latency panel never renders); length-axis domain uses time bounds; undefined `_renderSizeConfidenceBandsOnly` branch.
+
+## [4.0.229] - 2026-07-29 — Encoder axis no longer falls back to Time on a currently-stopped line; encoder-domain check de-duplicated
+
+Follow-up to 4.0.228. Two things:
+
+- **Stationary-line guard was too eager.** It flipped the axis to Time whenever the **1-hour hydrate** had no encoder width — so on a line that is stopped *right now* but moved earlier in the window, picking 📏 Encoder still rendered a Time axis (title "Camera × time", clock ticks). It now also honours the window's encoder span (`_mveEncWindowRange`): if the WINDOW has real encoder width, the domain fix keeps the axis from collapsing, so it stays on Encoder. Truly-flat cases (e.g. an unwired encoder, `encoder_value=0` everywhere) still fall back to Time so data is never invisible.
+- **De-duplicated** the 4-part `_mveEncWindowRange` validity check (was inlined at 3 call sites) into one `_encWinRange()` helper feeding the scatter domain, the strip domain, and the guard.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_encWinRange()` helper; stationary-guard honours the window span.
+- `vision_engine/static/status.html` — cache-busters → 4.0.229.
+
+## [4.0.228] - 2026-07-29 — Encoder-axis scatter/strips respect the selected window (were stuck on the last hour = current shipment only)
+
+Operator: *"I chose 24h but it only shows the last shipment — did you hardcode something?"* Yes, effectively. In **encoder-axis** mode (the default), the Camera×Encoder scatter and the quality/ejection/shipment/colour strips took their X-domain from a fast **1-hour hydrate** call's heatmap bounds ([`heatmapEncMin/Max`]). Selecting 24h correctly widened the *time* ladder (it walks 24h of buckets), but the fixed encoder X-axis clipped every older dot (older = lower encoder), so only the current shipment's ~hour showed. Time-axis mode was already correct (it synthesises `now−window → now`).
+
+Fix (frontend-only, uses `/api/shipment_spans` which the fleet already has — no backend change): `refreshAdvancedCharts` now fetches the window's **true encoder span** from `shipment_spans` (fast; returns per-shipment `enc_min/enc_max`), stashes the union as `window._mveEncWindowRange`, and both the scatter domain (`_refreshAdvancedChartsCore`) and the strip domain (`_seedProgressiveColorCache`) size to it. The ladder's older buckets now fall inside the axis and are drawn — all shipments in the window appear, still streaming newest→oldest. A picked shipment is unchanged (keeps its own span).
+
+### Files
+- `vision_engine/static/js/charts.js` — `_mveEncWindowRange` fetch + domain wiring in `refreshAdvancedCharts`, `_refreshAdvancedChartsCore`, `_seedProgressiveColorCache`.
+- `vision_engine/static/status.html` — cache-busters → 4.0.228.
+
+## [4.0.227] - 2026-07-29 — AI Assistant: tool calls actually execute on OpenAI-compatible relays (DeepSeek/Kimi); markdown responses render
+
+Two demo-blocking bugs in the AI Assistant:
+
+- **Tools never executed on DeepSeek/other OpenAI-compatible relays.** The `chatgpt` provider branch used the **deprecated `functions`/`function_call`** API. DeepSeek (and most current relays) only populate `message.tool_calls`, so MVE saw no function call, fell through to the `else`, and **returned the model's text verbatim** — the assistant *printed the SQL* (`query_database`) or *printed* `search_knowledge(...)` instead of running them, and KB answers were never grounded (empty citations). Switched to the modern **`tools`/`tool_calls`** API (with a legacy `function_call` fallback), so `search_knowledge` and `query_database` actually run: real DB results, real grounded answers with citations. The live-status question worked before only because current status is pre-injected into the system prompt (no tool call needed).
+- **Markdown wasn't rendered.** The assistant's reply was formatted with a bold/italic-only regex, so `##`/`###` headers and `| tables |` showed as raw text. Added `_mdToHtml()` — a compact GitHub-flavoured-markdown renderer (headers, tables, ordered/unordered lists, fenced + inline code, bold/italic, links; all HTML-escaped first).
+
+### Files
+- `vision_engine/routers/ai.py` — `call_ai_model` OpenAI branch → `tools`/`tool_calls` agentic loop.
+- `vision_engine/static/js/audio.js` — `_mdToHtml()`; `sendAIMessage` renders through it.
+- `vision_engine/static/status.html` — cache-busters → 4.0.227.
+
+## [4.0.226] - 2026-07-28 — Shipment-lane hover shows the FULL record (verdict, score, length, start→end, detections, top defects) in an app-styled card
+
+Operator: *"when I hover a specific shipment I need ALL the data — the start, the end, the detections, the length — not just the shipment name."*
+
+The full per-shipment record already lived in `window._mveShipmentMeta` (cached from `/api/quality/shipments`), but it was only wired to the native OS `title=` bubble **and** it depended on the Score-per-shipment card having loaded first — so before that card rendered, or on a fresh Charts open, the hover degraded to name-only. Three fixes:
+
+- **App-styled floating card** replaces the native `title=` bubble (`#mve-ship-tooltip`, dark card matching `--card-bg`/`--border-color`, verdict shown as a coloured badge). Cells now carry `data-ship`; the label overlays are already `pointer-events:none` so the hover falls through to the coloured cell.
+- **Computed live on hover** from the current meta + the strip's bin range, via one **delegated** listener on `#shipment-strip` (survives the progressive-ladder repaints — the listener is on the container, not the cells). Shows: shipment id, verdict + score, length (encoder span + unit), **Start → End** (actual first/last timestamps when available, else derived from the bins), detection count, and top defects. The bin-derived Start→End shows even before the meta arrives.
+- **Eager meta load** (`_ensureShipmentMetaLoaded`, throttled 1×/20 s, fired from the strip paint) so the record is present independently of the Score-per-shipment card.
+
+### Files
+- `vision_engine/static/js/charts.js` — `_shipmentHoverText` (native-title builder) replaced by `_ensureShipmentMetaLoaded` / `_shipTooltipEl` / `_shipmentTooltipHTML` / `_bindShipmentStripHover`; `_paintShipmentStrip` publishes `_shipHoverCtx`/`_shipRangeMap`, emits `data-ship`, binds the delegated hover.
+- `vision_engine/static/status.html` — cache-busters → 4.0.226.
+
+## [4.0.225] - 2026-07-28 — Gallery tab + PiGallery2 service removed; Knowledge tab renamed "Knowledge"
+
+Operator: *"remove the pigallery and Gallery tab entirely. Also `tab_knowledge` is not good UI — name it something like Knowledge."*
+
+- **Gallery tab gone.** Removed the Gallery tab button, the `#tab-gallery` content div, the `iframeConfig.gallery` entry (`iframes.js`, the only iframe tab left → `loadIframeForTab` is now a no-op), and `iframeTabs=['gallery']` in `audio.js` (nothing left to skip on tab-restore).
+- **PiGallery2 service removed** from `docker-compose.yml` (freed port 5000, RAM, and the `raw_images` bind-mount). On each host: `docker rm -f monitait_pigallery2` + drop `volumes/pigallery2_*` to reclaim disk.
+- **Knowledge tab label.** Button was `data-i18n="tab_knowledge"` (rendered the raw key on machines without that string). Now a hardcoded "📚 Knowledge".
+
+### Files
+- `vision_engine/static/status.html` — Gallery button + `#tab-gallery` div removed; Knowledge button relabelled; cache-busters → 4.0.225.
+- `vision_engine/static/js/iframes.js` — `iframeConfig.gallery` removed.
+- `vision_engine/static/js/audio.js` — `iframeTabs=[]`.
+- `docker-compose.yml` — `pigallery2` service removed.
+
+## [4.0.224] - 2026-07-28 — Knowledge (RAG) assistant: separate service, MVE proxy, Knowledge tab, AI-Assistant tools + citations
+
+- **Knowledge RAG landed as a separate `monitait_knowledge` container** (port 4445), gated behind `kb_available()` so a down/absent service never breaks MVE. MVE reaches it through a hardened proxy (`routers/knowledge.py`: TTL liveness cache, `asyncio.to_thread`, safe-int coercion).
+- **AI-Assistant tab** gained `search_knowledge` / `find_similar_issues` / `propose_config_change` tools (gated append in `ai.py`), a `KNOWLEDGE_PROMPT_SECTION`, and citation chips in the reply. `query_ai` now returns `{response, model, citations, proposed_actions, knowledge_available}`.
+- **Knowledge tab** (same-origin `knowledge.html` iframe → reaches `/api/kb/**` through MVE's proxy, no CORS): file upload / browse / search for the RAG corpus.
+- `main.py` — `knowledge_router` included; `_NoCacheHTMLStaticFiles` so HTML is never cached stale.
+
+### Files
+- `vision_engine/routers/knowledge.py` (new), `vision_engine/routers/ai.py`, `vision_engine/main.py`, `vision_engine/static/status.html`, `vision_engine/static/knowledge.html` (new), `knowledge_assistant/*` (separate service).
+
+## [4.0.223] - 2026-07-28 — Quality/ejection/shipment strips now paint from the full payload like colour-change (fixes "colour-change has data but the others don't")
+
+Operator: *"why does the colour-change strip have data but not the others?"* Backend was fully correct (quality/ejection/shipment/colour slices all 48/48 populated). The bug: at the Core render, colour-change is painted from the full payload (`_renderColorChangeStrip(axisMode, data)`), but `_renderStripsFromPayload` — the equivalent full-payload paint for quality/ejection/shipment — was **defined and never called**. So those three only ever filled via the progressive newest→oldest ladder; if it was slow/incomplete (or `_progressiveColorRange` wasn't ready) they stayed blank while colour-change was already full. Fix: call `_renderStripsFromPayload(data, axisMode)` right after the colour-change paint. They share identical `t_min/t_max`, so they align; the ladder still refines newest→oldest after.
+
+### Files
+- `vision_engine/static/js/charts.js` — Core render now calls `_renderStripsFromPayload`.
+- `vision_engine/static/status.html` — cache-busters → 4.0.223.
+
 ## [4.0.222] - 2026-07-27 — Score-per-shipment self-heals on tab-open; shipment hover shows length/start-end/score/verdict
 
 - **Score-per-shipment blank on Charts open (fleet-wide).** `switchTab('grafana')` never actually triggered a load, and the chart was often built while the tab was hidden (canvas 0×0 → Chart.js draws nothing) → it came up blank until a manual Refresh. Added `_ensureScorePerShipmentLoaded()` — a watchdog fired from `switchTab('grafana')` at 350/1200/3000 ms: if the chart already has data it just `resize()`+`update()`s it (the 0×0 case), otherwise it force-loads. Operator asked for exactly this ("check if Score-per-shipment doesn't exist and load it").

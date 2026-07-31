@@ -1707,7 +1707,7 @@ function switchTab(tabName) {
         });
     }
 
-    // Lazy-load/unload iframes for gallery and grafana tabs
+    // Lazy-load/unload any remaining iframe tabs (gallery removed in 4.0.225)
     if (typeof loadIframeForTab === 'function') {
         loadIframeForTab(tabName);
     }
@@ -1733,7 +1733,7 @@ function switchTab(tabName) {
 // stays skipped.
 document.addEventListener('DOMContentLoaded', function() {
     const savedTab = localStorage.getItem('selectedTab');
-    const iframeTabs = ['gallery'];
+    const iframeTabs = []; // 'gallery' removed in 4.0.225 — no iframe tabs left to skip
     if (savedTab && !iframeTabs.includes(savedTab)) {
         const tabButton = document.querySelector(`.tab-button[onclick="switchTab('${savedTab}')"]`);
         if (tabButton) {
@@ -2740,6 +2740,70 @@ function clearChatHistory() {
     }
 }
 
+// v4.0.224 — HTML-escape helper (none existed in static/js). Used to escape
+// untrusted citation text/labels before injecting them as chips.
+function _escKb(s) {
+    const d = document.createElement('div');
+    d.textContent = (s == null ? '' : String(s));
+    return d.innerHTML;
+}
+
+// v4.0.227 — compact GitHub-flavoured-markdown → HTML renderer for the AI
+// Assistant. Handles headers, tables, ordered/unordered lists, fenced + inline
+// code, bold/italic, and links. All text is HTML-escaped before formatting, so
+// model output cannot inject markup.
+function _mdToHtml(src) {
+    if (!src) return '';
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inline = (t) => esc(t)
+        .replace(/`([^`]+)`/g, '<code style="background:rgba(0,0,0,0.25);padding:1px 4px;border-radius:4px;">$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Pull fenced code blocks out first so their contents aren't reformatted.
+    const blocks = [];
+    src = String(src).replace(/```[\w-]*\n?([\s\S]*?)```/g, (_m, code) => {
+        blocks.push('<pre style="background:rgba(0,0,0,0.3);padding:8px 10px;border-radius:6px;overflow-x:auto;margin:6px 0;"><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>');
+        return ' CODE' + (blocks.length - 1) + ' ';
+    });
+    const lines = src.split('\n');
+    const out = [];
+    let i = 0;
+    const isSpecial = (s) => /^\s*(#{1,6})\s|^\s*[-*•]\s|^\s*\d+\.\s/.test(s) || /^ CODE\d+ $/.test(s.trim()) || /\|/.test(s) || s.trim() === '';
+    while (i < lines.length) {
+        const ln = lines[i];
+        if (/^ CODE\d+ $/.test(ln.trim())) { out.push(ln.trim()); i++; continue; }
+        const h = ln.match(/^\s*(#{1,6})\s+(.*)$/);
+        if (h) { const lvl = Math.min(6, h[1].length + 1); out.push('<h' + lvl + ' style="margin:10px 0 4px;font-size:' + (16 - h[1].length) + 'px;">' + inline(h[2]) + '</h' + lvl + '>'); i++; continue; }
+        // table: a row with pipes followed by a |---|---| separator
+        if (/\|/.test(ln) && i + 1 < lines.length && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(lines[i + 1])) {
+            const splitRow = (r) => { const c = r.split('|').map((s) => s.trim()); if (c.length && c[0] === '') c.shift(); if (c.length && c[c.length - 1] === '') c.pop(); return c; };
+            const head = splitRow(ln); i += 2; const rows = [];
+            while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim() !== '') { rows.push(splitRow(lines[i])); i++; }
+            const bd = 'border:1px solid var(--border-color,#334155);padding:4px 8px;';
+            const th = '<tr>' + head.map((c) => '<th style="' + bd + 'text-align:left;">' + inline(c) + '</th>').join('') + '</tr>';
+            const tb = rows.map((r) => '<tr>' + r.map((c) => '<td style="' + bd + '">' + inline(c) + '</td>').join('') + '</tr>').join('');
+            out.push('<table style="border-collapse:collapse;margin:8px 0;font-size:12px;">' + th + tb + '</table>');
+            continue;
+        }
+        if (/^\s*[-*•]\s+/.test(ln)) {
+            const items = [];
+            while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) { items.push('<li>' + inline(lines[i].replace(/^\s*[-*•]\s+/, '')) + '</li>'); i++; }
+            out.push('<ul style="margin:4px 0;padding-left:20px;">' + items.join('') + '</ul>'); continue;
+        }
+        if (/^\s*\d+\.\s+/.test(ln)) {
+            const items = [];
+            while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push('<li>' + inline(lines[i].replace(/^\s*\d+\.\s+/, '')) + '</li>'); i++; }
+            out.push('<ol style="margin:4px 0;padding-left:22px;">' + items.join('') + '</ol>'); continue;
+        }
+        if (ln.trim() === '') { i++; continue; }
+        const para = [ln]; i++;
+        while (i < lines.length && !isSpecial(lines[i])) { para.push(lines[i]); i++; }
+        out.push('<p style="margin:4px 0;">' + inline(para.join('\n')).replace(/\n/g, '<br>') + '</p>');
+    }
+    return out.join('\n').replace(/ CODE(\d+) /g, (_m, n) => blocks[+n] || '');
+}
+
 async function sendAIMessage() {
     const input = document.getElementById('ai-input');
     const message = input.value.trim();
@@ -2786,14 +2850,27 @@ async function sendAIMessage() {
         const aiMsg = document.createElement('div');
         aiMsg.style.cssText = 'margin-bottom: 10px; padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); color: var(--text-primary); line-height: 1.6;';
 
-        // Format the response with better line breaks and preserve markdown-like formatting
-        let formattedResponse = (data.response || data.error || 'No response')
-            .replace(/\n/g, '<br>')
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            .replace(/• /g, '&nbsp;&nbsp;• ');
+        // v4.0.227 — render the model's GitHub-flavoured markdown (headers,
+        // tables, lists, code, bold/italic) instead of the old bold-only regex
+        // that left ## / ### / | tables | as raw text (operator: "why do we have
+        // ## ### in the response, it should render").
+        let formattedResponse = _mdToHtml(data.response || data.error || 'No response');
 
-        aiMsg.innerHTML = `<div style="margin-bottom: 8px;"><strong style="color: var(--primary-color);">🤖 AI:</strong></div><div>${formattedResponse}</div>`;
+        aiMsg.innerHTML = `<div style="margin-bottom: 8px;"><strong style="color: var(--primary-color);">🤖 AI:</strong></div><div class="mve-md">${formattedResponse}</div>`;
+
+        // v4.0.224 — knowledge citation chips. Defensive on key names (the MKB
+        // passage shape is verified at runtime); empty array (KB off) → no chips,
+        // so this is inert when the knowledge service is down.
+        if (Array.isArray(data.citations) && data.citations.length) {
+            const chips = data.citations.map(function (c) {
+                const label = _escKb(c.citation || c.label || (c.document_id != null ? ('[' + c.document_id + ']') : '') || c.source || 'source');
+                const src = _escKb(c.source || c.document_name || '');
+                const tip = _escKb((c.text || c.snippet || '').slice(0, 200));
+                const href = (c.document_id != null) ? ('/api/kb/documents/' + encodeURIComponent(c.document_id) + '/download') : '#';
+                return '<a href="' + href + '" target="_blank" title="' + tip + '" style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;font-size:11px;background:rgba(100,160,255,0.15);color:#7ab8ff;border:1px solid rgba(100,160,255,0.35);border-radius:10px;text-decoration:none;">📄 ' + label + (src ? (' ' + src) : '') + '</a>';
+            }).join('');
+            aiMsg.insertAdjacentHTML('beforeend', '<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px;">' + chips + '</div>');
+        }
         chatMessages.appendChild(aiMsg);
 
         // Save to history

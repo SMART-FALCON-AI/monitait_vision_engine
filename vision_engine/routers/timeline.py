@@ -2299,7 +2299,7 @@ def shipment_quality_score_trend(
 from datetime import timedelta as _td   # 3.25.4 — used by /api/quality/heatmap
 
 @router.get("/api/quality/shipments")
-def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
+def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
     """3.25.4 — recent shipments + their quality scores for a per-shipment bar chart.
 
     Returns up to `n` shipments started within `window`, each with its
@@ -2338,14 +2338,21 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
         # keeping the GROUP BY bounded (statement_timeout guards the rest).
         "all":  "90 days",
     }
-    interval = _windows.get(window, "30 days")
     # v4.0.103 — clamp n: <=0 → uncapped (5000 max), else clamp to [1, 5000]
     try:
         n = int(n)
     except (TypeError, ValueError):
         n = 30
     effective_n = 5000 if n <= 0 else max(1, min(n, 5000))
+    # v4.0.238 — the last N shipments, TIME-WINDOW-FREE (operator: "just a SQL query,
+    # DESC LIMIT N, avoid anything time-related"). An unbounded GROUP BY over the whole
+    # table would itself be slow, so bound the scan by ROWS not time: pull the most
+    # recent ~2M rows via the time index (fast — the planner uses the time index for
+    # `ORDER BY time DESC LIMIT`), then GROUP those into shipments. 2M rows always holds
+    # far more than N shipments, so this returns the true last N however far back they
+    # are, and never times out. `window` is ignored for the list.
     out: list = []
+    rows: list = []
     try:
         from services.db import get_db_connection, release_db_connection
         conn = get_db_connection()
@@ -2353,30 +2360,29 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
             return JSONResponse(content={"shipments": []})
         try:
             cur = conn.cursor()
-            # 3.25.4 hotfix — image_path is `raw_images/<shipment>/<hour>/<frame>.jpg`,
-            # so the shipment label lives in segment 2.
-            # v4.0.103 — heavy CTE against big row counts (30d on khoy = ~45M
-            # rows). Raise per-tx timeout so we don't silently return an
-            # empty list on the operator's default 30d view.
-            cur.execute("SET LOCAL statement_timeout = 20000")
-            cur.execute(
-                f"""
-                SELECT SPLIT_PART(image_path, '/', 2) AS ship,
-                       MIN(time) AS first_t,
-                       MAX(time) AS last_t,
-                       COUNT(*)   AS n_rows
-                FROM inference_results
-                WHERE time > NOW() - INTERVAL %s
-                  AND image_path IS NOT NULL
-                  AND SPLIT_PART(image_path, '/', 2) NOT IN ('', 'no_shipment')
-                GROUP BY 1
-                ORDER BY first_t DESC
-                LIMIT %s
-                """,
-                (interval, effective_n),
-            )
-            rows = cur.fetchall()
-            cur.close()
+            try:
+                cur.execute("SET LOCAL statement_timeout = 15000")
+                cur.execute(
+                    """
+                    SELECT ship, MIN(time) AS first_t, MAX(time) AS last_t, COUNT(*) AS n_rows
+                    FROM (
+                        SELECT SPLIT_PART(image_path, '/', 2) AS ship, time
+                        FROM inference_results
+                        WHERE image_path IS NOT NULL
+                        ORDER BY time DESC
+                        LIMIT 2000000
+                    ) sub
+                    WHERE ship NOT IN ('', 'no_shipment')
+                    GROUP BY ship
+                    ORDER BY last_t DESC
+                    LIMIT %s
+                    """,
+                    (effective_n,),
+                )
+                rows = cur.fetchall()
+            finally:
+                try: cur.close()
+                except Exception: pass
         finally:
             try: release_db_connection(conn)
             except Exception: pass
@@ -2396,7 +2402,7 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
         # operator to hit "Calibrate".
         for ship, first_t, last_t, n_rows in rows:
             try:
-                qp = _compute_quality_payload(shipment=ship, window=window)
+                qp = _compute_quality_payload(shipment=ship, window="90d")
                 out.append({
                     "shipment": ship,
                     "score":            qp.get("score") if qp else None,
@@ -2414,6 +2420,10 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
                     # per 100 units" (works for any product: fabric metres, glass
                     # sheets, wire kilometres, whatever your encoder measures).
                     "encoder_span":            qp.get("encoder_span") if qp else 0,
+                    # 4.0.263 — real encoder start/end so the shipment tooltip can show the
+                    # encoder range like it shows the time range (operator request).
+                    "encoder_min":             qp.get("encoder_min") if qp else None,
+                    "encoder_max":             qp.get("encoder_max") if qp else None,
                     "encoder_unit":            qp.get("encoder_unit", "unit") if qp else "unit",
                     # v4.0.140 — new field primary; legacy alias kept one release.
                     "encoder_units_per_unit":  (qp.get("encoder_units_per_unit") if qp else None),
@@ -2431,7 +2441,7 @@ def quality_shipments(request: Request, n: int = 30, window: str = "30d"):
     # "list is capped" from "here's everything in the window".
     return JSONResponse(content={
         "shipments": out,
-        "window": window,
+        "window": "recent",
         "requested_n": n,
         "cap_applied": (len(out) == effective_n and n != 0),
         "count": len(out),
@@ -3430,7 +3440,7 @@ def _dc_load_severity():
 
 
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0, range_only: int = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -3574,6 +3584,35 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # goes back to 3 s when we release it — write paths and cheap reads
         # keep their fail-fast behaviour.
         cur.execute("SET LOCAL statement_timeout = 15000")
+
+        # 4.0.256 — cheap MIN/MAX range probe for the Charts loader. The frontend asks
+        # for the ACTUAL data extent (time + encoder) in the window so it can bucket the
+        # [min,max] of the SELECTED axis (operator: "check the min/max of time or encoder
+        # based on the X-axis and bucket THAT"), instead of [now-window, now] which is
+        # mostly empty when the line ran only recently. Pure indexed aggregate — no jsonb
+        # expansion — so it returns in ms even on a huge hypertable.
+        if int(range_only or 0):
+            cur.execute(
+                f"SELECT EXTRACT(EPOCH FROM MIN(time)) * 1000.0, "
+                f"       EXTRACT(EPOCH FROM MAX(time)) * 1000.0, "
+                f"       MIN(encoder_value), MAX(encoder_value) "
+                f"FROM inference_results "
+                f"WHERE time > NOW() - INTERVAL %s {ship_clause}",
+                tuple([interval] + ([shipment] if shipment else [])),
+            )
+            _rr = cur.fetchone() or (None, None, None, None)
+            try:
+                release_db_connection(conn)
+            except Exception:
+                pass
+            conn = None
+            return JSONResponse(content={
+                "data_t_min":   float(_rr[0]) if _rr[0] is not None else None,
+                "data_t_max":   float(_rr[1]) if _rr[1] is not None else None,
+                "data_enc_min": int(_rr[2]) if _rr[2] is not None else None,
+                "data_enc_max": int(_rr[3]) if _rr[3] is not None else None,
+                "window": window, "shipment": shipment,
+            })
 
         # --- distinct shipments in the window (for the dropdown) ---
         cur.execute(

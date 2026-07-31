@@ -144,6 +144,17 @@ async function _loadShownClasses() {
 }
 function _isShown(cls) { return !_hiddenClasses.has(cls); }
 
+// 4.0.245 — default the heatmap baseline to shipment_avg and the phase to p0 on
+// a FRESH browser (operator spec). Only seeds when nothing is stored, so an
+// explicit later choice always wins. Runs at script load, BEFORE any fetch reads
+// `localStorage.getItem('mve_heatmap_baseline') || 'camera'`.
+(function _seedHeatmapDefaults() {
+    try {
+        if (localStorage.getItem('mve_heatmap_baseline') == null) localStorage.setItem('mve_heatmap_baseline', 'shipment_avg');
+        if (localStorage.getItem('mve_heatmap_phase') == null)    localStorage.setItem('mve_heatmap_phase', '0');
+    } catch (_) { /* private-mode / storage-disabled — fall back to code defaults */ }
+})();
+
 const _INSIGHT_PALETTE = [
     '#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899',
     '#14b8a6', '#f97316', '#6366f1', '#84cc16', '#06b6d4', '#a855f7'
@@ -769,6 +780,8 @@ function setHeatmapScale(mode) {
     const off = 'rgba(51,65,85,0.5)';
     if (a) { a.style.background = (v === 'absolute') ? on : off; a.style.color = (v === 'absolute') ? '#fff' : '#cbd5e1'; }
     if (r) { r.style.background = (v === 'relative') ? on : off; r.style.color = (v === 'relative') ? '#fff' : '#cbd5e1'; }
+    const _ss = document.getElementById('hm-scale-select'); // 4.0.244 dropdown sync
+    if (_ss && _ss.value !== v) _ss.value = v;
     if (_insightCameraScatter) { try { _insightCameraScatter.update('none'); } catch (_) {} }
 }
 window.setHeatmapScale = setHeatmapScale;
@@ -833,6 +846,8 @@ function setHeatmapCells(mode) {
     const off = 'rgba(51,65,85,0.5)';
     if (s) { s.style.background = (v === 'shown')  ? on : off; s.style.color = (v === 'shown')  ? '#fff' : '#cbd5e1'; }
     if (h) { h.style.background = (v === 'hidden') ? on : off; h.style.color = (v === 'hidden') ? '#fff' : '#cbd5e1'; }
+    const _cs = document.getElementById('hm-cells-select'); // 4.0.244 dropdown sync
+    if (_cs && _cs.value !== v) _cs.value = v;
     if (_insightCameraScatter) { try { _insightCameraScatter.update('none'); } catch (_) {} }
 }
 window.setHeatmapCells = setHeatmapCells;
@@ -961,6 +976,17 @@ function _renderPhaseButtons(available, activePhase) {
     if (sel && !(available || []).map(String).includes(String(sel))) {
         localStorage.setItem('mve_heatmap_phase', '');
         setBtnActive(allBtn, true);
+    }
+    // 4.0.262 — populate the visible Phase DROPDOWN from the same available list (the
+    // buttons above are now hidden, kept only for setHeatmapPhase compatibility).
+    const _phSel = document.getElementById('hm-phase-select');
+    if (_phSel) {
+        const _phCur = (localStorage.getItem('mve_heatmap_phase') || '');
+        let _o = '<option value="">🌐 All</option>';
+        for (const ph of (available || [])) { if (!ph && ph !== 0) continue; _o += '<option value="' + String(ph) + '">p' + String(ph) + '</option>'; }
+        _phSel.innerHTML = _o;
+        const _avail = (available || []).map(String);
+        _phSel.value = (_phCur && _avail.includes(String(_phCur))) ? String(_phCur) : '';
     }
 }
 window._renderPhaseButtons = _renderPhaseButtons;
@@ -1576,6 +1602,15 @@ window.mveLoaderEnd   = mveLoaderEnd;
 // spinner. Score per shipment, insights, heatmap and ejection strips
 // still render from their own fast endpoints.
 let _progressiveLadderTicket = 0;
+// v4.0.230 — race coalescing. `_ladderActive` is true only while a progressive
+// load is in flight; `_lastLoadKey` identifies the view it is loading. Multiple
+// uncoordinated triggers (tab-click, trainer-colour fetch, colour-check event +
+// its re-apply, the 60s strip timer) used to each restart the whole ladder and
+// wipe the strip accumulators mid-load → the blank/snap at end of load. These
+// two let an identical re-fire fold into the running load, and gate the 60s
+// strip refresher so it never wipes accumulators the ladder is still filling.
+let _ladderActive = false;
+let _lastLoadKey = '';
 
 // 4.0.163 — progressive colour-cell cache. `refreshDetectionInsights` seeds
 // this from the initial /api/detection_charts response's color_heatmap.cells;
@@ -1585,6 +1620,15 @@ let _progressiveLadderTicket = 0;
 let _progressiveColorCells = new Map();       // key -> cell
 let _progressiveColorRange = null;            // {axis, lo, hi, n_bins}
 let _progressiveColorAxis = 'encoder';
+
+// v4.0.228 — the selected window's encoder span (union of shipment_spans'
+// enc_min/enc_max), stashed on `window` by refreshAdvancedCharts for the encoder
+// axis. ONE validated source for its three consumers: the scatter domain, the
+// strip domain, and the stationary-line guard. Returns {lo,hi} or null.
+function _encWinRange() {
+    const r = window._mveEncWindowRange;
+    return (r && Number.isFinite(r.lo) && Number.isFinite(r.hi) && r.hi > r.lo) ? r : null;
+}
 
 function _seedProgressiveColorCache(data, axisMode) {
     // 4.0.165 — the initial /api/detection_charts?window=1h call returns
@@ -1611,11 +1655,22 @@ function _seedProgressiveColorCache(data, axisMode) {
     // Compute bin_ref for the FULL target window, not the 1h hydrate.
     let lo, hi;
     if (useEnc) {
-        lo = Number(raw.enc_min) || 0;
-        hi = Number(raw.enc_max) || 0;
+        // v4.0.228 — for all-shipments, use the window's encoder span (stashed by
+        // refreshAdvancedCharts from shipment_spans) so the strips cover the whole
+        // window in lock-step with the scatter, not just the 1h hydrate bounds. A
+        // picked shipment keeps its own payload bounds (raw.enc_min/max = its span).
+        const _ewr = _picked ? null : _encWinRange();
+        if (_ewr) { lo = _ewr.lo; hi = _ewr.hi; }
+        else { lo = Number(raw.enc_min) || 0; hi = Number(raw.enc_max) || 0; }
     } else if (_picked && Number.isFinite(Number(raw.t_min)) && Number.isFinite(Number(raw.t_max))
                && Number(raw.t_max) > Number(raw.t_min)) {
         lo = Number(raw.t_min); hi = Number(raw.t_max);   // picked shipment span
+    } else if (window._mveScatterRange && Number.isFinite(window._mveScatterRange.loMs)
+               && Number.isFinite(window._mveScatterRange.hiMs)) {
+        // 4.0.256 — align the strip binning to the SAME data extent the scatter uses
+        // (range probe), so quality/ejection/colour cells land under their dots instead
+        // of over [now-window, now] (which misaligns them, piling at the far-left bin).
+        lo = window._mveScatterRange.loMs; hi = window._mveScatterRange.hiMs;
     } else {
         const winSel = document.getElementById('insight-window');
         const target = (winSel && winSel.value) || '24h';
@@ -1679,6 +1734,7 @@ async function _extendColorHeatmapFromBucket(sinceMs, untilMs, shipment) {
 // vertical guideline hits the same data in the scatter, colour, quality AND
 // ejection layers. Accumulators mirror _progressiveColorCells.
 let _progressiveQualityCells = new Map();    // bin -> {bucket,n,score,top_class}
+let _progressiveTrendPts = new Map();        // v4.0.237 — enc -> {x,y}: per-bucket quality-score trend, overlaid on the scatter
 let _progressiveEjectionCells = new Map();   // bin -> {bucket,n,top_procedure,by_procedure}
 let _progressiveShipmentCells = new Map();   // v4.0.217 — bin -> {bucket, shipment, n}
 
@@ -1711,14 +1767,32 @@ function _paintQualityStrip(cells, nbins, axis, lo, hi) {
     const axisEl = document.getElementById('quality-strip-axis');
     if (axisEl) { try { axisEl.remove(); } catch (_e) {} }
     if (!strip) return;
-    const html = [];
+    // v4.0.240 — show the ↑/↓ DELTA of the score vs the previous non-empty bucket, like
+    // the colour-change strip (operator: "put the number of quality... goes up = red
+    // worsening, down = green"). Cell tinted RED when the number goes UP, GREEN when it
+    // goes DOWN; |Δ| sets the depth. Absolute score stays in the tooltip.
+    let _prev = null, _maxAbs = 0;
+    const _dl = new Array(nbins).fill(null);
     for (let i = 0; i < nbins; i++) {
         const c = cells[i];
-        const has = c && (Number(c.n) > 0 || c.top_class != null);
-        const color = has ? _scoreColor(c.score) : 'rgba(148,163,184,0.06)';
+        const ok = c && (Number(c.n) > 0 || c.top_class != null) && Number.isFinite(Number(c.score));
+        if (!ok) { _prev = null; continue; }
+        const s = Number(c.score);
+        _dl[i] = (_prev === null) ? 0 : (s - _prev);
+        if (Math.abs(_dl[i]) > _maxAbs) _maxAbs = Math.abs(_dl[i]);
+        _prev = s;
+    }
+    const html = [];
+    for (let i = 0; i < nbins; i++) {
+        const c = cells[i], d = _dl[i];
+        if (d === null) { html.push('<div style="flex:1; background:rgba(148,163,184,0.06);" title="no data in this bucket"></div>'); continue; }
+        const a = (_maxAbs > 0 ? (0.2 + 0.7 * Math.abs(d) / _maxAbs) : 0.25).toFixed(2);
+        const bg = d > 0 ? `rgba(239,68,68,${a})` : d < 0 ? `rgba(34,197,94,${a})` : 'rgba(148,163,184,0.15)';
+        let label = '';
+        if (Math.abs(d) >= 0.05) { const m = Math.abs(d); label = (d > 0 ? '↑' : '↓') + (m >= 10 ? m.toFixed(0) : m.toFixed(1)); }
         const top = (c && c.top_class) ? `Top: ${c.top_class}` : '';
-        const tip = `${_binLabelForStrip(i, nbins, axis, lo, hi)}\nScore: ${c && c.score != null ? c.score : '—'}\nDetections: ${c ? (c.n || 0) : 0}\n${top}`.trim();
-        html.push(`<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`);
+        const tip = `${_binLabelForStrip(i, nbins, axis, lo, hi)}\nScore: ${c && c.score != null ? c.score : '—'}\nΔ vs prev: ${d >= 0 ? '+' : ''}${d.toFixed(1)}\nDetections: ${c ? (c.n || 0) : 0}\n${top}`.trim();
+        html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`);
     }
     strip.innerHTML = html.join('');
 }
@@ -1727,19 +1801,32 @@ function _paintEjectionStrip(cells, nbins, axis, lo, hi) {
     const strip  = document.getElementById('ejection-strip');
     const legend = document.getElementById('ejection-strip-legend');
     if (!strip) return;
-    const html = [];
+    // v4.0.240 — ↑/↓ DELTA of the ejection count vs the previous non-empty bucket
+    // (operator: "ejection goes up or down"). Cell RED when ejections go UP (worse),
+    // GREEN when they go DOWN; |Δ| sets the depth. Absolute count + breakdown in tooltip.
+    let _prev = null, _maxAbs = 0;
+    const _dl = new Array(nbins).fill(null);
     const totals = {};
     for (let i = 0; i < nbins; i++) {
         const c = cells[i];
-        const has = c && Number(c.n) > 0;
-        const color = (has && c.top_procedure) ? _procColor(c.top_procedure) : 'transparent';
-        const parts = has ? Object.entries(c.by_procedure || {})
-            .sort((a, b) => b[1] - a[1]).map(([n, k]) => `${n}: ${k}`).join('\n') : '';
-        if (has) {
-            Object.entries(c.by_procedure || {}).forEach(([n, k]) => { totals[n] = (totals[n] || 0) + k; });
-        }
-        const tip = `${_binLabelForStrip(i, nbins, axis, lo, hi)}\nTotal ejections: ${c ? (c.n || 0) : 0}\n${parts}`.trim();
-        html.push(`<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`);
+        if (c && Number(c.n) > 0) Object.entries(c.by_procedure || {}).forEach(([n, k]) => { totals[n] = (totals[n] || 0) + k; });
+        if (!c || !Number.isFinite(Number(c.n))) { _prev = null; continue; }
+        const v = Number(c.n);
+        _dl[i] = (_prev === null) ? 0 : (v - _prev);
+        if (Math.abs(_dl[i]) > _maxAbs) _maxAbs = Math.abs(_dl[i]);
+        _prev = v;
+    }
+    const html = [];
+    for (let i = 0; i < nbins; i++) {
+        const c = cells[i], d = _dl[i];
+        if (d === null) { html.push('<div style="flex:1; background:transparent;" title="no data in this bucket"></div>'); continue; }
+        const a = (_maxAbs > 0 ? (0.2 + 0.7 * Math.abs(d) / _maxAbs) : 0.25).toFixed(2);
+        const bg = d > 0 ? `rgba(239,68,68,${a})` : d < 0 ? `rgba(34,197,94,${a})` : 'rgba(148,163,184,0.12)';
+        let label = '';
+        if (Math.abs(d) >= 1) label = (d > 0 ? '↑' : '↓') + Math.abs(d).toFixed(0);
+        const parts = (c && Number(c.n) > 0) ? Object.entries(c.by_procedure || {}).sort((x, y) => y[1] - x[1]).map(([n, k]) => `${n}: ${k}`).join('\n') : '';
+        const tip = `${_binLabelForStrip(i, nbins, axis, lo, hi)}\nEjections: ${c ? (c.n || 0) : 0}\nΔ vs prev: ${d >= 0 ? '+' : ''}${d}\n${parts}`.trim();
+        html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`);
     }
     strip.innerHTML = html.join('');
     if (legend) {
@@ -1787,33 +1874,176 @@ function _stripTipIcon(desc) {
 // per-shipment META cached from /api/quality/shipments (score/verdict/length/
 // detections/top-defects) and computes the encoder-or-time start→end from the
 // bins the shipment occupies. Multi-line (native title honours \n).
-function _shipmentHoverText(sh, minBin, maxBin, nbins, axis, lo, hi) {
-    const lines = [String(sh)];
-    const m = (window._mveShipmentMeta || {})[String(sh)];
-    if (m) {
-        if (m.verdict != null || m.score != null) {
-            const sc = (m.score != null && isFinite(m.score)) ? ('  ·  score ' + Number(m.score).toFixed(1)) : '';
-            lines.push((m.verdict || '—') + sc);
+// ── Shipment-lane hover: app-styled tooltip with the FULL per-shipment record ──
+// v4.0.226 — operator: "when I hover a specific shipment I need ALL the data —
+// the start, the end, the detections, the length — not just the shipment name."
+// The data already lived in window._mveShipmentMeta (cached from
+// /api/quality/shipments), but it was only wired to the native OS `title` bubble
+// AND it depended on the Score-per-shipment card having loaded first, so before
+// that card rendered the hover degraded to name-only. Now: (a) an app-styled
+// floating card instead of the OS bubble, (b) content computed LIVE on hover so
+// it always reflects the latest meta, and (c) an eager meta load so the record
+// is present even before the Score card renders.
+var _shipHoverCtx = null;      // {nbins, axis, lo, hi} of the last strip paint
+var _shipRangeMap = {};        // ship id -> [firstBin, lastBin]
+var _shipStripBound = false;   // one-time delegated-listener guard
+var _shipMetaLoadedAt = 0;     // throttle stamp for the eager fetch
+
+// Fire-and-forget fetch that fills _mveShipmentMeta independently of the
+// Score-per-shipment card. Throttled to once / 20 s. The hover reads whatever is
+// in the cache at hover time, so a late fill still helps a shipment already on
+// screen (no strip repaint needed — content is computed on hover).
+function _ensureShipmentMetaLoaded() {
+    const now = Date.now();
+    if (_shipMetaLoadedAt && (now - _shipMetaLoadedAt) < 20000) return;
+    _shipMetaLoadedAt = now;
+    try {
+        fetch('/api/quality/shipments?n=60')  // v4.0.236 — windowless; backend escalates the scan (was window=all → timeout)
+            .then((r) => r.json())
+            .then((d) => {
+                const rows = (d && d.shipments) || [];
+                window._mveShipmentMeta = window._mveShipmentMeta || {};
+                window._mveShipmentVerdicts = window._mveShipmentVerdicts || {};
+                for (const s of rows) {
+                    if (!s || s.shipment == null) continue;
+                    const id = String(s.shipment);
+                    if (s.verdict) window._mveShipmentVerdicts[id] = String(s.verdict);
+                    window._mveShipmentMeta[id] = {
+                        score: s.score, verdict: s.verdict,
+                        encoder_span: s.encoder_span, encoder_unit: s.encoder_unit,
+                        encoder_min: s.encoder_min, encoder_max: s.encoder_max,  // 4.0.263 — real encoder start/end for the tooltip
+                        first_t: s.first_t, last_t: s.last_t,
+                        rows: s.rows, top_defects: s.top_defects
+                    };
+                }
+            })
+            .catch(() => {});
+    } catch (_e) {}
+}
+
+function _shipTooltipEl() {
+    let el = document.getElementById('mve-ship-tooltip');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'mve-ship-tooltip';
+        el.style.cssText = 'position:fixed; z-index:99999; pointer-events:none; display:none; '
+            + 'max-width:300px; padding:8px 11px; border-radius:8px; font-size:11px; line-height:1.55; '
+            + 'background:var(--card-bg,#0f172a); color:var(--text-color,#e2e8f0); '
+            + 'border:1px solid var(--border-color,#334155); box-shadow:0 8px 24px rgba(0,0,0,0.5);';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+function _shipFmtTs(t) {
+    try { return new Date(t).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+    catch (_e) { return String(t); }
+}
+
+// Build the tooltip body for a shipment id from the current meta + strip range.
+// The bin-derived Start→End always shows (even with no meta yet); verdict / score
+// / length / detections / top-defects fill in once the meta is present.
+function _shipmentTooltipHTML(sh) {
+    const id = String(sh);
+    const m = (window._mveShipmentMeta || {})[id] || null;
+    const ctx = _shipHoverCtx, rng = _shipRangeMap[id];
+    const esc = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const out = ['<div style="font-weight:700; margin-bottom:5px; word-break:break-all;">' + esc(id) + '</div>'];
+    const line = (label, valHtml) => {
+        out.push('<div style="display:flex; gap:12px; justify-content:space-between;">'
+            + '<span style="opacity:.6;">' + esc(label) + '</span>'
+            + '<span style="text-align:right;">' + valHtml + '</span></div>');
+    };
+    if (m && (m.verdict != null || m.score != null)) {
+        const vc = (typeof _shipVerdictColor === 'function' && _shipVerdictColor(id)) || '#94a3b8';
+        const badge = m.verdict
+            ? '<span style="display:inline-block; padding:0 6px; border-radius:6px; background:' + vc
+                + '; color:#fff; font-weight:700;">' + esc(m.verdict) + '</span>'
+            : '—';
+        const sc = (m.score != null && isFinite(m.score)) ? ('&nbsp; score ' + esc(Number(m.score).toFixed(1))) : '';
+        line('Verdict', badge + sc);
+    }
+    if (m && m.encoder_span != null && isFinite(m.encoder_span)) {
+        // 4.0.263 — DIVIDE the raw encoder span by encoder-units-per-unit (e.g. 1000) so
+        // the length is real meters, not raw counts (operator: "the length is not true
+        // considering the encoder number of each unit"). _fmtLenWithUpu does the divide +
+        // unit label; falls back to raw counts (tagged) when the line isn't calibrated.
+        const _upu = _upuFromAny(m, null);
+        const _unit = m.encoder_unit || _unitLabelFromAny(m, null);
+        line('Length', esc((_upu > 0)
+            ? _fmtLenWithUpu(m.encoder_span, _upu, _unit)
+            : (Math.round(m.encoder_span).toLocaleString() + ' ' + _unit + ' (raw)')));
+    }
+    // Start → End (TIME): prefer the shipment's actual timestamps; else derive from bins.
+    if (m && m.first_t != null && m.last_t != null) {
+        line('Start → End', esc(_shipFmtTs(m.first_t) + '  →  ' + _shipFmtTs(m.last_t)));
+    } else if (ctx && rng && ctx.axis === 'time' && isFinite(ctx.lo) && isFinite(ctx.hi) && ctx.hi > ctx.lo && ctx.nbins > 0) {
+        const sv = ctx.lo + (rng[0] / ctx.nbins) * (ctx.hi - ctx.lo);
+        const ev = ctx.lo + ((rng[1] + 1) / ctx.nbins) * (ctx.hi - ctx.lo);
+        line('Start → End', esc(_shipFmtTs(sv) + '  →  ' + _shipFmtTs(ev)));
+    }
+    // 4.0.263 — ALSO show the ENCODER start → end alongside the time (operator: "I need
+    // the start/stop of encoder like time"). Prefer the shipment's real encoder_min/max;
+    // else derive from the strip's encoder bins.
+    {
+        let _encS = null, _encE = null;
+        if (m && isFinite(Number(m.encoder_min)) && isFinite(Number(m.encoder_max))) {
+            _encS = Number(m.encoder_min); _encE = Number(m.encoder_max);
+        } else if (ctx && rng && ctx.axis !== 'time' && isFinite(ctx.lo) && isFinite(ctx.hi) && ctx.hi > ctx.lo && ctx.nbins > 0) {
+            _encS = ctx.lo + (rng[0] / ctx.nbins) * (ctx.hi - ctx.lo);
+            _encE = ctx.lo + ((rng[1] + 1) / ctx.nbins) * (ctx.hi - ctx.lo);
         }
-        if (m.encoder_span != null && isFinite(m.encoder_span)) {
-            lines.push('length: ' + Math.round(m.encoder_span).toLocaleString() + ' ' + (m.encoder_unit || ''));
+        if (_encS != null && _encE != null) {
+            line('Encoder', esc(Math.round(_encS).toLocaleString() + '  →  ' + Math.round(_encE).toLocaleString()));
         }
     }
-    if (isFinite(lo) && isFinite(hi) && hi > lo && nbins > 0) {
-        const sv = lo + (minBin / nbins) * (hi - lo);
-        const ev = lo + ((maxBin + 1) / nbins) * (hi - lo);
-        if (axis === 'time') {
-            const f = (t) => new Date(t).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-            lines.push('time: ' + f(sv) + '  →  ' + f(ev));
-        } else {
-            lines.push('encoder: ' + Math.round(sv).toLocaleString() + '  →  ' + Math.round(ev).toLocaleString());
-        }
+    if (m && m.rows != null && isFinite(m.rows)) line('Detections', esc(Number(m.rows).toLocaleString()));
+    if (m && Array.isArray(m.top_defects) && m.top_defects.length) {
+        line('Top defects', esc(m.top_defects.slice(0, 3).join(', ')));
     }
-    if (m) {
-        if (m.rows != null && isFinite(m.rows)) lines.push(Number(m.rows).toLocaleString() + ' detections');
-        if (Array.isArray(m.top_defects) && m.top_defects.length) lines.push('top: ' + m.top_defects.slice(0, 3).join(', '));
-    }
-    return lines.join('\n');
+    if (!m) out.push('<div style="opacity:.5; margin-top:3px;">loading full record…</div>');
+    return out.join('');
+}
+
+// One-time delegated hover on the shipment strip. Delegation survives the strip's
+// frequent innerHTML repaints (progressive ladder) — the listener lives on the
+// container, not the cells. Cells carry data-ship; the ID-overlay labels are
+// pointer-events:none so the hover falls through to the coloured cell beneath.
+function _bindShipmentStripHover() {
+    if (_shipStripBound) return;
+    const strip = document.getElementById('shipment-strip');
+    if (!strip) return;
+    _shipStripBound = true;
+    const tip = _shipTooltipEl();
+    const place = (e) => {
+        const pad = 14, w = tip.offsetWidth || 220, h = tip.offsetHeight || 90;
+        let x = e.clientX + pad, y = e.clientY + pad;
+        if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+        if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+        tip.style.left = Math.max(4, x) + 'px';
+        tip.style.top = Math.max(4, y) + 'px';
+    };
+    strip.addEventListener('mousemove', (e) => {
+        const sh = (e.target && e.target.getAttribute) ? e.target.getAttribute('data-ship') : null;
+        if (!sh) { tip.style.display = 'none'; return; }
+        tip.innerHTML = _shipmentTooltipHTML(sh);
+        tip.style.display = 'block';
+        place(e);
+    });
+    strip.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    // v4.0.242 — click a shipment-lane cell to SELECT that shipment (operator: "when I
+    // click a shipment in the lane it doesn't select it"). Reads the cell's data-ship,
+    // fills the Shipment picker, and runs the picked-shipment reload.
+    strip.style.cursor = 'pointer';
+    strip.addEventListener('click', (e) => {
+        const sh = (e.target && e.target.getAttribute) ? e.target.getAttribute('data-ship') : null;
+        if (!sh) return;
+        const inp = document.getElementById('insight-shipment');
+        if (!inp) return;
+        inp.value = sh;
+        try { tip.style.display = 'none'; } catch (_) {}
+        if (typeof _onShipmentPicked === 'function') _onShipmentPicked();
+    });
 }
 function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
     const strip = document.getElementById('shipment-strip');
@@ -1835,6 +2065,11 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
         if (!shRange[s]) shRange[s] = [i, i];
         else if (i > shRange[s][1]) shRange[s][1] = i;
     }
+    // v4.0.226 — publish the paint context + per-shipment bin range for the
+    // live hover tooltip, and make sure the full per-shipment meta is loading.
+    _shipHoverCtx = { nbins: nbins, axis: axis, lo: lo, hi: hi };
+    _shipRangeMap = shRange;
+    _ensureShipmentMetaLoaded();
     const _escAttr = (t) => String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     const cellHtml = [];
     for (let i = 0; i < nbins; i++) {
@@ -1851,9 +2086,9 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
         // begins. A shipment's OWN width stays a single flat block.
         const boundary = (i + 1 < nbins) && owner[i + 1] && owner[i + 1] !== sh;
         const sep = boundary ? ' box-shadow: inset -1px 0 0 rgba(2,6,23,0.55);' : '';
-        const r = shRange[sh] || [i, i];
-        const tip = _escAttr(_shipmentHoverText(sh, r[0], r[1], nbins, axis, lo, hi));
-        cellHtml.push('<div title="' + tip + '" style="flex:1 1 0; height:100%; background:' + bg + ';' + sep + '"></div>');
+        // v4.0.226 — carry the id on the cell; the app-styled tooltip is rendered
+        // live on hover from _shipmentTooltipHTML (replaces the native title=).
+        cellHtml.push('<div data-ship="' + _escAttr(String(sh)) + '" style="flex:1 1 0; height:100%; background:' + bg + ';' + sep + '"></div>');
     }
     // Centred ID overlay on same-shipment runs ≥3 bins wide.
     const labelHtml = [];
@@ -1876,6 +2111,7 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
     }
     strip.innerHTML = cellHtml.join('') + labelHtml.join('');
     if (typeof _relayoutShipmentStripLabels === 'function') { try { _relayoutShipmentStripLabels(); } catch (_e) {} }
+    _bindShipmentStripHover();  // v4.0.226 — idempotent; delegation survives repaints
 }
 
 // Rebuild the dense cell arrays from the streamed accumulators + repaint. Uses
@@ -1886,12 +2122,22 @@ function _repaintProgressiveStrips() {
     if (!rng || !(rng.hi > rng.lo)) return;
     const nbins = Math.max(1, Number(rng.n_bins) || 48);
     const axis = rng.axis === 'time' ? 'time' : 'encoder';
-    const qArr = [], eArr = [], sArr = [];
-    for (let b = 0; b < nbins; b++) {
-        qArr.push(_progressiveQualityCells.get(b) || null);
-        eArr.push(_progressiveEjectionCells.get(b) || null);
-        sArr.push(_progressiveShipmentCells.get(b) || null);
-    }
+    // v4.0.234 — re-bin every accumulated cell by its ABSOLUTE encoder centre over
+    // the CURRENT (auto-widening) domain, so a cell captured when the axis was
+    // narrower lands in the correct slice as the axis grows — keeping the strips
+    // aligned with the scatter dots bucket-by-bucket. Cells with no `_enc` (the
+    // picked-shipment single-fetch path) fall back to their raw bin index.
+    const qArr = new Array(nbins).fill(null), eArr = new Array(nbins).fill(null), sArr = new Array(nbins).fill(null);
+    const _binOf = (enc) => { const b = Math.floor((enc - rng.lo) / (rng.hi - rng.lo) * nbins); return (b >= 0 && b < nbins) ? b : -1; };
+    const _place = (c, arr) => {
+        let b = -1;
+        if (c && typeof c._enc === 'number') b = _binOf(c._enc);
+        else if (c && Number.isFinite(Number(c.bucket))) b = Number(c.bucket);
+        if (b >= 0 && b < nbins) arr[b] = c;
+    };
+    for (const c of _progressiveQualityCells.values()) _place(c, qArr);
+    for (const c of _progressiveEjectionCells.values()) _place(c, eArr);
+    for (const c of _progressiveShipmentCells.values()) _place(c, sArr);
     _paintQualityStrip(qArr, nbins, axis, rng.lo, rng.hi);
     _paintEjectionStrip(eArr, nbins, axis, rng.lo, rng.hi);
     _paintShipmentStrip(sArr, nbins, axis, rng.lo, rng.hi);
@@ -1999,23 +2245,41 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket) {
     try { const r = await fetch(url); data = await r.json(); }
     catch (e) { return; }
     if (ticket != null && ticket !== _progressiveLadderTicket) return;
+    // v4.0.234 — tag each cell with its ABSOLUTE encoder centre (from the bin_ref
+    // THIS fetch used) and key by it, so _repaintProgressiveStrips can re-bin over
+    // the auto-widening domain and a later bucket at the same position dedups.
+    // 4.0.257 — GUARD a degenerate range (rng.hi == rng.lo). On a stationary line the
+    // encoder is a single value, so the original _encOf collapsed EVERY bucket to the
+    // same key → all strip cells piled into bin 0 (operator: "you keep updating the
+    // leftmost bucket again and again"). When degenerate, key by the raw bin INDEX
+    // (distinct per bucket) exactly like the pre-v4.0.234 code that worked.
+    const _degen = !(rng.hi > rng.lo);
+    const _encOf = (b) => _degen ? Number(b) : (rng.lo + ((Number(b) + 0.5) / rng.n_bins) * (rng.hi - rng.lo));
+    const _reBin = (enc) => {
+        const r = _progressiveColorRange;
+        if (!(r.hi > r.lo)) return Math.max(0, Math.min(r.n_bins - 1, Math.round(enc)));
+        const b = Math.floor((enc - r.lo) / (r.hi - r.lo) * r.n_bins);
+        return Math.max(0, Math.min(r.n_bins - 1, b));
+    };
     // Colour (only when streaming it — picked shipment keeps Core's full set).
     if (colorOn && data.color_slice && Array.isArray(data.color_slice.cells)) {
-        for (const c of data.color_slice.cells) _progressiveColorCells.set(`${c.cam}|${c.bin}`, c);
+        for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
         if (_insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap) {
-            _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values());
+            _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values())
+                .map(c => (typeof c._enc === 'number') ? Object.assign({}, c, { bin: _reBin(c._enc) }) : c);
             try { _insightCameraScatter.update('none'); } catch (_e) {}
         }
     }
-    // Quality + ejection: merge only non-empty bins so an out-of-slice empty
-    // cell can't wipe a bin an earlier bucket already filled.
+    // Quality / ejection / shipment: merge only non-empty bins (an out-of-slice
+    // empty cell can't wipe a bin an earlier bucket already filled).
     const qc = (data.quality_slice && Array.isArray(data.quality_slice.cells)) ? data.quality_slice.cells : [];
-    for (const c of qc) if (Number(c.n) > 0 || c.top_class != null) _progressiveQualityCells.set(Number(c.bucket), c);
+    for (const c of qc) if (Number(c.n) > 0 || c.top_class != null) {
+        c._enc = _encOf(c.bucket); _progressiveQualityCells.set(Math.round(c._enc), c);
+    }
     const ec = (data.ejection_slice && Array.isArray(data.ejection_slice.cells)) ? data.ejection_slice.cells : [];
-    for (const c of ec) if (Number(c.n) > 0) _progressiveEjectionCells.set(Number(c.bucket), c);
-    // Shipment lane — same newest→oldest merge; a bin's dominant shipment wins.
+    for (const c of ec) if (Number(c.n) > 0) { c._enc = _encOf(c.bucket); _progressiveEjectionCells.set(Math.round(c._enc), c); }
     const sc = (data.shipment_slice && Array.isArray(data.shipment_slice.cells)) ? data.shipment_slice.cells : [];
-    for (const c of sc) if (c.shipment != null) _progressiveShipmentCells.set(Number(c.bucket), c);
+    for (const c of sc) if (c.shipment != null) { c._enc = _encOf(c.bucket); _progressiveShipmentCells.set(Math.round(c._enc), c); }
     _repaintProgressiveStrips();
 }
 window._extendStripsFromBucket = _extendStripsFromBucket;
@@ -2026,8 +2290,34 @@ async function refreshAdvancedCharts() {
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
 
+    // v4.0.230 — RACE COALESCE. If a ladder for the SAME view (window, shipment,
+    // axis, bins, colour-check) is already streaming, do NOT tear it down and
+    // restart it — the redundant re-fire (trainer-colour fetch, colour-check
+    // re-apply, a second tab-click) folds into the running load. A genuine change
+    // has a different key and still restarts. This kills the end-of-load blank/snap
+    // caused by a late trigger rebuilding the chart just as the first load finishes.
+    const _loadKey = target + '|' + shipment + '|' + _insightAxis + '|'
+        + (localStorage.getItem('mve_bucket_count') || '48') + '|'
+        + (window._mveColorCheckEnabled ? '1' : '0') + '|'
+        + minConf + '|'
+        + (localStorage.getItem('mve_heatmap_baseline') || '') + '|'
+        + (localStorage.getItem('mve_heatmap_phase') || '') + '|'
+        + (localStorage.getItem('mve_heatmap_parent_class') || '');
+    if (_ladderActive && _loadKey === _lastLoadKey) return;
+    // 4.0.251 — also swallow rapid DUPLICATE re-fires of the SAME view within 1.5s.
+    // The console showed 3 back-to-back [core] reloads after a tab-visible reconnect,
+    // each restarting the carpet from empty. A genuine change (window / shipment / axis
+    // / bins / …) has a different _loadKey and still refreshes immediately.
+    if (_loadKey === _lastLoadKey && window._mveLastRacFireAt
+        && (Date.now() - window._mveLastRacFireAt) < 1500) return;
+    window._mveLastRacFireAt = Date.now();
+    _lastLoadKey = _loadKey;
+
     _progressiveLadderTicket += 1;
     const myTicket = _progressiveLadderTicket;
+    _ladderActive = true;
+    window._mveScatterRange = null;  // 4.0.256 — only the all-shipments window branch sets this
+    try {
 
     // 4.0.202 — DO NOT call refreshQualityCharts() here. refreshAdvancedCharts
     // is only ever called from refreshDetectionInsights (line ~1405), which
@@ -2126,8 +2416,35 @@ async function refreshAdvancedCharts() {
             return;
         }
     } else {
+        // 4.0.256 — operator spec: bucket the ACTUAL data extent of the SELECTED axis,
+        // not [now-window, now] (mostly empty when the line ran only recently). Ask the
+        // backend for a cheap MIN/MAX range probe (time + encoder) over the window. The
+        // ladder always buckets by TIME (since/until), so loMs/hiMs use the data TIME
+        // extent; the encoder extent seeds the encoder-axis domain. 4s-timeout fallback
+        // to [now-window, now] so a slow probe can't stall the load.
         hiMs = Date.now();
         loMs = hiMs - _windowToMs(target);
+        window._mveEncWindowRange = null;
+        window._mveScatterRange = null;
+        try {
+            const _rangeJson = await Promise.race([
+                fetch('/api/detection_charts?range_only=1&window=' + encodeURIComponent(target)).then(r => r.json()),
+                new Promise((res) => setTimeout(() => res(null), 4000)),
+            ]);
+            if (myTicket !== _progressiveLadderTicket) return;
+            const _tmn = _rangeJson && Number(_rangeJson.data_t_min);
+            const _tmx = _rangeJson && Number(_rangeJson.data_t_max);
+            if (Number.isFinite(_tmn) && Number.isFinite(_tmx) && _tmx > _tmn) {
+                loMs = _tmn; hiMs = _tmx;
+                const _emn = Number(_rangeJson.data_enc_min), _emx = Number(_rangeJson.data_enc_max);
+                window._mveScatterRange = { loMs: loMs, hiMs: hiMs, encLo: _emn, encHi: _emx };
+                // Real encoder span ⇒ seed the encoder-axis domain; 0-width (stationary
+                // line) stays null so Core's guard falls back to time as before.
+                if (Number.isFinite(_emn) && Number.isFinite(_emx) && _emx > _emn) {
+                    window._mveEncWindowRange = { lo: _emn, hi: _emx };
+                }
+            }
+        } catch (_e) { /* keep the [now-window, now] fallback */ }
     }
     const bucketMs = Math.max(1000, Math.floor((hiMs - loMs) / bins));
 
@@ -2165,6 +2482,13 @@ async function refreshAdvancedCharts() {
         console.warn('[progressive] hydrate failed:', e);
     }
 
+    // 4.0.247 — DO NOT blank the hydrated dots any more. The old code emptied the
+    // scatter here so it could "carpet" bucket-by-bucket, but that made the chart
+    // depend ENTIRELY on the 48-fetch ladder completing — and on a reset-prone link
+    // enough bucket fetches failed that ZERO dots landed and the chart stayed blank.
+    // We now keep the hydrate's dots on screen and TOP THEM UP with one full-window
+    // fetch below, so a failed refill can never wipe the chart to empty.
+
     // Seed the dedup set with whatever's already on the chart.
     _progressiveScatterSeen = new Set();
     if (_insightCameraScatter) {
@@ -2175,40 +2499,38 @@ async function refreshAdvancedCharts() {
         }
     }
 
-    // Ladder: one bucket at a time, newest→oldest, over [loMs, hiMs].
+    // 4.0.248 — bucket-by-bucket ladder RESTORED. A single full-window fetch clustered
+    // ALL dots at the recent edge, because camera_scatter is ORDER BY time DESC LIMIT
+    // dot_cap and a parent class (TB) fills the newest N with just the last few hours.
+    // The ladder gives EACH bucket its own dot_cap, so dots spread evenly across the
+    // whole window. It's now robust where it used to fail: each bucket fetch retries on
+    // reset (see _extendScatterFromBucket) and we no longer blank the hydrate first, so
+    // a single dropped bucket can never wipe the chart to empty.
     let endMs = hiMs;
     let bucketCount = 0;
     try {
         while (endMs > loMs && bucketCount < bins) {
             if (myTicket !== _progressiveLadderTicket) return;
             if (!_insightCameraScatter) break;
-            // Bail if the operator changed the relevant control mid-ladder.
             if (!shipment && (winSel.value || '24h') !== target) break;
             if (shipment && ((document.getElementById('insight-shipment') || {}).value || '') !== shipment) break;
-
             const sinceMs = Math.max(loMs, endMs - bucketMs);
             await _extendScatterFromBucket(sinceMs, endMs, shipment, minConf, myTicket);
-            // v4.0.210 — stream quality + ejection (and colour, gated inside for
-            // all-shipments only) for THIS bucket from the SAME endpoint as the
-            // dots. Fills the strips newest→oldest in lock-step with the scatter,
-            // binned over the identical domain → guaranteed aligned. Replaces the
-            // colour-only _extendColorHeatmapFromBucket (folded inside). Ungated:
-            // quality/ejection stream for picked AND all-shipments; colour still
-            // streams only for all-shipments (picked keeps Core's full set).
-            // v4.0.217 — the shipment lane is now a backend bin-strip streamed
-            // by _extendStripsFromBucket (shipment_slice), painted inside
-            // _repaintProgressiveStrips — same domain/bins as quality/ejection/
-            // colour, so it's x-synced with the scatter. No more dots-derived
-            // re-derivation (which used a different domain and drifted).
             try { await _extendStripsFromBucket(sinceMs, endMs, shipment, myTicket); }
-            catch (_e) { /* per-bucket strip failures are non-fatal */ }
+            catch (_e) { /* per-bucket strip failure is non-fatal */ }
             endMs = sinceMs;
             bucketCount += 1;
         }
     } finally {
         if (myTicket === _progressiveLadderTicket) {
             _unmountScatterLoader();
+            try { _paintDotsDiag('ladder:' + bucketCount + 'buckets'); } catch (_) {}
         }
+    }
+    } finally {
+        // v4.0.230 — release the coalesce gate, but only if THIS load is still the
+        // current one (a newer refresh that superseded us owns the flag now).
+        if (myTicket === _progressiveLadderTicket) _ladderActive = false;
     }
 }
 window.refreshAdvancedCharts = refreshAdvancedCharts;
@@ -2418,21 +2740,39 @@ function _renormalizeScatterRadii(chart) {
 }
 
 
+// 4.0.246 — VISIBLE dots diagnostic. Paints a red monospace line above the
+// scatter title (shows in screenshots — no console needed). Called after the base
+// render AND after the progressive ladder so we see the FINAL drawn state.
+function _paintDotsDiag(tag) {
+    // 4.0.262 — diagnostic REMOVED now that the loader is fixed. Just clean up any banner
+    // a cached build may have left in the DOM, then no-op.
+    try { const _old = document.getElementById('mve-dots-diag'); if (_old && _old.parentNode) _old.parentNode.removeChild(_old); } catch (_e) {}
+}
+window._paintDotsDiag = _paintDotsDiag;
+
 async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket) {
     if (!_insightCameraScatter) return;
     let data;
-    try {
-        const r = await fetch('/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
-                              '&until_ms=' + Math.floor(untilMs) +
-                              '&shipment=' + encodeURIComponent(shipment) +
-                              '&min_conf=' + minConf +
-                              '&scatter_only=1' +
-                              '&dot_cap=' + _dotCap());
-        data = await r.json();
-    } catch (e) {
-        console.warn('[progressive] bucket fetch failed [' + new Date(sinceMs).toISOString() + ' → ' + new Date(untilMs).toISOString() + ']:', e);
-        return;
+    // 4.0.247 — dot_cap can be boosted by the single-fetch path (window._mveScatterFetchCap)
+    // so ONE fetch over the whole window still returns dots spread across it, not just the
+    // newest _dotCap().
+    const _fetchCap = (window._mveScatterFetchCap || _dotCap());
+    const _scatUrl = '/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
+                     '&until_ms=' + Math.floor(untilMs) +
+                     '&shipment=' + encodeURIComponent(shipment) +
+                     '&min_conf=' + minConf +
+                     '&scatter_only=1' +
+                     '&dot_cap=' + _fetchCap;
+    // 4.0.247 — retry on transient connection resets (ERR_CONNECTION_RESET seen on the
+    // operator's tunnel). A single dropped fetch used to silently lose the dots.
+    for (let _try = 0; _try < 3; _try++) {
+        try { const r = await fetch(_scatUrl); data = await r.json(); break; }
+        catch (e) {
+            if (_try === 2) { console.warn('[progressive] scatter fetch failed after 3 tries:', e); return; }
+            await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+        }
     }
+    if (!data) return;
     // 4.0.198 — bail if the progressive run that spawned this bucket was
     // superseded (operator picked a shipment / changed window while this
     // fetch was in flight). Without this, a late all-shipments bucket
@@ -2607,6 +2947,51 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
         // own bucket. Otherwise the first bucket's dots are frozen at their
         // initial (raw-confidence) sizes while later buckets get rescaled.
         _renormalizeScatterRadii(_insightCameraScatter);
+        // v4.0.233 — AUTO-WIDEN the encoder/length x-axis to fit ALL loaded dots.
+        // The window's true encoder span can't be queried reliably on a heavy line
+        // (shipment_spans caps at 200k rows; shipment_quality_score TIMES OUT → null),
+        // so the axis GROWS as the ladder streams older/lower-encoder dots
+        // newest→oldest. No range query; every shipment in the window appears; the
+        // strip domain (_progressiveColorRange) tracks it so the strips — loaded AFTER
+        // the scatter — bin over the exact same range.
+        try {
+            // 4.0.260 — read the scatter's ACTUAL effective axis (__mveAxis, set by Core's
+            // flat-encoder guard) FIRST. Before this, when _mveUnifiedX was undefined mid-render
+            // it fell back to _insightAxis (the DEFAULT 'encoder'), so this block ran on a TIME
+            // chart and rewrote _progressiveColorRange.axis→'encoder' with TIME bounds — the
+            // strips then binned by encoder over a time range and collapsed to ONE bucket (DIAG:
+            // axis=time but stripAxis=encoder). __mveAxis keeps the strips in sync with the dots.
+            const _am = (_insightCameraScatter && _insightCameraScatter.__mveAxis)
+                     || (window._mveUnifiedX && window._mveUnifiedX.axisMode) || _insightAxis;
+            const _pickedNow = ((document.getElementById('insight-shipment') || {}).value || '').trim();
+            const _xs = _insightCameraScatter.options && _insightCameraScatter.options.scales
+                && _insightCameraScatter.options.scales.x;
+            // 4.0.249 — auto-widen ONLY the encoder/length axis (its span is unknown).
+            // The TIME axis is pinned to the full window [loMs,hiMs] up front by
+            // refreshAdvancedCharts, so the ladder carpets right→left into a STABLE frame;
+            // auto-widening time here rescaled the axis every bucket and made the dots
+            // jump around (operator: "why not loading bucket by bucket right→left").
+            if (!_pickedNow && (_am === 'encoder' || _am === 'length') && _xs) {
+                let _lo = Infinity, _hi = -Infinity;
+                for (const _ds of (_insightCameraScatter.data.datasets || [])) {
+                    for (const _p of (_ds.data || [])) {
+                        const _x = Number(_p.x);
+                        if (Number.isFinite(_x)) { if (_x < _lo) _lo = _x; if (_x > _hi) _hi = _x; }
+                    }
+                }
+                if (Number.isFinite(_lo) && Number.isFinite(_hi) && _hi > _lo) {
+                    const _pad = (_hi - _lo) * 0.01;
+                    _xs.min = _lo - _pad; _xs.max = _hi + _pad;
+                    if (window._mveUnifiedX) { window._mveUnifiedX.xMin = _lo - _pad; window._mveUnifiedX.xMax = _hi + _pad; }
+                    // Only encoder/length re-key the colour-strip domain; time strips keep
+                    // the range Core seeded (the backend has no color_axis=time binning).
+                    if (_am === 'encoder' || _am === 'length') {
+                        const _nb = (_progressiveColorRange && _progressiveColorRange.n_bins) || (parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48);
+                        _progressiveColorRange = { axis: 'encoder', lo: _lo - _pad, hi: _hi + _pad, n_bins: _nb };
+                    }
+                }
+            }
+        } catch (_wm) { /* auto-widen is best-effort */ }
         _insightCameraScatter.update('none'); // no animation — feels instant
         // v4.0.106 — was `console.log('[progressive] window=' + win + ...)` but
         // `win` was never a parameter of `_extendScatterFromBucket`. That
@@ -2788,8 +3173,12 @@ async function _refreshAdvancedChartsCore(preloadedData) {
     const _win = document.getElementById('insight-window')?.value || '24h';
     const _winMs = (() => { const m = String(_win).match(/^(\d+)([hd])$/); return m ? parseInt(m[1]) * (m[2]==='d'?86400:3600) * 1000 : 24*3600*1000; })();
     const _nowMs = Date.now();
-    const _scatterXMin = _nowMs - _winMs;
-    const _scatterXMax = _nowMs;
+    // 4.0.256 — prefer the data's actual TIME extent (range probe stashed by
+    // refreshAdvancedCharts) over [now-window, now], so the time axis spans exactly the
+    // data (operator: bucket the min/max of the selected axis). Falls back to the window.
+    const _sr256 = window._mveScatterRange;
+    const _scatterXMin = (_sr256 && Number.isFinite(_sr256.loMs)) ? _sr256.loMs : (_nowMs - _winMs);
+    const _scatterXMax = (_sr256 && Number.isFinite(_sr256.hiMs)) ? _sr256.hiMs : _nowMs;
 
     // ---- (3) Camera × {time|encoder} scatter — single merged renderer (3.25.13).
     // Builds the bubble chart for the currently selected `_insightAxis`; toggling
@@ -2819,10 +3208,23 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 .map(p => Number(p.x)).filter(Number.isFinite);
             const _encLo = _encXs.length ? Math.min.apply(null, _encXs) : null;
             const _encHi = _encXs.length ? Math.max.apply(null, _encXs) : null;
-            if (axisMode !== 'time' && (_encLo == null || _encHi == null || !(_encHi > _encLo))) {
+            // v4.0.229 — the guard was checking ONLY the 1h hydrate. On a line
+            // that is stopped RIGHT NOW but moved earlier in the window, the
+            // hydrate is flat so it wrongly fell back to time even though the
+            // operator picked Encoder and the window has real encoder width.
+            // Also honour the window's encoder span (_mveEncWindowRange, from
+            // shipment_spans): if the WINDOW has width, the axis won't collapse
+            // (the domain fix sizes it to the span), so keep Encoder.
+            if (axisMode !== 'time' && !_encWinRange()
+                && (_encLo == null || _encHi == null || !(_encHi > _encLo))) {
                 axisMode = 'time';
             }
         }
+        // v4.0.239 — reflect the EFFECTIVE axis on the Time|Encoder|Length toggle: when
+        // the guard falls back encoder/length→time (stopped/unwired line), the button
+        // shows Time so it matches the chart (operator: "don't show time while Encoder
+        // is selected"). Follows axisMode automatically as the line moves again.
+        try { if (typeof _setAxisToggleUI === 'function') _setAxisToggleUI(axisMode); } catch (_ax) {}
         const lenOffsets = (data && data.shipment_length_offsets) || {};
         if (Object.keys(lenOffsets).length > 0) _lastLengthOffsets = lenOffsets;
         const _toLengthX = (p) => {
@@ -2995,6 +3397,13 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         const _availableBaselineModes = new Set(data.color_baseline_modes || ['camera']);
         const _activeBaselineMode = data.color_baseline_mode || 'camera';
         const _activeBaselineMap  = data.color_baseline || {};
+        // 4.0.244 — keep the Baseline dropdown in sync with the active mode
+        // (only if it's one of the three options the dropdown offers, so a
+        // legacy mode like shipment_start/target doesn't blank the select).
+        const _bsSel = document.getElementById('hm-baseline-select');
+        if (_bsSel && ['camera','shipment_avg','reference_frame'].includes(_activeBaselineMode) && _bsSel.value !== _activeBaselineMode) {
+            _bsSel.value = _activeBaselineMode;
+        }
         // 4.0.32 — track whether a reference is set so the Reference button
         // can skip pick mode next time.
         window._referenceIsSet = _availableBaselineModes.has('reference_frame');
@@ -3030,8 +3439,19 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         _renderParentClassButtons(
             Array.isArray(data.parent_classes_available) ? data.parent_classes_available : [],
         );
-        // 4.0.162 — colour-change strip (sits between quality + ejection strips).
-        try { _renderColorChangeStrip(axisMode, data); } catch (_e) { /* non-fatal */ }
+        // v4.0.231 — paint strips from the payload ONLY for a picked shipment /
+        // single full-span fetch (preloadedData is null there). For an all-shipments
+        // WINDOW load, `data` is the 1h HYDRATE: its cells are binned over the last
+        // hour but the painters lay them out full-width → smeared + misaligned with
+        // the scatter, then the ladder clears+restreams them (the reported blank/snap
+        // and colour-change-ahead-of-the-others). So for a window load the progressive
+        // ladder OWNS all four strips; do not seed them from the 1h payload here.
+        if (!preloadedData) {
+            // 4.0.162 — colour-change strip (between quality + ejection).
+            try { _renderColorChangeStrip(axisMode, data); } catch (_e) { /* non-fatal */ }
+            // v4.0.223 — quality / ejection / shipment from the full-span payload.
+            try { _renderStripsFromPayload(data, axisMode); } catch (_e) { /* non-fatal */ }
+        }
 
         // 4.0.29c — pick the heatmap variant that matches the current axis.
         // Backend returns BOTH binned-by-encoder and binned-by-time forms so
@@ -3091,6 +3511,12 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 // 4.0.185 — operator can hide the whole ΔE cell layer via the
                 // "Cells: 👁 Show / 🚫 Hide" pill without dropping the scatter dots.
                 if ((localStorage.getItem('mve_heatmap_cells') || 'shown') === 'hidden') return;
+                // 4.0.253 — skip the ΔE cells on the TIME axis. They bin by ENCODER
+                // position; on a stationary line (encoder=0 → axis falls back to time)
+                // every cell collapses to bin 0 and piles up at the LEFT edge, which
+                // reads as "data on the left while the right isn't loaded". No encoder
+                // position ⇒ no meaningful heatmap, so don't paint it.
+                if (window._mveUnifiedX && window._mveUnifiedX.axisMode === 'time') return;
                 const ca = chart.chartArea;
                 // 4.0.164 — read cells from the mutable __mveHeatmap cache
                 // so the progressive per-bucket loader can push new cells
@@ -3100,6 +3526,16 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 const _liveCells = (chart.data && chart.data.__mveHeatmap && Array.isArray(chart.data.__mveHeatmap.cells))
                     ? chart.data.__mveHeatmap.cells
                     : heatmapCells;
+                // 4.0.259 — if EVERY ΔE cell landed in the SAME bin, the layer is just a
+                // solid block at one column (happens on a flat-encoder / stationary line
+                // where the encoder-binned cells all collapse to bin 0 = the left block the
+                // operator kept seeing). It carries no positional info, so skip painting it.
+                if (_liveCells.length > 1) {
+                    const _b0 = _liveCells[0] && _liveCells[0].bin;
+                    let _allSame = true;
+                    for (let _i = 1; _i < _liveCells.length; _i++) { if (_liveCells[_i].bin !== _b0) { _allSame = false; break; } }
+                    if (_allSame) return;
+                }
                 const binWidth = (heatmapEncMax - heatmapEncMin) / heatmapBins;
                 // 4.0.177 — colour scale mode. In 'relative' mode we normalise the
                 // 2/5/10 CIELAB tolerance bands to the span's own max |Δ|, so
@@ -3367,10 +3803,21 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         } else if (axisMode === 'time') {
             _uxMin = _scatterXMin; _uxMax = _scatterXMax;
         } else {
-            _uxMin = (heatmapEncMin != null) ? heatmapEncMin
-                   : (_uXs.length ? _dotLo : 0);
-            _uxMax = (heatmapEncMax != null) ? heatmapEncMax
-                   : (_uXs.length ? _dotHi : _uxMin + 1);
+            // v4.0.228 — prefer the SELECTED WINDOW's encoder span (from
+            // shipment_spans, stashed by refreshAdvancedCharts) over the 1h
+            // hydrate's heatmap bounds, so 24h shows EVERY shipment in the window
+            // rather than just the last hour. Union with the on-chart dots for
+            // safety (dots always fall within the span).
+            const _ewr = _encWinRange();
+            if (_ewr) {
+                _uxMin = (_dotLo != null) ? Math.min(_ewr.lo, _dotLo) : _ewr.lo;
+                _uxMax = (_dotHi != null) ? Math.max(_ewr.hi, _dotHi) : _ewr.hi;
+            } else {
+                _uxMin = (heatmapEncMin != null) ? heatmapEncMin
+                       : (_uXs.length ? _dotLo : 0);
+                _uxMax = (heatmapEncMax != null) ? heatmapEncMax
+                       : (_uXs.length ? _dotHi : _uxMin + 1);
+            }
         }
         // Pad the domain by 1% each side so edge dots aren't clipped by the
         // plot border, then guarantee a positive span.
@@ -3384,7 +3831,14 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         window._mveUnifiedX = { axisMode, xMin: _uxMin, xMax: _uxMax, bins: heatmapBins };
         const xScaleCfg = axisMode === 'time'
             ? { type: 'linear', min: _uxMin, max: _uxMax,
-                ticks: { color: '#94a3b8', font: { size: 9 }, callback: (v) => new Date(v).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) },
+                ticks: { color: '#94a3b8', font: { size: 9 }, maxRotation: 40, minRotation: 0, callback: (v) => {
+                    // 4.0.261 — TIME axis: every tick shows DATE + time (operator: "when time
+                    // is selected the x-axis numbers should be date and time"). Encoder shows raw
+                    // encoder values; length shows the Advanced-tab unit (both handled below).
+                    const _d = new Date(v);
+                    return _d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' +
+                           _d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                } },
                 grid: { color: 'rgba(148,163,184,0.08)' } }
             : axisMode === 'length'
                 ? { type: 'linear',
@@ -3551,6 +4005,9 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             _renormalizeScatterRadii(_insightCameraScatter);
             _insightCameraScatter.update('none');
         } catch (e) { /* keep the chart if renormalize fails */ }
+        // 4.0.246 — visible dots diagnostic (base-render state, before the ladder
+        // blanks + refills). See _paintDotsDiag.
+        try { _insightCameraScatter.__mveAxis = axisMode; _paintDotsDiag('core'); } catch (_diag) {}
     }
     // v4.0.113 — populate the shipment-lane strip that sits between the
     // scatter and the quality strip.
@@ -3933,21 +4390,30 @@ window._relayoutShipmentStripLabels = _relayoutShipmentStripLabels;
 // 3.25.13 — toggle the merged scatter's X-axis between time and encoder.
 // Re-renders the scatter (destroy + rebuild), reloads the quality + ejection
 // strips for the new axis, updates the strip titles + button styling.
+// v4.0.239 — sync ONLY the Time|Encoder|Length toggle styling to a given axis,
+// WITHOUT reloading. Shared by setInsightAxis AND the stationary-line guard, so the
+// toggle follows the EFFECTIVE axis (shows Time when encoder/length falls back).
+function _setAxisToggleUI(axis) {
+    const tBtn = document.getElementById('insight-axis-toggle-time');
+    const eBtn = document.getElementById('insight-axis-toggle-encoder');
+    const lBtn = document.getElementById('insight-axis-toggle-length');
+    const ACTIVE = 'linear-gradient(135deg,#10b981,#047857)', INACTIVE = 'rgba(51,65,85,0.5)';
+    if (tBtn) { tBtn.style.background = axis === 'time'    ? ACTIVE : INACTIVE; tBtn.style.color = axis === 'time'    ? '#fff' : '#cbd5e1'; }
+    if (eBtn) { eBtn.style.background = axis === 'encoder' ? ACTIVE : INACTIVE; eBtn.style.color = axis === 'encoder' ? '#fff' : '#cbd5e1'; }
+    if (lBtn) { lBtn.style.background = axis === 'length'  ? ACTIVE : INACTIVE; lBtn.style.color = axis === 'length'  ? '#fff' : '#cbd5e1'; }
+    // 4.0.244 — toolbar is now a dropdown; keep it in sync with the EFFECTIVE axis
+    // (the stationary-line guard calls this with 'time' when encoder/length fell back,
+    // so the dropdown must show Time even though the operator picked Encoder).
+    const sel = document.getElementById('insight-axis-select');
+    if (sel && sel.value !== axis) sel.value = axis;
+}
 function setInsightAxis(axis) {
     // v4.0.132 — added 'length' (cumulative length across shipments,
     // immune to PLC encoder resets).
     if (axis !== 'time' && axis !== 'encoder' && axis !== 'length') return;
     if (_insightAxis === axis) return;
     _insightAxis = axis;
-    // Active-button styling.
-    const tBtn = document.getElementById('insight-axis-toggle-time');
-    const eBtn = document.getElementById('insight-axis-toggle-encoder');
-    const lBtn = document.getElementById('insight-axis-toggle-length');
-    const ACTIVE = 'linear-gradient(135deg,#10b981,#047857)';
-    const INACTIVE = 'rgba(51,65,85,0.5)';
-    if (tBtn) { tBtn.style.background = axis === 'time'    ? ACTIVE : INACTIVE; tBtn.style.color = axis === 'time'    ? '#fff' : '#cbd5e1'; }
-    if (eBtn) { eBtn.style.background = axis === 'encoder' ? ACTIVE : INACTIVE; eBtn.style.color = axis === 'encoder' ? '#fff' : '#cbd5e1'; }
-    if (lBtn) { lBtn.style.background = axis === 'length'  ? ACTIVE : INACTIVE; lBtn.style.color = axis === 'length'  ? '#fff' : '#cbd5e1'; }
+    _setAxisToggleUI(axis);   // active-button styling (shared with the fallback sync)
     // Strip titles.
     // v4.0.216 — compact titles: emoji + a hover ⓘ (full description in tooltip).
     const _si = (emoji, desc) => emoji + ' ' + _stripTipIcon(desc);
@@ -4293,145 +4759,6 @@ async function refreshProductionCharts() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Defect Diagnostics: Pareto (Show-filtered), defects-by-camera, defect-location
-// heatmap (bbox-center density), inference latency. Reads /api/quality_charts.
-// ---------------------------------------------------------------------------
-async function refreshQualityCharts() {
-    const window = document.getElementById('insight-window')?.value || '24h';
-    const shipment = document.getElementById('insight-shipment')?.value || '';
-    const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
-    let data;
-    try {
-        const r = await fetch('/api/quality_charts?window=' + encodeURIComponent(window) +
-                              '&shipment=' + encodeURIComponent(shipment) +
-                              '&min_conf=' + minConf);
-        data = await r.json();
-    } catch (e) { console.error('quality_charts fetch failed:', e); return; }
-
-    const byClass = data.by_class || {};
-    const byCamera = data.by_camera || {};
-    const hm = data.heatmap || { gw: 32, gh: 20, max: 0, cells: [] };
-    const latency = data.latency_over_time || [];
-    const hasData = Object.keys(byClass).length > 0;
-
-    const emptyEl = document.getElementById('quality-empty');
-    const chartsEl = document.getElementById('quality-charts');
-    const totalEl = document.getElementById('quality-total');
-    if (emptyEl) emptyEl.style.display = hasData ? 'none' : 'block';
-    if (chartsEl) chartsEl.style.display = hasData ? 'grid' : 'none';
-    if (totalEl) totalEl.textContent = hasData ? `${hm.cells.length} active grid cells • ${Object.keys(byCamera).length} camera(s)` : '';
-    if (!hasData) return;
-
-    // ---- Pareto of defects (Show-filtered): bars desc + cumulative % line ----
-    const paretoCtx = document.getElementById('quality-pareto-chart');
-    if (paretoCtx) {
-        if (_qualPareto) _qualPareto.destroy();
-        const names = Object.keys(byClass).filter(_isShown).sort((a, b) => byClass[b] - byClass[a]);
-        const counts = names.map(n => byClass[n]);
-        const grand = counts.reduce((a, b) => a + b, 0) || 1;
-        let run = 0;
-        const cum = counts.map(c => { run += c; return Math.round(run / grand * 1000) / 10; });
-        _qualPareto = new Chart(paretoCtx, {
-            data: {
-                labels: names,
-                datasets: [
-                    { type: 'bar', label: 'Count', data: counts, backgroundColor: names.map(n => _classColor(n)), borderRadius: 3, yAxisID: 'y' },
-                    { type: 'line', label: 'Cumulative %', data: cum, borderColor: '#f59e0b', backgroundColor: 'transparent', yAxisID: 'y1', tension: 0, pointRadius: 2, borderWidth: 2 }
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: true, labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 } },
-                    title: { display: true, text: 'Pareto of defects — click a class for images', color: '#cbd5e1', font: { size: 13 } }
-                },
-                onClick: (evt, els, chart) => {
-                    if (els && els.length) {
-                        const lab = chart.data.labels[els[0].index];
-                        if (lab) openDefectDrawer(lab);
-                    }
-                },
-                scales: {
-                    x: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { display: false } },
-                    y: { beginAtZero: true, ticks: { color: '#94a3b8', precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } },
-                    y1: { position: 'right', beginAtZero: true, max: 100, ticks: { color: '#f59e0b' }, grid: { display: false }, title: { display: true, text: '%', color: '#f59e0b' } }
-                }
-            }
-        });
-    }
-
-    // ---- Defects by camera ----
-    const camCtx = document.getElementById('quality-camera-chart');
-    if (camCtx) {
-        if (_qualCamera) _qualCamera.destroy();
-        const cams = Object.keys(byCamera).sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
-        _qualCamera = new Chart(camCtx, {
-            type: 'bar',
-            data: { labels: cams.map(c => 'Cam ' + c), datasets: [{ label: 'Detections', data: cams.map(c => byCamera[c]), backgroundColor: 'rgba(139,92,246,0.6)', borderRadius: 3 }] },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: { legend: { display: false }, title: { display: true, text: 'Defects by camera / station', color: '#cbd5e1', font: { size: 13 } } },
-                scales: {
-                    x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
-                    y: { beginAtZero: true, ticks: { color: '#94a3b8', precision: 0 }, grid: { color: 'rgba(148,163,184,0.1)' } }
-                }
-            }
-        });
-    }
-
-    // ---- Defect location heatmap (bbox-center density) ----
-    const heatCtx = document.getElementById('quality-heatmap-chart');
-    if (heatCtx) {
-        if (_qualHeatmap) _qualHeatmap.destroy();
-        const maxc = hm.max || 1;
-        const pts = (hm.cells || []).map(c => ({ x: c.x + 0.5, y: c.y + 0.5, r: 5 + (c.c / maxc) * 16, _c: c.c }));
-        const bg = (hm.cells || []).map(c => `rgba(239,68,68,${(0.15 + 0.85 * (c.c / maxc)).toFixed(3)})`);
-        _qualHeatmap = new Chart(heatCtx, {
-            type: 'bubble',
-            data: { datasets: [{ label: 'Defect density', data: pts, backgroundColor: bg, borderColor: 'rgba(239,68,68,0.3)' }] },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                    title: { display: true, text: 'Defect location heatmap (bbox centers, frame layout)', color: '#cbd5e1', font: { size: 13 } },
-                    tooltip: { callbacks: { label: (c) => `${c.raw._c} defect(s) here` } }
-                },
-                scales: {
-                    x: { type: 'linear', min: 0, max: hm.gw, ticks: { display: false }, grid: { color: 'rgba(148,163,184,0.08)' }, title: { display: true, text: '← frame width →', color: '#94a3b8', font: { size: 10 } } },
-                    y: { type: 'linear', min: 0, max: hm.gh, reverse: true, ticks: { display: false }, grid: { color: 'rgba(148,163,184,0.08)' }, title: { display: true, text: '↑ frame height ↓', color: '#94a3b8', font: { size: 10 } } }
-                }
-            }
-        });
-    }
-
-    // ---- Inference latency over time (avg / max ms) ----
-    const latCtx = document.getElementById('quality-latency-chart');
-    if (latCtx) {
-        if (_qualLatency) _qualLatency.destroy();
-        _qualLatency = new Chart(latCtx, {
-            type: 'line',
-            data: {
-                labels: latency.map(p => p.t),
-                datasets: [
-                    { label: 'Max ms', data: latency.map(p => p.max), borderColor: 'rgba(239,68,68,0.5)', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1 },
-                    { label: 'Avg ms', data: latency.map(p => p.avg), borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.12)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 }
-                ]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: true, labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 12 } },
-                    title: { display: true, text: 'Inference latency over time (ms)', color: '#cbd5e1', font: { size: 13 } }
-                },
-                scales: {
-                    x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxTicksLimit: 8 }, grid: { display: false } },
-                    y: { beginAtZero: true, ticks: { color: '#94a3b8' }, grid: { color: 'rgba(148,163,184,0.1)' } }
-                }
-            }
-        });
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Operator drill-down (3.21.0):
@@ -4543,13 +4870,35 @@ document.addEventListener('DOMContentLoaded', () => {
 // the quality-score card and the inner charts.
 function _reorderChartsTab() {
     try {
-        const trend  = document.getElementById('sqs-trend-row');
+        // v4.0.237 — Score-per-shipment is the operator's TOP chart: it's independent
+        // of every other chart and loads on tab open. Move #quality-charts-panel to
+        // the VERY TOP of the Charts tab, ABOVE #detection-insight-panel (which holds
+        // the shipment/window/config controls, the quality-score card, and the main
+        // scatter). Was tucked BELOW the quality-score card, inside Detection Insights.
+        const tab    = document.getElementById('tab-grafana');
+        const dins   = document.getElementById('detection-insight-panel');
         const sScore = document.getElementById('quality-charts-panel');
-        if (trend && sScore && trend.parentNode) {
-            // insertBefore(node, sibling) — if sibling is null it appends; nextSibling
-            // is the element right after trend, which is what we want.
-            trend.parentNode.insertBefore(sScore, trend.nextSibling);
+        if (tab && sScore && dins && dins.parentNode === tab) {
+            tab.insertBefore(sScore, dins);          // Score-per-shipment first
+        } else if (tab && sScore) {
+            tab.insertBefore(sScore, tab.firstChild);
         }
+        // v4.0.241 — REMOVE the "Shipment Quality Score + Trend over window" section
+        // (operator: "remove this fucking section"). Relocate its still-wanted buttons
+        // into the config bar first (Download PDF next to CSV, then Calibrate) so
+        // nothing is lost, then hide the whole card. The per-shipment score card above
+        // + the ↑/↓ quality-strip deltas now carry the score/trend story.
+        const csvBtn = document.querySelector('#detection-insight-panel button[onclick="exportInsightCSV()"]');
+        const cfgBar = csvBtn && csvBtn.parentNode;
+        const pdfBtn = document.getElementById('sqs-download-pdf');
+        const calBtn = document.getElementById('sqs-calibrate');
+        if (cfgBar && pdfBtn) { pdfBtn.style.cssText = 'padding:4px 10px; font-size:12px; cursor:pointer; background:rgba(16,185,129,0.25); color:#6ee7b7; border:1px solid rgba(16,185,129,0.5); border-radius:4px;'; cfgBar.insertBefore(pdfBtn, csvBtn.nextSibling); }
+        // v4.0.243 — Calibrate lives in the Advanced tab beside the score_scale_factor
+        // Set button (operator: it's the same gain knob), NOT in the Charts toolbar.
+        const setBtn = document.querySelector('button[onclick="setScoreScaleFactor()"]');
+        if (setBtn && calBtn) { calBtn.style.cssText = 'padding:6px 12px; font-size:12px; cursor:pointer; background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; border:none; border-radius:6px; font-weight:600; margin-left:8px; vertical-align:middle;'; setBtn.parentNode.insertBefore(calBtn, setBtn.nextSibling); }
+        const qCard = document.getElementById('shipment-quality-card');
+        if (qCard) qCard.style.display = 'none';
     } catch (e) { /* never block page load on reorder errors */ }
 }
 document.addEventListener('DOMContentLoaded', _reorderChartsTab);
@@ -5149,19 +5498,35 @@ async function refreshQualityCharts() {
     // that exact [lo,hi]/N_BINS domain and repaint. No-op before the first render.
     const rng = _progressiveColorRange;
     if (!rng || !(rng.hi > rng.lo)) return;
+    // v4.0.230 — NEVER wipe + re-stream the strip accumulators while the ladder is
+    // mid-load: that clears the quality/ejection/shipment cells the ladder is still
+    // filling and BLANKS the strips (the 60s timer landing on a ~60s heavy-machine
+    // load = the reported "goes blank at the end"). The ladder owns the strips
+    // while active; this periodic refresher only runs once the load has settled.
+    if (_ladderActive) return;
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const win = document.getElementById('insight-window')?.value || '24h';
     const hiMs = Date.now();
     // Time window that BOUNDS the rows; the binning domain (bin_ref) is
     // _progressiveColorRange, so a vertical guideline still hits the same data.
     const loMs = shipment ? (hiMs - _windowToMs('90d')) : (hiMs - _windowToMs(win));
-    _progressiveQualityCells = new Map();
-    _progressiveEjectionCells = new Map();
-    _progressiveShipmentCells = new Map();
+    // v4.0.230 — do NOT wipe the accumulators first. _extendStripsFromBucket does
+    // one wide slice over the current domain and overwrites each bin, so the strips
+    // update IN PLACE with no blank gap. Wiping made them flash empty for the ~1.3s
+    // the wide slice takes to return on a heavy machine (the 60s "blank" flicker).
     try { await _extendStripsFromBucket(loMs, hiMs, shipment, _progressiveLadderTicket); }
     catch (_e) { /* strip refresh failures are non-fatal */ }
 }
 window.refreshQualityCharts = refreshQualityCharts;
+
+// v4.0.232 — the "🔬 Defect Diagnostics" panel is retired (removed from the current
+// status.html). This hides it on any machine still serving the OLD status.html (so
+// a charts.js-only ripple removes it fleet-wide without shipping status.html — which
+// would otherwise add the Knowledge tab to sites that have no knowledge service).
+document.addEventListener('DOMContentLoaded', function () {
+    var _dd = document.getElementById('quality-insight-panel');
+    if (_dd) _dd.style.display = 'none';
+});
 
 // 4.0.202 — dedicated, window-INDEPENDENT loader for the Score-per-shipment
 // card. Shows the last N shipments regardless of the timeframe selector.
@@ -5272,10 +5637,34 @@ async function _loadQualityShipmentsChart(win) {
     // on window, remove it entirely"). Subtitle no longer mentions a window.
     if (subtitleEl) subtitleEl.textContent = `· last ${n} shipments · color = verdict`;
     try {
-        // No `window` param → backend returns the last N shipments by time.
-        const r = await fetch(`/api/quality/shipments?n=${n}&window=all`);
+        // v4.0.236 — no window param (operator: "remove the window from the api
+        // entirely; query the last N shipments, no matter the time"). The backend
+        // escalates its scan (24h→3d→7d→…) until it has N, so this never full-scans
+        // / times out the way `window=all` did (which blanked the card on khoy).
+        const r = await fetch(`/api/quality/shipments?n=${n}`);
         const d = await r.json();
         const rows = (d.shipments || []).slice().reverse();  // oldest left → newest right
+        // v4.0.243 — TREND chip in the header: older-third vs newer-third of the scores
+        // across the shown shipments (operator: "put the trend here — improving /
+        // degrading / stable, based on the relative scores"). Relative rescaling is
+        // monotonic within the window, so the DIRECTION is identical to absolute scores.
+        try {
+            const _chip = document.getElementById('sqs-list-trend');
+            if (_chip) {
+                const _sc = rows.map(s => Number(s && s.score)).filter(Number.isFinite);
+                if (_sc.length >= 4) {
+                    const _k = Math.max(1, Math.floor(_sc.length / 3));
+                    const _avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+                    const _d = _avg(_sc.slice(_sc.length - _k)) - _avg(_sc.slice(0, _k));  // newest − oldest
+                    let _txt, _bg, _fg;
+                    if (_d > 0.5)      { _txt = '↗ Improving'; _bg = 'rgba(34,197,94,0.25)'; _fg = '#6ee7b7'; }
+                    else if (_d < -0.5){ _txt = '↘ Degrading'; _bg = 'rgba(239,68,68,0.25)'; _fg = '#fca5a5'; }
+                    else               { _txt = '→ Stable';    _bg = 'rgba(71,85,105,0.5)';  _fg = '#cbd5e1'; }
+                    _chip.textContent = _txt;
+                    _chip.style.background = _bg; _chip.style.color = _fg; _chip.style.display = 'inline-block';
+                } else { _chip.style.display = 'none'; }
+            }
+        } catch (_tr) { /* trend chip is best-effort */ }
         // v4.0.221 — cache shipment→verdict so the shipment LANE can colour each
         // bin by its shipment's verdict (operator: "colour the shipment lane by
         // the verdict of that shipment"). Reuses these already-computed verdicts —
@@ -5292,6 +5681,7 @@ async function _loadQualityShipmentsChart(win) {
                     window._mveShipmentMeta[id] = {
                         score: s.score, verdict: s.verdict,
                         encoder_span: s.encoder_span, encoder_unit: s.encoder_unit,
+                        encoder_min: s.encoder_min, encoder_max: s.encoder_max,  // 4.0.263 — real encoder start/end for the tooltip
                         first_t: s.first_t, last_t: s.last_t,
                         rows: s.rows, top_defects: s.top_defects
                     };
