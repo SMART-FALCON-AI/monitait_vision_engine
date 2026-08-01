@@ -110,7 +110,7 @@ function _unitLabelFromAny(row, data) {
         || 'units';
 }
 
-let _insightAxis = 'encoder';   // 3.26.0 — default to encoder (was 'time'); operators on roll-based lines care about position more than wall-clock.
+let _insightAxis = (function () { try { return localStorage.getItem('mve_insight_axis') || 'encoder'; } catch (e) { return 'encoder'; } })();   // 3.26.0 default encoder; 4.0.271 — persisted so a refresh keeps the operator's pick (was resetting, then getting overwritten Time by the stationary-guard fallback).
 let _ejectionProcBar = null;
 let _ejectionProcPie = null;
 let _ejectionTimeline = null;
@@ -4401,11 +4401,14 @@ function _setAxisToggleUI(axis) {
     if (tBtn) { tBtn.style.background = axis === 'time'    ? ACTIVE : INACTIVE; tBtn.style.color = axis === 'time'    ? '#fff' : '#cbd5e1'; }
     if (eBtn) { eBtn.style.background = axis === 'encoder' ? ACTIVE : INACTIVE; eBtn.style.color = axis === 'encoder' ? '#fff' : '#cbd5e1'; }
     if (lBtn) { lBtn.style.background = axis === 'length'  ? ACTIVE : INACTIVE; lBtn.style.color = axis === 'length'  ? '#fff' : '#cbd5e1'; }
-    // 4.0.244 — toolbar is now a dropdown; keep it in sync with the EFFECTIVE axis
-    // (the stationary-line guard calls this with 'time' when encoder/length fell back,
-    // so the dropdown must show Time even though the operator picked Encoder).
+    // 4.0.271 — the dropdown must reflect the OPERATOR's pick (_insightAxis), NOT a
+    // transient stationary-guard fallback. The guard flips encoder->time when the
+    // encoder data is momentarily degenerate/empty (e.g. first paint before encoder
+    // rows arrive); the old code overwrote the dropdown to Time, so on refresh the
+    // operator saw "Time" even though they'd chosen Encoder. Only an EXPLICIT
+    // setInsightAxis (axis === _insightAxis) is allowed to move the dropdown.
     const sel = document.getElementById('insight-axis-select');
-    if (sel && sel.value !== axis) sel.value = axis;
+    if (sel && axis === _insightAxis && sel.value !== axis) sel.value = axis;
 }
 function setInsightAxis(axis) {
     // v4.0.132 — added 'length' (cumulative length across shipments,
@@ -4413,6 +4416,7 @@ function setInsightAxis(axis) {
     if (axis !== 'time' && axis !== 'encoder' && axis !== 'length') return;
     if (_insightAxis === axis) return;
     _insightAxis = axis;
+    try { localStorage.setItem('mve_insight_axis', axis); } catch (e) {}   // 4.0.271 — persist the operator's pick across refreshes
     _setAxisToggleUI(axis);   // active-button styling (shared with the fallback sync)
     // Strip titles.
     // v4.0.216 — compact titles: emoji + a hover ⓘ (full description in tooltip).
@@ -4902,6 +4906,15 @@ function _reorderChartsTab() {
     } catch (e) { /* never block page load on reorder errors */ }
 }
 document.addEventListener('DOMContentLoaded', _reorderChartsTab);
+// 4.0.271 — on load, sync the X-axis dropdown to the persisted operator pick so the
+// UI shows what's actually selected (not the HTML default or a guard fallback).
+document.addEventListener('DOMContentLoaded', function () {
+    try {
+        const sel = document.getElementById('insight-axis-select');
+        if (sel && sel.value !== _insightAxis) sel.value = _insightAxis;
+        if (typeof _setAxisToggleUI === 'function') _setAxisToggleUI(_insightAxis);
+    } catch (e) {}
+});
 
 function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
     const el = document.getElementById('chart-image-preview');
