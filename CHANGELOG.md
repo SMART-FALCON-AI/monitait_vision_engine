@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.270] - 2026-08-01 — AI Assistant: conversation-history sidebar (multi-chat)
+
+- The AI Assistant now has a **ChatGPT-style sidebar**: a **＋ New Chat** button plus a list of past conversations grouped *Today* / *Previous 30 days*, each clickable to switch back into it, with a delete affordance. The active conversation is highlighted; the conversation title is its first user message.
+- Each conversation is its own `localStorage` entry (`ai_conversations`); the old flat `ai_chat_history` is **migrated once** into a single conversation so nothing is lost. **Clear History** now wipes all conversations and starts fresh.
+- Files: `static/status.html` (sidebar layout), `static/js/audio.js` (multi-conversation store + render), `static/js/i18n.js` (`ai_new_chat`/`ai_today`/`ai_earlier`/`ai_no_convs`/`ai_clear_confirm`, en/fa/ar).
+
 ## [4.0.269] - 2026-08-01 — Autoscaler fix: disk writers are CPU-bound, stop the thrash death-spiral
 
 Root-caused a live data-loss issue on khoy (busy 8-core line): raw-image JPEG writes were being **dropped** (296/30s) — the DB record saved (fast) but the image never landed on disk ("image not on disk" in the AI assistant). It was **not** the disk model (same WD Green works on other sites), **not** old/faulty code (`watcher.py`/`db.py` byte-identical across sites), and **not** the remove/janitor path.

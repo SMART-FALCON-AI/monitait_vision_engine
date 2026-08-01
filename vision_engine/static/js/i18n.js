@@ -521,7 +521,13 @@ var translations = {
         secondary_diagnostics: "Secondary diagnostics",
         storage_config: "Raw Image Storage",
         tip_length: "Encoder counts since the current shipment began. Zero when no active shipment. Negative if the belt is reversing.",
-        unwind_mode: "Unwind"
+        unwind_mode: "Unwind",
+        // + i18n v4.0.267 (chunk A)
+        ai_new_chat: "New Chat",
+        ai_today: "Today",
+        ai_earlier: "Previous 30 days",
+        ai_no_convs: "No conversations yet",
+        ai_clear_confirm: "Clear ALL chat history?"
     },
     fa: {
         tab_dashboard: "داشبورد", tab_ai: "دستیار هوشمند", tab_gallery: "گالری",
@@ -943,7 +949,13 @@ var translations = {
         secondary_diagnostics: "تشخیص‌های ثانویه",
         storage_config: "ذخیره‌سازی تصویر خام",
         tip_length: "شمارش انکودر از زمان شروع محموله فعلی. در صورت نبود محموله فعال، صفر است. در صورت حرکت معکوس نوار نقاله، منفی است.",
-        unwind_mode: "بازکردن"
+        unwind_mode: "بازکردن",
+        // + i18n v4.0.267 (chunk A)
+        ai_new_chat: "گفتگوی جدید",
+        ai_today: "امروز",
+        ai_earlier: "۳۰ روز گذشته",
+        ai_no_convs: "هنوز گفتگویی نیست",
+        ai_clear_confirm: "همه تاریخچه گفتگو پاک شود؟"
     },
     ar: {
         tab_dashboard: "لوحة التحكم", tab_ai: "مساعد ذكي", tab_gallery: "معرض",
@@ -1360,7 +1372,13 @@ var translations = {
         secondary_diagnostics: "التشخيصات الثانوية",
         storage_config: "تخزين الصور الخام",
         tip_length: "عدد نبضات المُشفّر منذ بدء الشحنة الحالية. يكون صفرًا في حال عدم وجود شحنة نشطة. يكون سالبًا إذا كان الحزام يتحرك للخلف.",
-        unwind_mode: "فك اللف"
+        unwind_mode: "فك اللف",
+        // + i18n v4.0.267 (chunk A)
+        ai_new_chat: "محادثة جديدة",
+        ai_today: "اليوم",
+        ai_earlier: "آخر ٣٠ يومًا",
+        ai_no_convs: "لا توجد محادثات بعد",
+        ai_clear_confirm: "مسح كل سجل المحادثة؟"
     },
     de: {
         tab_dashboard: "Dashboard", tab_ai: "KI-Assistent", tab_gallery: "Galerie",

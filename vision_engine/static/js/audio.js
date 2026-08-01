@@ -2690,53 +2690,153 @@ function clearDBProfileForm() {
     document.getElementById('db-password').value = '';
 }
 
-// Load chat history from localStorage
-function loadChatHistory() {
-    const chatMessages = document.getElementById('ai-chat-messages');
-    const history = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
-
-    // Clear existing messages (except welcome message)
-    const welcomeMsg = chatMessages.querySelector('div');
-    chatMessages.innerHTML = '';
-    if (welcomeMsg) chatMessages.appendChild(welcomeMsg);
-
-    // Restore messages
-    history.forEach(msg => {
-        const msgDiv = document.createElement('div');
-        if (msg.type === 'user') {
-            msgDiv.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; text-align: right; color: var(--text-primary);';
-            msgDiv.innerHTML = `<strong>You:</strong> ${msg.content}`;
-        } else if (msg.type === 'ai') {
-            msgDiv.style.cssText = 'margin-bottom: 10px; padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); color: var(--text-primary); line-height: 1.6;';
-            msgDiv.innerHTML = `<div style="margin-bottom: 8px;"><strong style="color: var(--primary-color);">🤖 AI:</strong></div><div>${msg.content}</div>`;
-        } else if (msg.type === 'error') {
-            msgDiv.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger-color); border-radius: 8px; color: var(--danger-color);';
-            msgDiv.innerHTML = `<strong>Error:</strong> ${msg.content}`;
-        }
-        chatMessages.appendChild(msgDiv);
-    });
-
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+// ===== AI conversation history (multi-chat sidebar, ChatGPT-style) =====
+// v4.0.270 — was a single flat `ai_chat_history` list. Now every conversation
+// is its own entry in `ai_conversations`, so the operator can start a New Chat
+// and switch back into past chats from the sidebar. The old flat history is
+// migrated once into a single conversation so nothing is lost.
+function _loadConvs() {
+    try { return JSON.parse(localStorage.getItem('ai_conversations') || '[]'); }
+    catch (e) { return []; }
 }
-
-// Save message to history
-function saveChatMessage(type, content) {
-    const history = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
-    history.push({ type, content, timestamp: new Date().toISOString() });
-
-    // Keep only last 50 messages to avoid localStorage quota
-    if (history.length > 50) {
-        history.splice(0, history.length - 50);
+function _saveConvs(c) { localStorage.setItem('ai_conversations', JSON.stringify(c)); }
+function _newConvObj() {
+    return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), title: '', created: new Date().toISOString(), messages: [] };
+}
+function _convTitle(msgs) {
+    const u = (msgs || []).find(m => m.type === 'user');
+    if (!u) return '';
+    const s = String(u.content).replace(/<[^>]*>/g, '').trim();
+    return s.length > 40 ? s.slice(0, 40) + '…' : s;
+}
+function _ensureConv() {
+    let convs = _loadConvs();
+    // one-time migration of the old flat history into a single conversation
+    if (!localStorage.getItem('ai_conv_migrated')) {
+        try {
+            const old = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
+            if (Array.isArray(old) && old.length) {
+                const c = _newConvObj(); c.messages = old; c.title = _convTitle(old);
+                convs.unshift(c); _saveConvs(convs);
+                localStorage.setItem('ai_current_conv', c.id);
+            }
+        } catch (e) {}
+        localStorage.setItem('ai_conv_migrated', '1');
     }
-
-    localStorage.setItem('ai_chat_history', JSON.stringify(history));
+    let id = localStorage.getItem('ai_current_conv') || '';
+    if (!id || !convs.find(c => c.id === id)) {
+        if (convs.length) { id = convs[0].id; }
+        else { const c = _newConvObj(); convs.unshift(c); _saveConvs(convs); id = c.id; }
+        localStorage.setItem('ai_current_conv', id);
+    }
+    return id;
 }
-
-// Clear chat history
+function newChat() {
+    const convs = _loadConvs();
+    const cur = convs.find(c => c.id === localStorage.getItem('ai_current_conv'));
+    // Reuse the current conversation if it's already blank (don't pile up empties).
+    if (cur && (!cur.messages || !cur.messages.length)) { loadChatHistory(); return; }
+    const c = _newConvObj(); convs.unshift(c); _saveConvs(convs);
+    localStorage.setItem('ai_current_conv', c.id);
+    const inp = document.getElementById('ai-input'); if (inp) inp.value = '';
+    loadChatHistory();
+    if (inp) { try { inp.focus(); } catch (e) {} }
+}
+function switchConversation(id) { localStorage.setItem('ai_current_conv', id); loadChatHistory(); }
+function deleteConversation(id, ev) {
+    if (ev) { ev.stopPropagation(); }
+    let convs = _loadConvs().filter(c => c.id !== id);
+    _saveConvs(convs);
+    if (localStorage.getItem('ai_current_conv') === id) {
+        localStorage.setItem('ai_current_conv', convs.length ? convs[0].id : '');
+    }
+    loadChatHistory();
+}
+function _welcomeBlockEl() {
+    const tr = (typeof t === 'function') ? t : (k => k);
+    const d = document.createElement('div');
+    d.id = 'ai-welcome';
+    d.style.cssText = 'padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); margin-bottom: 15px; box-shadow: var(--shadow-sm);';
+    d.innerHTML = '<p style="margin:0 0 10px 0; font-weight:600; color:var(--text-primary);">👋 ' + tr('ai_welcome') + '</p>'
+        + '<ul style="margin:0; padding-left:20px; font-size:14px; color:var(--text-primary); line-height:1.8;">'
+        + '<li>' + tr('ai_ex1') + '</li><li>' + tr('ai_ex2') + '</li><li>' + tr('ai_ex3') + '</li><li>' + tr('ai_ex4') + '</li></ul>';
+    return d;
+}
+function _renderMsgEl(msg) {
+    const div = document.createElement('div');
+    if (msg.type === 'user') {
+        div.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; text-align: right; color: var(--text-primary);';
+        div.innerHTML = '<strong>You:</strong> ' + _escKb(msg.content);
+    } else if (msg.type === 'ai') {
+        div.style.cssText = 'margin-bottom: 10px; padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); color: var(--text-primary); line-height: 1.6;';
+        div.innerHTML = '<div style="margin-bottom: 8px;"><strong style="color: var(--primary-color);">🤖 AI:</strong></div><div class="mve-md">' + msg.content + '</div>';
+    } else {
+        div.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger-color); border-radius: 8px; color: var(--danger-color);';
+        div.innerHTML = '<strong>Error:</strong> ' + _escKb(msg.content);
+    }
+    return div;
+}
+function renderConvList() {
+    const el = document.getElementById('ai-conv-list');
+    if (!el) return;
+    const tr = (typeof t === 'function') ? t : (k => k);
+    const convs = _loadConvs();
+    const cur = localStorage.getItem('ai_current_conv') || '';
+    if (!convs.length) { el.innerHTML = '<div style="opacity:.5; font-size:12px; padding:10px; text-align:center;">' + tr('ai_no_convs') + '</div>'; return; }
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    let html = ''; let lastGrp = '';
+    convs.forEach(c => {
+        let created = today; try { created = new Date(c.created); } catch (e) {}
+        const grp = (created >= today) ? tr('ai_today') : tr('ai_earlier');
+        if (grp !== lastGrp) { html += '<div style="font-size:10px; text-transform:uppercase; letter-spacing:.5px; opacity:.5; padding:8px 6px 3px;">' + grp + '</div>'; lastGrp = grp; }
+        const active = (c.id === cur);
+        const title = _escKb(c.title || tr('ai_new_chat'));
+        const bg = active ? 'rgba(59,130,246,0.28)' : 'transparent';
+        html += '<div onclick="switchConversation(\'' + c.id + '\')" title="' + title + '" '
+            + 'style="display:flex; align-items:center; justify-content:space-between; gap:4px; padding:7px 8px; margin-bottom:2px; border-radius:6px; cursor:pointer; font-size:13px; color:var(--text-primary); background:' + bg + ';" '
+            + 'onmouseover="this.style.background=\'rgba(148,163,184,0.14)\'" onmouseout="this.style.background=\'' + bg + '\'">'
+            + '<span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1;">' + title + '</span>'
+            + '<span onclick="deleteConversation(\'' + c.id + '\',event)" title="Delete" style="opacity:.45; flex-shrink:0; padding:0 2px; cursor:pointer;">🗑</span>'
+            + '</div>';
+    });
+    el.innerHTML = html;
+}
+// Load the ACTIVE conversation into the message pane + refresh the sidebar list.
+function loadChatHistory() {
+    const id = _ensureConv();
+    const convs = _loadConvs();
+    const c = convs.find(x => x.id === id) || { messages: [] };
+    const chatMessages = document.getElementById('ai-chat-messages');
+    if (chatMessages) {
+        chatMessages.innerHTML = '';
+        if (!c.messages || !c.messages.length) { chatMessages.appendChild(_welcomeBlockEl()); }
+        else { c.messages.forEach(m => chatMessages.appendChild(_renderMsgEl(m))); }
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+    renderConvList();
+}
+// Append a message to the ACTIVE conversation (bubbles it to the top of the list).
+function saveChatMessage(type, content) {
+    const id = _ensureConv();
+    let convs = _loadConvs();
+    let c = convs.find(x => x.id === id);
+    if (!c) { c = _newConvObj(); c.id = id; convs.unshift(c); }
+    c.messages.push({ type: type, content: content });
+    if (c.messages.length > 200) c.messages.splice(0, c.messages.length - 200);
+    if (!c.title && type === 'user') c.title = _convTitle([{ type: type, content: content }]);
+    convs = convs.filter(x => x.id !== id); convs.unshift(c);   // most-recent-first
+    _saveConvs(convs);
+    renderConvList();
+}
+// Clear ALL conversations (both new + legacy stores) and start fresh.
 function clearChatHistory() {
-    if (confirm('Clear all chat history?')) {
+    const tr = (typeof t === 'function') ? t : (k => k);
+    if (confirm(tr('ai_clear_confirm'))) {
+        localStorage.removeItem('ai_conversations');
         localStorage.removeItem('ai_chat_history');
-        location.reload();
+        localStorage.removeItem('ai_current_conv');
+        localStorage.removeItem('ai_conv_migrated');
+        newChat();
     }
 }
 
@@ -2815,6 +2915,8 @@ async function sendAIMessage() {
     if (!message) return;
 
     const chatMessages = document.getElementById('ai-chat-messages');
+    // 4.0.270 — drop the welcome placeholder once a real message is sent
+    var _w = document.getElementById('ai-welcome'); if (_w) _w.remove();
 
     // Add user message
     const userMsg = document.createElement('div');
