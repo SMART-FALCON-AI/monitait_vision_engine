@@ -2259,6 +2259,11 @@ You MUST use these exact table and column names:
 | module_id | TEXT | Inference module identifier |
 | phase_id | INTEGER | Capture phase number |
 
+### Showing a stored image to the operator
+When the operator asks to SEE or SHOW an image (e.g. "the latest image with weft_up", "show me a stitch defect"), query inference_results for the matching row's `image_path` (the detections JSONB holds each object's class — filter with e.g. `detections @> '[{{"class":"weft_up"}}]'` and `ORDER BY time DESC LIMIT 1`), strip a leading `raw_images/` from the path if present, and return it as a MARKDOWN IMAGE so the UI renders it inline:
+`![weft_up](/api/raw_image/<image_path WITHOUT the leading raw_images/ prefix>)`
+The `/api/raw_image/<path>` endpoint serves the JPEG. Add one short caption line above it (time · shipment · confidence).
+
 ### Common Query Patterns
 - Recent defects: `SELECT time, detections, detection_count, inference_time_ms FROM inference_results ORDER BY time DESC LIMIT 20`
 - Defect rate last hour: `SELECT COUNT(*) FILTER (WHERE detection_count > 0) as defective, COUNT(*) as total FROM inference_results WHERE time > NOW() - INTERVAL '1 hour'`

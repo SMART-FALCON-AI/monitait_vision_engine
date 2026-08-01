@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.268] - 2026-08-01 — i18n Phase 2B/2C: all remaining tabs + knowledge.html wired & translated
+
+- Wired every remaining hardcoded string across Dashboard/Cameras/Hardware/Inference/Process/Advanced tabs + modals (140 new keys) and all of `knowledge.html` (82 new keys — that page had no i18n system; added the `i18n.js` include + `applyLanguage()` bootstrap + `storage`-event live re-apply).
+- Defined 12 pre-existing orphan keys that were leaking raw key names into the UI (`unwind_mode`, `quality_thresholds`, `score_scale_factor_label`, `pro_camera_discovery` → "Discover Pro Cameras", etc.).
+- 234 new keys translated into all 8 non-English languages (1872 entries). Every language now reports **0 missing keys**; the orphan check reports **0** in both HTML files.
+- **Root-cause safeguard:** `applyLanguage()` now keeps an element's original (English) text when a key is undefined in every language, instead of painting the raw key name. A missing key can never again leak a `snake_case` identifier into the UI.
+
+### Files
+- `static/status.html`, `static/knowledge.html` — ~280 elements wired to `data-i18n`.
+- `static/js/i18n.js` — graceful-fallback safeguard + 234 keys × 9 languages.
+
+## [4.0.267] - 2026-08-01 — i18n Phase 2A: Charts toolbar + AI tab wired to translations
+
+Wired the Charts-tab toolbar/legend and the AI-tab copy to the i18n system — these were hardcoded English in every language before (part of the 539 untranslated strings the audit found).
+
+- **Charts toolbar labels** (X-axis, Baseline, Phase, Scale, Cells, Buckets, Parent class, Dots/Category/Bucket, Shipment, Window, Min conf) — span-wrapped the text node so the label's `<select>`/`<input>` child isn't wiped by the `textContent` swap.
+- **Dropdown options** (Time/Encoder/Length, Camera/Shipment avg/Reference, Absolute/Relative, Show/Hide, All, and the 8 Window ranges) — emoji preserved via `data-i18n-prefix`.
+- **Chart legend** (Defect, Parent, Marker, Context, Vertical/Horizontal defect) and the "Detection Insights" header.
+- **AI tab**: welcome line, 4 example questions, input placeholder.
+- 44 new keys added to `en` and translated into all 8 other languages (fa/ar/de/tr/ja/es/it/pl) — 352 cells.
+
+### Files
+- `static/status.html` — ~30 elements wired to `data-i18n`; cache-busters → 4.0.267.
+- `static/js/i18n.js` — 44 new keys × 9 languages (396 entries).
+
+### Still remaining (next chunks)
+- Inference / Process / Advanced / Hardware tabs (~250 strings) and all of `knowledge.html` (101 strings, no i18n system yet).
+
+## [4.0.266] - 2026-08-01 — i18n gap-fill (all 9 languages) + AI header slimmed
+
+### Translations
+- **Every language now has full coverage of all existing UI keys.** A node audit of `i18n.js` (parsing the real object, not line-regex) found the non-English locales were falling back to English on many keys: ar −11, de −12, tr −79, ja −86, es −86, it −158, pl −158 (590 cells). Filled all of them via per-language localizers. fa (Persian) was already complete.
+- Kept technical acronyms/units verbatim (PWM, DM, DataMatrix, YOLO, Redis, TimescaleDB, API, CPU, RAM, mm, mm², ms, µs, px, ΔE), preserved placeholders/ranges/trailing colons.
+- `mathTips` (Process-tab math-channel tooltips, ~60 deeply technical entries) intentionally left English-only — falls back cleanly via `t()`.
+
+### AI Assistant
+- **Big gradient "AI Analytics Assistant" banner removed** (operator: "it only consumes the screen"). Replaced with a slim bar carrying just 🗑 Clear History. Frees ~50px of vertical space for the chat/history pane. New i18n key `clear_history` in all 9 languages.
+- Confirmed chat history works: `sendAIMessage` saves every turn to `localStorage['ai_chat_history']` (last 50); `loadChatHistory()` restores them inline on AI-tab open.
+
+### Known-remaining (next phase)
+- 539 hardcoded static strings still lack `data-i18n` (Charts toolbar/legend, Inference/Process/Advanced tabs, and all of knowledge.html which has no i18n system yet). To be wired + translated in follow-up.
+
+### Files
+- `static/js/i18n.js` — 599 keys inserted across 9 language blocks (+`clear_history`).
+- `static/status.html` — AI header slimmed; cache-busters → 4.0.266.
+
 ## [4.0.246 – 4.0.263] - 2026-07-31 — Charts loader rebuilt correctly + shipment tooltip fixes
 
 Long debugging arc (vteam12 stationary + khoy/kiancord real-encoder lines) that ended with the Charts tab loading correctly on both flat-encoder and moving lines.

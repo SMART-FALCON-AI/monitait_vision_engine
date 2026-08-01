@@ -2759,6 +2759,10 @@ function _mdToHtml(src) {
         .replace(/`([^`]+)`/g, '<code style="background:rgba(0,0,0,0.25);padding:1px 4px;border-radius:4px;">$1</code>')
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
         .replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+        // 4.0.264 — render markdown images so the assistant can SHOW a frame (e.g. "the
+        // latest image with weft_up"). Restricted to relative (/…) or http(s) srcs. Must
+        // run BEFORE the link rule so ![alt](url) isn't mis-parsed as a link.
+        .replace(/!\[([^\]]*)\]\((\/[^)\s]+|https?:[^)\s]+)\)/g, '<img src="$2" alt="$1" loading="lazy" onerror="this.outerHTML=&#39;<span style=&quot;opacity:.6;font-style:italic&quot;>🖼 image not on disk (rotated / not stored on this line)</span>&#39;">')
         .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     // Pull fenced code blocks out first so their contents aren't reformatted.
     const blocks = [];

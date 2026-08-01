@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<!--
+  MKB Knowledge tab — vision_engine/static/knowledge.html
+
+  Standalone page AND tab body. Two ways to ship it, pick one in
+  patches/04_ui_knowledge_tab.md:
+
+    a) served as-is at /knowledge and embedded in status.html via an <iframe>
+       (zero risk to a 220 KB status.html that every site depends on), or
+    b) the <div id="kb-root"> body pasted in as another tab pane.
+
+  All API calls go through MVE's proxy at /api/kb/** (routers/knowledge.py), so
+  this page never needs to know MKB's port and there is no CORS to configure.
+
+  Deliberately dependency-free — no framework, no CDN. status.html is plain
+  JS + a vendored bundle, air-gapped sites cannot fetch a CDN, and this must
+  keep working when the plant network has no route to the internet.
+-->
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge — MonitaQC</title>
+<script src="/static/js/i18n.js?v=4.0.268"></script>
+<style>
+  :root {
+    --bg:#0f1419; --panel:#1a2029; --panel-2:#232b36; --line:#2f3946;
+    --text:#e6edf3; --muted:#8b98a5; --accent:#2f81f7; --ok:#3fb950;
+    --warn:#d29922; --err:#f85149;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f8fa; --panel:#fff; --panel-2:#f0f3f6; --line:#d0d7de;
+            --text:#1f2328; --muted:#656d76; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Vazirmatn,Tahoma,sans-serif; }
+  .wrap { max-width:1200px; margin:0 auto; padding:16px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:16px; margin-bottom:14px; }
+  h2 { font-size:15px; margin:0 0 12px; font-weight:600; }
+  h3 { font-size:13px; margin:16px 0 8px; color:var(--muted); font-weight:600; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px;
+           padding:7px 14px; cursor:pointer; font-size:13px; font-family:inherit; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--text); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input, select, textarea { background:var(--panel-2); border:1px solid var(--line);
+           color:var(--text); border-radius:6px; padding:7px 10px; font:inherit; width:100%; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:start; padding:8px; border-bottom:1px solid var(--line);
+           vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--line); margin-bottom:16px;
+          flex-wrap:wrap; }
+  .tabs button { background:transparent; color:var(--muted); border-radius:6px 6px 0 0;
+                 border-bottom:2px solid transparent; }
+  .tabs button.on { color:var(--text); border-bottom-color:var(--accent); }
+  .pane { display:none; } .pane.on { display:block; }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:36px; text-align:center;
+          color:var(--muted); cursor:pointer; transition:.15s; }
+  .drop.hot { border-color:var(--accent); background:rgba(47,129,247,.08); color:var(--text); }
+  .chip { display:inline-block; background:var(--panel-2); border:1px solid var(--line);
+          border-radius:12px; padding:1px 9px; font-size:11px; margin:2px 2px 2px 0; }
+  .st { font-size:11px; padding:2px 8px; border-radius:10px; }
+  .st.ready{background:rgba(63,185,80,.15);color:var(--ok)}
+  .st.failed{background:rgba(248,81,73,.15);color:var(--err)}
+  .st.pending,.st.parsing,.st.embedding{background:rgba(210,153,34,.15);color:var(--warn)}
+  .muted { color:var(--muted); font-size:12px; }
+  .bar { height:4px; background:var(--panel-2); border-radius:2px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  .banner { padding:10px 14px; border-radius:8px; margin-bottom:14px; font-size:13px; }
+  .banner.err { background:rgba(248,81,73,.12); border:1px solid var(--err); }
+  .banner.warn { background:rgba(210,153,34,.12); border:1px solid var(--warn); }
+  .hit { border-inline-start:3px solid var(--accent); padding:8px 12px; margin-bottom:10px;
+         background:var(--panel-2); border-radius:0 6px 6px 0; }
+  .hit .src { font-size:12px; color:var(--accent); margin-bottom:4px; }
+  .grow { flex:1; min-width:180px; }
+  code { background:var(--panel-2); padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap" id="kb-root">
+
+  <div id="banner"></div>
+
+  <div class="tabs">
+    <button class="on" data-p="library" data-i18n="kb_library">Library</button>
+    <button data-p="search" data-i18n="kb_search">Search</button>
+    <button data-p="issues" data-i18n="kb_issues">Issues</button>
+    <button data-p="assets" data-i18n="kb_assets">Assets</button>
+    <button data-p="mcp" data-i18n="kb_mcp_servers">MCP Servers</button>
+  </div>
+
+  <!-- ================= LIBRARY ================= -->
+  <div class="pane on" id="p-library">
+    <div class="card">
+      <h2 data-i18n="kb_upload_documents">Upload documents</h2>
+      <div class="drop" id="drop">
+        <span data-i18n="kb_drop_files_here">Drop files here or click to browse</span><br>
+        <span class="muted" data-i18n="kb_supported_formats">PDF · Word · Excel · PowerPoint · images (OCR) · CSV · text · ZIP</span>
+      </div>
+      <input type="file" id="file" multiple hidden>
+      <div class="row" style="margin-top:12px">
+        <div class="grow">
+          <label class="muted" data-i18n="type">Type</label>
+          <select id="up-type">
+            <option value="" data-i18n="kb_auto_detect">auto-detect</option>
+            <option value="sop" data-i18n="kb_doc_type_sop">SOP / procedure</option>
+            <option value="manual" data-i18n="kb_doc_type_manual">Machine manual</option>
+            <option value="spec" data-i18n="kb_doc_type_spec">Specification</option>
+            <option value="drawing" data-i18n="kb_doc_type_drawing">Drawing</option>
+            <option value="defect_catalog" data-i18n="kb_doc_type_defect_catalog">Defect catalogue</option>
+            <option value="report" data-i18n="kb_doc_type_report">Report</option>
+            <option value="certificate" data-i18n="kb_doc_type_certificate">Certificate</option>
+            <option value="work_order" data-i18n="kb_doc_type_work_order">Work order</option>
+            <option value="log" data-i18n="kb_doc_type_log">Log / data</option>
+            <option value="note" data-i18n="kb_doc_type_note">Note</option>
+          </select>
+        </div>
+        <div class="grow">
+          <label class="muted" data-i18n="kb_machine_asset">Machine / asset</label>
+          <select id="up-asset"><option value="" data-i18n="kb_none_option">— none —</option></select>
+        </div>
+        <div class="grow">
+          <label class="muted" data-i18n="kb_tags_comma">Tags (comma separated)</label>
+          <input id="up-tags" placeholder="loom-3, dyeing, 2026">
+        </div>
+      </div>
+      <div id="up-status" class="muted" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="kb_paste_knowledge">Paste knowledge</h2>
+      <p class="muted" data-i18n="kb_paste_knowledge_desc">Shift notes, a fix someone worked out on the floor, a message from
+      maintenance. This is where undocumented know-how gets captured.</p>
+      <input id="note-title" placeholder="Title" data-i18n-placeholder="kb_title" style="margin-bottom:8px">
+      <textarea id="note-body" rows="5" placeholder="What happened, what was tried, what fixed it…" data-i18n-placeholder="kb_note_body_ph"></textarea>
+      <button style="margin-top:8px" onclick="saveNote()" data-i18n="kb_save_to_kb">Save to knowledge base</button>
+    </div>
+
+    <div class="card">
+      <h2><span data-i18n="kb_documents">Documents</span> <span class="muted" id="doc-count"></span></h2>
+      <div class="row" style="margin-bottom:10px">
+        <input class="grow" id="doc-q" placeholder="Filter by title…" data-i18n-placeholder="kb_filter_by_title" oninput="loadDocs()">
+        <button class="ghost" onclick="loadDocs()" data-i18n="refresh">Refresh</button>
+      </div>
+      <table>
+        <thead><tr><th data-i18n="kb_title">Title</th><th data-i18n="type">Type</th><th data-i18n="kb_asset">Asset</th><th data-i18n="kb_lang_col">Lang</th>
+                   <th data-i18n="kb_chunks">Chunks</th><th data-i18n="status">Status</th><th></th></tr></thead>
+        <tbody id="docs"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="kb_ingest_queue">Ingest queue</h2>
+      <table>
+        <thead><tr><th data-i18n="kb_file">File</th><th data-i18n="kb_stage">Stage</th><th data-i18n="kb_progress">Progress</th><th data-i18n="kb_state">State</th></tr></thead>
+        <tbody id="jobs"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ================= SEARCH ================= -->
+  <div class="pane" id="p-search">
+    <div class="card">
+      <h2 data-i18n="kb_search_plant_docs">Search the plant's documents</h2>
+      <div class="row">
+        <input class="grow" id="q" placeholder="e.g. shade variation across width — what does the SOP say?"
+               data-i18n-placeholder="kb_search_ph"
+               onkeydown="if(event.key==='Enter')doSearch()">
+        <button onclick="doSearch()" data-i18n="kb_search">Search</button>
+      </div>
+      <div id="search-meta" class="muted" style="margin-top:8px"></div>
+    </div>
+    <div class="card"><div id="results" class="muted" data-i18n="kb_no_search_yet">No search yet.</div></div>
+  </div>
+
+  <!-- ================= ISSUES ================= -->
+  <div class="pane" id="p-issues">
+    <div class="card">
+      <h2 data-i18n="kb_open_trouble_thread">Open a trouble thread</h2>
+      <div class="row">
+        <input class="grow" id="iss-title" placeholder="What is wrong? e.g. camera 2 rejecting everything since 14:00" data-i18n-placeholder="kb_issue_title_ph">
+        <select id="iss-sev" style="width:auto">
+          <option value="low" data-i18n="kb_severity_low">low</option><option value="medium" selected data-i18n="kb_severity_medium">medium</option>
+          <option value="high" data-i18n="kb_severity_high">high</option><option value="critical" data-i18n="kb_severity_critical">critical</option>
+        </select>
+        <button onclick="openIssue()" data-i18n="kb_open_btn">Open</button>
+      </div>
+      <div id="iss-similar" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <h2 data-i18n="kb_issues">Issues</h2>
+      <table>
+        <thead><tr><th data-i18n="kb_code">Code</th><th data-i18n="kb_title">Title</th><th data-i18n="kb_severity">Severity</th><th data-i18n="status">Status</th>
+                   <th data-i18n="kb_opened">Opened</th><th data-i18n="kb_events">Events</th></tr></thead>
+        <tbody id="issues"></tbody>
+      </table>
+    </div>
+    <div class="card" id="issue-detail" style="display:none"></div>
+  </div>
+
+  <!-- ================= ASSETS ================= -->
+  <div class="pane" id="p-assets">
+    <div class="card">
+      <h2 data-i18n="kb_add_machine_line_station">Add machine / line / station</h2>
+      <p class="muted" data-i18n="kb_asset_mapping_desc">Mapping camera ids, procedure names and math channels to an asset is
+      what lets the assistant find the right manual for an alarm without being told which
+      machine it came from.</p>
+      <div class="row">
+        <input class="grow" id="as-name" placeholder="Name — e.g. Loom 3">
+        <input id="as-code" class="grow" placeholder="Code — LOOM-3">
+        <select id="as-kind" style="width:auto">
+          <option value="site" data-i18n="kb_kind_site">site</option><option value="line" data-i18n="kb_kind_line">line</option>
+          <option value="machine" selected data-i18n="kb_kind_machine">machine</option>
+          <option value="station" data-i18n="kb_kind_station">station</option><option value="camera" data-i18n="kb_kind_camera">camera</option>
+          <option value="tool" data-i18n="kb_kind_tool">tool</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input class="grow" id="as-cams" placeholder="Camera ids — 1,2" data-i18n-placeholder="kb_camera_ids_ph">
+        <input class="grow" id="as-procs" placeholder="Procedure names — shade,hole" data-i18n-placeholder="kb_procedure_names_ph">
+        <input class="grow" id="as-chans" placeholder="Channels — band_delta_e" data-i18n-placeholder="kb_channels_ph">
+        <button onclick="addAsset()" data-i18n="kb_add_btn">Add</button>
+      </div>
+    </div>
+    <div class="card">
+      <table>
+        <thead><tr><th data-i18n="kb_name">Name</th><th data-i18n="kb_kind">Kind</th><th data-i18n="kb_code">Code</th><th data-i18n="kb_mapped_to">Mapped to</th>
+                   <th data-i18n="kb_docs">Docs</th><th></th></tr></thead>
+        <tbody id="assets"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ================= MCP ================= -->
+  <div class="pane" id="p-mcp">
+    <div class="card">
+      <h2 data-i18n="kb_this_system_mcp_server">This system as an MCP server</h2>
+      <p class="muted" data-i18n="kb_external_agents_desc">External agents can query this production line and its documents.
+      Point an MCP client at:</p>
+      <p><code id="mcp-url">http://&lt;this-host&gt;:4445/mcp</code></p>
+      <p class="muted"><span data-i18n="kb_mcp_write_desc1">Read tools are always available. Write tools (open issue, append to
+      issue, upload document) require</span> <code>KB_MCP_ALLOW_WRITE=true</code><span data-i18n="kb_mcp_write_desc2">. Changing
+      procedures, pipelines or the ejector is never exposed over MCP — those go through
+      the approval flow.</span></p>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="kb_connect_external_mcp">Connect an external MCP server</h2>
+      <p class="muted" data-i18n="kb_erp_mes_desc">ERP, MES, maintenance/CMMS, ticketing, document management. Its tools
+      are merged into the assistant so one conversation can span the line and your business
+      systems.</p>
+      <div class="row">
+        <input class="grow" id="mcp-name" placeholder="Name (becomes the tool prefix) — cmms">
+        <select id="mcp-transport" style="width:auto">
+          <option value="http">http</option><option value="sse">sse</option>
+          <option value="stdio">stdio</option>
+        </select>
+        <input class="grow" id="mcp-endpoint" placeholder="https://erp.example.com/mcp">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input class="grow" id="mcp-token" placeholder="Bearer token (optional)" data-i18n-placeholder="kb_bearer_token_ph">
+        <input class="grow" id="mcp-allow" placeholder="Allowed tools, comma separated (empty = read-only tools)" data-i18n-placeholder="kb_allowed_tools_ph">
+        <label class="muted" style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+          <input type="checkbox" id="mcp-write" style="width:auto"> <span data-i18n="kb_allow_writes">allow writes</span>
+        </label>
+        <button onclick="addMcp()" data-i18n="kb_connect_btn">Connect</button>
+      </div>
+      <p class="muted" style="margin-top:8px" data-i18n-prefix="⚠ " data-i18n="kb_mcp_untrusted_warning">⚠ Tool descriptions from an external server are
+      treated as untrusted data, never as instructions. Write access needs both the checkbox
+      above and the tool named in the allowlist.</p>
+    </div>
+
+    <div class="card">
+      <h2 data-i18n="kb_connected_servers">Connected servers</h2>
+      <table>
+        <thead><tr><th data-i18n="kb_name">Name</th><th data-i18n="kb_transport">Transport</th><th data-i18n="status">Status</th><th data-i18n="kb_tools">Tools</th>
+                   <th data-i18n="kb_writes">Writes</th><th></th></tr></thead>
+        <tbody id="mcps"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/kb';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, opts = {}) {
+  const r = await fetch(API + path, opts);
+  const text = await r.text();
+  let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!r.ok) throw new Error(data.error || data.detail || r.statusText);
+  return data;
+}
+
+// --- tabs -------------------------------------------------------------------
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.remove('on'));
+  document.querySelectorAll('.pane').forEach(x => x.classList.remove('on'));
+  b.classList.add('on');
+  $('p-' + b.dataset.p).classList.add('on');
+  ({library: loadDocs, issues: loadIssues, assets: loadAssets, mcp: loadMcp}[b.dataset.p] || (()=>{}))();
+});
+
+// --- health banner ----------------------------------------------------------
+async function health() {
+  try {
+    const h = await fetch('/api/knowledge/status').then(r => r.json());
+    if (!h.available) {
+      $('banner').innerHTML =
+        `<div class="banner err"><b>Knowledge service unavailable.</b> ${esc(h.error || '')}<br>
+         <span class="muted">Start it:
+         <code>docker compose -f docker-compose.yml -f knowledge_assistant/docker-compose.knowledge.yml up -d knowledge</code></span></div>`;
+      return;
+    }
+    // A degraded embedder means only exact-word search is trustworthy. Say so —
+    // silently returning weak semantic results is how people stop trusting it.
+    $('banner').innerHTML = h.embed_degraded
+      ? `<div class="banner warn"><b>Semantic search is degraded.</b>
+         No embedding model is configured (<code>KB_EMBED_PROVIDER=hash</code>), so results
+         are keyword-based only. Set <code>KB_EMBED_PROVIDER</code> and re-index for
+         meaning-based search.</div>` : '';
+    $('mcp-url').textContent = `http://${location.hostname}:4445/mcp`;
+  } catch (e) {
+    $('banner').innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+  }
+}
+
+// --- upload -----------------------------------------------------------------
+$('drop').onclick = () => $('file').click();
+$('drop').ondragover = e => { e.preventDefault(); $('drop').classList.add('hot'); };
+$('drop').ondragleave = () => $('drop').classList.remove('hot');
+$('drop').ondrop = e => {
+  e.preventDefault(); $('drop').classList.remove('hot');
+  upload(e.dataTransfer.files);
+};
+$('file').onchange = e => upload(e.target.files);
+
+async function upload(files) {
+  if (!files || !files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  if ($('up-type').value)  fd.append('doc_type', $('up-type').value);
+  if ($('up-asset').value) fd.append('asset_id', $('up-asset').value);
+  if ($('up-tags').value)  fd.append('tags', $('up-tags').value);
+  fd.append('uploaded_by', 'ui');
+
+  $('up-status').textContent = `Uploading ${files.length} file(s)…`;
+  try {
+    const r = await api('/upload', { method: 'POST', body: fd });
+    const dupes = (r.results || []).filter(x => x.duplicate).length;
+    $('up-status').innerHTML =
+      `Queued ${r.accepted} file(s). ${dupes ? `<span class="muted">${dupes} already in the library.</span>` : ''}`;
+    loadDocs(); loadJobs();
+  } catch (e) {
+    $('up-status').innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`;
+  }
+}
+
+async function saveNote() {
+  const title = $('note-title').value.trim(), text = $('note-body').value.trim();
+  if (!title || !text) return alert('Title and text are both required.');
+  await api('/ingest/text', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ title, text, doc_type: 'note', uploaded_by: 'ui' }),
+  });
+  $('note-title').value = $('note-body').value = '';
+  loadDocs();
+}
+
+// --- documents --------------------------------------------------------------
+async function loadDocs() {
+  try {
+    const q = $('doc-q').value.trim();
+    const r = await api('/documents?limit=200' + (q ? '&q=' + encodeURIComponent(q) : ''));
+    $('doc-count').textContent = `(${r.total})`;
+    $('docs').innerHTML = (r.documents || []).map(d => `
+      <tr>
+        <td><a href="${API}/documents/${d.id}/download" target="_blank">${esc(d.title)}</a>
+            ${d.body_indexed ? '' : '<span class="chip" title="stored, but the body could not be parsed">not indexed</span>'}
+            <div class="muted">${esc(d.filename || '')}</div>
+            ${(d.tags || []).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</td>
+        <td>${esc(d.doc_type)}</td>
+        <td>${esc(d.asset_name || '—')}</td>
+        <td>${esc(d.lang || '—')}</td>
+        <td>${d.chunk_count}</td>
+        <td><span class="st ${esc(d.status)}">${esc(d.status)}</span>
+            ${d.error ? `<div class="muted" title="${esc(d.error)}">${esc(d.error.slice(0,60))}</div>` : ''}</td>
+        <td style="white-space:nowrap">
+          <button class="ghost" onclick="reindex(${d.id})">Re-index</button>
+          <button class="ghost" onclick="delDoc(${d.id})">Delete</button></td>
+      </tr>`).join('') || '<tr><td colspan="7" class="muted">No documents yet.</td></tr>';
+  } catch (e) { $('docs').innerHTML = `<tr><td colspan="7">${esc(e.message)}</td></tr>`; }
+}
+
+const reindex = id => api(`/documents/${id}/reindex`, {method:'POST'}).then(loadJobs);
+const delDoc = id => confirm('Delete this document and its indexed text?') &&
+  api(`/documents/${id}`, {method:'DELETE'}).then(loadDocs);
+
+async function loadJobs() {
+  try {
+    const r = await api('/jobs?limit=25');
+    $('jobs').innerHTML = (r.jobs || []).map(j => `
+      <tr><td>${esc(j.title || j.filename || j.document_id)}</td>
+          <td>${esc(j.stage || '—')}</td>
+          <td><div class="bar"><i style="width:${Math.round((j.progress||0)*100)}%"></i></div></td>
+          <td><span class="st ${j.state === 'done' ? 'ready' : j.state === 'failed' ? 'failed' : 'pending'}">${esc(j.state)}</span>
+              ${j.error ? `<div class="muted">${esc(j.error.slice(0,80))}</div>` : ''}</td>
+      </tr>`).join('') || '<tr><td colspan="4" class="muted">Queue is empty.</td></tr>';
+  } catch {}
+}
+
+// --- search -----------------------------------------------------------------
+async function doSearch() {
+  const q = $('q').value.trim();
+  if (!q) return;
+  $('results').textContent = 'Searching…';
+  try {
+    const r = await api('/search', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ query: q, top_k: 10 }),
+    });
+    $('search-meta').textContent = r.arm_counts
+      ? `matched — vector ${r.arm_counts.vector}, text ${r.arm_counts.fts}, fuzzy ${r.arm_counts.trigram}`
+      : '';
+    $('results').innerHTML = (r.hits || []).map((h, i) => `
+      <div class="hit">
+        <div class="src">[${i+1}] ${esc(r.citations[i].label)}
+          <span class="muted"> · ${h.matched_by.join(' + ')} · ${h.score}</span></div>
+        <div>${esc(h.text)}</div>
+        <a class="muted" href="${API}/documents/${h.document_id}/download" target="_blank">open source</a>
+      </div>`).join('') ||
+      '<span class="muted">Nothing matched. If the document should exist, upload it in the Library tab.</span>';
+  } catch (e) { $('results').innerHTML = `<span style="color:var(--err)">${esc(e.message)}</span>`; }
+}
+
+// --- issues -----------------------------------------------------------------
+async function openIssue() {
+  const title = $('iss-title').value.trim();
+  if (!title) return;
+  const r = await api('/issues', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ title, severity: $('iss-sev').value, opened_by: 'ui' }),
+  });
+  // Prior art first — the same defect usually has a resolved thread already.
+  $('iss-similar').innerHTML = (r.similar || []).length
+    ? `<h3>This looks like it happened before</h3>` + r.similar.map(s => `
+        <div class="hit"><div class="src">${esc(s.code || s.id)} — ${esc(s.title)}</div>
+          ${s.root_cause ? `<div><b>Root cause:</b> ${esc(s.root_cause)}</div>` : ''}
+          ${s.resolution ? `<div><b>Resolution:</b> ${esc(s.resolution)}</div>` : ''}
+        </div>`).join('')
+    : '<span class="muted">No similar past issue found.</span>';
+  $('iss-title').value = '';
+  loadIssues();
+}
+
+async function loadIssues() {
+  try {
+    const r = await api('/issues?limit=100');
+    $('issues').innerHTML = (r.issues || []).map(i => `
+      <tr style="cursor:pointer" onclick="showIssue(${i.id})">
+        <td>${esc(i.code || i.id)}</td><td>${esc(i.title)}</td>
+        <td>${esc(i.severity)}</td>
+        <td><span class="st ${i.status === 'resolved' || i.status === 'closed' ? 'ready' : 'pending'}">${esc(i.status)}</span></td>
+        <td class="muted">${new Date(i.opened_at).toLocaleString()}</td>
+        <td>${i.event_count}</td>
+      </tr>`).join('') || '<tr><td colspan="6" class="muted">No issues.</td></tr>';
+  } catch (e) { $('issues').innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+}
+
+async function showIssue(id) {
+  const i = await api('/issues/' + id);
+  const box = $('issue-detail');
+  box.style.display = 'block';
+  box.innerHTML = `
+    <h2>${esc(i.code || i.id)} — ${esc(i.title)}</h2>
+    <div class="muted">${esc(i.status)} · ${esc(i.severity)} ·
+      opened ${new Date(i.opened_at).toLocaleString()}</div>
+    ${i.root_cause ? `<h3>Root cause</h3><div>${esc(i.root_cause)}</div>` : ''}
+    ${i.resolution ? `<h3>Resolution</h3><div>${esc(i.resolution)}</div>` : ''}
+    <h3>Timeline</h3>
+    ${(i.events || []).map(e => `
+      <div class="hit"><div class="src">${esc(e.role || e.kind)} ·
+        ${new Date(e.ts).toLocaleString()}</div>
+        <div>${esc(e.content || JSON.stringify(e.payload))}</div></div>`).join('') ||
+      '<span class="muted">No events yet.</span>'}
+    <h3>Proposed actions</h3>
+    ${(i.actions || []).filter(a => a.kind === 'proposal' || a.kind === 'apply').map(a => `
+      <div class="hit">
+        <div class="src">${esc(a.request?.title || a.target)}
+          <span class="muted"> · ${esc(a.status)}</span></div>
+        <div class="muted">${esc(a.request?.rationale || '')}</div>
+        <pre style="overflow-x:auto"><code>${esc(JSON.stringify(a.request?.body, null, 2))}</code></pre>
+        ${a.status === 'proposed'
+          ? `<button onclick="approve(${a.id}, true)">Apply</button>
+             <button class="ghost" onclick="approve(${a.id}, false)">Reject</button>`
+          : ''}
+      </div>`).join('') ||
+      '<span class="muted">None. The assistant proposes changes here; nothing is applied without your approval.</span>'}
+    <div style="margin-top:14px">
+      <textarea id="ev-text" rows="3" placeholder="Add a note to this thread…"></textarea>
+      <button style="margin-top:8px" onclick="addEvent(${id})">Add note</button>
+    </div>`;
+  box.scrollIntoView({behavior:'smooth'});
+}
+
+async function addEvent(id) {
+  const content = $('ev-text').value.trim();
+  if (!content) return;
+  await api(`/issues/${id}/events`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ kind:'message', role:'user', content, author:'ui' }),
+  });
+  showIssue(id);
+}
+
+async function approve(actionId, ok) {
+  if (ok && !confirm('Apply this change to the running line?')) return;
+  try {
+    await api('/actions/approve', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action_id: actionId, approved_by: 'ui', approve: ok }),
+    });
+    loadIssues();
+    alert(ok ? 'Applied.' : 'Rejected.');
+  } catch (e) { alert(e.message); }
+}
+
+// --- assets -----------------------------------------------------------------
+async function loadAssets() {
+  try {
+    const r = await api('/assets');
+    $('assets').innerHTML = (r.assets || []).map(a => `
+      <tr><td>${esc(a.name)}</td><td>${esc(a.kind)}</td><td>${esc(a.code || '—')}</td>
+        <td class="muted">
+          ${(a.meta?.camera_ids || []).map(c => `<span class="chip">cam ${c}</span>`).join('')}
+          ${(a.meta?.procedure_names || []).map(p => `<span class="chip">${esc(p)}</span>`).join('')}
+          ${(a.meta?.channels || []).map(c => `<span class="chip">${esc(c)}</span>`).join('')}</td>
+        <td>${a.doc_count}</td>
+        <td><button class="ghost" onclick="delAsset(${a.id})">Delete</button></td>
+      </tr>`).join('') || '<tr><td colspan="6" class="muted">No assets yet.</td></tr>';
+
+    $('up-asset').innerHTML = '<option value="">— none —</option>' +
+      (r.assets || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  } catch (e) { $('assets').innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+}
+
+const nums = s => s.split(',').map(x => parseInt(x.trim(), 10)).filter(n => !isNaN(n));
+const strs = s => s.split(',').map(x => x.trim()).filter(Boolean);
+
+async function addAsset() {
+  const name = $('as-name').value.trim();
+  if (!name) return;
+  await api('/assets', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      name, code: $('as-code').value.trim() || null, kind: $('as-kind').value,
+      meta: { camera_ids: nums($('as-cams').value),
+              procedure_names: strs($('as-procs').value),
+              channels: strs($('as-chans').value) },
+    }),
+  });
+  ['as-name','as-code','as-cams','as-procs','as-chans'].forEach(i => $(i).value = '');
+  loadAssets();
+}
+
+const delAsset = id => confirm('Delete this asset?') &&
+  api('/assets/' + id, {method:'DELETE'}).then(loadAssets);
+
+// --- MCP --------------------------------------------------------------------
+async function loadMcp() {
+  try {
+    const r = await api('/mcp/servers');
+    $('mcps').innerHTML = (r.servers || []).map(s => `
+      <tr><td>${esc(s.name)}<div class="muted">${esc(s.url || s.command || '')}</div></td>
+        <td>${esc(s.transport)}</td>
+        <td><span class="st ${s.status === 'ok' ? 'ready' : s.status === 'error' ? 'failed' : 'pending'}">${esc(s.status)}</span>
+            ${s.last_error ? `<div class="muted">${esc(s.last_error.slice(0,70))}</div>` : ''}</td>
+        <td>${(s.tools || []).map(t => `<span class="chip">${esc(t.name)}</span>`).join('') || '<span class="muted">none discovered</span>'}</td>
+        <td>${s.write_enabled ? '<span style="color:var(--warn)">enabled</span>' : 'off'}</td>
+        <td style="white-space:nowrap">
+          <button class="ghost" onclick="rediscover('${esc(s.name)}')">Re-discover</button>
+          <button class="ghost" onclick="delMcp('${esc(s.name)}')">Remove</button></td>
+      </tr>`).join('') || '<tr><td colspan="6" class="muted">No external servers connected.</td></tr>';
+  } catch (e) { $('mcps').innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
+}
+
+async function addMcp() {
+  const name = $('mcp-name').value.trim(), endpoint = $('mcp-endpoint').value.trim();
+  if (!name || !endpoint) return alert('Name and endpoint are required.');
+  const transport = $('mcp-transport').value;
+  const token = $('mcp-token').value.trim();
+  try {
+    await api('/mcp/servers', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        name, transport,
+        url: transport === 'stdio' ? null : endpoint,
+        command: transport === 'stdio' ? endpoint : null,
+        auth: token ? { type:'bearer', token } : {},
+        write_enabled: $('mcp-write').checked,
+        tool_allowlist: strs($('mcp-allow').value),
+      }),
+    });
+    ['mcp-name','mcp-endpoint','mcp-token','mcp-allow'].forEach(i => $(i).value = '');
+    loadMcp();
+  } catch (e) { alert(e.message); }
+}
+
+const rediscover = n => api(`/mcp/servers/${n}/discover`, {method:'POST'})
+  .then(loadMcp).catch(e => alert(e.message));
+const delMcp = n => confirm(`Remove ${n}?`) &&
+  api('/mcp/servers/' + n, {method:'DELETE'}).then(loadMcp);
+
+// --- boot -------------------------------------------------------------------
+health(); loadDocs(); loadAssets(); loadJobs();
+setInterval(loadJobs, 5000);
+
+// --- i18n ---------------------------------------------------------------
+// Inherit the language the operator chose in the main app (shared localStorage,
+// same origin). Re-apply live if the language is switched while this tab is open.
+document.addEventListener('DOMContentLoaded', function(){ applyLanguage(); });
+if (document.readyState !== 'loading') applyLanguage();
+window.addEventListener('storage', function(e){ if(e.key==='monitaqc_lang') applyLanguage(); });
+</script>
+</body>
+</html>

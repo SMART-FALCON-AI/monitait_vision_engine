@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.263"></script>
+        <script src="/static/js/i18n.js?v=4.0.268"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -37,7 +37,7 @@
                     <button class="tab-button active" onclick="switchTab('dashboard')">📊 <span data-i18n="tab_dashboard">Dashboard</span></button>
                     <button class="tab-button" onclick="switchTab('grafana')">📈 <span data-i18n="tab_charts">Charts</span></button>
                     <button class="tab-button" onclick="switchTab('ai')">🤖 <span data-i18n="tab_ai">AI Assistant</span></button>
-                    <button class="tab-button" onclick="switchTab('knowledge')">📚 <span>Knowledge</span></button>
+                    <button class="tab-button" onclick="switchTab('knowledge')">📚 <span data-i18n="tab_knowledge">Knowledge</span></button>
                     <button class="tab-button" onclick="switchTab('hardware')">🔧 <span data-i18n="tab_hardware">Hardware</span></button>
                     <button class="tab-button" onclick="switchTab('cameras')">📷 <span data-i18n="tab_cameras">Cameras</span></button>
                     <button class="tab-button" onclick="switchTab('infrastructure')">🔮 <span data-i18n="tab_inference">Inference</span></button>
@@ -91,7 +91,7 @@
                                     <button onclick="generateShipmentCode()" title="Auto-generate next yyyymmddXXX" style="padding: 4px 8px; background: linear-gradient(135deg,#8b5cf6,#6d28d9); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 13px;">🎲</button>
                                 </div>
                                 <div id="shipment-buttons" style="display: flex; gap: 4px;">
-                                    <button onclick="saveShipmentId()" style="flex: 1; padding: 4px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 11px;">✓ Save</button>
+                                    <button onclick="saveShipmentId()" data-i18n-prefix="✓ " data-i18n="save" style="flex: 1; padding: 4px 8px; background: var(--success-color); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 11px;">✓ Save</button>
                                     <button onclick="cancelEditShipment()" style="padding: 4px 10px; background: var(--text-secondary); color: white; border: none; border-radius: 3px; cursor: pointer; font-weight: 600; font-size: 11px;">✗</button>
                                 </div>
                             </div>
@@ -206,7 +206,7 @@
                             <div id="state-ai-panel" style="display:none; margin-top:6px; padding:6px 8px; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.35); border-radius:4px; font-size:11px; line-height:1.45;">
                                 <div id="state-ai-content" style="color:#d1fae5;"></div>
                                 <div id="state-ai-actions" style="display:none; margin-top:4px; gap:4px; flex-direction:row;">
-                                    <button onclick="applyAiRecommendedState()" id="state-ai-apply" style="background:var(--primary-color); color:#fff; border:none; padding:2px 8px; cursor:pointer; font-size:10px; border-radius:3px; font-weight:600;">✓ Apply</button>
+                                    <button onclick="applyAiRecommendedState()" id="state-ai-apply" data-i18n-prefix="✓ " data-i18n="apply" style="background:var(--primary-color); color:#fff; border:none; padding:2px 8px; cursor:pointer; font-size:10px; border-radius:3px; font-weight:600;">✓ Apply</button>
                                     <button onclick="document.getElementById('state-ai-panel').style.display='none'" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); padding:1px 7px; cursor:pointer; font-size:10px; border-radius:3px;">✗</button>
                                 </div>
                             </div>
@@ -272,7 +272,7 @@
                                      detail/history use the Charts tab. -->
                                 <div id="timeline-footer" style="display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; background: rgba(0,0,0,0.8); border-top: 1px solid var(--border-color); flex-wrap: wrap;">
                                     <button id="timeline-zoom-in" class="timeline-nav-btn" title="Zoom In">+</button>
-                                    <button id="timeline-reset-zoom" class="timeline-nav-btn" title="Reset Zoom">Reset</button>
+                                    <button id="timeline-reset-zoom" class="timeline-nav-btn" title="Reset Zoom" data-i18n="dash_reset">Reset</button>
                                     <button id="timeline-zoom-out" class="timeline-nav-btn" title="Zoom Out">–</button>
                                     <span style="width: 1px; height: 20px; background: var(--border-color); margin: 0 4px;"></span>
                                     <button id="timeline-toggle-auto" class="timeline-nav-btn" title="Stop/Resume Auto-Update">Stop</button>
@@ -296,12 +296,12 @@
 
                 <div class="discovery-controls">
                     <div class="discovery-input-group">
-                        <label for="subnet-input">Network Subnet (first 3 octets)</label>
+                        <label for="subnet-input" data-i18n="network_subnet">Network Subnet (first 3 octets)</label>
                         <input type="text" id="subnet-input" class="discovery-input" value="192.168.0" placeholder="192.168.0">
-                        <small style="color: var(--text-secondary); font-size: 11px;">Scan for IP cameras on this subnet</small>
+                        <small style="color: var(--text-secondary); font-size: 11px;" data-i18n="cam_scan_hint">Scan for IP cameras on this subnet</small>
                     </div>
                     <div class="discovery-input-group" style="display: flex; align-items: flex-end;">
-                        <button id="scan-button" class="discovery-button" onclick="scanForCameras()">🔎 Scan Network</button>
+                        <button id="scan-button" class="discovery-button" onclick="scanForCameras()" data-i18n-prefix="🔎 " data-i18n="scan_network">🔎 Scan Network</button>
                     </div>
                     <!-- 4.0.53 — Pro (Basler / USB3 Vision) discovery button
                          moved INTO the IP Camera Discovery section so both
@@ -323,12 +323,12 @@
                     <table class="camera-table" style="width: 100%; border-collapse: collapse;">
                         <thead>
                             <tr style="background: rgba(30,41,59,0.4);">
-                                <th style="padding: 6px 8px; text-align: left;">Model</th>
-                                <th style="padding: 6px 8px; text-align: left;">Serial</th>
-                                <th style="padding: 6px 8px; text-align: left;">Vendor</th>
-                                <th style="padding: 6px 8px; text-align: left;">Source</th>
-                                <th style="padding: 6px 8px; text-align: left;">Status</th>
-                                <th style="padding: 6px 8px; text-align: right;">Actions</th>
+                                <th style="padding: 6px 8px; text-align: left;" data-i18n="cam_th_model">Model</th>
+                                <th style="padding: 6px 8px; text-align: left;" data-i18n="cam_th_serial">Serial</th>
+                                <th style="padding: 6px 8px; text-align: left;" data-i18n="cam_th_vendor">Vendor</th>
+                                <th style="padding: 6px 8px; text-align: left;" data-i18n="cam_th_source">Source</th>
+                                <th style="padding: 6px 8px; text-align: left;" data-i18n="status">Status</th>
+                                <th style="padding: 6px 8px; text-align: right;" data-i18n="cam_th_actions">Actions</th>
                             </tr>
                         </thead>
                         <tbody id="pro-cameras-tbody"></tbody>
@@ -429,15 +429,15 @@
                     <div class="camera-preview-header">
                         <h3 id="preview-camera-title" data-i18n="camera_preview">Camera Preview</h3>
                         <div style="display: flex; gap: 10px;">
-                            <button id="save-camera-button" class="discovery-button" onclick="saveDiscoveredCamera()" style="padding: 8px 16px;">💾 Save Camera</button>
-                            <button class="camera-preview-close" onclick="closeCameraPreview()">Close</button>
+                            <button id="save-camera-button" class="discovery-button" onclick="saveDiscoveredCamera()" style="padding: 8px 16px;" data-i18n-prefix="💾 " data-i18n="cam_save_camera">💾 Save Camera</button>
+                            <button class="camera-preview-close" onclick="closeCameraPreview()" data-i18n="modal_close">Close</button>
                         </div>
                     </div>
                     <div id="preview-camera-info"></div>
                     <img id="preview-camera-image" class="camera-preview-image" src="" alt="Camera preview">
                     <div id="preview-camera-actions" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #ddd;">
                         <div style="margin-bottom: 10px;">
-                            <label style="display: block; font-weight: 500; margin-bottom: 5px;">Camera Name (optional):</label>
+                            <label style="display: block; font-weight: 500; margin-bottom: 5px;" data-i18n="cam_name_label">Camera Name (optional):</label>
                             <input type="text" id="save-camera-name" placeholder="e.g., Front Door Camera, Line 1 Camera" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
                         </div>
                     </div>
@@ -450,7 +450,7 @@
                     <h2>📷 <span data-i18n="camera_monitoring">Camera Monitoring</span></h2>
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <span class="camera-refresh-status" id="camera-refresh-status">Active</span>
-                        <button class="control-button" style="width: auto; padding: 6px 12px;" onclick="refreshCameras()">🔄 Refresh</button>
+                        <button class="control-button" style="width: auto; padding: 6px 12px;" onclick="refreshCameras()" data-i18n-prefix="🔄 " data-i18n="refresh">🔄 Refresh</button>
                     </div>
                 </div>
 
@@ -601,24 +601,24 @@
                 <div class="control-section">
                     <h3 data-i18n="basic_controls">Basic Controls</h3>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px;">
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('U_ON_B_ON')">Both On</button>
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('U_ON_B_OFF')">U On, B Off</button>
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('B_ON_U_OFF')">B On, U Off</button>
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('B_OFF_U_OFF')">Both Off</button>
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('RESET_ENCODER')">Reset Encoder</button>
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('WARNING_ON')">Warning On</button>
-                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('WARNING_OFF')">Warning Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('U_ON_B_ON')" data-i18n="hw_both_on">Both On</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('U_ON_B_OFF')" data-i18n="hw_u_on_b_off">U On, B Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('B_ON_U_OFF')" data-i18n="hw_b_on_u_off">B On, U Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('B_OFF_U_OFF')" data-i18n="hw_both_off">Both Off</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('RESET_ENCODER')" data-i18n="hw_reset_encoder">Reset Encoder</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('WARNING_ON')" data-i18n="hw_warning_on">Warning On</button>
+                        <button class="control-button" style="width: auto; padding: 5px 12px; font-size: 12px;" onclick="sendCommand('WARNING_OFF')" data-i18n="hw_warning_off">Warning Off</button>
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 500px;">
                         <div style="display: flex; align-items: center; gap: 6px;">
                             <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;" data-i18n="upper_pwm">Upper PWM (0-255)</span>
                             <input type="number" class="control-input" id="pwm-up" min="0" max="255" value="255" style="margin: 0; padding: 4px 6px; width: 70px; font-size: 12px;">
-                            <button class="control-button" style="width: auto; padding: 4px 10px; font-size: 11px;" onclick="sendCommand('U_SET_PWM', document.getElementById('pwm-up').value)">Set</button>
+                            <button class="control-button" style="width: auto; padding: 4px 10px; font-size: 11px;" onclick="sendCommand('U_SET_PWM', document.getElementById('pwm-up').value)" data-i18n="set">Set</button>
                         </div>
                         <div style="display: flex; align-items: center; gap: 6px;">
                             <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;" data-i18n="bottom_pwm">Bottom PWM (0-255)</span>
                             <input type="number" class="control-input" id="pwm-down" min="0" max="255" value="255" style="margin: 0; padding: 4px 6px; width: 70px; font-size: 12px;">
-                            <button class="control-button" style="width: auto; padding: 4px 10px; font-size: 11px;" onclick="sendCommand('B_SET_PWM', document.getElementById('pwm-down').value)">Set</button>
+                            <button class="control-button" style="width: auto; padding: 4px 10px; font-size: 11px;" onclick="sendCommand('B_SET_PWM', document.getElementById('pwm-down').value)" data-i18n="set">Set</button>
                         </div>
                     </div>
                 </div>
@@ -628,7 +628,7 @@
                     <h3 data-i18n="serial_config">Serial Port Configuration</h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <span style="font-weight: bold; color: var(--text-primary);">Device Status:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);" data-i18n="hw_device_status">Device Status:</span>
                             <span id="serial-device-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
                                 <span id="serial-device-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
                                 <span id="serial-device-text" style="color: var(--text-primary);">Checking...</span>
@@ -640,7 +640,7 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="serial_port">Serial Port Device</div>
                             <input type="text" class="control-input" id="watcher-usb-input" value="/dev/ttyUSB0" placeholder="/dev/ttyUSB0">
-                            <button class="control-button" onclick="updateConfig('watcher_usb', document.getElementById('watcher-usb-input').value)">Set Port</button>
+                            <button class="control-button" onclick="updateConfig('watcher_usb', document.getElementById('watcher-usb-input').value)" data-i18n="hw_set_port">Set Port</button>
                             <div class="control-response" id="config-watcher_usb-response"></div>
                         </div>
                         <div class="control-item">
@@ -652,16 +652,16 @@
                                 <option value="57600" selected>57600</option>
                                 <option value="115200">115200</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('baud_rate', document.getElementById('baud-rate-input').value)">Set Baud Rate</button>
+                            <button class="control-button" onclick="updateConfig('baud_rate', document.getElementById('baud-rate-input').value)" data-i18n="hw_set_baud">Set Baud Rate</button>
                             <div class="control-response" id="config-baud_rate-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="serial_mode">Serial Mode</div>
                             <select class="control-input" id="serial-mode-input">
-                                <option value="new" selected>Normal</option>
-                                <option value="legacy">Legacy</option>
+                                <option value="new" selected data-i18n="hw_opt_normal">Normal</option>
+                                <option value="legacy" data-i18n="hw_opt_legacy">Legacy</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('serial_mode', document.getElementById('serial-mode-input').value)">Set Mode</button>
+                            <button class="control-button" onclick="updateConfig('serial_mode', document.getElementById('serial-mode-input').value)" data-i18n="hw_set_mode">Set Mode</button>
                             <div class="control-response" id="config-serial_mode-response"></div>
                         </div>
                     </div>
@@ -676,25 +676,25 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="downtime_threshold">Downtime Threshold (seconds)</div>
                             <input type="number" class="control-input" id="downtime-threshold" min="1" value="10">
-                            <button class="control-button" onclick="sendCommand('SET_DOWNTIME', document.getElementById('downtime-threshold').value)">Set Threshold</button>
+                            <button class="control-button" onclick="sendCommand('SET_DOWNTIME', document.getElementById('downtime-threshold').value)" data-i18n="hw_set_threshold">Set Threshold</button>
                             <div class="control-response" id="cmd-SET_DOWNTIME-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="external_reset">External Reset</div>
                             <select class="control-input" id="external-reset">
-                                <option value="0">Off</option>
-                                <option value="1">On</option>
+                                <option value="0" data-i18n="hw_opt_off">Off</option>
+                                <option value="1" data-i18n="hw_opt_on">On</option>
                             </select>
-                            <button class="control-button" onclick="sendCommand('SET_EXTERNAL_RESET', document.getElementById('external-reset').value)">Set External Reset</button>
+                            <button class="control-button" onclick="sendCommand('SET_EXTERNAL_RESET', document.getElementById('external-reset').value)" data-i18n="hw_set_external_reset">Set External Reset</button>
                             <div class="control-response" id="cmd-SET_EXTERNAL_RESET-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="verbose_mode">Verbose Mode</div>
                             <select class="control-input" id="verbose-mode">
-                                <option value="0">Off</option>
-                                <option value="1">On</option>
+                                <option value="0" data-i18n="hw_opt_off">Off</option>
+                                <option value="1" data-i18n="hw_opt_on">On</option>
                             </select>
-                            <button class="control-button" onclick="sendCommand('SET_VERBOSE', document.getElementById('verbose-mode').value)">Set Verbose Mode</button>
+                            <button class="control-button" onclick="sendCommand('SET_VERBOSE', document.getElementById('verbose-mode').value)" data-i18n="hw_set_verbose">Set Verbose Mode</button>
                             <div class="control-response" id="cmd-SET_VERBOSE-response"></div>
                         </div>
                     </div>
@@ -702,47 +702,47 @@
                         <h4 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="watcher_verbose">Watcher Verbose Configuration (Read-only)</h4>
                         <div class="verbose-grid">
                             <div>
-                                <div class="verbose-item-label">OK Offset Delay (OOD)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_ood">OK Offset Delay (OOD)</div>
                                 <div class="verbose-item-value" id="v-ood">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">OK Duration Pulses (ODP)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_odp">OK Duration Pulses (ODP)</div>
                                 <div class="verbose-item-value" id="v-odp">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">OK Duration Percent (ODL)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_odl">OK Duration Percent (ODL)</div>
                                 <div class="verbose-item-value" id="v-odl">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">OK Encoder Factor (OEF)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_oef">OK Encoder Factor (OEF)</div>
                                 <div class="verbose-item-value" id="v-oef">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">NG Offset Delay (NOD)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_nod">NG Offset Delay (NOD)</div>
                                 <div class="verbose-item-value" id="v-nod">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">NG Duration Pulses (NDP)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_ndp">NG Duration Pulses (NDP)</div>
                                 <div class="verbose-item-value" id="v-ndp">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">NG Duration Percent (NDL)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_ndl">NG Duration Percent (NDL)</div>
                                 <div class="verbose-item-value" id="v-ndl">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">NG Encoder Factor (NEF)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_nef">NG Encoder Factor (NEF)</div>
                                 <div class="verbose-item-value" id="v-nef">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">External Reset (EXT)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_ext">External Reset (EXT)</div>
                                 <div class="verbose-item-value" id="v-ext">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">Baud Rate (BUD)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_bud">Baud Rate (BUD)</div>
                                 <div class="verbose-item-value" id="v-bud">-</div>
                             </div>
                             <div>
-                                <div class="verbose-item-label">Downtime Threshold (DWT)</div>
+                                <div class="verbose-item-label" data-i18n="hw_v_dwt">Downtime Threshold (DWT)</div>
                                 <div class="verbose-item-value" id="v-dwt">-</div>
                             </div>
                         </div>
@@ -755,31 +755,31 @@
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="ok_counter_adj">OK Counter Adjustment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_counter_adj">Subtract from the hardware counter to correct miscounts. Use negative values to add.</span></span></div>
                             <input type="number" class="control-input" id="ok-adjust" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('OK_ADJUST', document.getElementById('ok-adjust').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-OK_ADJUST-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="offset_delay">Offset Delay (milliseconds)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_offset_delay">Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.</span></span></div>
                             <input type="number" class="control-input" id="ok-offset-delay" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('OK_OFFSET_DELAY', document.getElementById('ok-offset-delay').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-OK_OFFSET_DELAY-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="duration_pulses">Duration Pulses (16us each)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_pulses">Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.</span></span></div>
                             <input type="number" class="control-input" id="ok-duration-pulses" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('OK_DURATION_PULSES', document.getElementById('ok-duration-pulses').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-OK_DURATION_PULSES-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="duration_percent">Duration Percent</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_percent">Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.</span></span></div>
                             <input type="number" class="control-input" id="ok-duration-percent" min="0" max="100" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('OK_DURATION_PERCENT', document.getElementById('ok-duration-percent').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-OK_DURATION_PERCENT-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="encoder_factor">Encoder Factor</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder_factor">Multiplier for encoder counts per detection. Default 1 = one count per product.</span></span></div>
                             <input type="number" class="control-input" id="ok-encoder-factor" value="0">
-                            <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('OK_ENCODER_FACTOR', document.getElementById('ok-encoder-factor').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-OK_ENCODER_FACTOR-response"></div>
                         </div>
                     </div>
@@ -792,31 +792,31 @@
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="ng_counter_adj">NG Counter Adjustment</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_counter_adj">Subtract from the hardware counter to correct miscounts. Use negative values to add.</span></span></div>
                             <input type="number" class="control-input" id="ng-adjust" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('NG_ADJUST', document.getElementById('ng-adjust').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-NG_ADJUST-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="offset_delay">Offset Delay (milliseconds)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_offset_delay">Milliseconds to wait after detection before counting. Compensates for physical distance between sensor and counting point.</span></span></div>
                             <input type="number" class="control-input" id="ng-offset-delay" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('NG_OFFSET_DELAY', document.getElementById('ng-offset-delay').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-NG_OFFSET_DELAY-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="duration_pulses">Duration Pulses (16us each)</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_pulses">Number of samples (~16µs each) for noise filtering. Higher = more reliable but slower. 0 = instant count.</span></span></div>
                             <input type="number" class="control-input" id="ng-duration-pulses" min="0" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('NG_DURATION_PULSES', document.getElementById('ng-duration-pulses').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-NG_DURATION_PULSES-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="duration_percent">Duration Percent</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_duration_percent">Percentage of samples that must be HIGH during debounce window. E.g. 60 means 6 of 10 pulses must be HIGH.</span></span></div>
                             <input type="number" class="control-input" id="ng-duration-percent" min="0" max="100" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('NG_DURATION_PERCENT', document.getElementById('ng-duration-percent').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-NG_DURATION_PERCENT-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label"><span data-i18n="encoder_factor">Encoder Factor</span> <span class="info-tooltip-sm">i<span class="info-tooltip-text" data-i18n="tip_encoder_factor">Multiplier for encoder counts per detection. Default 1 = one count per product.</span></span></div>
                             <input type="number" class="control-input" id="ng-encoder-factor" value="0">
-                            <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)">Set</button>
+                            <button class="control-button" onclick="sendCommand('NG_ENCODER_FACTOR', document.getElementById('ng-encoder-factor').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="cmd-NG_ENCODER_FACTOR-response"></div>
                         </div>
                     </div>
@@ -830,7 +830,7 @@
                     <h3 data-i18n="inference_status">Inference Status</h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 10px; margin-bottom: 15px;">
                         <div style="display: flex; align-items: center; gap: 8px;">
-                            <span style="font-weight: bold; color: var(--text-primary);">Pipeline:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);" data-i18n="inf_pipeline_label">Pipeline:</span>
                             <span id="pipeline-status-indicator" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;">
                                 <span id="pipeline-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #6c757d;"></span>
                                 <span id="pipeline-text" style="color: var(--text-primary);">Checking...</span>
@@ -843,14 +843,14 @@
                     <h3 data-i18n="pipeline_management">Inference Pipeline Management</h3>
                     <div style="background: rgba(30, 41, 59, 0.5); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: var(--text-primary);">Active Pipeline:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);" data-i18n="inf_active_pipeline_label">Active Pipeline:</span>
                             <span id="current-pipeline-name" style="font-size: 16px; font-weight: bold; color: var(--primary-color);">Loading...</span>
                             <span style="color: var(--text-secondary);">|</span>
-                            <span style="font-weight: bold; color: var(--text-primary);">Current Model:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);" data-i18n="inf_current_model_label">Current Model:</span>
                             <span id="current-model-name" style="font-size: 16px; font-weight: bold; color: var(--success-color);">Loading...</span>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                            <button class="camera-btn camera-btn-primary" onclick="refreshPipelineConfig()">Refresh</button>
+                            <button class="camera-btn camera-btn-primary" onclick="refreshPipelineConfig()" data-i18n="refresh">Refresh</button>
                         </div>
                     </div>
 
@@ -859,33 +859,33 @@
                         <h4 style="margin: 0 0 15px 0; color: var(--primary-color); border-bottom: 2px solid var(--primary-color); padding-bottom: 8px;" data-i18n="pipeline_config">Pipeline Configuration</h4>
 
                         <div style="margin-bottom: 15px;">
-                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Available Pipelines</h5>
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="available_pipelines">Available Pipelines</h5>
                             <div id="pipelines-list" style="display: flex; flex-wrap: wrap; gap: 10px;">
                                 <span style="color: var(--text-secondary); font-style: italic;">Loading pipelines...</span>
                             </div>
                         </div>
 
                         <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
-                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Create/Edit Pipeline</h5>
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="create_edit_pipeline">Create/Edit Pipeline</h5>
                             <div class="control-grid" style="margin-bottom: 15px;">
                                 <div class="control-item">
-                                    <div class="control-label">Pipeline Name <span style="color: #dc3545;">*</span></div>
+                                    <div class="control-label"><span data-i18n="pipeline_name">Pipeline Name</span> <span style="color: #dc3545;">*</span></div>
                                     <input type="text" class="control-input" id="pipeline-name-input" placeholder="e.g., defect_detection">
                                 </div>
                                 <div class="control-item">
-                                    <div class="control-label">Description</div>
-                                    <input type="text" class="control-input" id="pipeline-desc-input" placeholder="Pipeline description...">
+                                    <div class="control-label" data-i18n="description">Description</div>
+                                    <input type="text" class="control-input" id="pipeline-desc-input" placeholder="Pipeline description..." data-i18n-placeholder="inf_pipeline_desc_ph">
                                 </div>
                                 <div class="control-item" style="grid-column: span 2;">
-                                    <div class="control-label">Models in Pipeline (select models to include)</div>
+                                    <div class="control-label" data-i18n="inf_models_in_pipeline">Models in Pipeline (select models to include)</div>
                                     <div id="pipeline-models-checklist" style="display: flex; flex-wrap: wrap; gap: 10px; padding: 8px; background: rgba(15, 23, 42, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px;">
                                         <span style="color: var(--text-secondary); font-style: italic;">Loading models...</span>
                                     </div>
                                 </div>
                             </div>
                             <div style="display: flex; gap: 8px;">
-                                <button class="control-button" style="background-color: var(--primary-color);" onclick="createOrUpdatePipeline()">Create/Update Pipeline</button>
-                                <button class="control-button" style="background-color: var(--danger-color);" onclick="deletePipeline()">Delete Pipeline</button>
+                                <button class="control-button" style="background-color: var(--primary-color);" onclick="createOrUpdatePipeline()" data-i18n="inf_create_update_pipeline">Create/Update Pipeline</button>
+                                <button class="control-button" style="background-color: var(--danger-color);" onclick="deletePipeline()" data-i18n="inf_delete_pipeline">Delete Pipeline</button>
                             </div>
                             <div class="control-response" id="pipeline-response"></div>
                         </div>
@@ -896,29 +896,29 @@
                         <h4 style="margin: 0 0 15px 0; color: var(--success-color); border-bottom: 2px solid var(--success-color); padding-bottom: 8px;" data-i18n="inference_models">Inference Models</h4>
 
                         <div style="margin-bottom: 15px;">
-                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Available Models</h5>
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="inf_available_models">Available Models</h5>
                             <div id="models-list" style="display: flex; flex-direction: column; gap: 10px;">
                                 <span style="color: var(--text-secondary); font-style: italic;">Loading models...</span>
                             </div>
                         </div>
 
                         <div style="background: rgba(15, 23, 42, 0.5); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 6px; padding: 12px;">
-                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);">Create/Edit Model</h5>
+                            <h5 style="margin: 0 0 10px 0; color: var(--text-primary);" data-i18n="create_edit_model">Create/Edit Model</h5>
                             <!-- Row 1: Name, Type, URL, Confidence — all on one line -->
                             <div style="display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 10px;">
                                 <div style="flex: 1; min-width: 120px;">
-                                    <label style="font-size: 10px; color: var(--text-secondary);">Name <span style="color: #dc3545;">*</span></label>
+                                    <label style="font-size: 10px; color: var(--text-secondary);"><span data-i18n="inf_name">Name</span> <span style="color: #dc3545;">*</span></label>
                                     <input type="text" class="control-input" id="model-name-input" placeholder="e.g., Local YOLO" style="margin: 0;">
                                 </div>
                                 <div style="min-width: 80px;">
-                                    <label style="font-size: 10px; color: var(--text-secondary);">Type <span style="color: #dc3545;">*</span></label>
+                                    <label style="font-size: 10px; color: var(--text-secondary);"><span data-i18n="type">Type</span> <span style="color: #dc3545;">*</span></label>
                                     <select class="control-input" id="model-type-input" onchange="handleModelTypeChange()" style="margin: 0;">
                                         <option value="gradio">Gradio</option>
                                         <option value="yolo">YOLO</option>
                                     </select>
                                 </div>
                                 <div style="flex: 2; min-width: 180px;">
-                                    <label style="font-size: 10px; color: var(--text-secondary);">Inference URL <span style="color: #dc3545;">*</span></label>
+                                    <label style="font-size: 10px; color: var(--text-secondary);"><span data-i18n="inference_url">Inference URL</span> <span style="color: #dc3545;">*</span></label>
                                     <input type="text" class="control-input" id="model-url-input" placeholder="http://yolo_inference:4442/..." onchange="fetchModelsFromGradio()" style="margin: 0;">
                                 </div>
                                 <!-- Gradio model name (shown when type=gradio) -->
@@ -938,22 +938,22 @@
                                     </select>
                                 </div>
                                 <div style="min-width: 80px;">
-                                    <label style="font-size: 10px; color: var(--text-secondary);">Confidence</label>
+                                    <label style="font-size: 10px; color: var(--text-secondary);" data-i18n="inf_confidence">Confidence</label>
                                     <input type="number" class="control-input" id="model-confidence-input" min="0" max="1" step="0.05" value="0.25" style="margin: 0;">
                                 </div>
-                                <button class="control-button" style="font-size: 11px; padding: 6px 10px; white-space: nowrap; margin: 0;" onclick="fetchModelsFromGradio()">Fetch</button>
-                                <button class="control-button" style="background-color: #28a745; font-size: 11px; padding: 6px 10px; white-space: nowrap; margin: 0;" onclick="createOrUpdateModel()">Save</button>
-                                <button class="control-button" style="background-color: #dc3545; font-size: 11px; padding: 6px 10px; white-space: nowrap; margin: 0;" onclick="deleteModel()">Delete</button>
+                                <button class="control-button" style="font-size: 11px; padding: 6px 10px; white-space: nowrap; margin: 0;" onclick="fetchModelsFromGradio()" data-i18n="inf_fetch">Fetch</button>
+                                <button class="control-button" style="background-color: #28a745; font-size: 11px; padding: 6px 10px; white-space: nowrap; margin: 0;" onclick="createOrUpdateModel()" data-i18n="save">Save</button>
+                                <button class="control-button" style="background-color: #dc3545; font-size: 11px; padding: 6px 10px; white-space: nowrap; margin: 0;" onclick="deleteModel()" data-i18n="delete">Delete</button>
                             </div>
                             <!-- Row 2: YOLO weights (shown when type=yolo) -->
                             <div id="yolo-weights-section" style="display: none; margin-bottom: 8px;">
                                 <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
                                     <select class="control-input" id="yolo-weights-select" style="flex: 2; min-width: 150px; margin: 0;">
-                                        <option value="">-- Select weight --</option>
+                                        <option value="" data-i18n="inf_select_weight">-- Select weight --</option>
                                     </select>
-                                    <button class="control-button" style="font-size: 11px; padding: 6px 10px; white-space: nowrap;" onclick="activateExistingWeights()">Activate</button>
+                                    <button class="control-button" style="font-size: 11px; padding: 6px 10px; white-space: nowrap;" onclick="activateExistingWeights()" data-i18n="inf_activate">Activate</button>
                                     <input type="file" id="yolo-weights-file" accept=".pt" style="font-size: 11px; color: var(--text-secondary); flex: 1; min-width: 120px;">
-                                    <button class="control-button" style="font-size: 11px; padding: 6px 10px; white-space: nowrap; background-color: #0d6efd;" onclick="uploadWeightsFile()">Upload .pt</button>
+                                    <button class="control-button" style="font-size: 11px; padding: 6px 10px; white-space: nowrap; background-color: #0d6efd;" onclick="uploadWeightsFile()" data-i18n="inf_upload_pt">Upload .pt</button>
                                 </div>
                                 <div id="yolo-classes-display" style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;"></div>
                             </div>
@@ -973,7 +973,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.263"
+                <iframe src="/static/knowledge.html?v=4.0.268"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -984,7 +984,7 @@
                 <!-- Embedded detection-insight panel — works on every machine, no Grafana needed -->
                 <div id="detection-insight-panel" style="margin-bottom: 15px; padding: 15px; background: var(--card-bg, #1e293b); border: 1px solid var(--border-color, #334155); border-radius: 8px;">
                     <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
-                        <h4 style="margin:0; color: var(--text-primary);">📊 Detection Insights</h4>
+                        <h4 style="margin:0; color: var(--text-primary);" data-i18n-prefix="📊 " data-i18n="ci_insights">📊 Detection Insights</h4>
                         <div style="display:flex; align-items:center; gap:8px;">
                             <!-- 4.0.198 — Shipment picker FIRST (operator spec). Searchable via
                                  native datalist: type any substring to filter the list. Empty =
@@ -993,7 +993,7 @@
                                  regardless of window). `#insight-shipment` is now an <input>, not
                                  a <select> — every consumer reads `.value` identically, and the
                                  population code writes <option>s into the datalist instead. -->
-                            <span style="font-size:12px; color:var(--text-secondary);">Shipment:</span>
+                            <span style="font-size:12px; color:var(--text-secondary);" data-i18n="ci_shipment">Shipment:</span>
                             <input id="insight-shipment" list="insight-shipment-list" placeholder="All shipments" autocomplete="off"
                                    onchange="_onShipmentPicked()"
                                    onfocus="this.dataset.prev=this.value; this.value=''; try{this.setAttribute('list','insight-shipment-list');}catch(_){}"
@@ -1005,22 +1005,22 @@
                                     style="padding:3px 7px; font-size:12px; cursor:pointer; background:rgba(51,65,85,0.6); color:var(--text-primary); border:1px solid rgba(71,85,105,0.6); border-radius:4px; display:none;">✕</button>
                             <!-- Timeframe group — hidden when a specific shipment is picked. -->
                             <span id="insight-timeframe-group" style="display:inline-flex; align-items:center; gap:8px;">
-                                <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Window:</span>
+                                <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;" data-i18n="ci_window">Window:</span>
                                 <select id="insight-window" onchange="refreshDetectionInsights()" style="padding:4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
-                                    <option value="1h">Last 1 hour</option>
-                                    <option value="6h">Last 6 hours</option>
-                                    <option value="24h" selected>Last 24 hours</option>
-                                    <option value="7d">Last 7 days</option>
-                                    <option value="30d">Last 30 days</option>
-                                    <option value="90d">Last 90 days</option>
-                                    <option value="120d">Last 120 days</option>
-                                    <option value="1y">Last 1 year</option>
+                                    <option value="1h" data-i18n="win_1h">Last 1 hour</option>
+                                    <option value="6h" data-i18n="win_6h">Last 6 hours</option>
+                                    <option value="24h" selected data-i18n="win_24h">Last 24 hours</option>
+                                    <option value="7d" data-i18n="win_7d">Last 7 days</option>
+                                    <option value="30d" data-i18n="win_30d">Last 30 days</option>
+                                    <option value="90d" data-i18n="win_90d">Last 90 days</option>
+                                    <option value="120d" data-i18n="win_120d">Last 120 days</option>
+                                    <option value="1y" data-i18n="win_1y">Last 1 year</option>
                                 </select>
                                 <span id="insight-long-window-note" style="display:none; font-size:11px; color:#f97316; font-style:italic; margin-left:4px;">
                                     📊 Long window — only Score-per-shipment loaded (other panels skipped for performance)
                                 </span>
                             </span>
-                            <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;">Min conf:</span>
+                            <span style="font-size:12px; color:var(--text-secondary); margin-left:8px;" data-i18n="ci_min_conf">Min conf:</span>
                             <input id="insight-min-conf" type="range" min="0" max="100" step="1" value="0"
                                    oninput="document.getElementById('insight-min-conf-val').textContent=this.value+'%'"
                                    onchange="refreshDetectionInsights()"
@@ -1124,11 +1124,11 @@
                                      setter the pill-buttons called; the originals are kept in a display:none
                                      wrapper so code that styles-them-by-id (_setAxisToggleUI, setHeatmapScale,
                                      setHeatmapCells, setHeatmapBaseline) keeps working untouched. -->
-                                <label style="color:var(--text-secondary);">X-axis:
+                                <label style="color:var(--text-secondary);"><span data-i18n="ci_xaxis">X-axis:</span>
                                     <select id="insight-axis-select" onchange="setInsightAxis(this.value)" title="Horizontal axis shared by the scatter and every strip. Time = wall-clock. Encoder = roll position (conveyor count). Length = cumulative length across shipments (immune to PLC encoder resets)." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
-                                        <option value="time">📍 Time</option>
-                                        <option value="encoder" selected>📏 Encoder</option>
-                                        <option value="length">🧵 Length</option>
+                                        <option value="time" data-i18n-prefix="📍 " data-i18n="opt_time">📍 Time</option>
+                                        <option value="encoder" selected data-i18n-prefix="📏 " data-i18n="opt_encoder">📏 Encoder</option>
+                                        <option value="length" data-i18n-prefix="🧵 " data-i18n="opt_length">🧵 Length</option>
                                     </select>
                                 </label>
                                 <span style="display:none;">
@@ -1141,11 +1141,11 @@
                                      Hidden when the "Parent Object Color Check" toggle in the Advanced tab
                                      is off (charts.js listens for `mve:color-check-toggled`). -->
                                 <span id="hm-color-toolbar" style="display:none; align-items:baseline; gap:4px; flex-wrap:wrap;">
-                                <label style="color:var(--text-secondary); margin-left:8px;">Baseline:
+                                <label style="color:var(--text-secondary); margin-left:8px;"><span data-i18n="ci_baseline">Baseline:</span>
                                     <select id="hm-baseline-select" onchange="setHeatmapBaseline(this.value)" title="Reference the colour ΔE is measured against. Camera = each camera's median across the window (auto). Shipment avg = median across each row's ENTIRE shipment. Reference = an operator-clicked point on the chart." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
-                                        <option value="camera">📷 Camera</option>
-                                        <option value="shipment_avg" selected>📊 Shipment avg</option>
-                                        <option value="reference_frame">🖼️ Reference</option>
+                                        <option value="camera" data-i18n-prefix="📷 " data-i18n="opt_camera">📷 Camera</option>
+                                        <option value="shipment_avg" selected data-i18n-prefix="📊 " data-i18n="opt_shipment_avg">📊 Shipment avg</option>
+                                        <option value="reference_frame" data-i18n-prefix="🖼️ " data-i18n="opt_reference">🖼️ Reference</option>
                                     </select>
                                 </label>
                                 <span style="display:none;">
@@ -1169,9 +1169,9 @@
                                      phases_available in /api/detection_charts. Active choice is stored as
                                      `mve_heatmap_phase` in localStorage. Scatter / quality strip / ejection strip
                                      are intentionally NOT filtered — phase is a colour-channel concept. -->
-                                <label style="color:var(--text-secondary); margin-left:8px;">Phase:
+                                <label style="color:var(--text-secondary); margin-left:8px;"><span data-i18n="ci_phase">Phase:</span>
                                     <select id="hm-phase-select" onchange="setHeatmapPhase(this.value)" title="Filter the colour data to one capture phase (p0, p1, …) or All. Options are populated from the phases present in the window." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
-                                        <option value="">🌐 All</option>
+                                        <option value="" data-i18n-prefix="🌐 " data-i18n="opt_all">🌐 All</option>
                                     </select>
                                 </label>
                                 <!-- 4.0.262 — Phase is a dropdown now; the original dynamic buttons are kept
@@ -1183,10 +1183,10 @@
                                      CIELAB tolerance bands ≤2/≤5/≤10/>10 (green/yellow/orange/red).
                                      `relative` normalises the same bands to the span's own max |Δ|
                                      so a very stable shipment still exposes its worst few cells. -->
-                                <label style="color:var(--text-secondary); margin-left:8px;">Scale:
+                                <label style="color:var(--text-secondary); margin-left:8px;"><span data-i18n="ci_scale">Scale:</span>
                                     <select id="hm-scale-select" onchange="setHeatmapScale(this.value)" title="Absolute = fixed CIELAB tolerance bands (|Δ|≤2 green, ≤5 yellow, ≤10 orange, >10 red) — best for compliance thresholds. Relative = bands scaled to the span's largest |Δ| so even a stable window exposes its worst cells." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
-                                        <option value="absolute" selected>📐 Absolute</option>
-                                        <option value="relative">📊 Relative (span)</option>
+                                        <option value="absolute" selected data-i18n-prefix="📐 " data-i18n="opt_absolute">📐 Absolute</option>
+                                        <option value="relative" data-i18n-prefix="📊 " data-i18n="opt_relative">📊 Relative (span)</option>
                                     </select>
                                 </label>
                                 <span style="display:none;">
@@ -1198,10 +1198,10 @@
                                      for scatter dots, but for the whole ΔE heatmap
                                      layer. Sticky in localStorage; the colorHeatmap
                                      plugin early-returns when hidden so no refetch. -->
-                                <label style="color:var(--text-secondary); margin-left:8px;">Cells:
+                                <label style="color:var(--text-secondary); margin-left:8px;"><span data-i18n="ci_cells">Cells:</span>
                                     <select id="hm-cells-select" onchange="setHeatmapCells(this.value)" title="Show or hide the ΔE colour-heatmap layer behind the scatter dots. Hiding keeps the dots visible." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;">
-                                        <option value="shown" selected>👁 Show</option>
-                                        <option value="hidden">🚫 Hide</option>
+                                        <option value="shown" selected data-i18n-prefix="👁 " data-i18n="opt_show">👁 Show</option>
+                                        <option value="hidden" data-i18n-prefix="🚫 " data-i18n="opt_hide">🚫 Hide</option>
                                     </select>
                                 </label>
                                 <span style="display:none;">
@@ -1216,17 +1216,17 @@
                                      as `mve_heatmap_parent_class`. Hidden alongside the
                                      rest when the color feature is off. -->
                                 <span id="hm-parent-class-wrap" style="display:none; align-items:baseline; gap:4px; flex-wrap:wrap;">
-                                    <span style="color:var(--text-secondary); margin-left:14px;">Parent class:</span>
+                                    <span style="color:var(--text-secondary); margin-left:14px;" data-i18n="ci_parent_class">Parent class:</span>
                                     <span id="hm-parent-class-buttons" style="display:inline-flex; gap:4px; flex-wrap:wrap;">
                                         <button id="hm-parent-class-all" onclick="setHeatmapParentClass('')" title="Show all parent classes collapsed (mixed baseline)." style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🌐 All</button>
                                     </span>
                                 </span>
                                 </span>
                                 <!-- v4.0.150 — restored a single grouping label "Dots/Category/Bucket:" before the dot-count selector; operator asked for it back after v4.0.149's bare inputs. Buckets input keeps no label (its number pattern is obvious). -->
-                                <label style="color:var(--text-secondary); margin-left:8px;">Buckets:
+                                <label style="color:var(--text-secondary); margin-left:8px;"><span data-i18n="ci_buckets">Buckets:</span>
                                 <input id="hm-bucket-count" type="number" min="4" max="192" step="4" value="48" onchange="setBucketCount(this.value)" title="How many columns the colour heatmap, quality strip, and ejection strip are divided into across the visible window." style="width:56px; background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:4px;" aria-label="Buckets across the visible window">
                                 </label>
-                                <span style="color:var(--text-secondary); margin-left:8px;" title="Max dots kept per CLASS (category) per bucket — e.g. 10 stitch + 10 weft-up + 10 warp-up in each time/encoder bucket.">Dots/Category/Bucket:</span>
+                                <span style="color:var(--text-secondary); margin-left:8px;" title="Max dots kept per CLASS (category) per bucket — e.g. 10 stitch + 10 weft-up + 10 warp-up in each time/encoder bucket." data-i18n="ci_dots_bucket">Dots/Category/Bucket:</span>
                                 <select id="hm-dot-cap" onchange="setDotCap(this.value)" title="Max scatter dots kept per class PER BUCKET. The span is split into buckets and each loads up to this many dots, so a low value gives a sparse-but-even view across the whole shipment; higher = denser but slower pan/zoom." style="background:rgba(15,23,42,0.6); color:#e2e8f0; border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:3px 6px; font-size:11px; margin-left:6px;" aria-label="Dots per class per bucket">
                                     <option value="10">10</option>
                                     <option value="100">100</option>
@@ -1237,21 +1237,21 @@
                                 </select>
                                 <span id="hm-dot-cap-warn" style="display:none; color:#fcd34d; margin-left:6px; font-size:11px;" title="Chart.js pan/zoom slows noticeably above ~3000 dots per class.">⚠ slow</span>
                                 <!-- 4.0.245 — Apply / Refresh moved here (end of toolbar row, after Dots/bucket). -->
-                                <button onclick="refreshDetectionInsights()" title="Apply the current Shipment / Window / Min-conf selection and reload every chart on this tab." style="padding:4px 10px; font-size:11px; cursor:pointer; background:linear-gradient(135deg,#3b82f6,#2563eb); color:#fff; border:none; border-radius:4px; font-weight:600; margin-left:14px;">🔄 Apply / Refresh</button>
+                                <button onclick="refreshDetectionInsights()" title="Apply the current Shipment / Window / Min-conf selection and reload every chart on this tab." style="padding:4px 10px; font-size:11px; cursor:pointer; background:linear-gradient(135deg,#3b82f6,#2563eb); color:#fff; border:none; border-radius:4px; font-weight:600; margin-left:14px;" data-i18n-prefix="🔄 " data-i18n="ci_apply">🔄 Apply / Refresh</button>
                             </div>
                             <!-- 4.0.44 — title + legend lifted OUT of Chart.js so the colour heatmap (which paints inside chartArea) can't reach them. -->
                             <!-- v4.0.135 — title + shape legend in a single row so it takes ONE line, not two. -->
                             <div style="display:flex; flex-wrap:wrap; justify-content:center; align-items:baseline; gap:16px; margin-top:8px; margin-bottom:4px;">
                                 <div id="insight-scatter-title" style="color:#cbd5e1; font-size:13px; font-weight:500;">Camera × encoder (roll position) — hover for image, click dot for the exact frame</div>
                                 <div id="insight-scatter-shape-legend" style="display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; font-size:10px; color:#94a3b8; letter-spacing:0.3px;">
-                                    <span title="Class severity > 0 in audio_settings"><span style="color:#e2e8f0; font-size:14px;">●</span> Defect</span>
-                                    <span title="Class in parent_object_list"><span style="color:#e2e8f0; font-size:14px;">◆</span> Parent</span>
-                                    <span title="Class in marker_object_list (e.g. stitch)"><span style="color:#e2e8f0; font-size:14px;">▲</span> Marker</span>
-                                    <span title="Everything else (unclassified)"><span style="color:#e2e8f0; font-size:14px;">✕</span> Context</span>
+                                    <span title="Class severity > 0 in audio_settings"><span style="color:#e2e8f0; font-size:14px;">●</span> <span data-i18n="leg_defect">Defect</span></span>
+                                    <span title="Class in parent_object_list"><span style="color:#e2e8f0; font-size:14px;">◆</span> <span data-i18n="leg_parent">Parent</span></span>
+                                    <span title="Class in marker_object_list (e.g. stitch)"><span style="color:#e2e8f0; font-size:14px;">▲</span> <span data-i18n="leg_marker">Marker</span></span>
+                                    <span title="Everything else (unclassified)"><span style="color:#e2e8f0; font-size:14px;">✕</span> <span data-i18n="leg_context">Context</span></span>
                                     <!-- 4.0.180 — orientation-tagged defects. Narrow rectangle scales
                                          with dot confidence (same as circle radius does). -->
-                                    <span title="Class role = vertical_defect: defect oriented along the length axis (X). Renders as a wide thin bar in harmony with the X-axis."><span style="display:inline-block; width:14px; height:3px; background:#e2e8f0; vertical-align:middle; margin:0 4px 3px 0;"></span>Vertical defect</span>
-                                    <span title="Class role = horizontal_defect: defect oriented across the width axis (Y), spans cameras. Renders as a tall thin bar."><span style="display:inline-block; width:3px; height:14px; background:#e2e8f0; vertical-align:middle; margin:0 4px 3px 0;"></span>Horizontal defect</span>
+                                    <span title="Class role = vertical_defect: defect oriented along the length axis (X). Renders as a wide thin bar in harmony with the X-axis."><span style="display:inline-block; width:14px; height:3px; background:#e2e8f0; vertical-align:middle; margin:0 4px 3px 0;"></span><span data-i18n="leg_vdefect">Vertical defect</span></span>
+                                    <span title="Class role = horizontal_defect: defect oriented across the width axis (Y), spans cameras. Renders as a tall thin bar."><span style="display:inline-block; width:3px; height:14px; background:#e2e8f0; vertical-align:middle; margin:0 4px 3px 0;"></span><span data-i18n="leg_hdefect">Horizontal defect</span></span>
                                 </div>
                             </div>
                             <div id="insight-scatter-legend" style="display:flex; flex-wrap:wrap; justify-content:center; gap:14px; margin-bottom:6px; font-size:11px; color:#cbd5e1; min-height:14px;"></div>
@@ -1397,36 +1397,47 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.263"></script>
+            <script src="/static/js/iframes.js?v=4.0.268"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.263"></script>
+            <script src="/static/js/charts.js?v=4.0.268"></script>
             <!-- End Grafana Tab -->
 
+            <!-- 4.0.264 — AI Assistant rendered-markdown theming. _mdToHtml emits headers
+                 with no colour, and there was no .mve-md CSS, so headers/some text fell back
+                 to the browser default (black) on the dark theme. Force everything to the
+                 theme text colour; size is adjustable via --ai-md-size (default 14px). -->
+            <style>
+                #ai-chat-messages .mve-md { color: var(--text-primary); font-size: var(--ai-md-size, 14px); line-height: 1.55; }
+                #ai-chat-messages .mve-md h1, #ai-chat-messages .mve-md h2, #ai-chat-messages .mve-md h3,
+                #ai-chat-messages .mve-md h4, #ai-chat-messages .mve-md h5, #ai-chat-messages .mve-md h6 { color: var(--text-primary); }
+                #ai-chat-messages .mve-md p, #ai-chat-messages .mve-md li, #ai-chat-messages .mve-md td,
+                #ai-chat-messages .mve-md th, #ai-chat-messages .mve-md strong, #ai-chat-messages .mve-md em { color: var(--text-primary); }
+                #ai-chat-messages .mve-md code { color: #e2e8f0; }
+                #ai-chat-messages .mve-md a { color: var(--primary-color); }
+                #ai-chat-messages .mve-md img { max-width: 100%; border-radius: 6px; margin: 6px 0; border: 1px solid rgba(51,65,85,0.6); }
+            </style>
             <!-- AI Assistant Tab -->
             <div id="tab-ai" class="tab-content">
                 <div style="height: calc(100vh - 150px);">
                     <!-- Chat Interface -->
                     <div style="display: flex; flex-direction: column; background: rgba(30, 41, 59, 0.4); border-radius: 8px; box-shadow: var(--shadow-md); overflow: hidden; height: 100%; border: 1px solid rgba(51, 65, 85, 0.6);">
-                        <!-- Chat Header -->
-                        <div style="padding: 15px 20px; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); color: white; display: flex; justify-content: space-between; align-items: center;">
-                            <div>
-                                <h3 style="margin: 0; font-size: 18px;">🤖 AI Analytics Assistant</h3>
-                                <p style="margin: 5px 0 0 0; font-size: 13px; opacity: 0.9;">Ask me about production data, defects, and quality metrics</p>
-                            </div>
-                            <button onclick="clearChatHistory()" style="padding: 6px 12px; background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.3); border-radius: 6px; color: white; cursor: pointer; font-size: 12px; font-weight: 500; transition: all 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.3)'" onmouseout="this.style.background='rgba(255,255,255,0.2)'">
-                                🗑️ Clear History
-                            </button>
+                        <!-- 4.0.266 — big gradient "AI Analytics Assistant" banner removed
+                             (operator: "it only consumes the screen"). Slim bar keeps only the
+                             Clear History control; the chat and its restored history render in
+                             the pane below (loadChatHistory reads localStorage on tab-open). -->
+                        <div style="display:flex; justify-content:flex-end; align-items:center; padding:5px 12px; background:rgba(30,41,59,0.5); border-bottom:1px solid rgba(51,65,85,0.6);">
+                            <button onclick="clearChatHistory()" title="Clear the saved chat history stored in this browser" data-i18n-prefix="🗑️ " data-i18n="clear_history" style="padding:3px 10px; background:rgba(148,163,184,0.15); border:1px solid rgba(148,163,184,0.3); border-radius:6px; color:var(--text-secondary); cursor:pointer; font-size:11px;">🗑️ Clear History</button>
                         </div>
 
                         <!-- Chat Messages -->
                         <div id="ai-chat-messages" style="flex: 1; overflow-y: auto; padding: 20px; background: rgba(15, 23, 42, 0.3);">
                             <div style="padding: 15px; background: rgba(30, 41, 59, 0.6); border-radius: 8px; border-left: 4px solid var(--primary-color); margin-bottom: 15px; box-shadow: var(--shadow-sm);">
-                                <p style="margin: 0 0 10px 0; font-weight: 600; color: var(--text-primary);">👋 Welcome! Try asking:</p>
+                                <p style="margin: 0 0 10px 0; font-weight: 600; color: var(--text-primary);" data-i18n-prefix="👋 " data-i18n="ai_welcome">👋 Welcome! Try asking:</p>
                                 <ul style="margin: 0; padding-left: 20px; font-size: 14px; color: var(--text-primary); line-height: 1.8;">
-                                    <li>What's the defect rate for the last hour?</li>
-                                    <li>Show me the most common defect types today</li>
-                                    <li>Compare production speed vs quality metrics</li>
-                                    <li>Analyze trends in the last 24 hours</li>
+                                    <li data-i18n="ai_ex1">What's the defect rate for the last hour?</li>
+                                    <li data-i18n="ai_ex2">Show me the most common defect types today</li>
+                                    <li data-i18n="ai_ex3">Compare production speed vs quality metrics</li>
+                                    <li data-i18n="ai_ex4">Analyze trends in the last 24 hours</li>
                                 </ul>
                             </div>
                         </div>
@@ -1439,6 +1450,7 @@
                                     id="ai-input"
                                     class="control-input"
                                     placeholder="Type your question here..."
+                                    data-i18n-placeholder="ai_input_ph"
                                     style="flex: 1; margin: 0; font-size: 14px; min-width: 0; width: 100%;"
                                     onkeypress="if(event.key === 'Enter') sendAIMessage()"
                                 >
@@ -1470,25 +1482,25 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">RELEASE score (≥ this = green)</div>
+                            <div class="control-label" data-i18n="proc_qt_release">RELEASE score (≥ this = green)</div>
                             <input type="number" class="control-input" id="qt-release-input" min="0" max="100" step="0.1" value="85">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">RE-INSPECT score (≥ this = yellow)</div>
+                            <div class="control-label" data-i18n="proc_qt_reinspect">RE-INSPECT score (≥ this = yellow)</div>
                             <input type="number" class="control-input" id="qt-reinspect-input" min="0" max="100" step="0.1" value="60">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Min detections (below → PENDING)</div>
+                            <div class="control-label" data-i18n="proc_qt_min_det">Min detections (below → PENDING)</div>
                             <input type="number" class="control-input" id="qt-min-rows-input" min="0" step="1" value="100">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Min encoder span (below → PENDING)</div>
+                            <div class="control-label" data-i18n="proc_qt_min_span">Min encoder span (below → PENDING)</div>
                             <input type="number" class="control-input" id="qt-min-span-input" min="0" step="1" value="100">
                         </div>
                     </div>
                     <div style="margin-top: 10px; display: flex; gap: 10px; align-items: center;">
-                        <button class="control-button" onclick="saveQualityThresholds()" style="background: linear-gradient(135deg,#3b82f6,#1e40af); color:#fff;">💾 Save Thresholds</button>
-                        <button class="control-button" onclick="loadQualityThresholds()" style="background: rgba(51,65,85,0.6); color:#fff;">↻ Reload</button>
+                        <button class="control-button" onclick="saveQualityThresholds()" style="background: linear-gradient(135deg,#3b82f6,#1e40af); color:#fff;" data-i18n-prefix="💾 " data-i18n="proc_qt_save">💾 Save Thresholds</button>
+                        <button class="control-button" onclick="loadQualityThresholds()" style="background: rgba(51,65,85,0.6); color:#fff;" data-i18n-prefix="↻ " data-i18n="proc_reload">↻ Reload</button>
                         <span id="qt-response" style="font-size: 12px; color: var(--text-secondary);"></span>
                     </div>
                 </div>
@@ -1555,37 +1567,37 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_enabled">Ejector Enabled</div>
                             <select class="control-input" id="ejector-enabled-input">
-                                <option value="true">Enabled</option>
-                                <option value="false">Disabled</option>
+                                <option value="true" data-i18n="enabled">Enabled</option>
+                                <option value="false" data-i18n="disabled">Disabled</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('ejector_enabled', document.getElementById('ejector-enabled-input').value)">Set</button>
+                            <button class="control-button" onclick="updateConfig('ejector_enabled', document.getElementById('ejector-enabled-input').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="config-ejector_enabled-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_offset">Ejector Offset (encoder counts)</div>
                             <input type="number" class="control-input" id="ejector-offset-input" min="0" value="1">
-                            <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)">Set Offset</button>
+                            <button class="control-button" onclick="updateConfig('ejector_offset', document.getElementById('ejector-offset-input').value)" data-i18n="proc_set_offset">Set Offset</button>
                             <div class="control-response" id="config-ejector_offset-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_delay">Ejector Delay (seconds)</div>
                             <input type="number" class="control-input" id="ejector-delay-input" min="0" step="0.1" value="0">
-                            <button class="control-button" onclick="updateConfig('ejector_delay', document.getElementById('ejector-delay-input').value)">Set Delay</button>
+                            <button class="control-button" onclick="updateConfig('ejector_delay', document.getElementById('ejector-delay-input').value)" data-i18n="proc_set_delay">Set Delay</button>
                             <div class="control-response" id="config-ejector_delay-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="ejector_duration">Ejector Duration (seconds)</div>
                             <input type="number" class="control-input" id="ejector-duration-input" min="0" step="0.01" value="0.01">
-                            <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)">Set Duration</button>
+                            <button class="control-button" onclick="updateConfig('ejector_duration', document.getElementById('ejector-duration-input').value)" data-i18n="proc_set_duration">Set Duration</button>
                             <div class="control-response" id="config-ejector_duration-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="capture_mode">Capture Mode</div>
                             <select class="control-input" id="capture-mode-input">
-                                <option value="single">Single</option>
-                                <option value="multiple">Multiple</option>
+                                <option value="single" data-i18n="proc_opt_single">Single</option>
+                                <option value="multiple" data-i18n="proc_opt_multiple">Multiple</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('capture_mode', document.getElementById('capture-mode-input').value)">Set Mode</button>
+                            <button class="control-button" onclick="updateConfig('capture_mode', document.getElementById('capture-mode-input').value)" data-i18n="hw_set_mode">Set Mode</button>
                             <div class="control-response" id="config-capture_mode-response"></div>
                         </div>
                     </div>
@@ -1594,7 +1606,7 @@
                     <div style="margin-top: 15px; background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.3);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
                             <h4 style="margin: 0; color: #ef4444;" data-i18n="ejection_procedures">Ejection Procedures</h4>
-                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;" title="Create a new ejection procedure with customizable rules">+ Add Procedure</button>
+                            <button onclick="addProcedure()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: #ef4444;" title="Create a new ejection procedure with customizable rules" data-i18n="proc_add_procedure">+ Add Procedure</button>
                         </div>
                         <div id="procedures-list">
                             <div style="padding: 15px; background: rgba(15, 23, 42, 0.5); border-radius: 6px; text-align: center; color: var(--text-secondary); font-style: italic;">
@@ -1602,7 +1614,7 @@
                             </div>
                         </div>
                         <div style="margin-top: 10px; text-align: right;">
-                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);">Save Procedures</button>
+                            <button onclick="saveProcedures()" class="control-button" style="padding: 6px 14px; font-size: 12px; background: var(--success-color);" data-i18n="proc_save_procedures">Save Procedures</button>
                             <span id="procedures-save-status" style="margin-left: 8px; font-size: 12px; color: var(--text-secondary);"></span>
                         </div>
                     </div>
@@ -1615,44 +1627,44 @@
                     <div style="background: rgba(30, 41, 59, 0.3); padding: 15px; border-radius: 8px; border: 1px solid rgba(51, 65, 85, 0.6);">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
                             <h4 style="margin: 0; color: var(--text-primary);" data-i18n="per_object">Per-Object Detection & Alerts</h4>
-                            <button onclick="fetchModelClasses()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: var(--secondary-color);">Fetch Classes</button>
+                            <button onclick="fetchModelClasses()" class="control-button" style="padding: 5px 10px; font-size: 12px; background: var(--secondary-color);" data-i18n="proc_fetch_classes">Fetch Classes</button>
                         </div>
 
                         <!-- 3.21.24 — Filter bar: search box + "show only active" toggle + count.
                              Active classes (≥1 detection in the selected window) float to the
                              top of the grid automatically; the toggle hides the idle ones. -->
                         <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:12px; padding:8px 10px; background:rgba(15,23,42,0.4); border:1px solid rgba(51,65,85,0.5); border-radius:6px;">
-                            <input type="text" id="per-object-search" placeholder="🔍 search class name…" oninput="updateObjectsList()"
+                            <input type="text" id="per-object-search" placeholder="🔍 search class name…" data-i18n-placeholder="proc_search_ph" oninput="updateObjectsList()"
                                 style="flex:1 1 180px; min-width:120px; padding:5px 8px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
                             <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); cursor:pointer;" title="Hide classes that haven't fired in the chosen window">
                                 <input type="checkbox" id="per-object-active-only" onchange="updateObjectsList()" style="width:14px; height:14px; cursor:pointer;">
-                                Show only active
+                                <span data-i18n="proc_show_active">Show only active</span>
                             </label>
                             <select id="per-object-active-window" onchange="loadActiveClasses(); updateObjectsList()"
                                 style="padding:4px 6px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px;">
-                                <option value="15m">last 15 min</option>
-                                <option value="1h" selected>last 1 h</option>
-                                <option value="6h">last 6 h</option>
-                                <option value="24h">last 24 h</option>
-                                <option value="7d">last 7 d</option>
+                                <option value="15m" data-i18n="proc_last_15m">last 15 min</option>
+                                <option value="1h" selected data-i18n="proc_last_1h">last 1 h</option>
+                                <option value="6h" data-i18n="proc_last_6h">last 6 h</option>
+                                <option value="24h" data-i18n="proc_last_24h">last 24 h</option>
+                                <option value="7d" data-i18n="proc_last_7d">last 7 d</option>
                             </select>
                             <span id="per-object-count" style="font-size:11px; color:var(--text-secondary);">—</span>
                             <!-- 3.25.2 — AI suggests Severity values for every class. -->
-                            <button onclick="openSeveritySuggestPanel()" title="Ask the active AI to suggest a Severity 0–100 for every class" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 10px; cursor:pointer; font-size:11px; border-radius:4px; font-weight:600; margin-left:auto;">🤖 Suggest severities</button>
+                            <button onclick="openSeveritySuggestPanel()" title="Ask the active AI to suggest a Severity 0–100 for every class" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 10px; cursor:pointer; font-size:11px; border-radius:4px; font-weight:600; margin-left:auto;" data-i18n-prefix="🤖 " data-i18n="proc_suggest_sev">🤖 Suggest severities</button>
                         </div>
 
                         <!-- 3.25.2 — Severity-suggestion panel, hidden until the button above opens it. -->
                         <div id="severity-suggest-panel" style="display:none; margin-bottom:12px; padding:10px; background:rgba(16,185,129,0.06); border:1px solid rgba(16,185,129,0.35); border-radius:6px;">
                             <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-                                <strong style="color:#a7f3d0; font-size:13px;">🤖 AI Severity Suggestions</strong>
+                                <strong style="color:#a7f3d0; font-size:13px;" data-i18n-prefix="🤖 " data-i18n="proc_ai_sev_title">🤖 AI Severity Suggestions</strong>
                                 <span id="severity-suggest-meta" style="font-size:11px; color:var(--text-secondary);"></span>
-                                <button onclick="closeSeveritySuggestPanel()" style="margin-left:auto; background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:2px 8px; cursor:pointer; font-size:11px;">✕ Close</button>
+                                <button onclick="closeSeveritySuggestPanel()" style="margin-left:auto; background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:3px; padding:2px 8px; cursor:pointer; font-size:11px;" data-i18n-prefix="✕ " data-i18n="modal_close">✕ Close</button>
                             </div>
-                            <input type="text" id="severity-context-input" placeholder="(optional) Describe your product / what defects matter — e.g. 'jeans line, TB=fabric tear, MD=missing dye'" style="width:100%; padding:5px 8px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; margin-bottom:8px;">
+                            <input type="text" id="severity-context-input" placeholder="(optional) Describe your product / what defects matter — e.g. 'jeans line, TB=fabric tear, MD=missing dye'" data-i18n-placeholder="proc_severity_ctx_ph" style="width:100%; padding:5px 8px; background:rgba(30,41,59,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; font-size:12px; margin-bottom:8px;">
                             <div style="display:flex; gap:6px; align-items:center; margin-bottom:8px;">
-                                <button onclick="runSeveritySuggest()" id="severity-suggest-run-btn" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;">🤖 Run (review)</button>
-                                <button onclick="autoTuneAllSeverities()" id="severity-autotune-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Suggest and apply in one click — no review step">🚀 Auto-tune all</button>
-                                <button onclick="applyAllSeveritySuggestions()" id="severity-apply-all-btn" disabled style="background:var(--primary-color); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;">✓ Apply all</button>
+                                <button onclick="runSeveritySuggest()" id="severity-suggest-run-btn" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" data-i18n-prefix="🤖 " data-i18n="proc_sev_run">🤖 Run (review)</button>
+                                <button onclick="autoTuneAllSeverities()" id="severity-autotune-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Suggest and apply in one click — no review step" data-i18n-prefix="🚀 " data-i18n="proc_sev_autotune">🚀 Auto-tune all</button>
+                                <button onclick="applyAllSeveritySuggestions()" id="severity-apply-all-btn" disabled style="background:var(--primary-color); color:#fff; border:none; padding:5px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;" data-i18n-prefix="✓ " data-i18n="proc_sev_apply_all">✓ Apply all</button>
                                 <span id="severity-suggest-status" style="font-size:11px; color:var(--text-secondary);"></span>
                             </div>
                             <div id="severity-suggest-results" style="max-height:340px; overflow-y:auto; font-size:12px;"></div>
@@ -1682,8 +1694,8 @@
                         <span style="color:var(--text-secondary);">Tip: set L to the median brightness you'd expect for that camera under nominal lighting (rough range 30–80). Set a and b near 0 unless your product has a strong colour tint.</span>
                     </div>
                     <div id="color-target-rows" style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px;"></div>
-                    <button class="control-button" onclick="addColorTargetRow()" style="margin-right:8px;">+ Add Camera</button>
-                    <button class="control-button" onclick="saveColorTarget()" style="background-color: var(--success-color);">💾 Save Color Target</button>
+                    <button class="control-button" onclick="addColorTargetRow()" style="margin-right:8px;" data-i18n="proc_add_camera">+ Add Camera</button>
+                    <button class="control-button" onclick="saveColorTarget()" style="background-color: var(--success-color);" data-i18n-prefix="💾 " data-i18n="proc_save_color_target">💾 Save Color Target</button>
                     <div class="control-response" id="config-color_target-response" style="margin-top:6px;"></div>
                 </div>
 
@@ -1703,7 +1715,7 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="score_scale_factor_label">Score Scale Factor (0.001 – 1e9)</div>
                             <input type="number" class="control-input" id="score-scale-factor-input" min="0.001" max="1000000000" step="any" value="1">
-                            <button class="control-button" onclick="setScoreScaleFactor()">Set</button>
+                            <button class="control-button" onclick="setScoreScaleFactor()" data-i18n="set">Set</button>
                             <div class="control-response" id="config-score_scale_factor-response"></div>
                             <span id="score-scale-current" style="font-size:11px; color:var(--text-secondary); margin-top:4px; display:block;">current: …</span>
                         </div>
@@ -1717,16 +1729,16 @@
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label" data-i18n="parent_objects">Parent Object List (comma-separated, use _root for no parent requirement)</div>
                             <input type="text" class="control-input" id="parent-object-list-input" value="_root,box,pack,DP-105,jean,knit">
-                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)">Set Parent Objects</button>
+                            <button class="control-button" onclick="updateConfig('parent_object_list', document.getElementById('parent-object-list-input').value)" data-i18n="proc_set_parent">Set Parent Objects</button>
                             <div class="control-response" id="config-parent_object_list-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="remove_raw">Remove Raw Image After DM Decode</div>
                             <select class="control-input" id="remove-raw-image-input">
-                                <option value="false">No</option>
-                                <option value="true">Yes</option>
+                                <option value="false" data-i18n="proc_opt_no">No</option>
+                                <option value="true" data-i18n="proc_opt_yes">Yes</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)">Set</button>
+                            <button class="control-button" onclick="updateConfig('remove_raw_image_when_dm_decoded', document.getElementById('remove-raw-image-input').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="config-remove_raw_image_when_dm_decoded-response"></div>
                         </div>
                     </div>
@@ -1739,19 +1751,19 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="valid_dm_sizes">Valid DM Char Sizes (comma-separated)</div>
                             <input type="text" class="control-input" id="dm-chars-sizes-input" value="13,19,26">
-                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)">Set Sizes</button>
+                            <button class="control-button" onclick="updateConfig('dm_chars_sizes', document.getElementById('dm-chars-sizes-input').value)" data-i18n="proc_set_sizes">Set Sizes</button>
                             <div class="control-response" id="config-dm_chars_sizes-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="confidence_threshold">Confidence Threshold (0-1)</div>
                             <input type="number" class="control-input" id="dm-confidence-input" min="0" max="1" step="0.05" value="0.8">
-                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)">Set Confidence</button>
+                            <button class="control-button" onclick="updateConfig('dm_confidence_threshold', document.getElementById('dm-confidence-input').value)" data-i18n="proc_set_confidence">Set Confidence</button>
                             <div class="control-response" id="config-dm_confidence_threshold-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="overlap_threshold">Overlap Threshold (0-1)</div>
                             <input type="number" class="control-input" id="dm-overlap-input" min="0" max="1" step="0.05" value="0.2">
-                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)">Set Overlap</button>
+                            <button class="control-button" onclick="updateConfig('dm_overlap_threshold', document.getElementById('dm-overlap-input').value)" data-i18n="proc_set_overlap">Set Overlap</button>
                             <div class="control-response" id="config-dm_overlap_threshold-response"></div>
                         </div>
                     </div>
@@ -1764,19 +1776,19 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="histogram_feature">Histogram Feature</div>
                             <select class="control-input" id="histogram-enabled-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
+                                <option value="false" selected data-i18n="disabled">Disabled</option>
+                                <option value="true" data-i18n="enabled">Enabled</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)">Set</button>
+                            <button class="control-button" onclick="updateConfig('histogram_enabled', document.getElementById('histogram-enabled-input').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="config-histogram_enabled-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="save_histogram">Save Histogram Images</div>
                             <select class="control-input" id="histogram-save-image-input">
-                                <option value="false" selected>Disabled</option>
-                                <option value="true">Enabled</option>
+                                <option value="false" selected data-i18n="disabled">Disabled</option>
+                                <option value="true" data-i18n="enabled">Enabled</option>
                             </select>
-                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)">Set</button>
+                            <button class="control-button" onclick="updateConfig('histogram_save_image', document.getElementById('histogram-save-image-input').value)" data-i18n="set">Set</button>
                             <div class="control-response" id="config-histogram_save_image-response"></div>
                         </div>
                     </div>
@@ -1824,14 +1836,14 @@
                         </div>
 
                         <div class="control-item">
-                            <div class="control-label">Image Quality: <strong id="timeline-quality-value">85%</strong></div>
+                            <div class="control-label"><span data-i18n="adv_image_quality_label">Image Quality:</span> <strong id="timeline-quality-value">85%</strong></div>
                             <input type="range" id="timeline-quality" min="50" max="100" value="85" style="width: 100%; margin-top: 8px; cursor: pointer;">
                         </div>
 
                         <div class="control-item">
-                            <div class="control-label">Rows per Page: <strong id="timeline-rows-value">10</strong></div>
+                            <div class="control-label"><span data-i18n="adv_rows_per_page_label">Rows per Page:</span> <strong id="timeline-rows-value">10</strong></div>
                             <input type="range" id="timeline-rows" min="1" max="50" value="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
-                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">Frames displayed per page</div>
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;" data-i18n="adv_frames_per_page_hint">Frames displayed per page</div>
                         </div>
 
                         <!-- "Total Frames Stored" control removed in 3.21.2 — storage is now bound
@@ -1839,7 +1851,7 @@
                              memory (no pagination, no off-page records, lighter /status page). -->
 
                         <div class="control-item" style="grid-column: span 2;">
-                            <button id="timeline-apply-config" class="control-button" style="background: var(--primary-color); color: white; font-weight: 600; padding: 10px 20px;">
+                            <button id="timeline-apply-config" class="control-button" style="background: var(--primary-color); color: white; font-weight: 600; padding: 10px 20px;" data-i18n-prefix="✓ " data-i18n="apply_timeline">
                                 ✓ Apply Timeline Configuration
                             </button>
                             <div class="control-response" id="timeline-config-response"></div>
@@ -1867,11 +1879,11 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">Unit name</div>
+                            <div class="control-label" data-i18n="adv_unit_name">Unit name</div>
                             <input type="text" class="control-input" id="encoder-unit-input" value="encoder_unit"
                                    placeholder="Meter, Batch, Cubic Meter, tile, piece, …"
                                    oninput="window._refreshEncoderUnitLabels && window._refreshEncoderUnitLabels()">
-                            <button class="control-button" onclick="saveEncoderCalibration()" style="background:var(--primary-color); color:white;">Save</button>
+                            <button class="control-button" onclick="saveEncoderCalibration()" style="background:var(--primary-color); color:white;" data-i18n="save">Save</button>
                             <div id="encoder-unit-response" class="control-response"></div>
                         </div>
                         <div class="control-item">
@@ -1903,7 +1915,7 @@
                      fallback), or on the whole frame if no parent-role class
                      is designated yet. -->
                 <div class="control-section">
-                    <h3>🎨 Parent Object Color Check</h3>
+                    <h3 data-i18n-prefix="🎨 " data-i18n="adv_parent_color_check">🎨 Parent Object Color Check</h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
                         Tracks colour drift by measuring CIELAB (L*a*b*) on the parent object's bounding box every frame. Turn this on after designating one class as <b>Role: 🌳 Parent</b> in the <b>Process</b> tab — MVE will measure that class's largest bbox. When off, the chart tab hides the colour heatmap and its baseline/phase pickers. Baseline is per <b>(camera, phase)</b>.
                     </div>
@@ -1911,10 +1923,10 @@
                         <div class="control-item" style="grid-column: span 3;">
                             <label style="cursor:pointer; display:inline-flex; align-items:center; gap:8px; padding:6px 0;">
                                 <input type="checkbox" id="color-check-enabled-input" style="width:16px; height:16px; cursor:pointer;">
-                                <span style="font-weight:600;">Enable Parent Object Color Check</span>
-                                <span style="font-size:11px; color:var(--text-secondary);">— off by default; opt-in per site.</span>
+                                <span style="font-weight:600;" data-i18n="adv_enable_color_check">Enable Parent Object Color Check</span>
+                                <span style="font-size:11px; color:var(--text-secondary);" data-i18n="adv_color_check_hint">— off by default; opt-in per site.</span>
                             </label>
-                            <button class="control-button" onclick="saveColorConfig()" style="background:var(--primary-color); color:white; margin-top:8px;">Save color check</button>
+                            <button class="control-button" onclick="saveColorConfig()" style="background:var(--primary-color); color:white; margin-top:8px;" data-i18n="adv_save_color_check">Save color check</button>
                             <div id="color-config-response" class="control-response"></div>
                         </div>
                     </div>
@@ -1931,33 +1943,33 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Trainer base URL</div>
+                            <div class="control-label" data-i18n="adv_trainer_base_url">Trainer base URL</div>
                             <input type="text" class="control-input" id="ai-trainer-url-input" placeholder="https://ai-trainer.monitait.com">
                             <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">3.26.0 — Just the origin (no path). MVE appends <code>/api/images/</code>, <code>/api/categories/</code>, <code>/api/annotations/</code>, etc. Default: <code style="background:rgba(15,23,42,0.6); padding:1px 4px; border-radius:3px; color:#86efac;">https://ai-trainer.monitait.com</code></div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Task ID</div>
+                            <div class="control-label" data-i18n="adv_task_id">Task ID</div>
                             <input type="number" class="control-input" id="ai-trainer-task-id-input" placeholder="e.g. 322">
-                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">Integer task ID from the trainer.</div>
+                            <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;" data-i18n="adv_task_id_hint">Integer task ID from the trainer.</div>
                         </div>
                         <div class="control-item">
-                            <div class="control-label">API key (legacy / optional)</div>
-                            <input type="password" class="control-input" id="ai-trainer-api-key-input" placeholder="leave blank to use email + password auth below">
+                            <div class="control-label" data-i18n="adv_api_key_legacy">API key (legacy / optional)</div>
+                            <input type="password" class="control-input" id="ai-trainer-api-key-input" placeholder="leave blank to use email + password auth below" data-i18n-placeholder="adv_apikey_ph">
                             <div style="font-size:11px; color:var(--text-secondary); margin-top:4px;">If set, used as <code>Authorization: Bearer …</code>. Otherwise MVE logs in with email + password to fetch a JWT.</div>
                         </div>
                         <!-- 3.24.8 — JWT login flow. MVE stores email+password, fetches an access token,
                              auto-refreshes every 6h. The password is write-only (we don't echo it back). -->
                         <div class="control-item">
-                            <div class="control-label">Trainer email</div>
+                            <div class="control-label" data-i18n="adv_trainer_email">Trainer email</div>
                             <input type="email" class="control-input" id="ai-trainer-email-input" placeholder="you@example.com">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Trainer password <small style="opacity:0.6;">(write-only)</small></div>
-                            <input type="password" class="control-input" id="ai-trainer-password-input" placeholder="leave blank to keep existing">
+                            <div class="control-label"><span data-i18n="adv_trainer_password">Trainer password</span> <small style="opacity:0.6;" data-i18n="adv_write_only">(write-only)</small></div>
+                            <input type="password" class="control-input" id="ai-trainer-password-input" placeholder="leave blank to keep existing" data-i18n-placeholder="adv_trainer_pw_ph">
                         </div>
                         <div class="control-item" style="grid-column: span 2;">
-                            <button class="control-button" onclick="saveAiTrainerConfig()" style="background:var(--primary-color); color:white;">Save AI Trainer Config</button>
-                            <button class="control-button" onclick="testAiTrainerLogin()" style="background:rgba(16,185,129,0.6); color:white;">Test login</button>
+                            <button class="control-button" onclick="saveAiTrainerConfig()" style="background:var(--primary-color); color:white;" data-i18n="adv_save_trainer">Save AI Trainer Config</button>
+                            <button class="control-button" onclick="testAiTrainerLogin()" style="background:rgba(16,185,129,0.6); color:white;" data-i18n="adv_test_login">Test login</button>
                             <div id="ai-trainer-response" class="control-response"></div>
                         </div>
                     </div>
@@ -1968,7 +1980,7 @@
                      a Telegram-compatible service (self-hosted gateway, etc.) just
                      change the base URL; the wire format is the same. Tokens are write-only. -->
                 <div class="control-section">
-                    <h3>📨 <span>Notifications</span></h3>
+                    <h3>📨 <span data-i18n="adv_notifications">Notifications</span></h3>
                     <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.6); border-radius: 4px; padding: 12px; margin-bottom: 15px; font-size: 12px; color: var(--text-secondary);">
                         Choose your messaging platform, then click the <span style="display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; font-style:italic;">i</span> icon for a 5-step setup guide. Schedules below run on a cron — same format as classic crontab (5 fields: <code>MIN HOUR DOM MON DOW</code>).
                     </div>
@@ -1976,7 +1988,7 @@
                          so the only real difference is the base URL. Picking Bale auto-fills base_url with
                          the Bale API endpoint. The `i` icon opens a step-by-step modal per platform. -->
                     <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px; flex-wrap:wrap;">
-                        <span style="font-size:12px; color:var(--text-secondary); font-weight:500;">Platform:</span>
+                        <span style="font-size:12px; color:var(--text-secondary); font-weight:500;" data-i18n="adv_platform">Platform:</span>
                         <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
                             <input type="radio" name="notif-platform" value="telegram" id="notif-platform-telegram" checked onchange="onNotifPlatformChange()">
                             <span>✈️ Telegram</span>
@@ -1995,25 +2007,25 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item">
-                            <div class="control-label">📨 Bot token <small style="opacity:0.6;">(write-only)</small></div>
+                            <div class="control-label"><span data-i18n-prefix="📨 " data-i18n="adv_bot_token">📨 Bot token</span> <small style="opacity:0.6;" data-i18n="adv_write_only">(write-only)</small></div>
                             <input type="password" class="control-input" id="notif-telegram-token" placeholder="123456:ABCdefGHI…">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Default chat id</div>
+                            <div class="control-label" data-i18n="adv_default_chat_id">Default chat id</div>
                             <input type="text" class="control-input" id="notif-telegram-chat" placeholder="-100… or 123456789">
                         </div>
                         <div class="control-item">
-                            <div class="control-label">Base URL <small style="opacity:0.6;" id="notif-baseurl-hint">(auto — leave blank for Telegram)</small></div>
+                            <div class="control-label"><span data-i18n="adv_base_url">Base URL</span> <small style="opacity:0.6;" id="notif-baseurl-hint">(auto — leave blank for Telegram)</small></div>
                             <input type="text" class="control-input" id="notif-telegram-baseurl" placeholder="https://api.telegram.org/bot{token}/">
                         </div>
                         <div class="control-item" style="display:flex; flex-direction:column; gap:6px;">
                             <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer;">
                                 <input type="checkbox" id="notif-telegram-enabled" style="width:14px; height:14px; cursor:pointer;">
-                                Enable channel
+                                <span data-i18n="adv_enable_channel">Enable channel</span>
                             </label>
                             <div style="display:flex; gap:6px;">
-                                <button class="control-button" onclick="saveNotifChannel('telegram')" style="background:var(--secondary-color); color:white; padding:3px 10px; font-size:11px;">Save</button>
-                                <button class="control-button" onclick="testNotifChannel('telegram')" style="background:rgba(16,185,129,0.6); color:white; padding:3px 10px; font-size:11px;">Test send</button>
+                                <button class="control-button" onclick="saveNotifChannel('telegram')" style="background:var(--secondary-color); color:white; padding:3px 10px; font-size:11px;" data-i18n="save">Save</button>
+                                <button class="control-button" onclick="testNotifChannel('telegram')" style="background:rgba(16,185,129,0.6); color:white; padding:3px 10px; font-size:11px;" data-i18n="adv_test_send">Test send</button>
                             </div>
                         </div>
                     </div>
@@ -2021,15 +2033,15 @@
                         <!-- Schedules editor -->
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label" style="display:flex; align-items:center; justify-content:space-between;">
-                                <span>Shift schedules (cron-style)</span>
-                                <button class="control-button" onclick="addNotifSchedule()" style="background:var(--primary-color); color:white; padding:3px 10px; font-size:11px;">+ Add schedule</button>
+                                <span data-i18n="adv_shift_schedules">Shift schedules (cron-style)</span>
+                                <button class="control-button" onclick="addNotifSchedule()" style="background:var(--primary-color); color:white; padding:3px 10px; font-size:11px;" data-i18n="adv_add_schedule">+ Add schedule</button>
                             </div>
                             <div id="notif-schedules" style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
                                 <div style="color:var(--text-secondary); font-style:italic; font-size:12px;">No schedules yet. Click "+ Add schedule" to wire a shift.</div>
                             </div>
                             <div style="display:flex; gap:8px; margin-top:8px;">
-                                <button class="control-button" onclick="saveNotifSchedules()" style="background:var(--primary-color); color:white;">Save schedules</button>
-                                <button class="control-button" onclick="sendShiftReportNow()" style="background:rgba(245,158,11,0.6); color:white;" title="Run the first schedule immediately (skip the cron)">Send now</button>
+                                <button class="control-button" onclick="saveNotifSchedules()" style="background:var(--primary-color); color:white;" data-i18n="adv_save_schedules">Save schedules</button>
+                                <button class="control-button" onclick="sendShiftReportNow()" style="background:rgba(245,158,11,0.6); color:white;" title="Run the first schedule immediately (skip the cron)" data-i18n="adv_send_now">Send now</button>
                             </div>
                             <div id="notif-response" class="control-response"></div>
                         </div>
@@ -2037,8 +2049,8 @@
                         <!-- Audit log -->
                         <div class="control-item" style="grid-column: span 2;">
                             <div class="control-label" style="display:flex; align-items:center; justify-content:space-between;">
-                                <span>Recent sends</span>
-                                <button class="control-button" onclick="loadNotifLog()" style="background:rgba(51,65,85,0.6); color:white; padding:3px 10px; font-size:11px;">Refresh</button>
+                                <span data-i18n="adv_recent_sends">Recent sends</span>
+                                <button class="control-button" onclick="loadNotifLog()" style="background:rgba(51,65,85,0.6); color:white; padding:3px 10px; font-size:11px;" data-i18n="refresh">Refresh</button>
                             </div>
                             <div id="notif-log" style="margin-top:6px; max-height:220px; overflow-y:auto; font-size:11px; color:var(--text-secondary);">Loading…</div>
                         </div>
@@ -2053,10 +2065,10 @@
                     </div>
                     <div class="control-grid">
                         <div class="control-item" style="grid-column: span 2;">
-                            <div class="control-label">Storage Path (DATA_ROOT)</div>
+                            <div class="control-label" data-i18n="adv_storage_path">Storage Path (DATA_ROOT)</div>
                             <div style="display:flex; gap:8px; align-items:center; margin-top:8px; width:100%;">
                                 <input type="text" class="control-input" id="data-root-input" value="/mnt/SSD-RESERVE" placeholder="/mnt/SSD-RESERVE" style="flex:1 1 auto; min-width:0; width:auto;">
-                                <button class="control-button" onclick="saveDataRoot()" style="flex:0 0 auto; width:auto; max-width:220px; background:var(--primary-color); color:white; white-space:nowrap; padding:6px 16px;">
+                                <button class="control-button" onclick="saveDataRoot()" style="flex:0 0 auto; width:auto; max-width:220px; background:var(--primary-color); color:white; white-space:nowrap; padding:6px 16px;" data-i18n="adv_save_restart">
                                     Save (requires restart)
                                 </button>
                             </div>
@@ -2082,13 +2094,13 @@
                         <div class="control-item">
                             <div class="control-label" data-i18n="redis_host">Redis Host</div>
                             <input type="text" class="control-input" id="redis-host-input" value="redis" placeholder="redis">
-                            <button class="control-button" onclick="updateConfig('redis_host', document.getElementById('redis-host-input').value)">Set Host</button>
+                            <button class="control-button" onclick="updateConfig('redis_host', document.getElementById('redis-host-input').value)" data-i18n="adv_set_host">Set Host</button>
                             <div class="control-response" id="config-redis_host-response"></div>
                         </div>
                         <div class="control-item">
                             <div class="control-label" data-i18n="redis_port">Redis Port</div>
                             <input type="number" class="control-input" id="redis-port-input" value="6379" placeholder="6379">
-                            <button class="control-button" onclick="updateConfig('redis_port', document.getElementById('redis-port-input').value)">Set Port</button>
+                            <button class="control-button" onclick="updateConfig('redis_port', document.getElementById('redis-port-input').value)" data-i18n="hw_set_port">Set Port</button>
                             <div class="control-response" id="config-redis_port-response"></div>
                         </div>
                     </div>
@@ -2102,7 +2114,7 @@
                     <h3>🔑 <span data-i18n="ai_config">AI Configuration</span></h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: var(--text-primary);">Active Model:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);" data-i18n="adv_active_model_label">Active Model:</span>
                             <span id="ai-active-model-name" style="font-size: 16px; font-weight: bold; color: #007bff;">None</span>
                             <span id="ai-active-model-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
                         </div>
@@ -2139,21 +2151,21 @@
                                  (rucode.rdemos.com, ai-trainer.monitait.com, Ollama, vLLM, LiteLLM, etc).
                                  Both optional. Leave blank to use the provider SDK's default. -->
                             <div class="control-item">
-                                <div class="control-label">Base URL (optional)</div>
+                                <div class="control-label" data-i18n="adv_base_url_optional">Base URL (optional)</div>
                                 <input type="text" id="ai-base-url" class="control-input" placeholder="e.g. https://rucode.rdemos.com/v1">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-top:3px;">For OpenAI-compatible relays. Empty = use the provider's default endpoint.</div>
                             </div>
                             <div class="control-item">
-                                <div class="control-label">Model ID (optional)</div>
+                                <div class="control-label" data-i18n="adv_model_id_optional">Model ID (optional)</div>
                                 <input type="text" id="ai-model-id" class="control-input" placeholder="e.g. kimi-k2.6, gpt-4o, llama3:8b">
                                 <div style="font-size:10px; color:var(--text-secondary); margin-top:3px;">Overrides the SDK's hard-coded model. Empty = use default (gpt-4o for ChatGPT, claude-3-5-sonnet for Claude).</div>
                             </div>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
-                            <button class="camera-btn camera-btn-success" onclick="saveAIModel()">Save Model</button>
-                            <button class="camera-btn camera-btn-secondary" onclick="clearAIModelForm()">Clear</button>
+                            <button class="camera-btn camera-btn-success" onclick="saveAIModel()" data-i18n="save_model">Save Model</button>
+                            <button class="camera-btn camera-btn-secondary" onclick="clearAIModelForm()" data-i18n="clear">Clear</button>
                             <span style="margin-left: auto; font-size: 12px; color: var(--text-secondary);">
-                                <a id="ai-api-link" href="https://console.anthropic.com/" target="_blank" style="color: var(--primary-color);">Get API Key</a>
+                                <a id="ai-api-link" href="https://console.anthropic.com/" target="_blank" style="color: var(--primary-color);" data-i18n="get_api_key">Get API Key</a>
                             </span>
                         </div>
                     </div>
@@ -2164,7 +2176,7 @@
                     <h3>⚙️ <span data-i18n="db_config">Database Configuration</span></h3>
                     <div style="background: #f0f8ff; border: 1px solid #b0d0ff; border-radius: 6px; padding: 12px; margin-bottom: 15px;">
                         <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; color: var(--text-primary);">Active Profile:</span>
+                            <span style="font-weight: bold; color: var(--text-primary);" data-i18n="adv_active_profile_label">Active Profile:</span>
                             <span id="db-active-profile-name" style="font-size: 16px; font-weight: bold; color: #007bff;">None</span>
                             <span id="db-active-profile-badge" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background-color: #6c757d; color: white;">-</span>
                             <div id="db-status" style="padding: 3px 8px; border-radius: 12px; font-size: 11px; background: var(--warning-color); color: white;">Checking...</div>
@@ -2207,8 +2219,8 @@
                             </div>
                         </div>
                         <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
-                            <button class="camera-btn camera-btn-success" onclick="saveDBProfile()">Save Profile</button>
-                            <button class="camera-btn camera-btn-secondary" onclick="clearDBProfileForm()">Clear</button>
+                            <button class="camera-btn camera-btn-success" onclick="saveDBProfile()" data-i18n="save_profile">Save Profile</button>
+                            <button class="camera-btn camera-btn-secondary" onclick="clearDBProfileForm()" data-i18n="clear">Clear</button>
                         </div>
                     </div>
                 </div>
@@ -2220,21 +2232,21 @@
                     <h3 data-i18n="data_file_editor">📝 Data File Editor</h3>
                     <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
                         <div>
-                            <span class="control-label">File: </span><span id="data-file-path">Loading...</span>
+                            <span class="control-label" data-i18n="adv_file_label">File:</span> <span id="data-file-path">Loading...</span>
                         </div>
-                        <button class="control-button" style="width: auto;" onclick="loadDataFile()">Reload</button>
+                        <button class="control-button" style="width: auto;" onclick="loadDataFile()" data-i18n="proc_reload">Reload</button>
                         <div style="flex: 1;"></div>
-                        <button onclick="exportServiceConfig()" style="padding: 8px 12px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
+                        <button onclick="exportServiceConfig()" style="padding: 8px 12px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;" data-i18n-prefix="⬇️ " data-i18n="adv_export_config">
                             ⬇️ Export Config
                         </button>
-                        <button onclick="importServiceConfig()" style="padding: 8px 12px; background: var(--warning-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;">
+                        <button onclick="importServiceConfig()" style="padding: 8px 12px; background: var(--warning-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 11px; white-space: nowrap;" data-i18n-prefix="⬆️ " data-i18n="adv_import_config">
                             ⬆️ Import Config
                         </button>
                         <div class="data-source" id="dataSource" style="font-size: 11px; padding: 4px 8px; background: var(--light-bg); border-radius: 4px;">Loading...</div>
                     </div>
                     <textarea id="data-file-content" class="control-input" style="width: 100%; height: 300px; font-family: monospace; font-size: 12px; resize: vertical;"></textarea>
                     <div style="margin-top: 10px; display: flex; gap: 10px;">
-                        <button class="control-button" style="background-color: #6c757d;" onclick="formatDataFile()">Format JSON</button>
+                        <button class="control-button" style="background-color: #6c757d;" onclick="formatDataFile()" data-i18n="adv_format_json">Format JSON</button>
                     </div>
                     <div class="control-response" id="data-file-response"></div>
                     <div style="margin-top: 10px; padding: 10px; background: #d1ecf1; border: 1px solid #17a2b8; border-radius: 4px; font-size: 12px; color: var(--secondary-color);">
@@ -2270,16 +2282,16 @@
                     <div style="display:flex; gap:8px; align-items:center;">
                         <!-- 3.21.22 — Upload the RAW image of the current frame to ai-trainer.monitait.com.
                              Config (URL + task_id) lives in Advanced → AI Trainer. -->
-                        <button id="defect-upload-trainer" onclick="uploadCurrentDefectToAiTrainer()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Send the raw image of this frame to the AI trainer for retraining">📤 Upload to AI Trainer</button>
+                        <button id="defect-upload-trainer" onclick="uploadCurrentDefectToAiTrainer()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Send the raw image of this frame to the AI trainer for retraining" data-i18n-prefix="📤 " data-i18n="modal_upload_trainer">📤 Upload to AI Trainer</button>
                         <!-- 3.26.0 — Embedded Label Studio Frontend 1.4.0 (same library + version as ai-trainer.monitait.com) so the operator can correct the YOLO box(es) in-place and submit them back to the trainer. -->
-                        <button id="defect-annotate-btn" onclick="openAnnotateModal()" style="background:linear-gradient(135deg,#ec4899,#db2777); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Open Label Studio in-line to correct this frame's boxes and submit them to ai-trainer">✏️ Annotate</button>
+                        <button id="defect-annotate-btn" onclick="openAnnotateModal()" style="background:linear-gradient(135deg,#ec4899,#db2777); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Open Label Studio in-line to correct this frame's boxes and submit them to ai-trainer" data-i18n-prefix="✏️ " data-i18n="modal_annotate">✏️ Annotate</button>
                         <!-- 3.23.0 — Ask the active AI model "why did this happen?" with the dot's
                              metric/value/time + surrounding chart context pre-loaded. -->
-                        <button id="defect-why-btn" onclick="askWhyForCurrentDefect()" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Ask the active AI model to explain this dot — uses the surrounding chart context">🤔 Why?</button>
+                        <button id="defect-why-btn" onclick="askWhyForCurrentDefect()" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:4px 12px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" title="Ask the active AI model to explain this dot — uses the surrounding chart context" data-i18n-prefix="🤔 " data-i18n="modal_why">🤔 Why?</button>
                         <div id="defect-view-toggle" style="display:flex; gap:0; border:1px solid rgba(51,65,85,0.7); border-radius:4px; overflow:hidden;">
-                            <button data-view="ann"  onclick="setDefectView('ann')"  style="background:rgba(59,130,246,0.6); color:#fff; border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Annotated</button>
-                            <button data-view="raw"  onclick="setDefectView('raw')"  style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Raw</button>
-                            <button data-view="both" onclick="setDefectView('both')" style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;">Both</button>
+                            <button data-view="ann"  onclick="setDefectView('ann')"  style="background:rgba(59,130,246,0.6); color:#fff; border:0; padding:4px 12px; cursor:pointer; font-size:12px;" data-i18n="modal_annotated">Annotated</button>
+                            <button data-view="raw"  onclick="setDefectView('raw')"  style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;" data-i18n="modal_raw">Raw</button>
+                            <button data-view="both" onclick="setDefectView('both')" style="background:transparent; color:var(--text-secondary); border:0; padding:4px 12px; cursor:pointer; font-size:12px;" data-i18n="modal_both">Both</button>
                         </div>
                         <button onclick="closeDefectDrawer()" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; padding:2px 10px; cursor:pointer; font-size:16px;" title="Close (ESC)">✕</button>
                     </div>
@@ -2298,16 +2310,16 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.263">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.268">
         <div id="annotate-modal" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
-                    <span style="font-weight:600;">✏️ Annotate</span>
+                    <span style="font-weight:600;" data-i18n-prefix="✏️ " data-i18n="modal_annotate">✏️ Annotate</span>
                     <span id="annotate-meta" style="font-size:11px; color:var(--text-secondary);"></span>
                     <span id="annotate-status" style="font-size:11px; color:#fcd34d; font-style:italic; margin-left:auto;"></span>
                     <!-- 4.0.2 — Download bundles raw + render-on-demand DETECTED for offline analysis. -->
-                    <button onclick="downloadFrameBundle()" title="Download both the raw frame AND the rendered-with-boxes frame" style="background:linear-gradient(135deg,#3b82f6,#1d4ed8); color:#fff; border:none; padding:6px 14px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;">📥 Download (raw + DETECTED)</button>
-                    <button id="annotate-submit" onclick="submitAnnotations()" disabled style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:6px 14px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;">💾 Save & ship to trainer</button>
+                    <button onclick="downloadFrameBundle()" title="Download both the raw frame AND the rendered-with-boxes frame" style="background:linear-gradient(135deg,#3b82f6,#1d4ed8); color:#fff; border:none; padding:6px 14px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600;" data-i18n-prefix="📥 " data-i18n="modal_download">📥 Download (raw + DETECTED)</button>
+                    <button id="annotate-submit" onclick="submitAnnotations()" disabled style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:6px 14px; cursor:pointer; font-size:12px; border-radius:4px; font-weight:600; opacity:0.5;" data-i18n-prefix="💾 " data-i18n="modal_save_ship">💾 Save & ship to trainer</button>
                     <button onclick="closeAnnotateModal()" style="background:transparent; color:var(--text-secondary); border:1px solid rgba(51,65,85,0.6); border-radius:4px; padding:2px 10px; cursor:pointer; font-size:16px;" title="Close (ESC)">✕</button>
                 </div>
                 <!-- Inline class→category mapping panel; hidden once every MVE class the frame uses is mapped. -->
@@ -2333,16 +2345,16 @@
                 <div id="notif-setup-body" style="padding:20px; font-size:13px; line-height:1.6;"></div>
                 <div style="padding:12px 20px 18px; text-align:right; border-top:1px solid #334155; position:sticky; bottom:0; background:#0f172a;">
                     <button type="button" onclick="hideNotifSetupSteps()"
-                            style="background:#3b82f6; color:white; border:none; padding:8px 18px; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500;">
+                            style="background:#3b82f6; color:white; border:none; padding:8px 18px; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500;" data-i18n="modal_got_it">
                         Got it
                     </button>
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.263"></script>
-        <script src="/static/js/app-core.js?v=4.0.263"></script>
+        <script src="/static/js/audio.js?v=4.0.268"></script>
+        <script src="/static/js/app-core.js?v=4.0.268"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.263"></script>
-        <script src="/static/js/annotate.js?v=4.0.263"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.268"></script>
+        <script src="/static/js/annotate.js?v=4.0.268"></script>
     </body>
 </html>
