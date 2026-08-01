@@ -1491,14 +1491,24 @@ def _autoscaler():
                     )
 
             # ── Scale inference workers (up AND down) ──
-            if inf_level == "CRITICAL":
+            # 4.0.272 — CPU-gate the scale-UP, same as disk/db. This was the third
+            # death-spiral: inference queue backs up -> multiply workers x4 -> the
+            # extra post-processing/dispatch threads add CPU contention -> queue
+            # stays high -> ramp to max, even on an already-saturated box. The gate
+            # holds the count steady when there's no CPU headroom (scale-DOWN below
+            # is unaffected, so it still shrinks once the queue clears).
+            if inf_level == "CRITICAL" and _cpu_ok("inference"):
                 _ok_streak = 0
                 new_workers = min(INFERENCE_WORKERS * 4, MAX_INFERENCE_WORKERS)
-            elif inf_level == "WARNING":
+            elif inf_level == "WARNING" and _cpu_ok("inference"):
                 _ok_streak = 0
                 new_workers = min(INFERENCE_WORKERS * 2, MAX_INFERENCE_WORKERS)
-            else:
+            elif inf_level == "OK":
                 _ok_streak += 1
+                new_workers = INFERENCE_WORKERS
+            else:
+                # CRITICAL/WARNING but no CPU headroom: hold steady, don't ramp,
+                # and don't count this as an OK tick (so scale-down doesn't trigger).
                 new_workers = INFERENCE_WORKERS
 
             # Scale UP — spawn new threads

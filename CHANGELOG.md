@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.272] - 2026-08-01 — Autoscaler: close the 3rd death-spiral (CPU-gate inference scale-up)
+
+Companion to 4.0.269. The autoscaler had **three** "queue backs up → multiply workers → contention worsens → ramp to max" spirals: disk writers, db writers, and inference workers. 4.0.269 hardened the shared `_cpu_ok` gate (real blocking sample + run-queue check) which covers disk **and** db — verified live on khoy (`SKIP db scale-up — load 16 on 8 cores`). But the **inference** scale-up (main.py:1494) multiplied workers ×4 up to the max with **no CPU gate**.
+
+- `main.py` — inference scale-UP now also requires `_cpu_ok("inference")`; when there's no CPU headroom it holds the worker count steady (doesn't ramp, doesn't falsely count as an OK tick). Scale-DOWN is unaffected, so it still shrinks once the queue clears.
+
 ## [4.0.271] - 2026-08-01 — Charts: X-axis dropdown now shows the operator's actual pick
 
 - **Bug:** the X-axis dropdown was bound to the *effective* axis, not the operator's choice. The stationary-line guard flips encoder→time when encoder data is momentarily degenerate/empty (e.g. first paint before encoder rows arrive), and `_setAxisToggleUI` then overwrote the dropdown to **Time** — so on refresh the operator saw "Time" even though they'd selected **Encoder**.
