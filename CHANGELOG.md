@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.269] - 2026-08-01 — Autoscaler fix: disk writers are CPU-bound, stop the thrash death-spiral
+
+Root-caused a live data-loss issue on khoy (busy 8-core line): raw-image JPEG writes were being **dropped** (296/30s) — the DB record saved (fast) but the image never landed on disk ("image not on disk" in the AI assistant). It was **not** the disk model (same WD Green works on other sites), **not** old/faulty code (`watcher.py`/`db.py` byte-identical across sites), and **not** the remove/janitor path.
+
+**The bug:** the disk-writer autoscaler treated `cv2.imencode`+write threads as *I/O-bound* (v4.0.123 raised the ceiling to `max(16, cpu×2)`). They're actually **CPU-bound** (the encode). On an 8-core box the autoscaler piled **16 encode-threads** on, which thrashed — write-await **196 ms**, throughput **~2 MB/s**, queue permanently CRITICAL. The `_cpu_ok` gate that should have stopped it used `cpu_percent(interval=None)`, which is unreliable (first call = 0.0, back-to-back calls measure a ~0 window and always pass), so it never blocked. And there's no scale-down, so once at 16 it stayed.
+
+**Proven fix (live on khoy via `MAX_DISK_WRITERS=4` env):** capping the ramp (~6 effective writers) → **6 ms await, ~30 MB/s, ZERO drops**, load 29→15. Images store again.
+
+- `main.py` — disk-writer ceiling now `max(4, cpu_logical // 2)` (conservative, core-aware) instead of `max(16, cpu×2)`. `MAX_DISK_WRITERS` env still overrides per site.
+- `main.py` — `_cpu_ok()` hardened: real blocking `cpu_percent(interval=0.3)` **plus** a run-queue check (`load1 >= cpu_logical` → refuse) so the gate actually blocks ramping on a saturated box.
+- If the queue still saturates, dropping image writes is the intended graceful degradation (ejector never starved) — far better than thrashing the whole box.
+
 ## [4.0.268] - 2026-08-01 — i18n Phase 2B/2C: all remaining tabs + knowledge.html wired & translated
 
 - Wired every remaining hardcoded string across Dashboard/Cameras/Hardware/Inference/Process/Advanced tabs + modals (140 new keys) and all of `knowledge.html` (82 new keys — that page had no i18n system; added the `i18n.js` include + `applyLanguage()` bootstrap + `storage`-event live re-apply).

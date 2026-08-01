@@ -822,15 +822,19 @@ _cpu_logical = psutil.cpu_count(logical=True) or 1
 _cpu_physical = psutil.cpu_count(logical=False) or 1
 _mem = psutil.virtual_memory()
 _mem_total_gb = round(_mem.total / (1024**3), 1)
-# v4.0.123 — disk writers are I/O-bound (dsync 5-6 ms per 3 MB write on
-# khoy) not CPU-bound. The old cap of `max(4, cpu_logical)` = 8 on an
-# 8-core box (khoy) was hitting the ceiling under load — autoscaler saw
-# `disk_count == MAX_DISK_WRITERS` and refused to scale, so bursts drove
-# the queue into CRITICAL (44.6 % seen 2026-07-14). New default:
-# max(16, cpu_logical*2) — a machine's disk can absorb far more parallel
-# writes than one thread per core when writes are I/O-bound. Operators
-# can override per site via `MAX_DISK_WRITERS`.
-_max_disk_writers = int(os.environ.get("MAX_DISK_WRITERS", str(max(16, _cpu_logical * 2))))
+# v4.0.269 — disk writers are CPU-BOUND (each runs cv2.imencode BEFORE the
+# write), NOT I/O-bound as v4.0.123 assumed. That assumption was disproven on
+# khoy 2026-08-01: the max(16, cpu*2)=16 ceiling let the autoscaler pile 16
+# encode-threads onto an 8-core box → thrash — write-await 196 ms, ~2 MB/s,
+# 296 dropped-image-writes / 30 s. Capping the ramp (~6 effective writers) →
+# 6 ms await, ~30 MB/s, ZERO drops. The v4.0.123 "cap-8 refused to scale"
+# symptom was NOT too-few threads — it was the disk/CPU unable to keep up, and
+# adding more encode-threads made it strictly worse. So scale CONSERVATIVELY
+# with cores (half the logical cores, floor 4). If the queue still saturates,
+# dropping image writes is the intended graceful degradation (the ejector is
+# never starved) — far better than thrashing the whole box. Operators can
+# still override per site via MAX_DISK_WRITERS.
+_max_disk_writers = int(os.environ.get("MAX_DISK_WRITERS", str(max(4, _cpu_logical // 2))))
 _max_inference_workers = max(8, min(_cpu_logical * 2, 32))
 app.state.system_capacity = {
     "cpu_logical": _cpu_logical,
@@ -1366,14 +1370,30 @@ def _autoscaler():
     CPU_HEADROOM_CEIL = 75.0  # percent, box-wide
 
     def _cpu_ok(scale_reason: str) -> bool:
-        """Return True if we have CPU headroom to add more threads."""
+        """Return True only if there is genuine CPU headroom to add threads.
+
+        v4.0.269 — hardened after the khoy thrash. The old reading used
+        `cpu_percent(interval=None)`, which is unreliable: the first call
+        returns 0.0, and back-to-back calls (disk then db in the same loop)
+        measure a near-zero window and always pass — so the gate never
+        actually blocked the disk-writer ramp while the box was saturated.
+        Now take a real BLOCKING sample AND check the run-queue: if the
+        1-min load already meets/exceeds the logical core count, the box is
+        oversubscribed and more encode-threads can only make it worse."""
         if _ps is None:
             return True   # unknown → don't refuse scale-up
-        pct = _ps.cpu_percent(interval=None)
-        if pct >= CPU_HEADROOM_CEIL:
+        try:
+            pct = _ps.cpu_percent(interval=0.3)   # blocking → accurate reading
+        except Exception:
+            pct = 0.0
+        try:
+            load1 = os.getloadavg()[0]
+        except (OSError, AttributeError):
+            load1 = 0.0
+        if pct >= CPU_HEADROOM_CEIL or (load1 and load1 >= _cpu_logical):
             logger.warning(
-                f"[Autoscaler] SKIP {scale_reason} scale-up — CPU at {pct:.0f}% "
-                f">= {CPU_HEADROOM_CEIL:.0f}%. More threads would worsen contention."
+                f"[Autoscaler] SKIP {scale_reason} scale-up — CPU {pct:.0f}% / "
+                f"load {load1:.1f} on {_cpu_logical} cores. More threads worsen contention."
             )
             return False
         return True
