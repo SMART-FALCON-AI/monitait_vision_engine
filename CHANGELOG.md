@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.289 – 4.0.290] - 2026-08-02 — Per-pipeline weights: the Pipeline-tab UI
+
+- The **Create/Edit Pipeline** card (Inference tab) gains: a **weight-file dropdown** (pick an existing `/weights/*.pt`, incl. HuggingFace/gradio models via the existing model checklist), an **upload + name** row for `.pt` weights, an **AI-Trainer Task ID**, a **weight serial #**, and a **confusion-matrix image upload** (offline data-URI preview).
+- **Upload-without-activate**: `/api/models/upload-weights?activate=0` saves + names the weight to `/weights` **without** pushing to the live YOLO or mirroring best.pt — so uploading a weight for a *non-active* pipeline never disturbs the running model. The pipeline's own activation does the push (via the existing `/set-model`). Verified on vteam12.
+- Procedure: upload+name the weight in the pipeline → activate the pipeline → MVE pushes that weight to the shared YOLO container. Switching pipelines = switching the model.
+- Files: `static/status.html`, `static/js/app-core.js`, `routers/inference.py`.
+
 ## [4.0.285 – 4.0.288] - 2026-08-02 — Strip-label halo + per-pipeline weights/metadata foundation
 
 - **4.0.285** — quality/ejection/colour-change strip labels get a white outline halo (matching the ΔE labels) so the `↑/↓` values stay readable on faint low-Δ cells instead of blending into the green.

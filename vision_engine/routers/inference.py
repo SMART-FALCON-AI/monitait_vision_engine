@@ -533,8 +533,11 @@ def list_weights(request: Request):
 
 
 @router.post("/api/models/upload-weights")
-async def upload_weights(request: Request, file: UploadFile = File(...)):
-    """Upload a .pt weight file and activate it on all YOLO replicas."""
+async def upload_weights(request: Request, file: UploadFile = File(...), activate: int = 1):
+    """Upload a .pt weight file. activate=1 (default) also pushes it to all YOLO
+    replicas + mirrors best.pt. activate=0 (pipeline card) ONLY saves + names it, so
+    uploading a weight for a NON-active pipeline never disturbs the live YOLO model —
+    the pipeline's own activation pushes it later."""
     if not file.filename or not file.filename.endswith(".pt"):
         return JSONResponse(content={"error": "Only .pt files are allowed"}, status_code=400)
 
@@ -559,6 +562,17 @@ async def upload_weights(request: Request, file: UploadFile = File(...)):
 
     size_mb = round(total / (1024 * 1024), 1)
     logger.info(f"Uploaded weight file: {safe_name} ({size_mb}MB)")
+
+    # 4.0.289 — activate=0: SAVE + NAME only (pipeline card). Don't mirror best.pt and
+    # don't push to YOLO, so a weight uploaded for a non-active pipeline leaves the live
+    # model untouched. The pipeline's activation (activate_pipeline) does the push.
+    if not activate:
+        return JSONResponse(content={
+            "filename": safe_name,
+            "path": f"/weights/{safe_name}",
+            "size_mb": size_mb,
+            "activated": False,
+        })
 
     # 3.21.12 — also copy to /weights/best.pt so the single-file bind-mount
     # (./volumes/weights/best.pt:/code/best.pt:ro) picks this up on next yolo

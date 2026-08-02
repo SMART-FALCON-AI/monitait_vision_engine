@@ -2774,6 +2774,8 @@ async function refreshPipelineConfig() {
         renderPipelinesList(pipelineData.pipelines || {}, currentPipeline);
         renderModelsList(pipelineData.models || {});
         renderModelsChecklist(pipelineData.models || {});
+        // 4.0.289 — fill the per-pipeline weight dropdown from /weights/*.pt
+        try { populatePipelineWeightOptions(); } catch (_e) {}
 
     } catch (error) {
         console.error('Error loading pipeline config:', error);
@@ -3072,6 +3074,24 @@ function loadPipelineForEdit(pipelineName) {
     document.getElementById('pipeline-name-input').value = pipeline.name;
     document.getElementById('pipeline-desc-input').value = pipeline.description || '';
 
+    // 4.0.289 — per-pipeline weight + ai-trainer metadata into the form.
+    const _wsel = document.getElementById('pipeline-weight-input');
+    if (_wsel) {
+        // ensure the pipeline's own weight is a selectable option even if the list is stale
+        if (pipeline.weight_file && !Array.from(_wsel.options).some(o => o.value === pipeline.weight_file)) {
+            const o = document.createElement('option'); o.value = pipeline.weight_file; o.textContent = pipeline.weight_file; _wsel.appendChild(o);
+        }
+        _wsel.value = pipeline.weight_file || '';
+    }
+    const _tid = document.getElementById('pipeline-taskid-input'); if (_tid) _tid.value = pipeline.task_id || '';
+    const _ser = document.getElementById('pipeline-serial-input'); if (_ser) _ser.value = pipeline.weight_serial_number || '';
+    const _cm = document.getElementById('pipeline-confmat-preview');
+    if (_cm) {
+        if (pipeline.confusion_matrix) { _cm.src = pipeline.confusion_matrix; _cm.style.display = 'block'; }
+        else { _cm.removeAttribute('src'); _cm.style.display = 'none'; }
+    }
+    const _cmi = document.getElementById('pipeline-confmat-input'); if (_cmi) _cmi.value = '';
+
     // Check the models in this pipeline + restore each phase's stride (3.21.10).
     const checkboxes = document.querySelectorAll('input[name="pipeline-model"]');
     const phaseByModel = {};
@@ -3084,6 +3104,73 @@ function loadPipelineForEdit(pipelineName) {
             strideInput.value = (ph && ph.stride) ? ph.stride : 1;
         }
     });
+}
+
+// 4.0.289 — confusion-matrix picker: read the chosen image as a data-URI (offline
+// snapshot) and preview it. The data-URI is saved into the pipeline record on save.
+function onPipelineConfMatPick(event) {
+    const f = event && event.target && event.target.files && event.target.files[0];
+    const prev = document.getElementById('pipeline-confmat-preview');
+    if (!f || !prev) return;
+    const reader = new FileReader();
+    reader.onload = function () { prev.src = reader.result; prev.style.display = 'block'; };
+    reader.readAsDataURL(f);
+}
+
+// 4.0.289 — fill the pipeline weight dropdown from the EXISTING /weights/*.pt list
+// (weights are uploaded in the Inference Models section; here we just associate one).
+async function populatePipelineWeightOptions() {
+    const sel = document.getElementById('pipeline-weight-input');
+    if (!sel) return;
+    try {
+        const r = await fetch('/api/models/weights');
+        const d = await r.json();
+        const files = (d.weights || d.files || [])
+            .map(w => (typeof w === 'string' ? w : (w && (w.filename || w.name))))
+            .filter(Boolean);
+        const keep = sel.value;
+        sel.innerHTML = '<option value="">— none / keep current —</option>' +
+            files.map(f => `<option value="${f}">${f}</option>`).join('');
+        if (keep && files.includes(keep)) sel.value = keep;
+    } catch (e) { /* leave the default option in place */ }
+}
+
+// 4.0.289 — upload + name a .pt weight straight from the pipeline card. activate=0 so it
+// ONLY saves to /weights (does not touch the live YOLO). Then auto-select it in the dropdown.
+async function uploadPipelineWeight() {
+    const fileEl = document.getElementById('pipeline-weight-file');
+    const nameEl = document.getElementById('pipeline-weight-name');
+    const statusEl = document.getElementById('pipeline-weight-upload-status');
+    const setStatus = (msg, ok) => { if (statusEl) { statusEl.textContent = msg; statusEl.style.color = ok === true ? '#86efac' : ok === false ? '#f87171' : 'var(--text-secondary)'; } };
+    const f = fileEl && fileEl.files && fileEl.files[0];
+    if (!f) { setStatus('Choose a .pt file first', false); return; }
+    // Target filename from the name field (fallback to the file's own name), sanitized.
+    let base = ((nameEl && nameEl.value) || '').trim() || f.name.replace(/\.pt$/i, '');
+    base = base.replace(/[^A-Za-z0-9._-]/g, '_');
+    const fname = /\.pt$/i.test(base) ? base : base + '.pt';
+    const fd = new FormData();
+    fd.append('file', f, fname);   // the name the server saves under
+    setStatus('Uploading ' + fname + '…');
+    try {
+        const r = await fetch('/api/models/upload-weights?activate=0', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (r.ok && d.filename) {
+            setStatus('Uploaded ' + d.filename + ' (' + (d.size_mb != null ? d.size_mb + ' MB' : '') + ') — selected. Save the pipeline to keep it.', true);
+            await populatePipelineWeightOptions();
+            const sel = document.getElementById('pipeline-weight-input');
+            if (sel) {
+                if (!Array.from(sel.options).some(o => o.value === d.filename)) {
+                    const o = document.createElement('option'); o.value = d.filename; o.textContent = d.filename; sel.appendChild(o);
+                }
+                sel.value = d.filename;
+            }
+            if (fileEl) fileEl.value = '';
+        } else {
+            setStatus(d.error || 'Upload failed', false);
+        }
+    } catch (e) {
+        setStatus('Error: ' + (e.message || e), false);
+    }
 }
 
 function loadModelForEdit(modelId) {
@@ -3169,6 +3256,14 @@ async function createOrUpdatePipeline() {
         return;
     }
 
+    // 4.0.289 — per-pipeline weight association + AI-trainer metadata. The confusion
+    // matrix is carried as an OFFLINE data-URI on the preview img (no upload endpoint).
+    const weightFile = (document.getElementById('pipeline-weight-input')?.value || '').trim();
+    const taskId = (document.getElementById('pipeline-taskid-input')?.value || '').trim();
+    const weightSerial = (document.getElementById('pipeline-serial-input')?.value || '').trim();
+    const _cmEl = document.getElementById('pipeline-confmat-preview');
+    const confusionMatrix = (_cmEl && String(_cmEl.src || '').startsWith('data:')) ? _cmEl.src : '';
+
     try {
         const response = await fetch('/api/pipelines', {
             method: 'POST',
@@ -3177,7 +3272,11 @@ async function createOrUpdatePipeline() {
                 name: pipelineName,
                 description: description,
                 phases: phases,
-                enabled: true
+                enabled: true,
+                weight_file: weightFile,
+                task_id: taskId,
+                weight_serial_number: weightSerial,
+                confusion_matrix: confusionMatrix
             })
         });
 
