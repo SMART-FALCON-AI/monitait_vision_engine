@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.284] - 2026-08-02 — Charts: dead-code cleanup (frontend, no behaviour change)
+
+Removed **480 lines** of confirmed-dead JS from `charts.js` (6531 → 6051), each verified to have **zero call sites** before removal (`node --check` clean; all live functions intact). No behaviour change — none of this was ever invoked.
+
+- Deleted orphaned functions: `_renderShipmentStrip` (~216 lines, superseded by `_renderShipmentStripFromScatterDots`), `_loadEjectionAxis` + `_loadQualityHeatmap` + their helpers `_stripRangeQS`/`_scoreColor` (superseded by the v4.0.210 `_extendStripsFromBucket` slice system), `_extendColorHeatmapFromBucket` (superseded by the same), `_animateScatterAppearance`, `_progressiveLadder`, `_imgUrlFromPath`, `_onChartClickOpenDrawer`.
+- Collapsed the always-false `_renderSizeConfidenceBandsOnly` guard (the function never existed) to its only-ever-taken branch.
+- Dropped dead state vars `_progressiveTrendPts` (abandoned trend overlay) and `_progressiveColorAxis` (write-only).
+- Preserved the live neighbours that were interleaved with the dead code: `_procColor`, `_colorChangeColor`, `_renderColorChangeStrip`, `_verdictColor`.
+- Files: `static/js/charts.js`, `static/status.html`.
+
 ## [4.0.281 – 4.0.283] - 2026-08-02 — Charts: ΔE colour layer stays active when the last hour is idle (the real fix)
 
 - **Root cause (API-confirmed):** the ΔE colour layer only registers if it has a valid `[min,max]`, and it read that from the **1h-hydrate** payload. On a line that was **idle in the last hour** (`window=1h` → `color cells=0, enc_min/max=None`) the layer switched **off entirely**, even though the older buckets had colour. That's why khoy showed colour on a 7-day window but not a 24h one, while an actively-running vteam12 always showed it.

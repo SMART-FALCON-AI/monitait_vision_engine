@@ -1619,7 +1619,6 @@ let _lastLoadKey = '';
 // in newest-first alongside the scatter dots.
 let _progressiveColorCells = new Map();       // key -> cell
 let _progressiveColorRange = null;            // {axis, lo, hi, n_bins}
-let _progressiveColorAxis = 'encoder';
 
 // v4.0.228 — the selected window's encoder span (union of shipment_spans'
 // enc_min/enc_max), stashed on `window` by refreshAdvancedCharts for the encoder
@@ -1695,45 +1694,8 @@ function _seedProgressiveColorCache(data, axisMode) {
         axis: useEnc ? 'encoder' : 'time',
         lo: lo, hi: hi, n_bins: bins,
     };
-    _progressiveColorAxis = useEnc ? 'encoder' : 'time';
 }
 
-async function _extendColorHeatmapFromBucket(sinceMs, untilMs, shipment) {
-    if (!_progressiveColorRange || _progressiveColorRange.hi <= _progressiveColorRange.lo) return;
-    const phase = localStorage.getItem('mve_heatmap_phase') || '';
-    const parentClass = localStorage.getItem('mve_heatmap_parent_class') || '';
-    const bins = _progressiveColorRange.n_bins;
-    const url = '/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
-                '&until_ms=' + Math.floor(untilMs) +
-                '&shipment=' + encodeURIComponent(shipment) +
-                '&scatter_only=1' +
-                '&include_color_slice=1' +
-                '&color_axis=' + encodeURIComponent(_progressiveColorRange.axis) +
-                '&bin_ref_lo=' + _progressiveColorRange.lo +
-                '&bin_ref_hi=' + _progressiveColorRange.hi +
-                '&bins=' + bins +
-                '&phase=' + encodeURIComponent(phase) +
-                '&parent_class=' + encodeURIComponent(parentClass);
-    let data;
-    try {
-        const r = await fetch(url);
-        data = await r.json();
-    } catch (e) {
-        console.warn('[progressive color] fetch failed:', e);
-        return;
-    }
-    const slice = data.color_slice || {};
-    const cells = Array.isArray(slice.cells) ? slice.cells : [];
-    if (!cells.length) return;
-    for (const c of cells) {
-        _progressiveColorCells.set(`${c.cam}|${c.bin}`, c);
-    }
-    // Push merged cells back into the raw heatmap payload the plugin reads.
-    if (_insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap) {
-        _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values());
-        try { _insightCameraScatter.update('none'); } catch (_e) {}
-    }
-}
 
 // ===========================================================================
 // v4.0.210 — QUALITY + EJECTION strips from the SAME API as the scatter.
@@ -1747,7 +1709,6 @@ async function _extendColorHeatmapFromBucket(sinceMs, untilMs, shipment) {
 // vertical guideline hits the same data in the scatter, colour, quality AND
 // ejection layers. Accumulators mirror _progressiveColorCells.
 let _progressiveQualityCells = new Map();    // bin -> {bucket,n,score,top_class}
-let _progressiveTrendPts = new Map();        // v4.0.237 — enc -> {x,y}: per-bucket quality-score trend, overlaid on the scatter
 let _progressiveEjectionCells = new Map();   // bin -> {bucket,n,top_procedure,by_procedure}
 let _progressiveShipmentCells = new Map();   // v4.0.217 — bin -> {bucket, shipment, n}
 
@@ -2233,8 +2194,8 @@ function _renderStripsFromPayload(data, axis) {
 }
 window._renderStripsFromPayload = _renderStripsFromPayload;
 
-// Per-bucket streamer — mirrors _extendColorHeatmapFromBucket but for the
-// quality + ejection strips (and folds in colour so ONE fetch fills all three).
+// Per-bucket streamer for the quality + ejection strips — and folds in colour
+// so ONE fetch fills all three (this superseded the old colour-only streamer).
 // Called newest→oldest by the ladder AND once over the full domain by the
 // periodic refresh. bin_ref comes from _progressiveColorRange (same domain the
 // colour heatmap + scatter axis use).
@@ -2485,11 +2446,7 @@ async function refreshAdvancedCharts() {
                 + '&dot_cap=' + _dotCap());
             if (myTicket !== _progressiveLadderTicket) { _unmountScatterLoader(); return; }
             const d = await r.json();
-            if (typeof _renderSizeConfidenceBandsOnly === 'function') {
-                try { _renderSizeConfidenceBandsOnly(d); } catch (e) { console.warn(e); }
-            } else {
-                try { await _refreshAdvancedChartsCore(d); } catch (e) { console.warn(e); }
-            }
+            try { await _refreshAdvancedChartsCore(d); } catch (e) { console.warn(e); }
         }
     } catch (e) {
         console.warn('[progressive] hydrate failed:', e);
@@ -2585,66 +2542,6 @@ function _unmountScatterLoader() {
 // sees dots progressively appear. All data was already fetched by the Core
 // render above; this just re-orders the visual reveal.
 let _scatterAnimTicket = 0;
-function _animateScatterAppearance() {
-    if (!_insightCameraScatter) return;
-    const chart = _insightCameraScatter;
-    const dsCount = (chart.data.datasets || []).length;
-    if (dsCount === 0) return;
-
-    // Snapshot every point together with its dataset index. Skip animation
-    // entirely for tiny scatters — the pop-in effect would be noise for a
-    // dozen dots.
-    const allPoints = [];
-    for (let i = 0; i < dsCount; i++) {
-        const ds = chart.data.datasets[i];
-        for (const p of (ds.data || [])) {
-            allPoints.push({ dsIdx: i, point: p });
-        }
-    }
-    if (allPoints.length < 30) return;
-
-    // Sort newest→oldest. Time-axis x is epoch ms; encoder-axis x is the
-    // raw encoder value — both increase over time, so higher x = newer.
-    allPoints.sort((a, b) => (b.point.x || 0) - (a.point.x || 0));
-
-    // Clear every dataset's data — chart stays alive, axes/legend intact.
-    for (let i = 0; i < dsCount; i++) {
-        chart.data.datasets[i].data = [];
-    }
-    chart.update('none');
-
-    // Progressive fill: ~15 chunks over ~3 seconds. Cheap: no DB, no fetch.
-    const CHUNKS = 15;
-    const TOTAL_MS = 3000;
-    const chunkSize = Math.max(3, Math.ceil(allPoints.length / CHUNKS));
-    const delayMs = Math.floor(TOTAL_MS / CHUNKS);
-
-    // Each animation is tagged with a monotonic ticket. If refreshAdvancedCharts
-    // fires again before this animation finishes (operator changed window /
-    // shipment / min_conf), the ticket bumps and the older loop bails out
-    // instead of interleaving with the newer render's dots.
-    _scatterAnimTicket += 1;
-    const myTicket = _scatterAnimTicket;
-
-    let idx = 0;
-    function _pump() {
-        if (myTicket !== _scatterAnimTicket) return;   // superseded
-        if (!_insightCameraScatter) return;            // chart destroyed
-        const chart = _insightCameraScatter;
-        const end = Math.min(idx + chunkSize, allPoints.length);
-        for (let i = idx; i < end; i++) {
-            const { dsIdx, point } = allPoints[i];
-            const ds = chart.data.datasets[dsIdx];
-            if (ds && ds.data) ds.data.push(point);
-        }
-        chart.update('none');
-        idx = end;
-        if (idx < allPoints.length) {
-            setTimeout(_pump, delayMs);
-        }
-    }
-    setTimeout(_pump, 60);  // brief empty flash so the reveal is visible
-}
 
 // Convert a window string ('24h', '7d', ...) to milliseconds.
 function _windowToMs(w) {
@@ -2685,14 +2582,6 @@ function _scatterPointKey(p, cls) {
 // time to reach the target IS longer than a single big query — but the
 // operator sees continuous forward progress on the scatter, which is what
 // they asked for ("bucket by bucket").
-function _progressiveLadder(target) {
-    // Rungs are ordered smallest→largest and are POWERS of the 30-min
-    // dashboard bucket size (48 buckets over 24 h → 30 min each).
-    const rungs = ['2h', '4h', '6h', '12h', '24h', '48h', '7d', '30d'];
-    const idx = rungs.indexOf(target);
-    if (idx < 0) return ['6h', target]; // custom window — do at least one intermediate step
-    return rungs.slice(0, idx + 1);
-}
 
 // v4.0.74 — silently fetch one time-bucket via `since_ms`/`until_ms` and
 // append only NEW points to the existing `_insightCameraScatter`. Server
@@ -4065,7 +3954,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
     // edges sat off the dots. Now both share exactly [_uxMin,_uxMax], so a
     // bar edge at encoder value E lands on the same pixel as a dot at E.
     // Pass the pair matching the ACTIVE axis; the other pair stays null so
-    // _renderShipmentStrip picks the right mode.
+    // the shipment-lane renderer picks the right mode.
     // 4.0.207 — derive the shipment lanes from the SCATTER'S OWN DOTS instead
     // of a separate /api/shipment_spans fetch. Operator: "show the shipment
     // lane based on the data inside the scatter chart so we're sure they're in
@@ -4129,223 +4018,6 @@ window._renderShipmentStripFromScatterDots = _renderShipmentStripFromScatterDots
 // hue per shipment ID via golden-angle hash. Style intentionally matches
 // the operator's requested design: colored border + tinted background,
 // full shipment ID in matching hue text.
-function _renderShipmentStrip(spans, axisMode, enc_min, enc_max, t_min, t_max) {
-    const strip = document.getElementById('shipment-strip');
-    const title = document.getElementById('shipment-strip-title');
-    if (!strip) return;
-    if (!Array.isArray(spans) || spans.length === 0) {
-        strip.innerHTML = '';
-        if (title) title.style.display = 'none';
-        return;
-    }
-    if (title) title.style.display = '';
-    // v4.0.117 — update title to reflect what axis we're actually using
-    // (encoder / time / equal-slice) so an operator on a stationary line
-    // (vteam12 test box, or a fresh shipment before first encoder tick)
-    // isn't confused by "encoder range" when we're really painting by time.
-    const _updateTitle = (m) => {
-        if (!title) return;
-        const t = (m === 'enc')  ? '🚚 shipment lanes — encoder range per shipment id'
-                : (m === 'time') ? '🚚 shipment lanes — time range per shipment id (line stationary)'
-                :                  '🚚 shipment lanes — one slice per shipment (no encoder/time width)';
-        title.textContent = t;
-    };
-    // v4.0.117 — RULE: if we got spans, we MUST render something. Zero-
-    // width spans (line stationary; test-box vteam12; brand-new shipment
-    // before first encoder tick) previously silently dropped and the
-    // strip stayed empty. Now: prefer encoder-axis with real widths,
-    // else time-axis if that has a real range, else equal-slice layout.
-    // Every shipment always gets a visible box.
-    const _hueForShipment = (id) => {
-        const s = String(id || '');
-        let h = 0;
-        for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-        return ((h * 137.508) % 360 + 360) % 360;
-    };
-    // v4.0.123 — semantic color by verdict when the backend supplies one.
-    // Falls back to golden-angle hue when verdict is null (no_shipment,
-    // insufficient data, or compute error).
-    const _colorForVerdict = (verdict) => {
-        switch (String(verdict || '').toUpperCase()) {
-            case 'RELEASE':
-                return { border: 'hsl(142, 70%, 50%)', bg: 'hsla(142, 70%, 40%, 0.20)', text: 'hsl(142, 85%, 82%)' };
-            case 'RE-INSPECT':
-            case 'REINSPECT':
-                return { border: 'hsl(45, 90%, 55%)',  bg: 'hsla(45,  90%, 45%, 0.22)', text: 'hsl(45,  95%, 82%)' };
-            case 'HOLD':
-                return { border: 'hsl(0,  75%, 58%)',  bg: 'hsla(0,   75%, 45%, 0.22)', text: 'hsl(0,   90%, 85%)' };
-            case 'PENDING':
-                return { border: 'hsl(220, 15%, 60%)', bg: 'hsla(220, 15%, 40%, 0.18)', text: 'hsl(220, 20%, 82%)' };
-            default:
-                return null;   // caller falls back to hue-based
-        }
-    };
-    const _fmtEnc  = (v) => (v == null ? '?' : Number(v).toLocaleString());
-    const _fmtTime = (v) => {
-        if (v == null) return '?';
-        try { return new Date(v).toLocaleString([], {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}); }
-        catch (_e) { return String(v); }
-    };
-    // Decide layout mode.
-    const isEnc  = (axisMode === 'encoder');
-    const encRanges  = spans.map(s => [Number(s.enc_min || 0), Number(s.enc_max || 0)]);
-    const timeRanges = spans.map(s => [Number(s.t_min   || 0), Number(s.t_max   || 0)]);
-    const encTotal   = Math.max.apply(null, encRanges.map(r => r[1])) - Math.min.apply(null, encRanges.map(r => r[0]));
-    const timeTotal  = Math.max.apply(null, timeRanges.map(r => r[1])) - Math.min.apply(null, timeRanges.map(r => r[0]));
-    const encHasWidth  = encRanges.some(r => r[1] > r[0]);
-    const timeHasWidth = timeRanges.some(r => r[1] > r[0]);
-    let mode;
-    if (isEnc && encHasWidth && encTotal > 0)        mode = 'enc';
-    else if (!isEnc && timeHasWidth && timeTotal > 0) mode = 'time';
-    else if (encHasWidth && encTotal > 0)             mode = 'enc';
-    else if (timeHasWidth && timeTotal > 0)           mode = 'time';
-    else                                              mode = 'equal';
-    // Compute per-span (lo, hi) in the chosen mode's units.
-    let axisMin, axisMax, range;
-    let clipped;
-    _updateTitle(mode);
-    if (mode === 'equal') {
-        // Sort by t_min (or shipment string) so ordering is stable.
-        const sorted = spans.slice().sort((a, b) => (a.t_min || 0) - (b.t_min || 0));
-        const N = sorted.length;
-        clipped = sorted.map((sp, i) => ({
-            sp,
-            clipLo: i / N,
-            clipHi: (i + 1) / N,
-        }));
-        axisMin = 0; axisMax = 1; range = 1;
-    } else {
-        const useEnc = (mode === 'enc');
-        // Caller bounds first, then span-derived fallback.
-        let inMin = useEnc ? enc_min : t_min;
-        let inMax = useEnc ? enc_max : t_max;
-        if (inMin == null || inMax == null || !(inMax > inMin)) {
-            const los = spans.map(s => useEnc ? s.enc_min : s.t_min).filter(x => x != null);
-            const his = spans.map(s => useEnc ? s.enc_max : s.t_max).filter(x => x != null);
-            inMin = los.length ? Math.min.apply(null, los) : 0;
-            inMax = his.length ? Math.max.apply(null, his) : 1;
-        }
-        if (!(inMax > inMin)) { inMax = inMin + 1; }
-        axisMin = inMin; axisMax = inMax; range = axisMax - axisMin;
-        // Give every span AT LEAST a min-visible slice (2% of axis).
-        const minSlice = range * 0.02;
-        clipped = [];
-        for (const sp of spans) {
-            const lo = useEnc ? sp.enc_min : sp.t_min;
-            const hi = useEnc ? sp.enc_max : sp.t_max;
-            if (lo == null || hi == null) continue;
-            let clipLo = Math.max(lo, axisMin);
-            let clipHi = Math.min(hi, axisMax);
-            if (!(clipHi > clipLo)) clipHi = clipLo + minSlice;
-            if ((clipHi - clipLo) < minSlice) clipHi = clipLo + minSlice;
-            // v4.0.210 — the min-visible widening above extends clipHi RIGHT
-            // only. For the newest/rightmost shipment (clipLo near axisMax) that
-            // pushes clipHi PAST axisMax, so leftPct+widthPct > 100% and the bar
-            // paints beyond the plot's right edge (#shipment-strip is
-            // overflow:visible). Clamp to axisMax and shift the slice LEFT so it
-            // sits flush against the right edge instead of overflowing.
-            if (clipHi > axisMax) {
-                clipHi = axisMax;
-                clipLo = Math.max(axisMin, axisMax - minSlice);
-            }
-            clipped.push({ sp, clipLo, clipHi });
-        }
-    }
-    if (clipped.length === 0) { strip.innerHTML = ''; return; }
-    clipped.sort((a, b) => a.clipLo - b.clipLo);
-    // Greedy lane assignment. Each lane tracks the max clipHi seen so
-    // far; a span goes into the first lane whose max is <= this span's
-    // clipLo. If none fits, open a new lane. 4.0.166 — cap removed. On
-    // razin the auto-cutoff can produce 10+ overlapping shipments in a
-    // 24 h window; the prior MAX_LANES=5 pushed extras back into lane 0
-    // where they visually collapsed into unreadable slivers. Better to
-    // let the strip grow taller (compact lane height keeps total height
-    // reasonable) so EVERY shipment gets its own readable row.
-    const laneHi = []; // laneHi[i] = highest clipHi placed in lane i
-    for (const c of clipped) {
-        let placed = false;
-        for (let i = 0; i < laneHi.length; i++) {
-            if (laneHi[i] <= c.clipLo) { c.lane = i; laneHi[i] = c.clipHi; placed = true; break; }
-        }
-        if (!placed) {
-            c.lane = laneHi.length;
-            laneHi.push(c.clipHi);
-        }
-    }
-    const nLanes = Math.max(1, laneHi.length);
-    // 4.0.166 — compact lane height (14 px, was 22) + smaller font so
-    // 10+ overlapping shipments still fit in a reasonable strip height
-    // (14 * 12 = 168 px total for a razin-scale swim-lane view). Font
-    // shrinks proportionally so the label stays readable.
-    // 4.0.167 — defensive: reassert position:relative and override any
-    // stale cached inline height/overflow before painting so the older
-    // overflow:hidden state from cached status.html can't clip lane ≥ 2.
-    const laneH  = 14;
-    strip.style.position = 'relative';
-    strip.style.overflow = 'visible';
-    strip.style.height = (nLanes * laneH) + 'px';
-    const html = clipped.map(({ sp, clipLo, clipHi, lane }) => {
-        const leftPct  = ((clipLo - axisMin) / range) * 100;
-        const widthPct = ((clipHi - clipLo) / range) * 100;
-        // v4.0.123 — prefer verdict-based color; fall back to hue-hash when
-        // no verdict is available (e.g. no_shipment or insufficient data).
-        const _verdictColors = _colorForVerdict(sp.verdict);
-        const hue   = _hueForShipment(sp.shipment);
-        const hueS  = hue.toFixed(0);
-        const border = _verdictColors ? _verdictColors.border : ('hsl(' + hueS + ', 75%, 55%)');
-        const bg     = _verdictColors ? _verdictColors.bg     : ('hsla(' + hueS + ', 75%, 45%, 0.18)');
-        const text   = _verdictColors ? _verdictColors.text   : ('hsl(' + hueS + ', 85%, 78%)');
-        const shipStr = String(sp.shipment || '');
-        // v4.0.115 — prefer FULL shipment ID always; relayout helper
-        // downgrades to a tail-8 / tail-4 slice only when the bar is
-        // physically too narrow for the full string.
-        const labelFull = shipStr;
-        const labelMed  = shipStr.length > 8 ? shipStr.slice(-8) : shipStr;
-        const labelTail = shipStr.length > 4 ? shipStr.slice(-4) : shipStr;
-        const _verdictLabel = sp.verdict
-            ? (sp.verdict + (sp.score != null ? ' (score ' + Number(sp.score).toFixed(1) + ')' : ''))
-            : (sp.score != null ? 'score ' + Number(sp.score).toFixed(1) : '—');
-        // v4.0.140 — add Length line to the strip tooltip. Uses the shared
-        // helper so it reads the operator's unit label + upu from the same
-        // cache the rest of the UI uses. Encoder span is computed here
-        // rather than trusted from sp.encoder_span, because shipment_spans
-        // payload only carries enc_min/enc_max (not a precomputed span).
-        const _span = (sp.enc_max != null && sp.enc_min != null)
-            ? (Number(sp.enc_max) - Number(sp.enc_min)) : null;
-        const _lenStr = (_span != null && _span >= 0)
-            ? _fmtLenWithUpu(_span, _upuFromAny(sp, null), _unitLabelFromAny(sp, null))
-            : null;
-        const tipLines = [
-            'Shipment: ' + shipStr,
-            'Status: '   + _verdictLabel,
-            'Lane: '     + (lane + 1) + ' / ' + nLanes,
-            'Encoder: '  + _fmtEnc(sp.enc_min) + ' → ' + _fmtEnc(sp.enc_max),
-            _lenStr ? ('Length: ' + _lenStr) : null,
-            'Time: '     + _fmtTime(sp.t_min)  + ' → ' + _fmtTime(sp.t_max),
-            'Detections: ' + (sp.n_rows != null ? Number(sp.n_rows).toLocaleString() : '?'),
-        ].filter(Boolean);
-        const tip = tipLines.join('\n').replace(/"/g, '&quot;');
-        const top = (lane * laneH) + 'px';
-        return '<div class="mve-ship-bar" data-w-pct="' + widthPct + '" '
-             + 'data-label-full="' + labelFull.replace(/"/g, '&quot;') + '" '
-             + 'data-label-med="'  + labelMed.replace(/"/g, '&quot;')  + '" '
-             + 'data-label-tail="' + labelTail.replace(/"/g, '&quot;') + '" '
-             + 'title="' + tip + '" '
-             + 'style="position:absolute; top:' + top + '; height:' + (laneH - 1) + 'px; '
-             + 'left:' + leftPct + '%; width:' + widthPct + '%; '
-             + 'background:' + bg + '; border:1px solid ' + border + '; '
-             + 'box-sizing:border-box; border-radius:3px; overflow:hidden; '
-             + 'display:flex; align-items:center; justify-content:center; '
-             + 'font-size:9px; color:' + text + '; font-weight:700; letter-spacing:0.2px; line-height:1; '
-             + 'text-shadow:0 1px 2px rgba(0,0,0,0.55); cursor:default;">'
-             + '<span class="mve-ship-label" style="pointer-events:none; padding:0 4px; '
-             + 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + labelFull + '</span>'
-             + '</div>';
-    }).join('');
-    strip.innerHTML = html;
-    _relayoutShipmentStripLabels();
-}
-window._renderShipmentStrip = _renderShipmentStrip;
 
 // v4.0.119 — INDEPENDENT strip refresher. Hits `/api/shipment_spans`
 // (a standalone endpoint that only runs the bounded CTE — ~70 ms) and
@@ -4821,10 +4493,6 @@ async function refreshProductionCharts() {
 // The detection pipeline no longer writes _DETECTED.jpg as of 4.0.0; legacy
 // _DETECTED.jpg URLs still resolve through the render endpoint's fallback.
 // ---------------------------------------------------------------------------
-function _imgUrlFromPath(p) {
-    if (!p) return null;
-    return '/api/raw_image/' + encodeURI(String(p).replace(/^raw_images\//, ''));
-}
 // Both URLs for any chart data point or drawer item.
 //   `ann`  → render-on-demand annotated view (same raw under the hood)
 //   `raw`  → bare raw frame
@@ -5298,14 +4966,6 @@ function _scatterImageTooltip(ctx) {
     el.style.display = 'block';
 }
 // Click handler factory for bar/pie/pareto: drills into the drawer.
-function _onChartClickOpenDrawer(chart) {
-    return function (evt, els) {
-        if (!els || !els.length) return;
-        const idx = els[0].index;
-        const lab = chart.data.labels && chart.data.labels[idx];
-        if (lab) openDefectDrawer(lab);
-    };
-}
 
 // 3.21.2 — centered modal showing the EXACT clicked frame at BIG size.
 // Default view = Annotated. Toggle Raw / Both via the header buttons.
@@ -5511,12 +5171,6 @@ window.askWhyForCurrentDefect = askWhyForCurrentDefect;
 
 let _qualityShipmentsChart = null;
 
-function _scoreColor(score) {
-    if (score == null || isNaN(score)) return 'rgba(100,116,139,0.5)';
-    if (score >= 85) return '#22c55e';
-    if (score >= 60) return '#facc15';
-    return '#ef4444';
-}
 
 function _verdictColor(v) {
     if (v === 'RELEASE')    return 'rgba(34,197,94,0.7)';
@@ -6039,85 +5693,7 @@ function _procColor(name) {
 // time-domain from leaking into an encoder query, and vice-versa). For time,
 // xMin/xMax are epoch-milliseconds; for encoder they are encoder units — both
 // exactly what the backend's lo/hi params expect.
-function _stripRangeQS(axis) {
-    const ux = window._mveUnifiedX || {};
-    let qs = '';
-    if (ux.axisMode === axis
-        && Number.isFinite(ux.xMin) && Number.isFinite(ux.xMax)
-        && ux.xMax > ux.xMin) {
-        qs = `&lo=${ux.xMin}&hi=${ux.xMax}`;
-    }
-    const ship = (document.getElementById('insight-shipment') || {}).value || '';
-    if (ship) qs += `&shipment=${encodeURIComponent(ship)}`;
-    return qs;
-}
 
-async function _loadEjectionAxis(axis, win) {
-    // 3.25.13 — unified IDs (single strip + single legend regardless of axis).
-    const stripId  = 'ejection-strip';
-    const legendId = 'ejection-strip-legend';
-    const strip  = document.getElementById(stripId);
-    const legend = document.getElementById(legendId);
-    if (!strip) return;
-    try {
-        // 4.0.35 — bucket count synced with colour heatmap.
-        // 4.0.197 — prefer the bin count the scatter's colour-heatmap just
-        // rendered (window._mveUnifiedX.bins) so ejection cells edge-align
-        // with the heatmap cells + the dots above. Falls back to the sticky
-        // bucket count before the first scatter render.
-        const _bk = (window._mveUnifiedX && window._mveUnifiedX.bins)
-            ? window._mveUnifiedX.bins
-            : (parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48);
-        // v4.0.209 — SINGLE SOURCE OF X-DOMAIN. Bucket over the scatter's exact
-        // [xMin, xMax] (window._mveUnifiedX) so a vertical guideline hits the
-        // same encoder/time in the scatter, colour heatmap AND this strip.
-        // Only pass the range when the scatter's axis matches ours (guards a
-        // stale time-domain leaking into an encoder query, and vice-versa).
-        const _rng = _stripRangeQS(axis);
-        const r = await fetch(`/api/quality/ejection_axis?axis=${axis}&window=${encodeURIComponent(win)}&buckets=${_bk}${_rng}`);
-        const d = await r.json();
-        const cells = d.buckets || [];
-        if (!cells.length) {
-            const hint = d.note || 'no ejection events in window';
-            strip.innerHTML = `<div style="color:var(--text-secondary); font-size:10px; padding:2px; flex:1; text-align:center; font-style:italic;">${hint}</div>`;
-            if (legend) legend.innerHTML = '';
-            return;
-        }
-        // 3.25.13 — local-TZ label formatting on the time axis (matches scatter).
-        const _fmtEjCellLabel = (c) => {
-            if (!c) return '';
-            if (axis === 'time' && c.ts) {
-                const d = new Date(c.ts);
-                const win24h = (win === '24h' || win === '1h' || win === '6h');
-                return win24h
-                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    : d.toLocaleDateString([], { month: '2-digit', day: '2-digit' }) + ' ' +
-                      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            }
-            return c.label || '';
-        };
-        // Cells: colored by top_procedure; empty buckets stay transparent.
-        strip.innerHTML = cells.map(c => {
-            const color = c.top_procedure ? _procColor(c.top_procedure) : 'transparent';
-            const parts = Object.entries(c.by_procedure || {})
-                .sort((a, b) => b[1] - a[1])
-                .map(([n, k]) => `${n}: ${k}`).join('\n');
-            const tip = `${_fmtEjCellLabel(c)}\nTotal ejections: ${c.n}\n${parts}`.trim();
-            return `<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`;
-        }).join('');
-        // Legend: chip per procedure that fired in the window (deterministic colors).
-        if (legend) {
-            const totals = {};
-            cells.forEach(c => {
-                Object.entries(c.by_procedure || {}).forEach(([n, k]) => { totals[n] = (totals[n] || 0) + k; });
-            });
-            legend.innerHTML = Object.entries(totals)
-                .sort((a, b) => b[1] - a[1])
-                .map(([n, k]) => `<span style="display:inline-flex; align-items:center; gap:3px;"><span style="display:inline-block; width:10px; height:10px; background:${_procColor(n)}; border-radius:2px;"></span>${n} (${k})</span>`)
-                .join('');
-        }
-    } catch (e) { console.warn(`ejection_axis ${axis} failed`, e); }
-}
 
 
 // 4.0.164 — colour-change strip. Fed from `data.color_change_strip` (encoder
@@ -6223,62 +5799,6 @@ function _renderColorChangeStrip(axisMode, data) {
 window._renderColorChangeStrip = _renderColorChangeStrip;
 
 
-async function _loadQualityHeatmap(axis, win) {
-    // 3.25.13 — unified IDs (single strip regardless of axis).
-    const stripId = 'quality-strip';
-    const axisId  = 'quality-strip-axis';
-    const strip   = document.getElementById(stripId);
-    const axisEl  = document.getElementById(axisId);
-    if (!strip) return;
-    try {
-        // 4.0.35 — bucket count synced with colour heatmap.
-        // 4.0.197 — prefer window._mveUnifiedX.bins so quality cells edge-align
-        // with the colour-heatmap cells + dots. Falls back to sticky count.
-        const _bk = (window._mveUnifiedX && window._mveUnifiedX.bins)
-            ? window._mveUnifiedX.bins
-            : (parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48);
-        // v4.0.209 — SINGLE SOURCE OF X-DOMAIN (see _loadEjectionAxis). Same
-        // [xMin,xMax,bins] as the scatter → guaranteed vertical-line alignment.
-        const _rng = _stripRangeQS(axis);
-        const r = await fetch(`/api/quality/heatmap?axis=${axis}&window=${encodeURIComponent(win)}&buckets=${_bk}${_rng}`);
-        const d = await r.json();
-        const cells = d.buckets || [];
-        if (!cells.length) {
-            const hint = d.note || 'no data in window';
-            strip.innerHTML = `<div style="color:var(--text-secondary); font-size:11px; padding:6px; flex:1; text-align:center; font-style:italic;">${hint}</div>`;
-            if (axisEl) axisEl.innerHTML = '';
-            return;
-        }
-        // 3.25.13 — for the time axis, format labels in the OPERATOR'S local TZ
-        // (the scatter does the same via toLocaleTimeString). Backend already
-        // sends `ts` as ISO, so we just re-format here. Encoder axis labels are
-        // numeric position ranges and don't need this.
-        const _fmtCellLabel = (c) => {
-            if (!c) return '';
-            if (axis === 'time' && c.ts) {
-                const d = new Date(c.ts);
-                const win24h = (win === '24h' || win === '1h' || win === '6h');
-                return win24h
-                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    : d.toLocaleDateString([], { month: '2-digit', day: '2-digit' }) + ' ' +
-                      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            }
-            return c.label || '';
-        };
-        strip.innerHTML = cells.map(c => {
-            const color = _scoreColor(c.score);
-            const top = c.top_class ? `Top: ${c.top_class}` : '';
-            const tip = `${_fmtCellLabel(c)}\nScore: ${c.score}\nDetections: ${c.n}\n${top}`.trim();
-            return `<div style="flex:1; background:${color}; cursor:default;" title="${tip.replace(/"/g, '&quot;')}"></div>`;
-        }).join('');
-        if (axisEl) {
-            const first = _fmtCellLabel(cells[0]);
-            const mid   = _fmtCellLabel(cells[Math.floor(cells.length / 2)]);
-            const last  = _fmtCellLabel(cells[cells.length - 1]);
-            axisEl.innerHTML = `<span>${first}</span><span>${mid}</span><span>${last}</span>`;
-        }
-    } catch (e) { console.warn(`heatmap ${axis} failed`, e); }
-}
 
 // Auto-refresh when the Charts tab opens or window changes.
 document.addEventListener('DOMContentLoaded', () => {
