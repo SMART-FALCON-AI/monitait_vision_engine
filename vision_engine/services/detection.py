@@ -1656,13 +1656,31 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                     # visible in DB so we can diagnose them instead of silently
                     # dropping data.
                     raw_image_path = os.path.join("raw_images", f"{frame_id}.jpg")
+                    # 4.0.286 — stamp the COMPACT pipeline + capture ids so charts can
+                    # filter/colour detections by pipeline and resolve that pipeline's
+                    # classes. Names/classes are foreign-keyed from config, not stored here.
+                    _pid = None
+                    _cid = None
+                    try:
+                        _cp = _pipeline_manager.current_pipeline if _pipeline_manager else None
+                        _pid = getattr(_cp, "id", None) if _cp else None
+                    except Exception:
+                        _pid = None
+                    try:
+                        _sm = getattr(_app.state, "state_manager", None) if (_app is not None and hasattr(_app, "state")) else None
+                        _cs = getattr(_sm, "current_state", None) if _sm else None
+                        _cid = getattr(_cs, "id", None) if _cs else None
+                    except Exception:
+                        _cid = None
                     write_inference_to_db(
                         shipment=shipment_str,
                         image_path=raw_image_path,
                         detections=filtered,
                         inference_time_ms=inference_time_ms,
                         model_used=model_name_used,
-                        encoder_value=encoder  # 3.21.0: roll position per detection
+                        encoder_value=encoder,  # 3.21.0: roll position per detection
+                        pipeline_id=_pid,       # 4.0.286: compact inference-pipeline id
+                        capture_id=_cid         # 4.0.286: compact capture-state id
                     )
 
                 # 3.21.11: evaluate eject from the LIVE inference path (every captured

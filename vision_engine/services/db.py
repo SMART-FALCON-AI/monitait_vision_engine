@@ -322,21 +322,31 @@ add_db_writers(2)
 
 
 def write_inference_to_db(shipment, image_path, detections, inference_time_ms,
-                          model_used="yolov8", encoder_value=None):
+                          model_used="yolov8", encoder_value=None,
+                          pipeline_id=None, capture_id=None, phase_id=None):
     """Queue inference result for async write to TimescaleDB.
 
     encoder_value (3.21.0): capture-time encoder position, so charts can plot
     defects by roll position (camera × encoder), not just by timestamp.
+
+    pipeline_id / capture_id / phase_id (4.0.286): COMPACT integer tags of which
+    inference pipeline + capture state + phase produced this row. Tiny (small ints);
+    the name/classes/category snapshot are resolved from the pipeline/state config,
+    so charts can filter/colour detections by pipeline and show that pipeline's classes.
     """
     try:
         _db_queue.put_nowait((
             """INSERT INTO inference_results
                (time, shipment, image_path, detections, detection_count,
-                inference_time_ms, model_used, encoder_value)
-               VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)""",
+                inference_time_ms, model_used, encoder_value,
+                pipeline_id, capture_id, phase_id)
+               VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (shipment, image_path, Json(detections), len(detections),
              inference_time_ms, model_used,
-             int(encoder_value) if encoder_value is not None else None)
+             int(encoder_value) if encoder_value is not None else None,
+             int(pipeline_id) if pipeline_id is not None else None,
+             int(capture_id) if capture_id is not None else None,
+             int(phase_id) if phase_id is not None else None)
         ))
     except queue.Full:
         logger.warning("DB write queue full — dropping inference result")
@@ -453,10 +463,15 @@ def ensure_inference_encoder_column():
         cur.execute("BEGIN")
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute("ALTER TABLE inference_results ADD COLUMN IF NOT EXISTS encoder_value BIGINT;")
+        # 4.0.286 — COMPACT pipeline + capture ids (the tiny per-row tags). The names,
+        # classes and category snapshot are foreign-keyed from the pipeline/state config,
+        # NOT stored here — so each row carries two small ints instead of long strings.
+        cur.execute("ALTER TABLE inference_results ADD COLUMN IF NOT EXISTS pipeline_id INTEGER;")
+        cur.execute("ALTER TABLE inference_results ADD COLUMN IF NOT EXISTS capture_id INTEGER;")
         conn.commit()
         cur.close()
         _inference_encoder_col_ready = True
-        logger.info("inference_results.encoder_value column ready")
+        logger.info("inference_results.encoder_value + pipeline_id + capture_id columns ready")
         return True
     except Exception as e:
         logger.warning(f"ensure_inference_encoder_column failed (will retry): {e}")

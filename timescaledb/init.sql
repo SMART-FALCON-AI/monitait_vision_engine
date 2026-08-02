@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS inference_results (
     pipeline_name TEXT,
     module_id TEXT,
     phase_id INTEGER,
-    encoder_value BIGINT   -- capture-time encoder (3.21.0) — roll-position charts
+    encoder_value BIGINT,  -- capture-time encoder (3.21.0) — roll-position charts
+    pipeline_id INTEGER,   -- 4.0.286: compact inference-pipeline id (name/classes in config)
+    capture_id INTEGER     -- 4.0.286: compact capture-state id (name in config)
 );
 
 SELECT create_hypertable('inference_results', 'time', if_not_exists => TRUE);

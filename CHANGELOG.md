@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.285 – 4.0.288] - 2026-08-02 — Strip-label halo + per-pipeline weights/metadata foundation
+
+- **4.0.285** — quality/ejection/colour-change strip labels get a white outline halo (matching the ΔE labels) so the `↑/↓` values stay readable on faint low-Δ cells instead of blending into the green.
+- **4.0.286-288 (feature foundation, backend)** — per-pipeline weight file + metadata:
+  - `Pipeline` and capture `State` each gain a **compact integer `id`** (server-assigned; `default`=0, others 1,2,…; `from_config` backfills pre-id configs stably). This id — not the name — is what tags detections.
+  - `Pipeline` gains `task_id, categories[], confusion_matrix, weight_serial_number, weight_file`.
+  - Activating a pipeline with a `weight_file` pushes it to YOLO via the **existing** `/set-model` API (no YOLO-container change) + mirrors best.pt.
+  - `inference_results` gains `pipeline_id INTEGER` + `capture_id INTEGER` (idempotent migration + init.sql). The writer stores them; detection.py stamps them from the in-memory managers (**no new DB connection** — the ids are read from `current_pipeline.id`/`current_state.id`). Verified on vteam12: rows now carry `pipeline_id=1 capture_id=3`.
+  - Remaining (not yet built): the Pipeline-tab UI to SET these (weight picker/task_id/serial/confusion-matrix), the ai-trainer snapshot, and the dot-click→categories wiring.
+- Files: `static/js/charts.js`, `services/pipeline.py`, `services/state_machine.py`, `services/db.py`, `services/detection.py`, `routers/inference.py`, `timescaledb/init.sql`.
+
 ## [4.0.284] - 2026-08-02 — Charts: dead-code cleanup (frontend, no behaviour change)
 
 Removed **480 lines** of confirmed-dead JS from `charts.js` (6531 → 6051), each verified to have **zero call sites** before removal (`node --check` clean; all live functions intact). No behaviour change — none of this was ever invoked.

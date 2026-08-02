@@ -1766,7 +1766,7 @@ function _paintQualityStrip(cells, nbins, axis, lo, hi) {
         if (Math.abs(d) >= 0.05) { const m = Math.abs(d); label = (d > 0 ? '↑' : '↓') + (m >= 10 ? m.toFixed(0) : m.toFixed(1)); }
         const top = (c && c.top_class) ? `Top: ${c.top_class}` : '';
         const tip = `${_binLabelForStrip(i, nbins, axis, lo, hi)}\nScore: ${c && c.score != null ? c.score : '—'}\nΔ vs prev: ${d >= 0 ? '+' : ''}${d.toFixed(1)}\nDetections: ${c ? (c.n || 0) : 0}\n${top}`.trim();
-        html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`);
+        html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.95); text-shadow:-1px -1px 0 rgba(255,255,255,.9),1px -1px 0 rgba(255,255,255,.9),-1px 1px 0 rgba(255,255,255,.9),1px 1px 0 rgba(255,255,255,.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`);
     }
     strip.innerHTML = html.join('');
 }
@@ -1800,7 +1800,7 @@ function _paintEjectionStrip(cells, nbins, axis, lo, hi) {
         if (Math.abs(d) >= 1) label = (d > 0 ? '↑' : '↓') + Math.abs(d).toFixed(0);
         const parts = (c && Number(c.n) > 0) ? Object.entries(c.by_procedure || {}).sort((x, y) => y[1] - x[1]).map(([n, k]) => `${n}: ${k}`).join('\n') : '';
         const tip = `${_binLabelForStrip(i, nbins, axis, lo, hi)}\nEjections: ${c ? (c.n || 0) : 0}\nΔ vs prev: ${d >= 0 ? '+' : ''}${d}\n${parts}`.trim();
-        html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`);
+        html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.95); text-shadow:-1px -1px 0 rgba(255,255,255,.9),1px -1px 0 rgba(255,255,255,.9),-1px 1px 0 rgba(255,255,255,.9),1px 1px 0 rgba(255,255,255,.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g, '&quot;')}">${label}</div>`);
     }
     strip.innerHTML = html.join('');
     if (legend) {
@@ -5787,7 +5787,7 @@ function _renderColorChangeStrip(axisMode, data) {
                 const val = mag >= 10 ? mag.toFixed(0) : mag.toFixed(1);
                 label = (dp > 0 ? '↑' : '↓') + val;
             }
-            html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.85); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g,'&quot;')}">${label}</div>`);
+            html.push(`<div style="flex:1; background:${bg}; cursor:default; display:flex; align-items:center; justify-content:center; font-size:9px; line-height:1; font-weight:700; color:rgba(15,23,42,0.95); text-shadow:-1px -1px 0 rgba(255,255,255,.9),1px -1px 0 rgba(255,255,255,.9),-1px 1px 0 rgba(255,255,255,.9),1px 1px 0 rgba(255,255,255,.9); overflow:hidden; white-space:nowrap;" title="${tip.replace(/"/g,'&quot;')}">${label}</div>`);
         }
     }
     strip.innerHTML = html.join('');

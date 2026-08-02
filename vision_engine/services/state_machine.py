@@ -83,6 +83,11 @@ class State:
     Default: Single phase with U_ON_B_OFF light, 0.1s delay, all detected cameras.
     """
     name: str
+    # 4.0.286 — COMPACT stable integer id, assigned server-side by StateManager.
+    # This (NOT the name) is the capture-side id stamped on inference rows, so the
+    # DB carries a tiny int and the name/config is "foreign-keyed" from state config.
+    # 0 = unassigned; add_state() fills it. Survives renames.
+    id: int = 0
     phases: List[CapturePhase] = field(default_factory=lambda: [
         CapturePhase(light_mode="U_ON_B_OFF", delay=0.1, cameras=_get_default_cameras())
     ])
@@ -126,6 +131,7 @@ class State:
         """Convert state to dictionary for JSON serialization."""
         return {
             "name": self.name,
+            "id": self.id,
             "phases": [p.to_dict() for p in self.phases],
             "light_status_check": self.light_status_check,
             "steps": self.steps,
@@ -159,6 +165,7 @@ class State:
 
         return cls(
             name=data.get('name', 'default'),
+            id=int(data.get('id', 0) or 0),
             phases=phases,
             light_status_check=data.get('light_status_check', False),
             steps=int(data.get('steps', 1)),
@@ -245,8 +252,16 @@ class StateManager:
         """Add or update a named state."""
         try:
             with self.state_lock:
+                # 4.0.286 — assign a stable compact id (see State.id). Keep an existing
+                # state's id on update; allocate max(existing)+1 on create. This id — not
+                # the name — is the capture tag stamped on inference rows.
+                existing = self.states.get(state.name)
+                if existing is not None and getattr(existing, "id", 0):
+                    state.id = existing.id
+                elif not state.id:
+                    state.id = max([getattr(s, "id", 0) or 0 for s in self.states.values()], default=0) + 1
                 self.states[state.name] = state
-                logger.info(f"Added/updated state: {state.name}")
+                logger.info(f"Added/updated state: {state.name} (id={state.id})")
                 return True
         except Exception as e:
             self._handle_error(f"Error adding state: {e}")
@@ -463,6 +478,17 @@ class StateManager:
 
             for name, state_data in data.items():
                 self.states[name] = State.from_dict(state_data)
+
+            # 4.0.286 — backfill compact ids for states saved before ids existed. Same
+            # deterministic scheme as pipelines: 'default' stays 0, rest max(existing)+1
+            # in stable order. Keeps capture_id stable across boots.
+            _next_cid = max([getattr(s, "id", 0) or 0 for s in self.states.values()], default=0) + 1
+            for _sname, _sobj in self.states.items():
+                if _sname == "default":
+                    _sobj.id = 0
+                elif not getattr(_sobj, "id", 0):
+                    _sobj.id = _next_cid
+                    _next_cid += 1
 
             logger.info(f"Loaded {len(data)} states from {filepath}")
             return True

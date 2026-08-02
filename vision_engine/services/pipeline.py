@@ -124,13 +124,34 @@ class Pipeline:
     phases: List[PipelinePhase] = field(default_factory=list)
     enabled: bool = True
     description: str = ""
+    # 4.0.286 — COMPACT stable integer id, assigned server-side by PipelineManager.
+    # This (NOT the name) is what gets stamped on every stored detection, so the
+    # per-detection tag stays tiny (one small int vs a full name string × millions
+    # of rows). 0 = unassigned; add_pipeline() fills it. Survives renames.
+    id: int = 0
+    # 4.0.286 — per-pipeline AI-trainer metadata + weight association. Each pipeline
+    # owns its OWN ai-trainer task (replacing the single global task_id), an OFFLINE
+    # snapshot of that task's categories + confusion-matrix image + weight serial, and
+    # the /weights/*.pt file to push to YOLO when this pipeline is activated. All default
+    # empty so pre-existing pipeline configs keep loading unchanged.
+    task_id: str = ""
+    categories: List[Dict[str, Any]] = field(default_factory=list)   # snapshot: [{id, category_name, color}]
+    confusion_matrix: str = ""          # offline snapshot: data-URI or /weights path
+    weight_serial_number: str = ""
+    weight_file: str = ""               # filename in WEIGHTS_DIR; loaded on activate
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
+            "id": self.id,
             "phases": [p.to_dict() for p in self.phases],
             "enabled": self.enabled,
-            "description": self.description
+            "description": self.description,
+            "task_id": self.task_id,
+            "categories": self.categories,
+            "confusion_matrix": self.confusion_matrix,
+            "weight_serial_number": self.weight_serial_number,
+            "weight_file": self.weight_file,
         }
 
     @classmethod
@@ -142,9 +163,15 @@ class Pipeline:
 
         return cls(
             name=data.get("name", "default"),
+            id=int(data.get("id", 0) or 0),
             phases=phases,
             enabled=data.get("enabled", True),
-            description=data.get("description", "")
+            description=data.get("description", ""),
+            task_id=data.get("task_id", "") or "",
+            categories=data.get("categories", []) or [],
+            confusion_matrix=data.get("confusion_matrix", "") or "",
+            weight_serial_number=data.get("weight_serial_number", "") or "",
+            weight_file=data.get("weight_file", "") or "",
         )
 
 
@@ -361,8 +388,17 @@ class PipelineManager:
         """Add or update a pipeline."""
         try:
             with self.pipeline_lock:
+                # 4.0.286 — assign a stable compact id. On UPDATE (same name) keep the
+                # existing id so detections already stamped with it stay valid; on CREATE
+                # allocate max(existing ids)+1. This id — not the name — is what gets
+                # stamped on every stored detection.
+                existing = self.pipelines.get(pipeline.name)
+                if existing is not None and getattr(existing, "id", 0):
+                    pipeline.id = existing.id
+                elif not pipeline.id:
+                    pipeline.id = max([getattr(p, "id", 0) or 0 for p in self.pipelines.values()], default=0) + 1
                 self.pipelines[pipeline.name] = pipeline
-                logger.info(f"Added/updated pipeline: {pipeline.name}")
+                logger.info(f"Added/updated pipeline: {pipeline.name} (id={pipeline.id})")
                 return True
         except Exception as e:
             logger.error(f"Error adding pipeline: {e}")
@@ -708,6 +744,18 @@ class PipelineManager:
             if "pipelines" in config:
                 for name, pipeline_data in config["pipelines"].items():
                     self.pipelines[name] = Pipeline.from_dict(pipeline_data)
+
+            # 4.0.286 — backfill compact ids for pipelines saved BEFORE ids existed
+            # (from_dict returns 0 for them). Deterministic: 'default' stays 0, the rest
+            # take max(existing)+1 in stable config order, so ids don't shuffle across
+            # boots. They persist explicitly the next time a pipeline is saved.
+            _next_pid = max([getattr(p, "id", 0) or 0 for p in self.pipelines.values()], default=0) + 1
+            for _pname, _pobj in self.pipelines.items():
+                if _pname == "default":
+                    _pobj.id = 0
+                elif not getattr(_pobj, "id", 0):
+                    _pobj.id = _next_pid
+                    _next_pid += 1
 
             # Set current pipeline
             current_name = config.get("current_pipeline", "default")

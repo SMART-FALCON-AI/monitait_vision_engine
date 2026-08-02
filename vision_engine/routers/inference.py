@@ -198,10 +198,42 @@ def activate_pipeline(pipeline_name: str, request: Request):
         except Exception as save_err:
             logger.error(f"Error saving after pipeline activation to DATA_FILE: {save_err}")
 
+        # 4.0.286 — per-pipeline weight. If the activated pipeline names a
+        # weight_file, push it to YOLO via the EXISTING /set-model API (NO change
+        # to the YOLO container) — identical mechanism to /api/models/activate-weights.
+        # Mirror to /weights/best.pt so the choice survives a restart. Non-fatal:
+        # the pipeline stays active even if the weight push fails.
+        weight_status = None
+        try:
+            pobj = pm.pipelines.get(pipeline_name) if hasattr(pm, "pipelines") else None
+            wf = (getattr(pobj, "weight_file", "") or "").strip() if pobj else ""
+            if wf:
+                safe_name = pathlib.Path(wf).name
+                dest = WEIGHTS_DIR / safe_name
+                if dest.exists():
+                    try:
+                        import shutil as _shutil
+                        best_dest = WEIGHTS_DIR / "best.pt"
+                        if dest.resolve() != best_dest.resolve():
+                            _shutil.copyfile(dest, best_dest)
+                    except Exception as _me:
+                        logger.warning(f"pipeline weight mirror failed: {_me}")
+                    successes, last_error = _call_set_model_all_replicas(f"/weights/{safe_name}", request=request)
+                    weight_status = {"weight_file": safe_name, "replicas_updated": successes,
+                                     "error": (str(last_error) if successes == 0 and last_error else None)}
+                    logger.info(f"Pipeline '{pipeline_name}' weight '{safe_name}' pushed to {successes} replica(s)")
+                else:
+                    weight_status = {"weight_file": safe_name, "error": "weight file not found in /weights"}
+                    logger.warning(f"Pipeline '{pipeline_name}' weight_file '{safe_name}' not found in {WEIGHTS_DIR}")
+        except Exception as _we:
+            logger.error(f"Error pushing pipeline weight on activate: {_we}")
+            weight_status = {"error": str(_we)}
+
         return JSONResponse(content={
             "success": True,
             "message": f"Activated pipeline: {pipeline_name} (saved)",
-            "current_model": pm.get_current_model().to_dict() if pm.get_current_model() else None
+            "current_model": pm.get_current_model().to_dict() if pm.get_current_model() else None,
+            "weight": weight_status
         })
     return JSONResponse(content={"error": f"Pipeline not found: {pipeline_name}"}, status_code=404)
 
