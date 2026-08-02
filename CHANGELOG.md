@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.281 – 4.0.283] - 2026-08-02 — Charts: ΔE colour layer stays active when the last hour is idle (the real fix)
+
+- **Root cause (API-confirmed):** the ΔE colour layer only registers if it has a valid `[min,max]`, and it read that from the **1h-hydrate** payload. On a line that was **idle in the last hour** (`window=1h` → `color cells=0, enc_min/max=None`) the layer switched **off entirely**, even though the older buckets had colour. That's why khoy showed colour on a 7-day window but not a 24h one, while an actively-running vteam12 always showed it.
+- **Fix (4.0.281):** `heatmapMin/Max` **and** `heatmapBins` now come from `_progressiveColorRange` (the range probe = full data min/max, `enc_min=50…enc_max=21.7M` on khoy) instead of the 1h payload, so the layer stays active and the streamed cells land in the right columns. This is the one useful half of the reverted 4.0.278 — the cell-clearing half is **not** re-applied.
+- **4.0.282** added a temporary `[MVE-HMDIAG]` console probe to confirm the cause from the browser; **4.0.283** removed it. Verified live on khoy (green ΔE cells paint across the full encoder range on an idle-last-hour 24h window).
+- Files: `static/js/charts.js`, `static/status.html`.
+
+## [4.0.280] - 2026-08-02 — Charts: cache-buster bump + Encoder is the default axis everywhere
+
+- **Colour-cell regression fixed.** 4.0.278 tried to make the ΔE cells stream bucket-by-bucket (blank `__mveHeatmap.cells` on reload + domain from the range probe) — it **removed the colour layer** on some views, so it was **reverted in 4.0.279**. But a half-failed khoy deploy left the cache-buster stuck at `?v=4.0.278`, so browsers kept running the **cached broken 278** `charts.js`. Bumping the cache-buster to `?v=4.0.280` forces the good (reverted) file to load. Lesson: a frontend revert is invisible until the cache-buster moves.
+- **Encoder is now the default axis, front and back.** Dropdown reordered **Encoder → Time → Length** (Encoder first + `selected`); frontend `_insightAxis` already defaulted to encoder; backend `detection_charts` already defaulted `color_axis="encoder"`; and the two strip endpoints (`/api/quality/heatmap`, `/api/quality/ejection_axis`) now default `axis="encoder"` too (verified live: both return `axis=encoder` with no param). Applied via container restart on vteam12.
+- Files: `static/js/charts.js`, `static/status.html`, `routers/timeline.py`.
+
+## [4.0.278 – 4.0.279] - 2026-08-02 — Charts: colour-cell streaming attempt, then reverted
+
+- 4.0.278 blanked `__mveHeatmap.cells` on reload to sync colour with the dots; it dropped the colour layer on all-shipments views and was **fully reverted in 4.0.279** (back to the 4.0.276 colour behaviour). See 4.0.280 for the cache-buster follow-up.
+- Files: `static/js/charts.js`, `static/status.html`.
+
 ## [4.0.273 – 4.0.277] - 2026-08-02 — Charts: Encoder axis actually renders encoder (+ colour-cell bucketing)
 
 - **4.0.274** — **Encoder axis no longer flips to Time.** The stationary-line guard was overriding a deliberate pick whenever the current window's defect dots were sparse. Now it's deterministic: if the operator *explicitly* selected an axis (persisted in `localStorage` as `mve_insight_axis`), it is **never** auto-flipped — the guard only rescues the *default* on a truly flat/unwired line. So "I chose Encoder → I see encoder values" (x-axis renders raw encoder / "Encoder (roll position)").

@@ -3492,17 +3492,37 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // older-window cells into this same cache as it walks newest→oldest.
         try { _seedProgressiveColorCache(data, axisMode); } catch (_e) {}
         const heatmapCells = Array.isArray(_hmRaw.cells) ? _hmRaw.cells : [];
-        const heatmapMin = (axisMode === 'encoder')
+        // 4.0.281 — `heatmapActive` (whether the ΔE colour layer registers at ALL) needs
+        // a valid [min,max]. Reading it from the 1h-hydrate payload means an IDLE line —
+        // no colour rows in the LAST HOUR — yields null → heatmapActive=false → the whole
+        // colour layer vanishes, even though older buckets DO have colour. That is exactly
+        // the khoy case: colour shows on a 7-day window but NOT on a 24h window whose last
+        // hour was idle (confirmed: 1h enc_min/max=None, but range probe = 50..21,698,506).
+        // Take the domain from _progressiveColorRange (the range probe = full data min/max,
+        // already seeded just above); fall back to the payload only if the seed is degenerate.
+        // NOTE: this is the ONE piece of 4.0.278 worth keeping — the cell-clearing that broke
+        // colour is NOT re-applied.
+        const _seedLo = (_progressiveColorRange && Number.isFinite(Number(_progressiveColorRange.lo))) ? Number(_progressiveColorRange.lo) : null;
+        const _seedHi = (_progressiveColorRange && Number.isFinite(Number(_progressiveColorRange.hi))) ? Number(_progressiveColorRange.hi) : null;
+        const _seedOk = (_seedLo != null && _seedHi != null && _seedHi > _seedLo);
+        const _payMin = (axisMode === 'encoder')
             ? (_hmRaw.enc_min != null ? Number(_hmRaw.enc_min) : null)
             : (_hmRaw.t_min   != null ? Number(_hmRaw.t_min)   : null);
-        const heatmapMax = (axisMode === 'encoder')
+        const _payMax = (axisMode === 'encoder')
             ? (_hmRaw.enc_max != null ? Number(_hmRaw.enc_max) : null)
             : (_hmRaw.t_max   != null ? Number(_hmRaw.t_max)   : null);
+        const heatmapMin = _seedOk ? _seedLo : _payMin;
+        const heatmapMax = _seedOk ? _seedHi : _payMax;
         // Alias kept so the rest of the plugin body reads cleanly. These are
         // X-axis values in whichever unit the active axis uses (encoder counts
         // OR epoch-millis), so the binning math is identical.
         const heatmapEncMin = heatmapMin, heatmapEncMax = heatmapMax;
-        const heatmapBins = Math.max(1, Number(_hmRaw.n_bins) || 32);
+        // 4.0.281 — bins must match the streamed cells' bin count (they're binned over
+        // _progressiveColorRange.n_bins). An empty 1h payload has no n_bins → the old `|| 32`
+        // fallback mispositioned the streamed cells (bin K drawn at K/32 instead of K/N).
+        const heatmapBins = Math.max(1, Number(_hmRaw.n_bins)
+            || (_progressiveColorRange && Number(_progressiveColorRange.n_bins))
+            || 32);
         const heatmapBoundsCollapsed = (heatmapEncMin != null && heatmapEncMax != null &&
                                         heatmapEncMax === heatmapEncMin);
         // 4.0.161 — read the feature flag from THIS response first (server

@@ -2534,7 +2534,7 @@ def frame_detections(image_path: str = "", request: Request = None):
 @router.get("/api/quality/ejection_axis")
 def quality_ejection_axis(
     request: Request,
-    axis: str = "time",
+    axis: str = "encoder",   # 4.0.280 — encoder is the product default axis (front + back)
     window: str = "24h",
     buckets: int = 48,
     shipment: str = "",
@@ -2778,7 +2778,7 @@ def quality_ejection_axis(
 @router.get("/api/quality/heatmap")
 def quality_heatmap(
     request: Request,
-    axis: str = "time",
+    axis: str = "encoder",   # 4.0.280 — encoder is the product default axis (front + back)
     window: str = "24h",
     buckets: int = 48,
     shipment: str = "",
