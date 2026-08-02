@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.273 – 4.0.277] - 2026-08-02 — Charts: Encoder axis actually renders encoder (+ colour-cell bucketing)
+
+- **4.0.274** — **Encoder axis no longer flips to Time.** The stationary-line guard was overriding a deliberate pick whenever the current window's defect dots were sparse. Now it's deterministic: if the operator *explicitly* selected an axis (persisted in `localStorage` as `mve_insight_axis`), it is **never** auto-flipped — the guard only rescues the *default* on a truly flat/unwired line. So "I chose Encoder → I see encoder values" (x-axis renders raw encoder / "Encoder (roll position)").
+- **4.0.276** — **Colour cells bucket correctly on the encoder axis.** When the **1h hydrate is empty** (line idle in the last hour), `color_heatmap.enc_min/max` came back NaN → `_progressiveColorRange` collapsed to `[0,0]` → every ΔE cell fell into one bucket (one solid block). Now it falls back to the full-window range probe's encoder extent, so the cells spread across all N buckets.
+- **4.0.277** — removed the temporary `[MVE-HMDIAG]` console diagnostic added in 4.0.275.
+- Files: `static/js/charts.js`, `static/status.html`.
+
 ## [4.0.272] - 2026-08-01 — Autoscaler: close the 3rd death-spiral (CPU-gate inference scale-up)
 
 Companion to 4.0.269. The autoscaler had **three** "queue backs up → multiply workers → contention worsens → ramp to max" spirals: disk writers, db writers, and inference workers. 4.0.269 hardened the shared `_cpu_ok` gate (real blocking sample + run-queue check) which covers disk **and** db — verified live on khoy (`SKIP db scale-up — load 16 on 8 cores`). But the **inference** scale-up (main.py:1494) multiplied workers ×4 up to the max with **no CPU gate**.

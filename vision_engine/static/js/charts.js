@@ -1661,7 +1661,20 @@ function _seedProgressiveColorCache(data, axisMode) {
         // picked shipment keeps its own payload bounds (raw.enc_min/max = its span).
         const _ewr = _picked ? null : _encWinRange();
         if (_ewr) { lo = _ewr.lo; hi = _ewr.hi; }
-        else { lo = Number(raw.enc_min) || 0; hi = Number(raw.enc_max) || 0; }
+        else {
+            lo = Number(raw.enc_min); hi = Number(raw.enc_max);
+            // 4.0.276 — the 1h hydrate can be EMPTY (line idle in the last hour) or
+            // narrow, so raw.enc_min/max come back NaN/undefined → a degenerate
+            // [0,0] range that bins EVERY colour cell into one block. When that
+            // happens, fall back to the FULL-WINDOW encoder extent from the range
+            // probe (returns the real span even when the last hour has no data).
+            if (!(hi > lo)) {
+                const _sr = window._mveScatterRange;
+                if (_sr && Number.isFinite(_sr.encLo) && Number.isFinite(_sr.encHi) && _sr.encHi > _sr.encLo) {
+                    lo = _sr.encLo; hi = _sr.encHi;
+                } else { lo = Number(lo) || 0; hi = Number(hi) || 0; }
+            }
+        }
     } else if (_picked && Number.isFinite(Number(raw.t_min)) && Number.isFinite(Number(raw.t_max))
                && Number(raw.t_max) > Number(raw.t_min)) {
         lo = Number(raw.t_min); hi = Number(raw.t_max);   // picked shipment span
@@ -3208,15 +3221,28 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 .map(p => Number(p.x)).filter(Number.isFinite);
             const _encLo = _encXs.length ? Math.min.apply(null, _encXs) : null;
             const _encHi = _encXs.length ? Math.max.apply(null, _encXs) : null;
-            // v4.0.229 — the guard was checking ONLY the 1h hydrate. On a line
-            // that is stopped RIGHT NOW but moved earlier in the window, the
-            // hydrate is flat so it wrongly fell back to time even though the
-            // operator picked Encoder and the window has real encoder width.
-            // Also honour the window's encoder span (_mveEncWindowRange, from
-            // shipment_spans): if the WINDOW has width, the axis won't collapse
-            // (the domain fix sizes it to the span), so keep Encoder.
-            if (axisMode !== 'time' && !_encWinRange()
-                && (_encLo == null || _encHi == null || !(_encHi > _encLo))) {
+            // 4.0.273 — honour the operator's Encoder pick unless the encoder is
+            // flat EVERYWHERE. The old guard fell back to time whenever THIS
+            // window's dots were sparse — but on a MOVING line the range probe
+            // reports a real encoder span (e.g. 50 → 21,698,506) even when few
+            // defects were detected this window, so it wrongly showed Time while
+            // Encoder was selected. Check ALL width sources: the window probe
+            // (_encWinRange), the range probe (_mveScatterRange.encLo/encHi), AND
+            // the loaded dots. Only flip when NONE has width (truly stationary /
+            // unwired line where every encoder_value is identical, e.g. vteam12).
+            const _sr = window._mveScatterRange;
+            const _probeWidth = _sr && Number.isFinite(_sr.encLo) && Number.isFinite(_sr.encHi) && _sr.encHi > _sr.encLo;
+            const _dotWidth = (_encLo != null && _encHi != null && _encHi > _encLo);
+            // 4.0.274 — if the operator EXPLICITLY picked this axis (persisted by
+            // setInsightAxis in localStorage), NEVER auto-flip it to time. The
+            // flip only exists to rescue the DEFAULT on a flat/unwired line — it
+            // must not override a deliberate choice. This makes it deterministic:
+            // "I chose Encoder → I see Encoder", regardless of whether the async
+            // range probe happened to reach this particular Core call.
+            let _explicitPick = null;
+            try { _explicitPick = localStorage.getItem('mve_insight_axis'); } catch (e) {}
+            if (axisMode !== 'time' && _explicitPick !== axisMode
+                && !_encWinRange() && !_probeWidth && !_dotWidth) {
                 axisMode = 'time';
             }
         }
