@@ -1158,10 +1158,40 @@ async function dashboardActivateState(name) {
     }
 }
 
+// 4.0.295 — full-screen loading overlay shown while a pipeline is switching + its weight
+// loads onto YOLO (can take a few seconds). Self-contained (injects its own keyframe).
+function _showPipelineSwitchLoader(msg) {
+    let el = document.getElementById('pipeline-switch-loader');
+    if (!el) {
+        if (!document.getElementById('pipeline-switch-loader-kf')) {
+            const st = document.createElement('style'); st.id = 'pipeline-switch-loader-kf';
+            st.textContent = '@keyframes mve-pl-spin{to{transform:rotate(360deg)}}';
+            document.head.appendChild(st);
+        }
+        el = document.createElement('div');
+        el.id = 'pipeline-switch-loader';
+        el.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,0.55);backdrop-filter:blur(2px);';
+        el.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;gap:14px;padding:22px 30px;background:rgba(15,23,42,0.94);border:1px solid rgba(51,65,85,0.85);border-radius:10px;color:#e2e8f0;font-size:14px;font-weight:500;text-align:center;">'
+            + '<span style="width:34px;height:34px;border:3px solid #475569;border-top-color:#3b82f6;border-radius:50%;display:inline-block;animation:mve-pl-spin 0.8s linear infinite;"></span>'
+            + '<span id="pipeline-switch-loader-msg"></span></div>';
+        document.body.appendChild(el);
+    }
+    const m = document.getElementById('pipeline-switch-loader-msg');
+    if (m) m.textContent = msg || 'Switching pipeline…';
+    el.style.display = 'flex';
+}
+function _hidePipelineSwitchLoader() {
+    const el = document.getElementById('pipeline-switch-loader');
+    if (el) el.style.display = 'none';
+}
+window._showPipelineSwitchLoader = _showPipelineSwitchLoader;
+window._hidePipelineSwitchLoader = _hidePipelineSwitchLoader;
+
 async function dashboardActivatePipeline(name) {
     if (!name) return;
     const sel = document.getElementById('dashboard-pipeline-picker');
     if (sel) sel.disabled = true;
+    _showPipelineSwitchLoader('Switching to “' + name + '” & loading its weight onto YOLO…');
     let ok = false;
     try {
         const r = await fetch('/api/pipelines/activate/' + encodeURIComponent(name), { method: 'POST' });
@@ -1171,6 +1201,7 @@ async function dashboardActivatePipeline(name) {
     } catch (e) {
         alert('Activate pipeline failed: ' + e.message);
     } finally {
+        _hidePipelineSwitchLoader();
         if (sel) sel.disabled = false;
         _flashPicker(sel, ok);
         loadDashboardPipelinePicker();
@@ -3218,6 +3249,7 @@ function loadModelForEdit(modelId) {
 
 async function activatePipeline(pipelineName) {
     const responseEl = document.getElementById('pipeline-response');
+    _showPipelineSwitchLoader('Switching to “' + pipelineName + '” & loading its weight onto YOLO…');
     try {
         // v4.0.146 — encodeURIComponent for pipeline names with `/`, etc.
         const response = await fetch(`/api/pipelines/activate/${encodeURIComponent(pipelineName)}`, { method: 'POST' });
@@ -3234,6 +3266,8 @@ async function activatePipeline(pipelineName) {
     } catch (error) {
         responseEl.textContent = 'Error: ' + error.message;
         responseEl.className = 'control-response error';
+    } finally {
+        _hidePipelineSwitchLoader();
     }
     setTimeout(() => { responseEl.textContent = ''; responseEl.className = 'control-response'; }, 3000);
 }

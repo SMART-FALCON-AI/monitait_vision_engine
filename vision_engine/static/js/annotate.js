@@ -113,24 +113,50 @@ async function openAnnotateModal() {
     _enableSubmit(false);
 
     try {
-        const [frameRes, labelsRes, mapRes, cfgRes] = await Promise.all([
+        // 4.0.294 — bind the annotation to the ACTIVE pipeline's ai-trainer task, NOT the
+        // global config task. So annotating a Razin detection uses Razin's task (321 →
+        // PVB_FILM, HOLE…) instead of the app-wide global task (324 → sky-test-1…). A
+        // charts dot carries its own pipeline's task; the dashboard uses the active pipeline.
+        const [frameRes, mapRes, cfgRes, pipesRes] = await Promise.all([
             fetch('/api/frame_detections?image_path=' + encodeURIComponent(window._currentDefectItem.image_path)),
-            fetch('/api/ai_trainer/labels'),
             fetch('/api/ai_trainer/class_map'),
             fetch('/api/ai_trainer/config'),
+            fetch('/api/pipelines'),
         ]);
-        const frameD  = await frameRes.json();
-        const labelsD = await labelsRes.json();
-        const mapD    = await mapRes.json();
-        const cfgD    = await cfgRes.json();
+        const frameD = await frameRes.json();
+        const mapD   = await mapRes.json();
+        const cfgD   = await cfgRes.json();
+        let   pipesD = {}; try { pipesD = await pipesRes.json(); } catch (_) {}
+        if (!frameRes.ok) throw new Error(frameD.error || 'frame load failed');
 
-        if (!frameRes.ok)  throw new Error(frameD.error  || 'frame load failed');
+        let taskId = '';
+        try {
+            const item = window._currentDefectItem || {};
+            if (item.pipeline_task_id) {
+                taskId = String(item.pipeline_task_id);            // charts dot → its pipeline's task
+            } else {
+                const cur = pipesD && pipesD.current_pipeline;
+                const p = cur && pipesD.pipelines && pipesD.pipelines[cur];
+                if (p && p.task_id) taskId = String(p.task_id);    // dashboard → active pipeline's task
+            }
+        } catch (_) {}
+        // 4.0.295 — pipeline task is AUTHORITATIVE; no global-config-task fallback anymore
+        // (operator: "we don't want global config task id anymore"). If the pipeline that
+        // produced this detection has no Task ID, say so instead of silently using a wrong task.
+        if (!taskId) {
+            _setStatus('This pipeline has no AI-Trainer Task ID — set it in Inference → the pipeline’s config.');
+            _enableSubmit(false);
+            return;
+        }
+
+        const labelsRes = await fetch('/api/ai_trainer/labels?task_id=' + encodeURIComponent(taskId));
+        const labelsD = await labelsRes.json();
         if (!labelsRes.ok) throw new Error(labelsD.error || 'labels load failed — check Advanced → AI Trainer');
 
         _annotateFrame    = frameD;
         _annotateLabels   = labelsD.labels || [];
         _annotateClassMap = mapD.class_map || {};
-        _annotateTaskId   = (cfgD.task_id || labelsD.task_id || '').toString();
+        _annotateTaskId   = taskId || (labelsD.task_id || '').toString();
 
         // Header meta — 4.0.15 appends px/mm calibration when present
         const meta = document.getElementById('annotate-meta');
@@ -245,12 +271,15 @@ function _buildLSConfig() {
     const labelTags = _annotateLabels.map(c =>
         `<Label alias="${c.id}" value="${c.category_name} - ${c.id}" background="${c.color || '#94a3b8'}"/>`
     ).join('');
+    // 4.0.297 — labels FIRST (above the image) so the category list is visible the
+    // moment the modal opens, with no scrolling. `showInline` keeps the chips wrapping
+    // in a compact block instead of a tall single column.
     return `
         <View>
-          <Image name="img" value="$image" zoom="true" zoomControl="true" rotateControl="false" negativeZoom="true"/>
-          <RectangleLabels name="tag" toName="img">
+          <RectangleLabels name="tag" toName="img" showInline="true">
             ${labelTags}
           </RectangleLabels>
+          <Image name="img" value="$image" zoom="true" zoomControl="true" rotateControl="false" negativeZoom="true"/>
         </View>`;
 }
 

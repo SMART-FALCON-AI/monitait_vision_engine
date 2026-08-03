@@ -10,6 +10,26 @@ let _insightSizeChart = null;
 let _insightConfidenceChart = null;
 let _insightConfClassChart = null;
 let _insightCameraScatter = null;
+
+// 4.0.296 — pipeline_id -> ai-trainer task_id map, so clicking a chart dot annotates
+// against the pipeline THAT PRODUCED it (each dot carries its `pid`), not the currently
+// active pipeline. Loaded once from /api/pipelines; refreshed cheaply on chart refresh.
+let _pipeTaskByIdMap = {};
+async function _loadPipeTaskMap() {
+    try {
+        const r = await fetch('/api/pipelines');
+        const d = await r.json();
+        const m = {};
+        for (const p of Object.values(d.pipelines || {})) {
+            if (p && p.id != null && p.task_id) m[String(p.id)] = String(p.task_id);
+        }
+        _pipeTaskByIdMap = m;
+    } catch (e) { /* keep the previous map */ }
+}
+function _pipeTaskById(pid) {
+    return (pid != null && _pipeTaskByIdMap[String(pid)]) ? _pipeTaskByIdMap[String(pid)] : '';
+}
+try { _loadPipeTaskMap(); } catch (e) {}
 let _insightCameraScatterEncoder = null;  // 3.25.13: kept (unused) to avoid touching unrelated old refs.
 // v4.0.108 — module-level cache of the last authoritative `camera_y_order`
 // returned by /api/detection_charts. `_extendScatterFromBucket` fetches
@@ -2763,6 +2783,7 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
             cls: cls,
             img: p.img,
             ship: p.ship,
+            pid: p.pid,                 // 4.0.296 — pipeline that produced this dot
             pointStyle: _bucketPointStyleFor(cls),
         };
         const key = _scatterPointKey(built, cls);
@@ -3199,7 +3220,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             if (!_isShown(p.cls)) return;
             (byClass[p.cls] = byClass[p.cls] || []).push({
                 x: p.x, y: _camToIdx(p.y), cam_id: p.y,
-                r: 3 + (p.r || 0) * 9, conf: p.r, cls: p.cls, img: p.img, ship: p.ship,
+                r: 3 + (p.r || 0) * 9, conf: p.r, cls: p.cls, img: p.img, ship: p.ship, pid: p.pid,
                 pointStyle: _pointStyleFor(p.cls),
             });
         });
@@ -3865,6 +3886,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         openFrameInAnnotator({
                             image_path: dp.img, shipment: dp.ship, t: dp.x,
                             cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
+                            pipeline_task_id: _pipeTaskById(dp.pid),   // 4.0.296 — the dot's OWN pipeline task
                         });
                     } else {
                         // encoder mode: dot has no timestamp — parse from filename if present.
@@ -3880,6 +3902,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                             image_path: dp.img, shipment: dp.ship, t: t,
                             cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
                             encoder: dp.x, camera_index: (dp.cam_id != null ? dp.cam_id : dp.y),
+                            pipeline_task_id: _pipeTaskById(dp.pid),   // 4.0.296 — the dot's OWN pipeline task
                         });
                     }
                 },

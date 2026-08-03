@@ -472,9 +472,12 @@ def _yolo_base_url(request: "Request | None" = None):
     return url
 
 
-def _call_set_model_all_replicas(model_path: str, request=None):
-    """Call set-model on yolo_inference, repeating to cover all replicas via DNS round-robin."""
-    base = _yolo_base_url(request)
+def _call_set_model_all_replicas(model_path: str, request=None, base=None):
+    """Call set-model on yolo_inference, repeating to cover all replicas via DNS round-robin.
+    Pass an explicit `base` when calling from a BACKGROUND thread — the request object is
+    only valid during the request lifecycle."""
+    if base is None:
+        base = _yolo_base_url(request)
     replicas = int(os.environ.get("YOLO_REPLICAS", 2))
     # 4.0.293 — uvicorn spreads set-model over N workers by OS connection routing, so we
     # must send MANY more calls than workers to reliably hit every one (coupon-collector).
@@ -483,15 +486,24 @@ def _call_set_model_all_replicas(model_path: str, request=None):
     # in-place swap is cheap, so the extra calls are safe.
     _workers = int(os.environ.get("YOLO_WORKERS", 4) or 4)
     attempts = max(replicas * 3, _workers * 4, int(os.environ.get("SET_MODEL_ATTEMPTS", "30")))
+    # 4.0.295 — WALL-CLOCK deadline + shorter per-attempt timeout so a slow/hung yolo
+    # can't make the ACTIVATE request outlast the frontend/nginx timeout, which showed as
+    # "Activate pipeline failed: Failed to fetch". Bounds the whole call to ~deadline secs.
+    import time as _t
+    _deadline = _t.monotonic() + float(os.environ.get("SET_MODEL_DEADLINE", "25"))
+    _per_timeout = int(os.environ.get("SET_MODEL_TIMEOUT", "8"))
     successes = 0
     last_error = None
     # 4.0.47 — log every attempt so we can see WHY successes stays 0 even when
     # a direct curl to the same URL returns 200. Earlier "unknown error"
     # response on the UI gave us nothing to debug; this surfaces it.
-    logger.info(f"set-model: base={base!r} model_path={model_path!r} attempts={attempts}")
+    logger.info(f"set-model: base={base!r} model_path={model_path!r} attempts={attempts} deadline={os.environ.get('SET_MODEL_DEADLINE','25')}s")
     for i in range(attempts):
+        if _t.monotonic() > _deadline:
+            logger.info(f"set-model: hit deadline after {i} attempts ({successes} ok)")
+            break
         try:
-            resp = requests.post(f"{base}/set-model", data={"model_path": model_path}, timeout=30)
+            resp = requests.post(f"{base}/set-model", data={"model_path": model_path}, timeout=_per_timeout)
             logger.info(f"set-model attempt {i+1}/{attempts}: status={resp.status_code} body={resp.text[:200]!r}")
             if resp.status_code == 200:
                 successes += 1

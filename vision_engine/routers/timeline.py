@@ -3714,7 +3714,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # identical. Base params re-ordered per branch to match.
             f"""
             WITH recent AS (
-                SELECT time, shipment, detections, image_path FROM inference_results
+                SELECT time, shipment, detections, image_path, pipeline_id FROM inference_results
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                 ORDER BY time DESC
                 LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
@@ -3726,7 +3726,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                        (elem->>'name') AS cls,
                        (elem->>'confidence')::float AS conf,
                        image_path AS img,
-                       shipment AS ship
+                       shipment AS ship,
+                       pipeline_id AS pid
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
                 WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
                   AND COALESCE(elem->>'name', '') !~ '^_'  -- 4.0.29: skip synthetic (_color etc.)
@@ -3736,7 +3737,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY cls ORDER BY t DESC) AS rn
                 FROM exploded
             )
-            SELECT x_ms, cam, cls, conf, img, ship FROM ranked
+            SELECT x_ms, cam, cls, conf, img, ship, pid FROM ranked
             WHERE rn <= %s
             ORDER BY t DESC
             LIMIT 6000
@@ -3745,8 +3746,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         )
         camera_scatter = [
             {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
-             "img": img, "ship": ship}
-            for x, cam, cls, conf, img, ship in cur.fetchall()
+             "img": img, "ship": ship, "pid": pid}
+            for x, cam, cls, conf, img, ship, pid in cur.fetchall()
         ]
 
         # --- camera × ENCODER scatter (3.21.0): defect map by roll position ---
@@ -3755,7 +3756,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         cur.execute(
             f"""
             WITH recent AS (
-                SELECT time, shipment, detections, image_path, encoder_value FROM inference_results
+                SELECT time, shipment, detections, image_path, encoder_value, pipeline_id FROM inference_results
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                   AND encoder_value IS NOT NULL
                 ORDER BY time DESC
@@ -3768,7 +3769,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                        (elem->>'name') AS cls,
                        (elem->>'confidence')::float AS conf,
                        image_path AS img,
-                       shipment AS ship
+                       shipment AS ship,
+                       pipeline_id AS pid
                 FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
                 WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
                   AND COALESCE(elem->>'name', '') !~ '^_'  -- 4.0.29: skip synthetic (_color etc.)
@@ -3778,7 +3780,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY cls ORDER BY t DESC) AS rn
                 FROM exploded
             )
-            SELECT enc, cam, cls, conf, img, ship FROM ranked
+            SELECT enc, cam, cls, conf, img, ship, pid FROM ranked
             WHERE rn <= %s
             LIMIT 6000
             """,
@@ -3786,8 +3788,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         )
         camera_scatter_encoder = [
             {"x": int(enc or 0), "y": cam, "cls": cls,
-             "r": round((conf or 0), 3), "img": img, "ship": ship}
-            for enc, cam, cls, conf, img, ship in cur.fetchall()
+             "r": round((conf or 0), 3), "img": img, "ship": ship, "pid": pid}
+            for enc, cam, cls, conf, img, ship, pid in cur.fetchall()
         ]
 
         # v4.0.74 — scatter_only short-circuit. When the client is polling

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.294 – 4.0.297] - 2026-08-03 — Annotator binds to the pipeline task; switch loader; chart-dot pipeline
+
+- **Annotator uses the pipeline's ai-trainer task, not the global one.** `openAnnotateModal` resolves the task from the dot's own pipeline (charts) or the active pipeline (dashboard); the global-config-task fallback is **removed** (operator: "we don't want global config task id anymore"). If a pipeline has no Task ID it says so instead of using the wrong task. (Migration: the global stays only as a backward-compat fallback for external callers that pass no `task_id`.)
+- **Chart dots carry their pipeline.** `detection_charts` scatters now return `pid` per dot; charts.js maps `pid → task_id` (from `/api/pipelines`) and passes it on dot-click, so clicking a historical **KC** detection annotates against **KC's** task, not whatever pipeline is active now.
+- **Pipeline-switch loading overlay** on both activate paths (dashboard picker + Inference tab) — spinner "Switching … & loading its weight onto YOLO…".
+- **"Activate pipeline failed: Failed to fetch" fixed** — `set-model` now has a wall-clock deadline (25s) + shorter per-attempt timeout (8s) so activation can't outlast the frontend/nginx timeout.
+- **Annotator category list visible without scrolling** — labels render above the image (`showInline`) so the category chips show the moment the modal opens.
+- Files: `static/js/annotate.js`, `static/js/charts.js`, `static/js/app-core.js`, `static/status.html`, `routers/inference.py`, `routers/timeline.py`.
+
 ## [4.0.291 – 4.0.293] - 2026-08-03 — Pipeline weights: reliable switching + UI polish
 
 - **Reliable weight switching (the real "TB / didn't switch" fix).** Activating a pipeline's weight partially failed with **CUDA OOM** — the GPU was saturated by **13 YOLO uvicorn workers** (`.env YOLO_WORKERS=13`, 7818/8192 MiB used, 21 free), so the per-worker weight swap had no room and some workers kept the old model. Fix: **size YOLO workers from GPU VRAM** (host-side, since `nvidia-smi` fails inside the container) — `workers = clamp(1, (VRAM − reserve)/per_worker, max)` → 13→7 on the 8 GiB card, GPU dropped to 3396/8192 (4.4 GB free), re-activate → **0 OOM**. Verified `best.pt` md5 == the activated weight. Also bumped `set-model` retries to `max(workers×4, 30)` so a switch reliably reaches every worker (4.0.293).
