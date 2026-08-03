@@ -24,6 +24,7 @@ Hardened vs the original addon (2026-07-28):
 import asyncio
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,10 @@ KB_LONG_TIMEOUT = _safe_int("KB_LONG_TIMEOUT", 300)
 _available: Optional[bool] = None
 _available_ts: float = 0.0
 _AVAILABLE_TTL = 45.0
+# Guards the single in-flight background probe so a burst of callers spawns at
+# most one health request.
+_probe_lock = threading.Lock()
+_probing = False
 
 
 def _mark(alive: bool) -> bool:
@@ -65,19 +70,49 @@ def _mark(alive: bool) -> bool:
     return alive
 
 
-def kb_available(force: bool = False) -> bool:
-    """Cheap cached liveness check. Used by the UI to disable the knowledge
-    toggle, and by ai.py to decide whether to advertise the KB tools at all —
-    advertising a tool that always errors just wastes the model's turns.
-    Re-probes at most every _AVAILABLE_TTL seconds so it recovers on its own."""
-    global _available, _available_ts
-    if not force and _available is not None and (time.monotonic() - _available_ts) < _AVAILABLE_TTL:
-        return _available
+def _probe_kb_blocking() -> bool:
     try:
         resp = requests.get(f"{KB_URL}/health", timeout=3)
         return _mark(resp.status_code == 200)
     except Exception:
         return _mark(False)
+
+
+def _probe_kb_background() -> None:
+    """Refresh the liveness cache off the request path. Never raises."""
+    global _probing
+    try:
+        _probe_kb_blocking()
+    finally:
+        with _probe_lock:
+            _probing = False
+
+
+def kb_available(force: bool = False) -> bool:
+    """NON-BLOCKING cached liveness check. Returns the last known result
+    INSTANTLY and refreshes in a background thread when the cache goes stale,
+    so a KB outage can never hold a core request thread (charts, status, the
+    capture loop). ai.py calls this on the AI-query path; making it block would
+    couple that path — and, via the shared threadpool, everything else — to the
+    health of a service that is allowed to be absent.
+
+    First-ever call returns False (assume-down until proven up — the safe
+    default that never waits) and kicks off the first probe. `force=True` does a
+    synchronous probe; it is used ONLY by /api/knowledge/status, which the
+    Knowledge tab hits deliberately and is never in a core code path."""
+    global _probing
+    if force:
+        return _probe_kb_blocking()
+    now = time.monotonic()
+    if _available is not None and (now - _available_ts) < _AVAILABLE_TTL:
+        return _available
+    # Stale or first-ever: trigger at most one background probe, return the last
+    # known value immediately (False if we have never successfully probed).
+    with _probe_lock:
+        if not _probing:
+            _probing = True
+            threading.Thread(target=_probe_kb_background, daemon=True).start()
+    return _available if _available is not None else False
 
 
 def _fail(exc: Exception, what: str) -> Dict[str, Any]:

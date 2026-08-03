@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.299] - 2026-08-03 — Colour heatmap + colour-change strip now survive tunnel resets; KB fully non-blocking; quieter console
+
+- **Colour strip / heatmap missing on remote (tunnel) viewing — FIXED.** The per-bucket strips+colour fetch (`_extendStripsFromBucket`) had a single try and a silent `return` on a connection reset, so over the operator's reverse-SSH tunnel a dropped bucket lost its colour slice permanently. The scatter (dots) fetch already retried 3× — hence the asymmetry the operator saw: **dots appeared but the colour heatmap + colour-change strip did not**. Gave the strips/colour fetch the same 3-try backoff. Colour now survives transient `ERR_CONNECTION_RESET`.
+- **KB decoupled from core, guaranteed.** `kb_available()` is now fully non-blocking: it returns the last known value INSTANTLY and re-probes the knowledge service in a background thread (stale-while-revalidate). Previously a cache-miss did a synchronous `requests.get(...timeout=3)` on the calling thread — on a KB-less site that could hold a worker for up to 3 s. The AI-query path (the only caller) — and, via the shared threadpool, everything else — can no longer wait on a service that is allowed to be absent.
+- **Quieter console.** Removed the per-poll `[Polling] …` narration and the per-bucket `[progressive] bucket …` log that spammed DevTools on every iteration. Lifecycle/one-shot logs kept.
+- Files: `static/js/charts.js`, `static/js/app-core.js`, `routers/knowledge.py`, `static/status.html`.
+
+
 ## [4.0.298] - 2026-08-03 — Knowledge tab: fully decoupled from core
 
 - On a site WITHOUT the `monitait_knowledge` service, the Knowledge tab was polling `/api/kb/documents` + `/api/kb/jobs` (every 5s) → the failing requests **starved MVE's workers** and reset unrelated requests, so **charts/colour wouldn't load**. Now: probe `/api/knowledge/status` once; **only poll if the service is up**, and **grey the Knowledge tab** when it's down. Core (charts, ΔE colour, detection, dashboard) has zero KB dependency (the AI Assistant already gates all KB use behind `kb_available()`).

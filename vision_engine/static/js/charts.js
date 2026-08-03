@@ -2235,9 +2235,22 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket) {
                 '&bins=' + rng.n_bins +
                 '&phase=' + encodeURIComponent(phase) +
                 '&parent_class=' + encodeURIComponent(parentClass);
+    // v4.0.299 — retry on transient connection resets, SAME as _extendScatterFromBucket.
+    // This strips+colour fetch previously had ONE try and a silent `return` on reset, so
+    // over the operator's reverse-SSH tunnel a dropped bucket lost its colour slice for
+    // good — the dots (which already retry) appeared, but the colour heatmap + the
+    // colour-change strip never did. Matching the scatter's 3-try backoff removes that
+    // asymmetry: a transient reset no longer wipes a bucket's colour.
     let data;
-    try { const r = await fetch(url); data = await r.json(); }
-    catch (e) { return; }
+    for (let _try = 0; _try < 3; _try++) {
+        try { const r = await fetch(url); data = await r.json(); break; }
+        catch (e) {
+            if (ticket != null && ticket !== _progressiveLadderTicket) return; // superseded
+            if (_try === 2) { console.warn('[progressive] strips/colour fetch failed after 3 tries:', e); return; }
+            await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+        }
+    }
+    if (!data) return;
     if (ticket != null && ticket !== _progressiveLadderTicket) return;
     // v4.0.234 — tag each cell with its ABSOLUTE encoder centre (from the bin_ref
     // THIS fetch used) and key by it, so _repaintProgressiveStrips can re-bin over
@@ -2925,10 +2938,7 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
         // dots. Net effect on-screen: user saw at most one bucket's worth
         // of dots, often none. Log the actual time-range we appended so
         // the entry is still useful.
-        console.log('[progressive] bucket ' +
-                    new Date(sinceMs).toISOString() + ' → ' +
-                    new Date(untilMs).toISOString() +
-                    ': added ' + addedCount + ' new points');
+        void addedCount; // (was a per-bucket console.log; removed — narration spam)
     }
 }
 

@@ -4003,19 +4003,15 @@ function pulseHeartbeat(elementId) {
 // Poll for latest detections (fallback for audio when SSE isn't working)
 let lastProcessedDetectionTime = 0;
 async function pollLatestDetections() {
-    console.log('[Polling] pollLatestDetections() called');
     try {
         const response = await fetch('/api/latest_detections');
-        console.log('[Polling] Response received:', response.status);
         const data = await response.json();
-        console.log('[Polling] Data:', data);
 
         if (data.has_detection && data.event) {
             const event = data.event;
             // Only process if we haven't seen this timestamp before
             if (event.timestamp !== lastProcessedDetectionTime) {
                 lastProcessedDetectionTime = event.timestamp;
-                console.log('[Polling] New detection event:', event);
 
                 // Process for audio
                 if (event.details && event.details.detections) {
