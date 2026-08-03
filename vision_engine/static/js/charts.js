@@ -2512,12 +2512,26 @@ async function refreshAdvancedCharts() {
         loMs = hiMs - _windowToMs(target);
         window._mveEncWindowRange = null;
         window._mveScatterRange = null;
+        window._mveEncSpanFixed = null;   // 4.0.304 — set below when the probe yields a real encoder span
         try {
-            const _rangeJson = await Promise.race([
-                fetch('/api/detection_charts?range_only=1&window=' + encodeURIComponent(target)).then(r => r.json()),
-                new Promise((res) => setTimeout(() => res(null), 4000)),
-            ]);
-            if (myTicket !== _progressiveLadderTicket) return;
+            // 4.0.304 — the range probe IS the "one simple response at the start that returns
+            // the encoder MIN/MAX (two fields)". It used to be a SINGLE 4s attempt; on a flaky
+            // tunnel it reset → the axis then auto-widened from partial dots and JUMPED. Because
+            // the encoder is ROLL-POSITION (resets per roll, not monotonic with time), an older
+            // roll with a bigger encoder rescaled the whole axis mid-load — the operator's
+            // "it resets many times / inconsistent span". Retry the probe like the buckets so the
+            // two fields arrive reliably, then PIN them (_mveEncSpanFixed) so the axis is set ONCE
+            // and stays fixed.
+            let _rangeJson = null;
+            for (let _rt = 0; _rt < 3; _rt++) {
+                _rangeJson = await Promise.race([
+                    fetch('/api/detection_charts?range_only=1&window=' + encodeURIComponent(target)).then(r => r.json()).catch(() => null),
+                    new Promise((res) => setTimeout(() => res(null), 4000)),
+                ]);
+                if (myTicket !== _progressiveLadderTicket) return;
+                if (_rangeJson && Number.isFinite(Number(_rangeJson.data_t_min))) break;
+                await new Promise(res => setTimeout(res, 300 * (_rt + 1)));
+            }
             const _tmn = _rangeJson && Number(_rangeJson.data_t_min);
             const _tmx = _rangeJson && Number(_rangeJson.data_t_max);
             if (Number.isFinite(_tmn) && Number.isFinite(_tmx) && _tmx > _tmn) {
@@ -2528,6 +2542,9 @@ async function refreshAdvancedCharts() {
                 // line) stays null so Core's guard falls back to time as before.
                 if (Number.isFinite(_emn) && Number.isFinite(_emx) && _emx > _emn) {
                     window._mveEncWindowRange = { lo: _emn, hi: _emx };
+                    // PIN the span. The auto-widen below anchors to this fixed extent, so the
+                    // encoder axis is full-width from the first bucket and never jumps mid-load.
+                    window._mveEncSpanFixed = { lo: _emn, hi: _emx };
                 }
             }
         } catch (_e) { /* keep the [now-window, now] fallback */ }
@@ -2997,6 +3014,15 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
                         const _x = Number(_p.x);
                         if (Number.isFinite(_x)) { if (_x < _lo) _lo = _x; if (_x > _hi) _hi = _x; }
                     }
+                }
+                // 4.0.304 — ANCHOR to the fixed span from the range probe (the two-field
+                // response, fetched once at load start). Union with the dots so nothing is
+                // ever clipped, but the axis starts at the FULL extent instead of growing
+                // bucket-by-bucket — which is what made it JUMP on roll-position encoders (an
+                // older roll with a bigger encoder rescaled everything). "Keep the span fixed."
+                const _fx = window._mveEncSpanFixed;
+                if (_fx && Number.isFinite(_fx.lo) && Number.isFinite(_fx.hi) && _fx.hi > _fx.lo) {
+                    _lo = Math.min(_lo, _fx.lo); _hi = Math.max(_hi, _fx.hi);
                 }
                 if (Number.isFinite(_lo) && Number.isFinite(_hi) && _hi > _lo) {
                     const _pad = (_hi - _lo) * 0.01;

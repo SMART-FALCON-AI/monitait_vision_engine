@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.304] - 2026-08-03 — Stable encoder axis: reliable range probe + pinned span
+
+- **Encoder axis kept jumping / "resetting" on khoy.** The x-axis is roll-position, which RESETS per roll — so it is not monotonic with time. The chart loads buckets newest→oldest by time and auto-widened the axis to fit the max encoder seen, so when an older roll with a bigger encoder streamed in, the whole axis rescaled (e.g. 22M→92M) and everything re-laid-out. The guard against this — a start-of-load range probe that returns the true encoder MIN/MAX (two fields) — was a SINGLE 4s attempt that kept resetting on the flaky tunnel, so the axis started narrow and jumped.
+- **Fix (operator's idea):** retry that probe (3× with backoff, like the bucket fetches) so the two-field span arrives reliably, then **PIN** it (`window._mveEncSpanFixed`). The auto-widen now anchors to the pinned extent (union with the loaded dots so nothing is ever clipped), so the axis is full-width from the first bucket and can't shrink or jump mid-load. Side benefit: the display domain no longer drifts past the colour bin-ref, so the newest colour buckets fill too.
+- Files: `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.303] - 2026-08-03 — Dashboard serial-metrics box: compact by default, expand on hover
 
 - The Dashboard serial-data grid (16 metrics) now shows only the four the operator watches most — **Encoder, Length, Speed, Ej NG** — in a compact 2×2 box. The other twelve (Pulses/s, Movement, Ej Queue, Ej Active, Ej Enable, Ej Offset, OK, NG, Ej OK, Downtime, Analog, Power) **roll down on hover** (also on keyboard focus) and collapse when the pointer leaves, so the box takes far less vertical space at rest. A subtle `⋯` hint marks that there's more. Pure CSS; every value `id` preserved so app-core.js updates them whether shown or hidden.
