@@ -2219,8 +2219,11 @@ window._renderStripsFromPayload = _renderStripsFromPayload;
 // Called newest→oldest by the ladder AND once over the full domain by the
 // periodic refresh. bin_ref comes from _progressiveColorRange (same domain the
 // colour heatmap + scatter axis use).
-async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket) {
-    const rng = _progressiveColorRange;
+async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preData, binRef) {
+    // v4.0.300 — binRef (when supplied by the merged one-call path) is the STABLE
+    // range the caller already used for this fetch's bin_ref, so _encOf below
+    // recovers the same absolute encoder the backend binned against.
+    const rng = binRef || _progressiveColorRange;
     if (!rng || !(rng.hi > rng.lo)) return;
     const colorOn = (window._mveColorCheckEnabled === true) && !shipment;
     const phase = localStorage.getItem('mve_heatmap_phase') || '';
@@ -2241,13 +2244,17 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket) {
     // good — the dots (which already retry) appeared, but the colour heatmap + the
     // colour-change strip never did. Matching the scatter's 3-try backoff removes that
     // asymmetry: a transient reset no longer wipes a bucket's colour.
-    let data;
-    for (let _try = 0; _try < 3; _try++) {
-        try { const r = await fetch(url); data = await r.json(); break; }
-        catch (e) {
-            if (ticket != null && ticket !== _progressiveLadderTicket) return; // superseded
-            if (_try === 2) { console.warn('[progressive] strips/colour fetch failed after 3 tries:', e); return; }
-            await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+    // v4.0.300 — skip the fetch when the merged one-call path already fetched this
+    // bucket and passed the payload in via preData.
+    let data = preData || null;
+    if (!data) {
+        for (let _try = 0; _try < 3; _try++) {
+            try { const r = await fetch(url); data = await r.json(); break; }
+            catch (e) {
+                if (ticket != null && ticket !== _progressiveLadderTicket) return; // superseded
+                if (_try === 2) { console.warn('[progressive] strips/colour fetch failed after 3 tries:', e); return; }
+                await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+            }
         }
     }
     if (!data) return;
@@ -2290,6 +2297,78 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket) {
     _repaintProgressiveStrips();
 }
 window._extendStripsFromBucket = _extendStripsFromBucket;
+
+// v4.0.300 — ONE call per bucket (operator's design). Keep bucketing — per-bucket
+// dot_cap is what gives EVEN category spread; a single global fetch would only
+// return the newest dots (clustered). But each bucket now makes a SINGLE request
+// that returns ALL of that bucket's data — dots + colour cell + quality + ejection
+// + shipment lane — instead of the old two (scatter, then strips/colour). Wins:
+//   • Half the requests (N instead of 2N) — fewer tunnel round-trips to reset.
+//   • ATOMIC: dots and colour share one fetch + one retry, so a bucket can never
+//     again land "dots but no colour" (the reset-drop bug 4.0.299 only softened).
+//
+// Binning: the colour/strip slices are binned server-side over bin_ref_lo/hi. The
+// scatter axis AUTO-WIDENS as older buckets stream, so it can't be the bin ref up
+// front (this bucket's low-encoder territory isn't in it yet — that dependency is
+// the whole reason it used to be two calls). We bin instead over the STABLE full-
+// window extent from the range probe (window._mveEncWindowRange); _enc tagging uses
+// the same ref, and _repaintProgressiveStrips re-bins by absolute _enc over the
+// current display domain — so positions stay correct no matter the load order.
+// Time axis is already pinned to [loMs,hiMs] up front, so its ref is the range as-is.
+async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket) {
+    if (!_insightCameraScatter) return;
+    const colorOn = (window._mveColorCheckEnabled === true) && !shipment;
+    const rng = _progressiveColorRange;
+    const axisIsEncoder = !!(rng && rng.axis !== 'time');
+    // Stable bin ref for the slices. Only for the ALL-shipments encoder window (a
+    // picked shipment keeps its Core-seeded, span-scoped _progressiveColorRange;
+    // _mveEncWindowRange would be stale from a prior all-shipments load).
+    let stripRef = rng;
+    if (!shipment && axisIsEncoder && window._mveEncWindowRange
+        && Number(window._mveEncWindowRange.hi) > Number(window._mveEncWindowRange.lo)) {
+        stripRef = { axis: 'encoder',
+                     lo: Number(window._mveEncWindowRange.lo),
+                     hi: Number(window._mveEncWindowRange.hi),
+                     n_bins: (rng && rng.n_bins) || (parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48) };
+    }
+    const phase = localStorage.getItem('mve_heatmap_phase') || '';
+    const parentClass = localStorage.getItem('mve_heatmap_parent_class') || '';
+    const _fetchCap = (window._mveScatterFetchCap || _dotCap());
+    let url = '/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
+              '&until_ms=' + Math.floor(untilMs) +
+              '&shipment=' + encodeURIComponent(shipment || '') +
+              '&min_conf=' + minConf +
+              '&scatter_only=1&dot_cap=' + _fetchCap +
+              '&include_strips=1';
+    const _refOk = stripRef && Number(stripRef.hi) > Number(stripRef.lo);
+    if (_refOk) {
+        // strips (quality/ejection/shipment) always need the bin ref; colour is added only when on.
+        if (colorOn) url += '&include_color_slice=1';
+        url += '&color_axis=' + encodeURIComponent(stripRef.axis || 'encoder') +
+               '&bin_ref_lo=' + stripRef.lo + '&bin_ref_hi=' + stripRef.hi +
+               '&bins=' + stripRef.n_bins;
+    }
+    url += '&phase=' + encodeURIComponent(phase) + '&parent_class=' + encodeURIComponent(parentClass);
+    // ONE fetch, 3-try backoff — everything for this bucket shares its fate.
+    let data = null;
+    for (let _try = 0; _try < 3; _try++) {
+        try { const r = await fetch(url); data = await r.json(); break; }
+        catch (e) {
+            if (ticket != null && ticket !== _progressiveLadderTicket) return;
+            if (_try === 2) { console.warn('[progressive] bucket fetch failed after 3 tries:', e); return; }
+            await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+        }
+    }
+    if (!data) return;
+    if (ticket != null && ticket !== _progressiveLadderTicket) return;
+    // Dots FIRST (auto-widens the display axis), then strips + colour from the SAME
+    // payload, binned over the stable stripRef.
+    try { await _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket, data); }
+    catch (_se) { /* dot apply non-fatal */ }
+    try { await _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, data, _refOk ? stripRef : undefined); }
+    catch (_pe) { /* strip apply non-fatal */ }
+}
+window._extendBucketAll = _extendBucketAll;
 
 async function refreshAdvancedCharts() {
     const winSel = document.getElementById('insight-window');
@@ -2518,9 +2597,10 @@ async function refreshAdvancedCharts() {
             if (!shipment && (winSel.value || '24h') !== target) break;
             if (shipment && ((document.getElementById('insight-shipment') || {}).value || '') !== shipment) break;
             const sinceMs = Math.max(loMs, endMs - bucketMs);
-            await _extendScatterFromBucket(sinceMs, endMs, shipment, minConf, myTicket);
-            try { await _extendStripsFromBucket(sinceMs, endMs, shipment, myTicket); }
-            catch (_e) { /* per-bucket strip failure is non-fatal */ }
+            // v4.0.300 — ONE atomic call per bucket (dots + colour + 4 strips) via
+            // _extendBucketAll, instead of the old TWO (scatter, then strips/colour).
+            try { await _extendBucketAll(sinceMs, endMs, shipment, minConf, myTicket); }
+            catch (_e) { /* per-bucket failure is non-fatal */ }
             endMs = sinceMs;
             bucketCount += 1;
         }
@@ -2685,9 +2765,9 @@ function _paintDotsDiag(tag) {
 }
 window._paintDotsDiag = _paintDotsDiag;
 
-async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket) {
+async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket, preData) {
     if (!_insightCameraScatter) return;
-    let data;
+    let data = preData || null;   // v4.0.300 — reuse the merged one-call payload when given
     // 4.0.247 — dot_cap can be boosted by the single-fetch path (window._mveScatterFetchCap)
     // so ONE fetch over the whole window still returns dots spread across it, not just the
     // newest _dotCap().
@@ -2700,11 +2780,14 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
                      '&dot_cap=' + _fetchCap;
     // 4.0.247 — retry on transient connection resets (ERR_CONNECTION_RESET seen on the
     // operator's tunnel). A single dropped fetch used to silently lose the dots.
-    for (let _try = 0; _try < 3; _try++) {
-        try { const r = await fetch(_scatUrl); data = await r.json(); break; }
-        catch (e) {
-            if (_try === 2) { console.warn('[progressive] scatter fetch failed after 3 tries:', e); return; }
-            await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+    // 4.0.300 — skip the fetch when the merged one-call path already fetched this bucket.
+    if (!data) {
+        for (let _try = 0; _try < 3; _try++) {
+            try { const r = await fetch(_scatUrl); data = await r.json(); break; }
+            catch (e) {
+                if (_try === 2) { console.warn('[progressive] scatter fetch failed after 3 tries:', e); return; }
+                await new Promise(res => setTimeout(res, 300 * (_try + 1)));
+            }
         }
     }
     if (!data) return;

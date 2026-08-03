@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.300] - 2026-08-03 — One atomic call per bucket (dots + colour + 4 strips)
+
+- **Operator's design: keep bucketing, one call per bucket.** The progressive ladder previously fired **two** requests per bucket — `_extendScatterFromBucket` (dots) then `_extendStripsFromBucket` (colour + quality + ejection + shipment) — against the same `/api/detection_charts` endpoint. Merged into a single `_extendBucketAll` request per bucket that returns **everything for that bucket**. Bucketing stays (per-bucket `dot_cap` is what gives even category spread; a single global fetch would only return the newest, clustered, dots).
+- **Two concrete wins:** (1) **half the requests** — N instead of 2N — so fewer tunnel round-trips that can reset; (2) **atomic bucket** — dots and colour now share one fetch + one retry, so a bucket can never again land "dots but no colour" (the reset-drop that 4.0.299's retry only softened).
+- **Correct binning under one call.** The colour/strip slices are binned server-side over `bin_ref_lo/hi`. The scatter axis auto-widens as older buckets stream, so it can't be the ref up front (this bucket's low-encoder territory isn't in it yet — that dependency is exactly why it used to be two calls). The merged call bins the slices over the **stable full-window extent** from the range probe (`window._mveEncWindowRange`); `_enc` tagging uses the same ref and `_repaintProgressiveStrips` re-bins by absolute `_enc` over the display domain, so positions stay correct regardless of load order. Picked shipment keeps its span-scoped ref; time axis keeps the up-front pinned range.
+- `_extendScatterFromBucket` / `_extendStripsFromBucket` gained an optional pre-fetched-payload param so their processing logic is reused with no second fetch; the 1h / no-span / standalone single-fetch paths are unchanged.
+- Files: `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.299] - 2026-08-03 — Colour heatmap + colour-change strip now survive tunnel resets; KB fully non-blocking; quieter console
 
 - **Colour strip / heatmap missing on remote (tunnel) viewing — FIXED.** The per-bucket strips+colour fetch (`_extendStripsFromBucket`) had a single try and a silent `return` on a connection reset, so over the operator's reverse-SSH tunnel a dropped bucket lost its colour slice permanently. The scatter (dots) fetch already retried 3× — hence the asymmetry the operator saw: **dots appeared but the colour heatmap + colour-change strip did not**. Gave the strips/colour fetch the same 3-try backoff. Colour now survives transient `ERR_CONNECTION_RESET`.
