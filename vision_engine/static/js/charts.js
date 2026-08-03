@@ -3546,10 +3546,19 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // feels continuous across the whole window instead of vanishing on the
         // stretch where no `_color` rows exist (e.g. shipments captured before
         // color-check was toggled on). Actual data cells overlay on top.
-        const heatmapActive = (
-            _colorEnabledFromPayload &&
-            heatmapEncMin != null && heatmapEncMax != null
-        );
+        // 4.0.301 — register the ΔE heatmap layer whenever colour-check is ON, NOT
+        // gated on a valid [min,max]. Those bounds come from the range probe, which
+        // RESETS on a flaky tunnel (see the operator's console: /health, /api/system/
+        // metrics, range_only all ERR_CONNECTION_RESET). When it did, heatmapEncMin/Max
+        // were null at THIS one-time check, so the plugin never registered and the
+        // background never painted — even though the range became valid moments later
+        // (scatter auto-widen) and the colour-CHANGE strip, which re-renders every
+        // ladder tick, DID show. That's the exact "strip yes, cells no" the operator
+        // saw. The plugin positions cells by bin over chartArea width (heatmapBins,
+        // always ≥1) and no-ops on the time axis, so it does NOT need the bounds for
+        // the main paint path — registering on colour-enabled alone is safe and makes
+        // the background survive a failed/slow probe just like the strip already does.
+        const heatmapActive = _colorEnabledFromPayload;
         const _heatmapPlugins = heatmapActive ? [{
             id: 'colorHeatmap',
             beforeDatasetsDraw(chart) {

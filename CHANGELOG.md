@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.301] - 2026-08-03 — Colour heatmap cells survive a failed/slow range probe
+
+- **"Colour-change strip shows but no colour cells behind the dots" — FIXED.** The ΔE heatmap background is a Chart.js plugin registered once, at chart-build time, gated on `heatmapActive = colour_on AND [min,max] != null`. Those bounds come from the range probe (`/api/detection_charts?range_only=1`), which **resets on a flaky tunnel** (operator's console: `/health`, `/api/system/metrics`, range_only all `ERR_CONNECTION_RESET`). When it reset, min/max were null at that one-time check, so the plugin **never registered** and the background never painted — even though the range became valid moments later (scatter auto-widen) and the colour-**change** strip, which re-renders every ladder tick, still showed. Now the layer registers whenever colour-check is ON; it positions cells by bin over chart-area width (always valid) and no-ops on the time axis, so it does not need the probe bounds. The heatmap now survives a failed/slow probe exactly like the strip.
+- Files: `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.300] - 2026-08-03 — One atomic call per bucket (dots + colour + 4 strips)
 
 - **Operator's design: keep bucketing, one call per bucket.** The progressive ladder previously fired **two** requests per bucket — `_extendScatterFromBucket` (dots) then `_extendStripsFromBucket` (colour + quality + ejection + shipment) — against the same `/api/detection_charts` endpoint. Merged into a single `_extendBucketAll` request per bucket that returns **everything for that bucket**. Bucketing stays (per-bucket `dot_cap` is what gives even category spread; a single global fetch would only return the newest, clustered, dots).
