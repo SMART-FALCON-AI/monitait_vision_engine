@@ -3647,9 +3647,23 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     const idx = idxByCam.has(cell.cam) ? idxByCam.get(cell.cam) : null;
                     if (idx == null) continue;
                     let x, y, w, h;
-                    if (heatmapBoundsCollapsed || binWidth <= 0) {
-                        // Single-bin fallback: paint the whole chart-area row
-                        // for this camera. Useful when line is stopped.
+                    if (ca && heatmapBins > 1) {
+                        // 4.0.302 — direct pixel positioning is now the PRIMARY path. Cells are
+                        // pre-binned into heatmapBins over the display range, so bin K sits at
+                        // ca.left + K*chartWidth/heatmapBins — 1:1 with the scatter dots and the
+                        // strips below, with NO dependence on heatmapEncMin/Max. Those bounds
+                        // come from the range probe, which on a flaky tunnel can RESET or return
+                        // COLLAPSED (enc_min===enc_max); the old order hit the single-bin fallback
+                        // below and painted EVERY cell full-width → the whole chart went solid
+                        // green (operator: "it just create one bucket"). Bin positioning can't
+                        // collapse, so it's the safe default whenever there's >1 bin.
+                        const chartWidth = ca.right - ca.left;
+                        const binPixelWidth = chartWidth / heatmapBins;
+                        x = ca.left + cell.bin * binPixelWidth;
+                        w = binPixelWidth;
+                    } else if (heatmapBoundsCollapsed || binWidth <= 0) {
+                        // Genuine single-bin (heatmapBins<=1) or no chartArea: paint the whole
+                        // chart-area row for this camera. Useful when the line is stopped.
                         x = ca ? ca.left : 0;
                         w = ca ? (ca.right - ca.left) : chart.width;
                     } else if (ca) {

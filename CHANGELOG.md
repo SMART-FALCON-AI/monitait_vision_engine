@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.302] - 2026-08-03 — Heatmap positions by bin (fixes 4.0.301 solid-green regression)
+
+- **4.0.301 regression fix.** After 4.0.301 forced the heatmap layer to register, khoy painted one solid green block ("it just create one bucket"). Cause: the plugin still chose its x-position from `heatmapBoundsCollapsed || binWidth <= 0` FIRST — and on a flaky tunnel the range probe returns COLLAPSED bounds (`enc_min === enc_max`), so `binWidth <= 0` fired and every cell painted FULL-WIDTH, overlapping into a solid row. Cells already carry correct `bin` indices, so direct-pixel-by-bin (`ca.left + bin*chartWidth/heatmapBins`) is now the PRIMARY path — it needs no bounds and can't collapse. Full-width is kept only for a genuine single bin (`heatmapBins <= 1`). Combined with 4.0.301, the heatmap now paints correct per-bin cells whether the probe succeeds, resets, or returns collapsed.
+- Files: `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.301] - 2026-08-03 — Colour heatmap cells survive a failed/slow range probe
 
 - **"Colour-change strip shows but no colour cells behind the dots" — FIXED.** The ΔE heatmap background is a Chart.js plugin registered once, at chart-build time, gated on `heatmapActive = colour_on AND [min,max] != null`. Those bounds come from the range probe (`/api/detection_charts?range_only=1`), which **resets on a flaky tunnel** (operator's console: `/health`, `/api/system/metrics`, range_only all `ERR_CONNECTION_RESET`). When it reset, min/max were null at that one-time check, so the plugin **never registered** and the background never painted — even though the range became valid moments later (scatter auto-widen) and the colour-**change** strip, which re-renders every ladder tick, still showed. Now the layer registers whenever colour-check is ON; it positions cells by bin over chart-area width (always valid) and no-ops on the time axis, so it does not need the probe bounds. The heatmap now survives a failed/slow probe exactly like the strip.
