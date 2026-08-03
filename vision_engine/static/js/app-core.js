@@ -2995,6 +2995,8 @@ function renderPipelinesList(pipelines, currentPipeline) {
                 ${isActive ? '<span style="margin-left: 8px; padding: 2px 6px; background: var(--primary-color); color: white; border-radius: 3px; font-size: 10px;">ACTIVE</span>' : ''}
                 <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary);">${pipeline.description || 'No description'}</div>
                 <div style="margin-top: 4px; font-size: 10px; color: var(--text-secondary);">Phases: ${phaseModels}</div>
+                ${pipeline.weight_file ? `<div style="margin-top: 4px; font-size: 10px; color: var(--text-secondary);">⚖ ${pipeline.weight_file}${pipeline.task_id ? ' · task ' + pipeline.task_id : ''}${pipeline.weight_serial_number ? ' · ' + pipeline.weight_serial_number : ''}</div>` : ''}
+                ${pipeline.confusion_matrix ? `<img src="${pipeline.confusion_matrix}" alt="confusion matrix" title="confusion matrix" style="margin-top: 6px; max-width: 100%; max-height: 130px; border: 1px solid var(--border-color); border-radius: 4px; background:#fff; display:block;">` : ''}
                 <div style="margin-top: 8px; display: flex; gap: 4px;">
                     ${!isActive ? `<button onclick="activatePipeline('${name}')" style="padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Activate</button>` : ''}
                     <button onclick="loadPipelineForEdit('${name}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
@@ -3150,27 +3152,37 @@ async function uploadPipelineWeight() {
     const fname = /\.pt$/i.test(base) ? base : base + '.pt';
     const fd = new FormData();
     fd.append('file', f, fname);   // the name the server saves under
-    setStatus('Uploading ' + fname + '…');
-    try {
-        const r = await fetch('/api/models/upload-weights?activate=0', { method: 'POST', body: fd });
-        const d = await r.json();
-        if (r.ok && d.filename) {
+    // 4.0.292 — XMLHttpRequest so we can show live UPLOAD progress (.pt files are tens of MB).
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/models/upload-weights?activate=0');
+    xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+            const pct = Math.round(e.loaded / e.total * 100);
+            const mb = (e.loaded / 1048576).toFixed(1), tot = (e.total / 1048576).toFixed(1);
+            setStatus(`Uploading ${fname}… ${pct}%  (${mb}/${tot} MB)`);
+        }
+    };
+    xhr.onload = () => {
+        let d = {}; try { d = JSON.parse(xhr.responseText); } catch (_) {}
+        if (xhr.status >= 200 && xhr.status < 300 && d.filename) {
             setStatus('Uploaded ' + d.filename + ' (' + (d.size_mb != null ? d.size_mb + ' MB' : '') + ') — selected. Save the pipeline to keep it.', true);
-            await populatePipelineWeightOptions();
-            const sel = document.getElementById('pipeline-weight-input');
-            if (sel) {
-                if (!Array.from(sel.options).some(o => o.value === d.filename)) {
-                    const o = document.createElement('option'); o.value = d.filename; o.textContent = d.filename; sel.appendChild(o);
+            populatePipelineWeightOptions().then(() => {
+                const sel = document.getElementById('pipeline-weight-input');
+                if (sel) {
+                    if (!Array.from(sel.options).some(o => o.value === d.filename)) {
+                        const o = document.createElement('option'); o.value = d.filename; o.textContent = d.filename; sel.appendChild(o);
+                    }
+                    sel.value = d.filename;
                 }
-                sel.value = d.filename;
-            }
+            });
             if (fileEl) fileEl.value = '';
         } else {
-            setStatus(d.error || 'Upload failed', false);
+            setStatus((d && d.error) || ('Upload failed (HTTP ' + xhr.status + ')'), false);
         }
-    } catch (e) {
-        setStatus('Error: ' + (e.message || e), false);
-    }
+    };
+    xhr.onerror = () => setStatus('Upload error (network)', false);
+    setStatus('Uploading ' + fname + '… 0%');
+    xhr.send(fd);
 }
 
 function loadModelForEdit(modelId) {

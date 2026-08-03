@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.291 – 4.0.293] - 2026-08-03 — Pipeline weights: reliable switching + UI polish
+
+- **Reliable weight switching (the real "TB / didn't switch" fix).** Activating a pipeline's weight partially failed with **CUDA OOM** — the GPU was saturated by **13 YOLO uvicorn workers** (`.env YOLO_WORKERS=13`, 7818/8192 MiB used, 21 free), so the per-worker weight swap had no room and some workers kept the old model. Fix: **size YOLO workers from GPU VRAM** (host-side, since `nvidia-smi` fails inside the container) — `workers = clamp(1, (VRAM − reserve)/per_worker, max)` → 13→7 on the 8 GiB card, GPU dropped to 3396/8192 (4.4 GB free), re-activate → **0 OOM**. Verified `best.pt` md5 == the activated weight. Also bumped `set-model` retries to `max(workers×4, 30)` so a switch reliably reaches every worker (4.0.293).
+- **Note:** the leftover `TB` class was NOT a switch bug — it's inside the model file's own `model.names` (yolo reports the loaded model's classes live). Per-pipeline category filtering (upcoming) is the fix for showing only a pipeline's intended classes.
+- **UI:** confusion-matrix now renders inside each pipeline card (+ weight/task/serial line); weight upload shows a live **% progress** bar (XHR); the Upload button no longer stretches full-width.
+- Files: `static/status.html`, `static/js/app-core.js`, `routers/inference.py`.
+
 ## [4.0.289 – 4.0.290] - 2026-08-02 — Per-pipeline weights: the Pipeline-tab UI
 
 - The **Create/Edit Pipeline** card (Inference tab) gains: a **weight-file dropdown** (pick an existing `/weights/*.pt`, incl. HuggingFace/gradio models via the existing model checklist), an **upload + name** row for `.pt` weights, an **AI-Trainer Task ID**, a **weight serial #**, and a **confusion-matrix image upload** (offline data-URI preview).

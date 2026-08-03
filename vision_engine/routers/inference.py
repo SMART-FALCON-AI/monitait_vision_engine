@@ -476,7 +476,13 @@ def _call_set_model_all_replicas(model_path: str, request=None):
     """Call set-model on yolo_inference, repeating to cover all replicas via DNS round-robin."""
     base = _yolo_base_url(request)
     replicas = int(os.environ.get("YOLO_REPLICAS", 2))
-    attempts = max(replicas * 3, 6)
+    # 4.0.293 — uvicorn spreads set-model over N workers by OS connection routing, so we
+    # must send MANY more calls than workers to reliably hit every one (coupon-collector).
+    # Under-shooting left some workers on the OLD weight after a switch. Cover up to
+    # YOLO_WORKERS×4 (env-tunable), min 30. GPU headroom (right-sized workers) means each
+    # in-place swap is cheap, so the extra calls are safe.
+    _workers = int(os.environ.get("YOLO_WORKERS", 4) or 4)
+    attempts = max(replicas * 3, _workers * 4, int(os.environ.get("SET_MODEL_ATTEMPTS", "30")))
     successes = 0
     last_error = None
     # 4.0.47 — log every attempt so we can see WHY successes stays 0 even when
