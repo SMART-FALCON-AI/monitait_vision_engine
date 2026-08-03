@@ -1,8 +1,8 @@
-# MonitaQC - Universal Quality Control Platform
+# MVE — Monitait Vision Engine
 
-**Version:** 3.10.0 | **Status:** Production-Ready | **Documentation:** [User Manual](docs/USER_MANUAL.md) | [Audit Report](docs/AUDIT_REPORT.md)
+**Version:** 4.0.297 | **Status:** Production | **Documentation:** [User Manual](docs/USER_MANUAL.md) | [Changelog](CHANGELOG.md)
 
-**MonitaQC** is an industrial computer vision platform for automated quality control and product identification. Forked from PartQC Box Vision Engine, this project is the foundation for a unified quality control system.
+**MVE (Monitait Vision Engine)** is an industrial computer-vision platform for automated quality control and product identification — real-time defect detection, colour/ΔE analysis, and per-pipeline model management, deployed across Iranian factories via Docker + reverse-SSH tunnels.
 
 ## Overview
 
@@ -23,6 +23,10 @@ MonitaQC features a **streamlined architecture** with only essential services:
   - IP cameras via RTSP/HTTP (Hikvision, Dahua, Axis, etc.)
   - Mix and match USB and network cameras
 - **AI-Powered Detection**: YOLOv5-based object detection with custom model support
+- **Per-Pipeline Model Management** (v4.0): each inference pipeline carries its own YOLO weight (`.pt`), AI-Trainer task, category list, confusion-matrix image and weight serial. Activating a pipeline hot-swaps the model on the shared YOLO container (via `/set-model`, no container rebuild); every detection is stamped with a compact pipeline id so charts and annotations bind to the pipeline that produced them.
+- **Dynamic GPU worker sizing**: the YOLO uvicorn worker count is auto-sized from GPU VRAM (reserving headroom for math/anomaly + the model hot-swap) so a weight switch never OOMs.
+- **In-app annotation → AI Trainer**: click a detection dot to open the embedded Label Studio editor, correct the boxes, and ship to that pipeline's own `ai-trainer.monitait.com` task (per-pipeline task, not a single global one).
+- **Detection Insights charts**: Camera × (encoder roll-position / time / length) scatter with a ΔE colour-drift heatmap, quality / ejection / colour-change strips, per-shipment scoring, and progressive bucket-by-bucket loading.
 - **DataMatrix Recognition**: Advanced barcode decoding with multi-stage preprocessing
 - **OCR Capabilities**: Text recognition using EasyOCR
 - **Object Nesting Detection**: Hierarchical parent-child object relationships
