@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.303] - 2026-08-03 — Dashboard serial-metrics box: compact by default, expand on hover
+
+- The Dashboard serial-data grid (16 metrics) now shows only the four the operator watches most — **Encoder, Length, Speed, Ej NG** — in a compact 2×2 box. The other twelve (Pulses/s, Movement, Ej Queue, Ej Active, Ej Enable, Ej Offset, OK, NG, Ej OK, Downtime, Analog, Power) **roll down on hover** (also on keyboard focus) and collapse when the pointer leaves, so the box takes far less vertical space at rest. A subtle `⋯` hint marks that there's more. Pure CSS; every value `id` preserved so app-core.js updates them whether shown or hidden.
+- Files: `static/status.html`.
+
+
 ## [4.0.302] - 2026-08-03 — Heatmap positions by bin (fixes 4.0.301 solid-green regression)
 
 - **4.0.301 regression fix.** After 4.0.301 forced the heatmap layer to register, khoy painted one solid green block ("it just create one bucket"). Cause: the plugin still chose its x-position from `heatmapBoundsCollapsed || binWidth <= 0` FIRST — and on a flaky tunnel the range probe returns COLLAPSED bounds (`enc_min === enc_max`), so `binWidth <= 0` fired and every cell painted FULL-WIDTH, overlapping into a solid row. Cells already carry correct `bin` indices, so direct-pixel-by-bin (`ca.left + bin*chartWidth/heatmapBins`) is now the PRIMARY path — it needs no bounds and can't collapse. Full-width is kept only for a genuine single bin (`heatmapBins <= 1`). Combined with 4.0.301, the heatmap now paints correct per-bin cells whether the probe succeeds, resets, or returns collapsed.
