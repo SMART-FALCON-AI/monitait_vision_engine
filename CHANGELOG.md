@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.298] - 2026-08-03 — Knowledge tab: fully decoupled from core
+
+- On a site WITHOUT the `monitait_knowledge` service, the Knowledge tab was polling `/api/kb/documents` + `/api/kb/jobs` (every 5s) → the failing requests **starved MVE's workers** and reset unrelated requests, so **charts/colour wouldn't load**. Now: probe `/api/knowledge/status` once; **only poll if the service is up**, and **grey the Knowledge tab** when it's down. Core (charts, ΔE colour, detection, dashboard) has zero KB dependency (the AI Assistant already gates all KB use behind `kb_available()`).
+- Files: `static/knowledge.html`, `static/js/app-core.js`, `static/status.html`.
+
+
 ## [4.0.294 – 4.0.297] - 2026-08-03 — Annotator binds to the pipeline task; switch loader; chart-dot pipeline
 
 - **Annotator uses the pipeline's ai-trainer task, not the global one.** `openAnnotateModal` resolves the task from the dot's own pipeline (charts) or the active pipeline (dashboard); the global-config-task fallback is **removed** (operator: "we don't want global config task id anymore"). If a pipeline has no Task ID it says so instead of using the wrong task. (Migration: the global stays only as a backward-compat fallback for external callers that pass no `task_id`.)

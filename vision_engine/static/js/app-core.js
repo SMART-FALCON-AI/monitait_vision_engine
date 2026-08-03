@@ -1069,6 +1069,19 @@ window.saveAiTrainerConfig = saveAiTrainerConfig;
 window.loadAiTrainerConfig = loadAiTrainerConfig;
 document.addEventListener('DOMContentLoaded', () => setTimeout(loadAiTrainerConfig, 1200));
 
+// 4.0.298 — grey the Knowledge tab on sites WITHOUT the knowledge service, so it's
+// visibly unavailable (and the KB churn is already gated off in knowledge.html).
+async function _greyKnowledgeTabIfDown() {
+    try {
+        const h = await fetch('/api/knowledge/status').then(r => r.json());
+        if (h && h.available) return;
+        const btn = Array.from(document.querySelectorAll('.tab-button'))
+            .find(b => /knowledge/i.test(b.getAttribute('onclick') || ''));
+        if (btn) { btn.style.opacity = '0.45'; btn.title = 'Knowledge service is not installed on this site'; }
+    } catch (e) { /* leave the tab as-is */ }
+}
+document.addEventListener('DOMContentLoaded', () => setTimeout(_greyKnowledgeTabIfDown, 1500));
+
 
 // =====================================================================
 // 3.25.0 — Dashboard inline pickers for capture state + inference pipeline

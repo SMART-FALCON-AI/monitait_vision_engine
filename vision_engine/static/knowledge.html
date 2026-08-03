@@ -316,7 +316,7 @@ async function health() {
         `<div class="banner err"><b>Knowledge service unavailable.</b> ${esc(h.error || '')}<br>
          <span class="muted">Start it:
          <code>docker compose -f docker-compose.yml -f knowledge_assistant/docker-compose.knowledge.yml up -d knowledge</code></span></div>`;
-      return;
+      return false;
     }
     // A degraded embedder means only exact-word search is trustworthy. Say so —
     // silently returning weak semantic results is how people stop trusting it.
@@ -326,8 +326,10 @@ async function health() {
          are keyword-based only. Set <code>KB_EMBED_PROVIDER</code> and re-index for
          meaning-based search.</div>` : '';
     $('mcp-url').textContent = `http://${location.hostname}:4445/mcp`;
+    return true;
   } catch (e) {
     $('banner').innerHTML = `<div class="banner err">${esc(e.message)}</div>`;
+    return false;
   }
 }
 
@@ -618,8 +620,15 @@ const delMcp = n => confirm(`Remove ${n}?`) &&
   api('/mcp/servers/' + n, {method:'DELETE'}).then(loadMcp);
 
 // --- boot -------------------------------------------------------------------
-health(); loadDocs(); loadAssets(); loadJobs();
-setInterval(loadJobs, 5000);
+// 4.0.298 — gate ALL polling on KB availability. On a site WITHOUT the knowledge
+// service, hammering /api/kb/* (docs + jobs every 5s) starved MVE workers and reset
+// unrelated requests (charts wouldn't load). Now: probe once; only poll if it's up.
+(async function _kbBoot() {
+  const _avail = await health();
+  if (!_avail) return;               // service down → no doc/job loads, no interval
+  loadDocs(); loadAssets(); loadJobs();
+  setInterval(loadJobs, 5000);
+})();
 
 // --- i18n ---------------------------------------------------------------
 // Inherit the language the operator chose in the main app (shared localStorage,
