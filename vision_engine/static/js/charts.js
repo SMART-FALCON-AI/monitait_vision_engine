@@ -2605,26 +2605,58 @@ async function refreshAdvancedCharts() {
     // whole window. It's now robust where it used to fail: each bucket fetch retries on
     // reset (see _extendScatterFromBucket) and we no longer blank the hydrate first, so
     // a single dropped bucket can never wipe the chart to empty.
-    let endMs = hiMs;
     let bucketCount = 0;
+    // 4.0.305 — bucket along the SELECTED axis (operator: "bucket by each x-axis, time or
+    // encoder"). ENCODER axis with a real fixed span → bucket by ENCODER: divide the pinned
+    // [enc_min, enc_max] into N columns and load each by its encoder start/stop, so a column
+    // fills exactly its slice and the span never re-derives (encoder isn't monotonic with
+    // time, so time-bucketing scattered a bucket's dots across the whole axis). TIME axis (or
+    // a stationary line where no encoder span exists) keeps the time ladder — time IS
+    // monotonic, so its buckets already map 1:1 to columns.
+    const _fxEnc = window._mveEncSpanFixed;
+    const _useEncoderBuckets = (!shipment && _insightAxis === 'encoder'
+        && _fxEnc && Number.isFinite(_fxEnc.lo) && Number.isFinite(_fxEnc.hi) && _fxEnc.hi > _fxEnc.lo);
     try {
-        while (endMs > loMs && bucketCount < bins) {
-            if (myTicket !== _progressiveLadderTicket) return;
-            if (!_insightCameraScatter) break;
-            if (!shipment && (winSel.value || '24h') !== target) break;
-            if (shipment && ((document.getElementById('insight-shipment') || {}).value || '') !== shipment) break;
-            const sinceMs = Math.max(loMs, endMs - bucketMs);
-            // v4.0.300 — ONE atomic call per bucket (dots + colour + 4 strips) via
-            // _extendBucketAll, instead of the old TWO (scatter, then strips/colour).
-            try { await _extendBucketAll(sinceMs, endMs, shipment, minConf, myTicket); }
-            catch (_e) { /* per-bucket failure is non-fatal */ }
-            endMs = sinceMs;
-            bucketCount += 1;
+        if (_useEncoderBuckets) {
+            const _eLo = _fxEnc.lo, _eHi = _fxEnc.hi;
+            const _encStep = (_eHi - _eLo) / bins;
+            // Pin the strip/colour domain to the SAME fixed span, then fetch strips + colour
+            // ONCE over the full window (all N bins in one aggregate — cheaper than 50 slices).
+            _progressiveColorRange = { axis: 'encoder', lo: _eLo, hi: _eHi, n_bins: bins };
+            try { await _extendStripsFromBucket(loMs, hiMs, shipment, myTicket); }
+            catch (_e) { /* strips non-fatal */ }
+            for (let _bi = bins - 1; _bi >= 0; _bi--) {   // rightmost (highest encoder) column first
+                if (myTicket !== _progressiveLadderTicket) return;
+                if (!_insightCameraScatter) break;
+                if ((winSel.value || '24h') !== target) break;
+                if (_insightAxis !== 'encoder') break;    // operator flipped the axis mid-load
+                const _bLo = _eLo + _bi * _encStep;
+                // widen the last (rightmost) column slightly so the exact enc_max is included
+                const _bHi = (_bi === bins - 1) ? (_eHi + Math.max(1, Math.abs(_eHi) * 1e-6)) : (_eLo + (_bi + 1) * _encStep);
+                try { await _extendScatterFromBucket(loMs, hiMs, shipment, minConf, myTicket, null, _bLo, _bHi); }
+                catch (_e) { /* per-column failure is non-fatal */ }
+                bucketCount += 1;
+            }
+        } else {
+            let endMs = hiMs;
+            while (endMs > loMs && bucketCount < bins) {
+                if (myTicket !== _progressiveLadderTicket) return;
+                if (!_insightCameraScatter) break;
+                if (!shipment && (winSel.value || '24h') !== target) break;
+                if (shipment && ((document.getElementById('insight-shipment') || {}).value || '') !== shipment) break;
+                const sinceMs = Math.max(loMs, endMs - bucketMs);
+                // v4.0.300 — ONE atomic call per bucket (dots + colour + 4 strips) via
+                // _extendBucketAll, instead of the old TWO (scatter, then strips/colour).
+                try { await _extendBucketAll(sinceMs, endMs, shipment, minConf, myTicket); }
+                catch (_e) { /* per-bucket failure is non-fatal */ }
+                endMs = sinceMs;
+                bucketCount += 1;
+            }
         }
     } finally {
         if (myTicket === _progressiveLadderTicket) {
             _unmountScatterLoader();
-            try { _paintDotsDiag('ladder:' + bucketCount + 'buckets'); } catch (_) {}
+            try { _paintDotsDiag((_useEncoderBuckets ? 'enc-ladder:' : 'ladder:') + bucketCount + 'buckets'); } catch (_) {}
         }
     }
     } finally {
@@ -2782,19 +2814,23 @@ function _paintDotsDiag(tag) {
 }
 window._paintDotsDiag = _paintDotsDiag;
 
-async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket, preData) {
+async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket, preData, encLo, encHi) {
     if (!_insightCameraScatter) return;
     let data = preData || null;   // v4.0.300 — reuse the merged one-call payload when given
     // 4.0.247 — dot_cap can be boosted by the single-fetch path (window._mveScatterFetchCap)
     // so ONE fetch over the whole window still returns dots spread across it, not just the
     // newest _dotCap().
     const _fetchCap = (window._mveScatterFetchCap || _dotCap());
+    // 4.0.305 — encLo/encHi (encoder-axis bucketing): fetch the dots for ONE encoder column
+    // over the FULL time window, so bucket i == the i-th encoder slice of the fixed span.
+    const _encQS = (encLo != null && encHi != null && Number.isFinite(encLo) && Number.isFinite(encHi) && encHi > encLo)
+        ? ('&enc_lo=' + encLo + '&enc_hi=' + encHi) : '';
     const _scatUrl = '/api/detection_charts?since_ms=' + Math.floor(sinceMs) +
                      '&until_ms=' + Math.floor(untilMs) +
                      '&shipment=' + encodeURIComponent(shipment) +
                      '&min_conf=' + minConf +
                      '&scatter_only=1' +
-                     '&dot_cap=' + _fetchCap;
+                     '&dot_cap=' + _fetchCap + _encQS;
     // 4.0.247 — retry on transient connection resets (ERR_CONNECTION_RESET seen on the
     // operator's tunnel). A single dropped fetch used to silently lose the dots.
     // 4.0.300 — skip the fetch when the merged one-call path already fetched this bucket.

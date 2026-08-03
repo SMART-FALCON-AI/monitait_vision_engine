@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.305] - 2026-08-03 — Bucket along the SELECTED axis (encoder buckets for the encoder axis)
+
+- **Operator's design.** The progressive ladder always bucketed by TIME. On the ENCODER axis that's wrong: encoder is roll-position and resets per roll, so it is not monotonic with time — a time-bucket's dots scattered across the whole axis and the span kept re-deriving. Now the ladder buckets along the **selected** axis: encoder-axis → divide the pinned `[enc_min, enc_max]` into N columns and load each by its encoder **start/stop** (`WHERE encoder_value >= lo AND < hi`), so every fetch fills exactly one column and the span is fixed the whole time. Time-axis keeps the time ladder (time is monotonic → already 1:1 with columns).
+- Strips + colour are pinned to the same fixed span and fetched ONCE over the window (all N bins in one aggregate) instead of per bucket. Backend gains `enc_lo`/`enc_hi` params applied to the scatter CTEs only (additive; zero effect when absent).
+- Files: `routers/timeline.py`, `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.304] - 2026-08-03 — Stable encoder axis: reliable range probe + pinned span
 
 - **Encoder axis kept jumping / "resetting" on khoy.** The x-axis is roll-position, which RESETS per roll — so it is not monotonic with time. The chart loads buckets newest→oldest by time and auto-widened the axis to fit the max encoder seen, so when an older roll with a bigger encoder streamed in, the whole axis rescaled (e.g. 22M→92M) and everything re-laid-out. The guard against this — a start-of-load range probe that returns the true encoder MIN/MAX (two fields) — was a SINGLE 4s attempt that kept resetting on the flaky tunnel, so the axis started narrow and jumped.

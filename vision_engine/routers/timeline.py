@@ -3440,7 +3440,7 @@ def _dc_load_severity():
 
 
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0, range_only: int = 0):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0, range_only: int = 0, enc_lo: float = 0, enc_hi: float = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -3702,6 +3702,16 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         if _hidden_by_process:
             _parent_filter_sql = " AND COALESCE(elem->>'name','') <> ALL(%s)"
             _parent_filter_args = [_hidden_by_process]
+        # 4.0.305 — encoder-range filter for encoder-AXIS bucketing. The client divides the
+        # window's [enc_min, enc_max] into N buckets and fetches each by its encoder start/stop
+        # (not by time), so every bucket fills exactly ONE column of the encoder axis and the
+        # span never re-derives from what a bucket happened to contain. Applied to the scatter
+        # CTEs only (strips/colour are fetched once over the full span, binned by encoder).
+        _enc_filter_sql = ""
+        _enc_filter_args = []
+        if float(enc_hi or 0) > float(enc_lo or 0):
+            _enc_filter_sql = " AND encoder_value >= %s AND encoder_value < %s"
+            _enc_filter_args = [float(enc_lo), float(enc_hi)]
 
         # --- camera scatter: stratified per-class so rare classes (spot/warp/stitch)
         # don't get swamped by dominant ones (weft_up). Up to 750 newest dots PER
@@ -3715,7 +3725,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             f"""
             WITH recent AS (
                 SELECT time, shipment, detections, image_path, pipeline_id FROM inference_results
-                WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
+                WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}{_enc_filter_sql}
                 ORDER BY time DESC
                 LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
             ),
@@ -3742,7 +3752,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             ORDER BY t DESC
             LIMIT 6000
             """,
-            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + _enc_filter_args + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
         )
         camera_scatter = [
             {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
@@ -3758,7 +3768,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             WITH recent AS (
                 SELECT time, shipment, detections, image_path, encoder_value, pipeline_id FROM inference_results
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
-                  AND encoder_value IS NOT NULL
+                  AND encoder_value IS NOT NULL{_enc_filter_sql}
                 ORDER BY time DESC
                 LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
             ),
@@ -3784,7 +3794,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             WHERE rn <= %s
             LIMIT 6000
             """,
-            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + _enc_filter_args + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
         )
         camera_scatter_encoder = [
             {"x": int(enc or 0), "y": cam, "cls": cls,
