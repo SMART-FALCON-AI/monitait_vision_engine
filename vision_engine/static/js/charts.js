@@ -1016,19 +1016,23 @@ window._renderPhaseButtons = _renderPhaseButtons;
 // or _root-only sites don't need the picker). Buttons: leading "All",
 // then one per discovered parent_class name.
 function _renderParentClassButtons(available) {
-    // 4.0.306 — now a DROPDOWN (was a button row) to match the other toolbar pickers.
+    // 4.0.306 — DROPDOWN (was a button row). 4.0.312 — STICKY list (operator: "keep the parent
+    // list no matter what, I would choose"). Parent classes are a config property; they don't come
+    // and go per fetch. UNION every incoming list into a persistent set that NEVER shrinks, so a
+    // transient short/empty call (the 1h hydrate, a slow probe, a picked-shipment subset) can't wipe
+    // the dropdown — which is exactly why it appeared during load then vanished after. Always render
+    // from the union, and show it whenever colour-check is on (even with a single parent).
     const wrap = document.getElementById('hm-parent-class-wrap');
     const sel = document.getElementById('hm-parent-class-select');
     if (!wrap || !sel) return;
-    const list = (available || []).filter(x => x != null).map(String);
-    // Hide the whole row when there's nothing meaningful to pick between (≤1 parent-role class).
-    if (list.length <= 1) {
-        wrap.style.display = 'none';
-        return;
-    }
-    wrap.style.display = window._mveColorCheckEnabled === true ? 'inline-flex' : 'none';
+    const _incoming = (available || []).filter(x => x != null).map(String);
+    const _set = new Set((window._mveParentClassesFull || []).map(String));
+    for (const p of _incoming) _set.add(p);
+    window._mveParentClassesFull = Array.from(_set).sort();
+    const list = window._mveParentClassesFull;
+    if (!list.length) { wrap.style.display = 'none'; return; }   // genuinely nothing known yet
+    wrap.style.display = (window._mveColorCheckEnabled === true) ? 'inline-flex' : 'none';
     const cur = (localStorage.getItem('mve_heatmap_parent_class') || '');
-    // Rebuild options: "All" + one per discovered parent class.
     sel.innerHTML = '';
     const _add = (val, label) => {
         const o = document.createElement('option');
@@ -1037,7 +1041,6 @@ function _renderParentClassButtons(available) {
     };
     _add('', '🌐 All');
     for (const pc of list) _add(pc, pc === '_root' ? '🖼 whole frame' : pc);
-    // Reset selection if it dropped out of the window's data, then reflect it in the dropdown.
     const _val = list.includes(cur) ? cur : '';
     if (_val !== cur) localStorage.setItem('mve_heatmap_parent_class', '');
     sel.value = _val;
@@ -2391,7 +2394,8 @@ async function refreshAdvancedCharts() {
     const myTicket = _progressiveLadderTicket;
     _ladderActive = true;
     window._mveScatterRange = null;  // 4.0.256 — only the all-shipments window branch sets this
-    window._mveParentClassesFull = null;  // 4.0.307 — full-window parent list; only the probe sets it
+    // 4.0.312 — do NOT clear _mveParentClassesFull here. The parent list is a sticky config
+    // property that must persist across loads (operator: "keep the parent list no matter what").
     try {
 
     // 4.0.202 — DO NOT call refreshQualityCharts() here. refreshAdvancedCharts
@@ -3545,14 +3549,9 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         );
         // 4.0.161 — parent-class picker. Hidden entirely when the site
         // has ≤ 1 parent-class in the window (single-parent or _root-only).
-        // 4.0.307 — prefer the FULL-window list from the range probe when we have it, so this
-        // Core render (fed the 1h hydrate, which can miss parents like TB) can't re-hide the
-        // dropdown. Falls back to the payload's list (picked shipment / no probe).
-        _renderParentClassButtons(
-            (Array.isArray(window._mveParentClassesFull) && window._mveParentClassesFull.length)
-                ? window._mveParentClassesFull
-                : (Array.isArray(data.parent_classes_available) ? data.parent_classes_available : []),
-        );
+        // 4.0.312 — just feed this payload's list into the STICKY union (_renderParentClassButtons
+        // never shrinks it), so the 1h hydrate can't re-hide the dropdown it can't fully see.
+        _renderParentClassButtons(Array.isArray(data.parent_classes_available) ? data.parent_classes_available : []);
         // v4.0.231 — paint strips from the payload ONLY for a picked shipment /
         // single full-span fetch (preloadedData is null there). For an all-shipments
         // WINDOW load, `data` is the 1h HYDRATE: its cells are binned over the last

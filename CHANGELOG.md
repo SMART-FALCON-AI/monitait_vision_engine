@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.312] - 2026-08-04 — Parent-class dropdown is now sticky (appeared during load, vanished after)
+
+- The dropdown showed while charts loaded then disappeared once loaded: a later render (1h hydrate / picked-shipment subset) passed a shorter list and the old `<=1 → hide` gate wiped it. Now the parent list is **sticky** — every incoming list is UNIONed into a set that never shrinks, the dropdown renders from that union, and it shows whenever colour-check is on (even with a single parent). A transient short/empty list can no longer hide it. (Operator: "keep the parent list no matter what, I would choose.")
+- Files: `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.311] - 2026-08-04 — Parent-class dropdown lists config parent-role classes (not window colour rows)
 
 - The parent-class dropdown was empty in the all-shipments view while it appeared for a picked shipment. Cause: the list was discovered by querying `_color` rows in the selected window, so a parent-role class was dropped whenever it had no colour rows in that window — even though it's clearly a detected, configured parent. Fixed: the start-of-load probe now reads parent classes straight from **config** (`audio_settings[cls].role == "parent"`), so every parent-role class (PVB_FILM, TB, …) always appears, independent of window or recent colour data.
