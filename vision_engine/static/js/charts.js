@@ -701,7 +701,7 @@ async function setHeatmapBaseline(mode) {
     // returned. No auto-shipment / config-check needed for shipment_avg:
     // its delta is precomputed per cell (color_heatmap.cells.delta_from_avg)
     // and works for the "All shipments" view too.
-    const VALID = ['camera', 'shipment_start', 'shipment_avg', 'target', 'reference_frame'];
+    const VALID = ['camera', 'shipment_start', 'shipment_avg', 'shipment_median', 'target', 'reference_frame'];
     if (!VALID.includes(mode)) return;
 
     if (mode === 'shipment_start') {
@@ -3497,7 +3497,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // (only if it's one of the three options the dropdown offers, so a
         // legacy mode like shipment_start/target doesn't blank the select).
         const _bsSel = document.getElementById('hm-baseline-select');
-        if (_bsSel && ['camera','shipment_avg','reference_frame'].includes(_activeBaselineMode) && _bsSel.value !== _activeBaselineMode) {
+        if (_bsSel && ['camera','shipment_avg','shipment_median','reference_frame'].includes(_activeBaselineMode) && _bsSel.value !== _activeBaselineMode) {
             _bsSel.value = _activeBaselineMode;
         }
         // 4.0.32 — track whether a reference is set so the Reference button
@@ -3824,10 +3824,15 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     const signedDelta = (base && Number.isFinite(base.E))
                         ? (cellE - Number(base.E))
                         : _cellDefaultDelta;
-                    if (Math.abs(signedDelta) >= 0.05 && w >= 18 && h >= 12) {
-                        const mag = Math.abs(signedDelta);
-                        const valStr = mag >= 10 ? mag.toFixed(0) : mag.toFixed(1);
-                        const label = (signedDelta > 0 ? '↑' : '↓') + valStr;
+                    // 4.0.309 — label as a PERCENT of the baseline (operator: "show 12% up from
+                    // base" instead of ↑0.4). Backend color_slice returns delta_pct =
+                    // 100·(cell−base)/base; fall back to the raw signed Δ when pct is absent.
+                    const _pct = Number.isFinite(Number(cell.delta_pct)) ? Number(cell.delta_pct) : null;
+                    const _showVal = (_pct != null) ? _pct : signedDelta;
+                    const _noiseFloor = (_pct != null) ? 0.5 : 0.05;   // 0.5% vs 0.05 ΔE
+                    if (Math.abs(_showVal) >= _noiseFloor && w >= 18 && h >= 12) {
+                        const label = (_showVal > 0 ? '↑' : '↓')
+                                    + Math.abs(_showVal).toFixed(0) + (_pct != null ? '%' : '');
                         // 4.0.172 — bumped contrast: 11 px (was 9), full-opacity
                         // white halo outline (was 0.75), full-black ink (was
                         // 0.95). Operator reported labels felt washed out

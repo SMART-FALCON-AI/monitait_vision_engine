@@ -3888,6 +3888,18 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                         _parent_local = (parent_class or "").strip()
                         _parent_cl_local = " AND elem->>'parent_class' = %s" if _parent_local else ""
                         _parent_ar_local = [_parent_local] if _parent_local else []
+                        # 4.0.309 — compare LIKE-FOR-LIKE. shipment_median → median vs median;
+                        # everything else (shipment_avg default, camera, reference) → mean vs mean.
+                        # Fixes "all cells brown": a bin-MEAN vs a cam-MEDIAN on a right-skewed E
+                        # distribution made every cell read positive. delta_pct expresses the
+                        # deviation as a PERCENT of the baseline (operator: "show 12% up from base").
+                        _bl = str(baseline or "").strip().lower()
+                        if _bl == "shipment_median":
+                            _base_stat = "percentile_cont(0.5) WITHIN GROUP (ORDER BY E)"
+                            _cell_stat = "percentile_cont(0.5) WITHIN GROUP (ORDER BY b.E)"
+                        else:
+                            _base_stat = "AVG(E)"
+                            _cell_stat = "AVG(b.E)"
                         _slice_cur = conn.cursor()
                         if _axis == "time":
                             _slice_cur.execute(
@@ -3913,11 +3925,14 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                                     FROM color_rows cr
                                 ),
                                 cam_phase_baselines AS (
-                                    SELECT cam, phase, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                                    SELECT cam, phase, {_base_stat} AS base_E
                                     FROM binned GROUP BY cam, phase
                                 )
                                 SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
-                                       AVG(b.E - cpb.base_E)::float
+                                       ({_cell_stat} - AVG(cpb.base_E))::float AS delta_e,
+                                       CASE WHEN AVG(cpb.base_E) <> 0
+                                            THEN (100.0 * ({_cell_stat} - AVG(cpb.base_E)) / AVG(cpb.base_E))::float
+                                            ELSE 0.0 END AS delta_pct
                                 FROM binned b JOIN cam_phase_baselines cpb
                                      ON cpb.cam = b.cam AND cpb.phase IS NOT DISTINCT FROM b.phase
                                 GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
@@ -3949,22 +3964,26 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                                     FROM color_rows cr
                                 ),
                                 cam_phase_baselines AS (
-                                    SELECT cam, phase, percentile_cont(0.5) WITHIN GROUP (ORDER BY E) AS base_E
+                                    SELECT cam, phase, {_base_stat} AS base_E
                                     FROM binned GROUP BY cam, phase
                                 )
                                 SELECT b.cam, b.bin, AVG(b.L)::float, AVG(b.E)::float, COUNT(*),
-                                       AVG(b.E - cpb.base_E)::float
+                                       ({_cell_stat} - AVG(cpb.base_E))::float AS delta_e,
+                                       CASE WHEN AVG(cpb.base_E) <> 0
+                                            THEN (100.0 * ({_cell_stat} - AVG(cpb.base_E)) / AVG(cpb.base_E))::float
+                                            ELSE 0.0 END AS delta_pct
                                 FROM binned b JOIN cam_phase_baselines cpb
                                      ON cpb.cam = b.cam AND cpb.phase IS NOT DISTINCT FROM b.phase
                                 GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
                                 """,
                                 [int(since_ms), int(until_ms)] + ([shipment] if shipment else []) + _phase_ar_local + _parent_ar_local + [_lo, _hi, _lo],
                             )
-                        for cam, bin_idx, mL, mE, n, de in _slice_cur.fetchall():
+                        for cam, bin_idx, mL, mE, n, de, dpct in _slice_cur.fetchall():
                             _color_slice_cells.append({
                                 "cam": int(cam or 0), "bin": int(bin_idx or 0),
                                 "L": round(mL or 0, 2), "E": round(mE or 0, 2),
-                                "delta_e": round(de or 0, 2), "n": int(n or 0),
+                                "delta_e": round(de or 0, 2),
+                                "delta_pct": round(dpct or 0, 1), "n": int(n or 0),
                             })
                         _slice_cur.close()
                     _payload["color_slice"] = {
@@ -4631,7 +4650,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # without computing values for unused modes.
             # 4.0.173 — "shipment_avg" mode always available; frontend reads
             # per-cell `delta_from_avg` from color_heatmap cells.
-            color_baseline_modes = ["camera", "shipment_avg"]
+            color_baseline_modes = ["camera", "shipment_avg", "shipment_median"]
             try:
                 from config import load_service_config as _lsc
                 _svc = _lsc() or {}

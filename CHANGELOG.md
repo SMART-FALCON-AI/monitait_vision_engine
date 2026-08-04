@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.309] - 2026-08-04 — Colour baseline: like-for-like + median mode + percent labels
+
+- **"Cameras 1 & 2 all brown" fixed.** The colour cell showed a per-bin **mean** compared to a per-camera **median** baseline. On a right-skewed E distribution (avg 37-44 vs median ~30 on khoy) the mean always sits above the median, so every cell read positive → the most-skewed cameras went brown. Now the baseline is computed with the **same statistic as the cell**: `Shipment average` = mean-vs-mean, new `Shipment median` = median-vs-median. Baseline dropdown is now **Camera / Shipment average (default) / Shipment median / Reference**.
+- **Percent labels.** Cell labels now read as a **percent of the baseline** (`↑12%`) instead of raw ΔE (`↑0.4`) — the colour-slice returns `delta_pct = 100·(cell−base)/base`.
+- Files: `routers/timeline.py`, `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.308] - 2026-08-04 — Picked shipment is fully window-independent (stats panel too)
 
 - Picking a shipment showed "No stored detections in this window yet" and hid the whole Detection Insights view — even though the scatter had fetched the shipment's dots. Cause: the panel's empty-gate came from `/api/detection_stats?window=<timeframe>`, which had **no shipment filter**, so an old shipment fell outside the previously-selected window → empty → the container (scatter included) was hidden. Fix: `detection_stats` now takes `shipment`; when set, every query (by-class, timeline, impact) filters by **`WHERE shipment = %s` with no time predicate at all** — the shipment IS the filter, exactly like `/api/detection_charts`. A picked shipment is now entirely independent of the timeframe across the general + bucket + stats queries.
