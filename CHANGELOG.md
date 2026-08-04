@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.313] - 2026-08-04 — General mveAi() helper + Inference row on one line with an AI "?"
+
+- **General AI helper.** New `window.mveAi(prompt)` — one place that calls the active model via `/api/ai_query` and normalizes the result + errors (incl. "AI not configured" / an unreachable endpoint). Feature buttons become thin wrappers instead of each duplicating fetch + error handling.
+- **Inference row** now stays on ONE line (flex-wrap:nowrap, flex:1 select, shrink-0 label), matching the Capture row, and gained a green **?** that asks the AI to recommend a pipeline (`askAiRecommendPipeline` → `mveAi`), shown in an inline panel.
+- Files: `static/status.html`, `static/js/app-core.js`.
+
+
 ## [4.0.312] - 2026-08-04 — Parent-class dropdown is now sticky (appeared during load, vanished after)
 
 - The dropdown showed while charts loaded then disappeared once loaded: a later render (1h hydrate / picked-shipment subset) passed a shorter list and the old `<=1 → hide` gate wiped it. Now the parent list is **sticky** — every incoming list is UNIONed into a set that never shrinks, the dropdown renders from that union, and it shows whenever colour-check is on (even with a single parent). A transient short/empty list can no longer hide it. (Operator: "keep the parent list no matter what, I would choose.")

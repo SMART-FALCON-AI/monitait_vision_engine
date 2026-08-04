@@ -1230,6 +1230,62 @@ window.loadDashboardPipelinePicker = loadDashboardPipelinePicker;
 // 3.25.3 — AI auto-pick capture state for the operator.
 let _aiRecommendedState = null;
 
+// 4.0.313 — GENERAL AI helper. ONE place that calls the active model (resolved server-side by
+// /api/ai_query), and normalizes the result + errors — including "AI not configured" and an
+// unreachable endpoint (e.g. khoy's blocked gateway). Any feature builds a prompt and calls this
+// instead of duplicating fetch + error handling; feature buttons become thin wrappers.
+//   const res = await mveAi('your question');  // → { ok:true, text:'…' }  |  { ok:false, error:'…' }
+window.mveAi = async function mveAi(prompt, opts) {
+    opts = opts || {};
+    try {
+        const r = await fetch('/api/ai_query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({ query: String(prompt || '') }, opts.extra || {})),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) {
+            const msg = d.error || ('HTTP ' + r.status);
+            if (opts.throwOnError) throw new Error(msg);
+            return { ok: false, error: msg };
+        }
+        return { ok: true, text: d.response || '', raw: d };
+    } catch (e) {
+        if (opts.throwOnError) throw e;
+        return { ok: false, error: (e && e.message) || 'network error' };
+    }
+};
+
+// 4.0.313 — thin wrapper: ask the AI which inference pipeline to use. Mirrors the Capture "?"
+// (askAiRecommendState) but routes through the general mveAi() helper instead of its own endpoint.
+async function askAiRecommendPipeline() {
+    const panel = document.getElementById('pipeline-ai-panel');
+    const content = document.getElementById('pipeline-ai-content');
+    const btn = document.getElementById('dashboard-pipeline-ai-btn');
+    if (!panel || !content) return;
+    panel.style.display = 'block';
+    content.innerHTML = '🤔 asking the AI…';
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    const sel = document.getElementById('dashboard-pipeline-picker');
+    const opts = sel ? Array.from(sel.options).map(o => o.value).filter(Boolean) : [];
+    const current = sel ? sel.value : '';
+    const prompt =
+        'Recommend the best INFERENCE PIPELINE for the current production line and product. '
+        + 'Available pipelines: ' + (opts.length ? opts.join(', ') : '(none listed)') + '. '
+        + 'Currently active: ' + (current || 'none') + '. '
+        + 'Use the line activity, detected defect classes and camera state you can see. '
+        + 'Answer in 1-2 short sentences — which pipeline and why. Reply in ' + (window.currentLang || 'en') + '.';
+    try {
+        const res = await window.mveAi(prompt);
+        content.innerHTML = res.ok
+            ? String(res.text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))
+            : ('<span style="color:#fca5a5;">✗ ' + String(res.error || 'AI unavailable').replace(/[<>&]/g,'') + '</span>');
+    } finally {
+        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+    }
+}
+window.askAiRecommendPipeline = askAiRecommendPipeline;
+
 async function askAiRecommendState() {
     const panel    = document.getElementById('state-ai-panel');
     const content  = document.getElementById('state-ai-content');
