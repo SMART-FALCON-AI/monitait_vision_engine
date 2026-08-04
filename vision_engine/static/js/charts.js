@@ -2387,6 +2387,7 @@ async function refreshAdvancedCharts() {
     const myTicket = _progressiveLadderTicket;
     _ladderActive = true;
     window._mveScatterRange = null;  // 4.0.256 — only the all-shipments window branch sets this
+    window._mveParentClassesFull = null;  // 4.0.307 — full-window parent list; only the probe sets it
     try {
 
     // 4.0.202 — DO NOT call refreshQualityCharts() here. refreshAdvancedCharts
@@ -2515,6 +2516,22 @@ async function refreshAdvancedCharts() {
                 if (myTicket !== _progressiveLadderTicket) return;
                 if (_rangeJson && Number.isFinite(Number(_rangeJson.data_t_min))) break;
                 await new Promise(res => setTimeout(res, 300 * (_rt + 1)));
+            }
+            // 4.0.307 — general data from the probe (full window): set the colour-check gate +
+            // render the parent-class dropdown from the FULL-window list, so every parent shows
+            // from the start instead of just the 1h hydrate's (which drops parents whose _color
+            // is older than the last hour, e.g. TB). Cache the unit for the length axis too.
+            if (_rangeJson) {
+                if (typeof _rangeJson.parent_color_check_enabled === 'boolean') {
+                    window._mveColorCheckEnabled = _rangeJson.parent_color_check_enabled;
+                }
+                if (Array.isArray(_rangeJson.parent_classes_available)) {
+                    window._mveParentClassesFull = _rangeJson.parent_classes_available;
+                    try { _renderParentClassButtons(window._mveParentClassesFull); } catch (_e) {}
+                }
+                window._lengthCache = window._lengthCache || {};
+                if (_rangeJson.encoder_unit) window._lengthCache.unit = _rangeJson.encoder_unit;
+                if (_rangeJson.encoder_units_per_unit != null) window._lengthCache.upu = Number(_rangeJson.encoder_units_per_unit);
             }
             const _tmn = _rangeJson && Number(_rangeJson.data_t_min);
             const _tmx = _rangeJson && Number(_rangeJson.data_t_max);
@@ -3511,8 +3528,13 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         );
         // 4.0.161 — parent-class picker. Hidden entirely when the site
         // has ≤ 1 parent-class in the window (single-parent or _root-only).
+        // 4.0.307 — prefer the FULL-window list from the range probe when we have it, so this
+        // Core render (fed the 1h hydrate, which can miss parents like TB) can't re-hide the
+        // dropdown. Falls back to the payload's list (picked shipment / no probe).
         _renderParentClassButtons(
-            Array.isArray(data.parent_classes_available) ? data.parent_classes_available : [],
+            (Array.isArray(window._mveParentClassesFull) && window._mveParentClassesFull.length)
+                ? window._mveParentClassesFull
+                : (Array.isArray(data.parent_classes_available) ? data.parent_classes_available : []),
         );
         // v4.0.231 — paint strips from the payload ONLY for a picked shipment /
         // single full-span fetch (preloadedData is null there). For an all-shipments

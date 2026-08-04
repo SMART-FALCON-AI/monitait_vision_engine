@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.307] - 2026-08-04 — Toolbar general-data comes from a full-window probe, not the 1h hydrate
+
+- **Parent-class dropdown never appeared in all-shipments view.** The picker (and colour-check gate) were fed by the 1h hydrate's `parent_classes_available`, which only sees parents whose `_color` rows fall in the last hour — so TB (older colour) was dropped and the list had ≤1 entry → hidden, even as TB streamed into the legend. Folded full-window **general data** into the start-of-load range probe (the "separate general-data call"): it now also returns `parent_classes_available` (full window), `parent_color_check_enabled`, and `encoder_unit`/`encoder_units_per_unit`. The frontend renders the dropdown + sets the colour-check gate from the probe, and Core prefers that full-window list so the 1h hydrate can't re-hide it.
+- Files: `routers/timeline.py`, `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.306] - 2026-08-04 — Parent-class picker is now a dropdown
 
 - The heatmap **Parent class** picker was a row of buttons; it's now a `<select>` dropdown matching the other toolbar pickers (X-axis, Baseline, Phase, Scale, Cells). Options are still built from `parent_classes_available` and it still hides when the colour feature is off or there's ≤1 parent-role class in the window (single-parent sites have nothing to choose between — which is why it's absent in an all-shipments view where only one class is designated parent-role). A class like TB only appears here where TB is designated parent-role in the class config.

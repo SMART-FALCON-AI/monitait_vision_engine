@@ -3601,6 +3601,33 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 tuple([interval] + ([shipment] if shipment else [])),
             )
             _rr = cur.fetchone() or (None, None, None, None)
+            # 4.0.307 — general chart metadata over the FULL window, folded into this start-of-
+            # load probe so the toolbar (parent-class dropdown, colour-check gate, unit label) no
+            # longer depends on the 1h hydrate — which misses parents whose _color rows are older
+            # than the last hour (operator: "TB shows late / the parent dropdown never appears").
+            # This is the "separate general-data call" the operator asked for.
+            _range_parents = []
+            try:
+                cur.execute(
+                    f"""SELECT DISTINCT COALESCE(NULLIF(elem->>'parent_class', ''), '_root') AS pc
+                        FROM inference_results, LATERAL jsonb_array_elements(detections) elem
+                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                          AND elem->>'name' = '_color'
+                        ORDER BY 1""",
+                    tuple([interval] + ([shipment] if shipment else [])),
+                )
+                _range_parents = [r[0] for r in cur.fetchall() if r and r[0]]
+            except Exception as _rpe:
+                logger.debug(f"range_only parent discovery failed: {_rpe}")
+            try:
+                from config import load_service_config as _lsc_ro
+                _ro_cfg = _lsc_ro() or {}
+                _ro_color = bool(_ro_cfg.get("parent_color_check_enabled", False))
+                _ro_unit = _ro_cfg.get("encoder_unit") or None
+                _ro_upu = _ro_cfg.get("encoder_units_per_unit",
+                                      _ro_cfg.get("encoder_units_per_meter"))
+            except Exception:
+                _ro_color, _ro_unit, _ro_upu = False, None, None
             try:
                 release_db_connection(conn)
             except Exception:
@@ -3611,6 +3638,10 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "data_t_max":   float(_rr[1]) if _rr[1] is not None else None,
                 "data_enc_min": int(_rr[2]) if _rr[2] is not None else None,
                 "data_enc_max": int(_rr[3]) if _rr[3] is not None else None,
+                "parent_classes_available": _range_parents,
+                "parent_color_check_enabled": _ro_color,
+                "encoder_unit": _ro_unit,
+                "encoder_units_per_unit": _ro_upu,
                 "window": window, "shipment": shipment,
             })
 
