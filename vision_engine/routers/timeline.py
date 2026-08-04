@@ -3058,7 +3058,7 @@ def quality_heatmap(
 
 
 @router.get("/api/detection_stats")
-def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0):
+def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0, shipment: str = ""):
     """Detection-quality insight for the Charts tab embedded panel.
 
     Aggregates the `inference_results` hypertable into:
@@ -3084,6 +3084,18 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
         "90d": ("90 days",  "1 day"),
     }
     interval, bucket = _windows.get(window, _windows["1h"])
+    # 4.0.308 — a picked shipment is ENTIRELY independent of the timeframe (operator: "just WHERE
+    # shipment = id, no time window"). So for a picked shipment the row filter is the shipment_id
+    # ALONE — no time predicate at all — and only the no-shipment view uses the "last N" interval.
+    # This fixes an old shipment coming back empty (and hiding the whole Detection Insights panel)
+    # just because the previously-selected window had nothing in it.
+    _ship = (shipment or "").strip()
+    if _ship:
+        _time_where = "shipment = %s"          # the shipment IS the filter — no time bound
+        _base_args = [_ship]
+    else:
+        _time_where = "time > NOW() - INTERVAL %s"
+        _base_args = [interval]
     empty = {"by_class": {}, "timeline": [], "total": 0, "window": window, "persisted": False}
 
     conn = None
@@ -3116,11 +3128,11 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
             # fast so the panel populates from the other two queries).
             cur.execute("SET statement_timeout = 6000")
             cur.execute(
-                """
+                f"""
                 SELECT COALESCE(elem->>'name', elem->>'class') AS cls, COUNT(*) AS n
                 FROM (
                     SELECT detections FROM inference_results
-                    WHERE time > NOW() - INTERVAL %s
+                    WHERE {_time_where}
                     ORDER BY time DESC
                     LIMIT 100000
                 ) recent,
@@ -3133,7 +3145,7 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
                 ORDER BY n DESC
                 LIMIT 30
                 """,
-                (interval, float(min_conf or 0.0)),
+                tuple(_base_args + [float(min_conf or 0.0)]),
             )
             for cls, n in cur.fetchall():
                 if cls is not None:
@@ -3149,15 +3161,15 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
             cur = conn.cursor()
             cur.execute("SET statement_timeout = 4000")
             cur.execute(
-                """
+                f"""
                 SELECT time_bucket(INTERVAL %s, time) AS bkt,
                        COALESCE(SUM(detection_count), 0) AS n
                 FROM inference_results
-                WHERE time > NOW() - INTERVAL %s
+                WHERE {_time_where}
                 GROUP BY bkt
                 ORDER BY bkt
                 """,
-                (bucket, interval),
+                tuple([bucket] + _base_args),
             )
             timeline = [{"t": b.strftime("%m-%d %H:%M"), "count": int(n)} for b, n in cur.fetchall()]
             cur.close()
@@ -3177,12 +3189,12 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
                 cur2 = conn.cursor()
                 cur2.execute("SET statement_timeout = 6000")
                 cur2.execute(
-                    """
+                    f"""
                     SELECT (det->>'name') AS cls,
                            SUM((det->>'confidence')::float) AS conf_sum
                     FROM (
                         SELECT detections FROM inference_results
-                        WHERE time > NOW() - INTERVAL %s
+                        WHERE {_time_where}
                         ORDER BY time DESC
                         LIMIT 100000
                     ) recent,
@@ -3192,7 +3204,7 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0)
                       AND COALESCE(det->>'name', '') !~ '^_'
                     GROUP BY (det->>'name')
                     """,
-                    (interval, float(min_conf or 0.0)),
+                    tuple(_base_args + [float(min_conf or 0.0)]),
                 )
                 for cls, conf_sum in cur2.fetchall():
                     if cls and _severities.get(cls, 0) > 0:

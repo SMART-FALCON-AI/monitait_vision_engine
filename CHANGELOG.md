@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.308] - 2026-08-04 — Picked shipment is fully window-independent (stats panel too)
+
+- Picking a shipment showed "No stored detections in this window yet" and hid the whole Detection Insights view — even though the scatter had fetched the shipment's dots. Cause: the panel's empty-gate came from `/api/detection_stats?window=<timeframe>`, which had **no shipment filter**, so an old shipment fell outside the previously-selected window → empty → the container (scatter included) was hidden. Fix: `detection_stats` now takes `shipment`; when set, every query (by-class, timeline, impact) filters by **`WHERE shipment = %s` with no time predicate at all** — the shipment IS the filter, exactly like `/api/detection_charts`. A picked shipment is now entirely independent of the timeframe across the general + bucket + stats queries.
+- Files: `routers/timeline.py`, `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.307] - 2026-08-04 — Toolbar general-data comes from a full-window probe, not the 1h hydrate
 
 - **Parent-class dropdown never appeared in all-shipments view.** The picker (and colour-check gate) were fed by the 1h hydrate's `parent_classes_available`, which only sees parents whose `_color` rows fall in the last hour — so TB (older colour) was dropped and the list had ≤1 entry → hidden, even as TB streamed into the legend. Folded full-window **general data** into the start-of-load range probe (the "separate general-data call"): it now also returns `parent_classes_available` (full window), `parent_color_check_enabled`, and `encoder_unit`/`encoder_units_per_unit`. The frontend renders the dropdown + sets the colour-check gate from the probe, and Core prefers that full-window list so the 1h hydrate can't re-hide it.

@@ -1340,7 +1340,11 @@ async function refreshDetectionInsights() {
     let data;
     try {
         const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
-        const r = await fetch('/api/detection_stats?window=' + encodeURIComponent(window) + '&min_conf=' + minConf);
+        // 4.0.308 — a picked shipment is independent of the timeframe: pass it so the stats panel
+        // (which gates the whole Detection Insights view) filters by shipment, not the window.
+        const _shipSel = document.getElementById('insight-shipment')?.value || '';
+        const r = await fetch('/api/detection_stats?window=' + encodeURIComponent(window) + '&min_conf=' + minConf
+                              + (_shipSel ? '&shipment=' + encodeURIComponent(_shipSel) : ''));
         data = await r.json();
     } catch (e) {
         console.error('detection_stats fetch failed:', e);
