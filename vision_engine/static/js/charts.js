@@ -2501,7 +2501,14 @@ async function refreshAdvancedCharts() {
         loMs = hiMs - _windowToMs(target);
         window._mveEncWindowRange = null;
         window._mveScatterRange = null;
-        window._mveEncSpanFixed = null;   // 4.0.304 — set below when the probe yields a real encoder span
+        // 4.0.310 — reuse the LAST-GOOD encoder extent for THIS window while the probe re-runs, so a
+        // slow/failed probe on a big table (khoy's MAX(encoder) over 7d intermittently times out)
+        // can't drop the pin and let the axis shrink to whatever dots loaded (operator: "you should
+        // query the whole at the start and NOT change the span mid-load"). The probe refreshes it
+        // below when it completes; a fresh window (different key) starts unpinned.
+        window._mveEncSpanFixed = (window._mveEncSpanCacheKey === target && window._mveEncSpanCacheVal
+                                   && Number(window._mveEncSpanCacheVal.hi) > Number(window._mveEncSpanCacheVal.lo))
+                                  ? window._mveEncSpanCacheVal : null;
         try {
             // 4.0.304 — the range probe IS the "one simple response at the start that returns
             // the encoder MIN/MAX (two fields)". It used to be a SINGLE 4s attempt; on a flaky
@@ -2515,7 +2522,9 @@ async function refreshAdvancedCharts() {
             for (let _rt = 0; _rt < 3; _rt++) {
                 _rangeJson = await Promise.race([
                     fetch('/api/detection_charts?range_only=1&window=' + encodeURIComponent(target)).then(r => r.json()).catch(() => null),
-                    new Promise((res) => setTimeout(() => res(null), 4000)),
+                    // 4.0.310 — 12s (was 4s): MAX(encoder) over 7d on khoy's ~8M rows needs time; a
+                    // 4s cap made it time out intermittently → span jumped. Long enough to complete.
+                    new Promise((res) => setTimeout(() => res(null), 12000)),
                 ]);
                 if (myTicket !== _progressiveLadderTicket) return;
                 if (_rangeJson && Number.isFinite(Number(_rangeJson.data_t_min))) break;
@@ -2550,6 +2559,10 @@ async function refreshAdvancedCharts() {
                     // PIN the span. The auto-widen below anchors to this fixed extent, so the
                     // encoder axis is full-width from the first bucket and never jumps mid-load.
                     window._mveEncSpanFixed = { lo: _emn, hi: _emx };
+                    // 4.0.310 — remember it so the NEXT load of this window pins immediately, even
+                    // if that probe is slow/fails.
+                    window._mveEncSpanCacheKey = target;
+                    window._mveEncSpanCacheVal = { lo: _emn, hi: _emx };
                 }
             }
         } catch (_e) { /* keep the [now-window, now] fallback */ }
@@ -3829,10 +3842,16 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     // 100·(cell−base)/base; fall back to the raw signed Δ when pct is absent.
                     const _pct = Number.isFinite(Number(cell.delta_pct)) ? Number(cell.delta_pct) : null;
                     const _showVal = (_pct != null) ? _pct : signedDelta;
-                    const _noiseFloor = (_pct != null) ? 0.5 : 0.05;   // 0.5% vs 0.05 ΔE
+                    // 4.0.310 — the colour is stable, so % deviations are small (~0.1-1.5%). Show a
+                    // DECIMAL (0.34% / 1.2%) so they read meaningfully instead of rounding to "0",
+                    // and drop the noise floor so genuine drift isn't hidden.
+                    const _noiseFloor = (_pct != null) ? 0.02 : 0.05;
                     if (Math.abs(_showVal) >= _noiseFloor && w >= 18 && h >= 12) {
-                        const label = (_showVal > 0 ? '↑' : '↓')
-                                    + Math.abs(_showVal).toFixed(0) + (_pct != null ? '%' : '');
+                        const _av = Math.abs(_showVal);
+                        const _num = (_pct != null)
+                            ? ((_av < 1 ? _av.toFixed(2) : _av.toFixed(1)) + '%')
+                            : (_av >= 10 ? _av.toFixed(0) : _av.toFixed(1));
+                        const label = (_showVal > 0 ? '↑' : '↓') + _num;
                         // 4.0.172 — bumped contrast: 11 px (was 9), full-opacity
                         // white halo outline (was 0.75), full-black ink (was
                         // 0.95). Operator reported labels felt washed out
@@ -3845,7 +3864,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         ctx.lineWidth = 3;
                         ctx.lineJoin = 'round';
                         ctx.strokeText(label, x + w / 2, labelY);
-                        ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+                        // 4.0.310 — colour the % text by direction so it reads at a glance: RED =
+                        // warmer / higher than base (↑), BLUE = cooler / lower (↓). White halo above
+                        // keeps both legible over any cell hue.
+                        ctx.fillStyle = (_showVal > 0) ? 'rgba(220, 38, 38, 1)' : 'rgba(37, 99, 235, 1)';
                         ctx.fillText(label, x + w / 2, labelY);
                     }
                 }

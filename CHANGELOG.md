@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.310] - 2026-08-04 — Colour % labels (decimals + red/blue) + encoder-span pin survives a slow probe
+
+- **Percent labels showed "0".** The colour is stable so % deviations are small (~0.1-1.5%); `toFixed(0)` rounded them to 0. Now shown with a decimal (`0.34%` / `1.2%`) and a lower noise floor.
+- **Red/blue label text.** The % is coloured by direction — **red = warmer/higher than base (↑)**, **blue = cooler/lower (↓)** — over the white halo, so it reads at a glance instead of black.
+- **Encoder axis still jumped (87M ↔ 21M).** The start-of-load `MAX(encoder)` probe over khoy's ~8M rows intermittently timed out (4s), so the pin dropped and the axis shrank to whatever dots loaded. Now: the probe timeout is 12s, and the last-good extent is **cached per window** and reused while the probe re-runs — so the span is pinned immediately and never falls back to a shrinking axis.
+- Files: `static/js/charts.js`, `static/status.html`.
+
+
 ## [4.0.309] - 2026-08-04 — Colour baseline: like-for-like + median mode + percent labels
 
 - **"Cameras 1 & 2 all brown" fixed.** The colour cell showed a per-bin **mean** compared to a per-camera **median** baseline. On a right-skewed E distribution (avg 37-44 vs median ~30 on khoy) the mean always sits above the median, so every cell read positive → the most-skewed cameras went brown. Now the baseline is computed with the **same statistic as the cell**: `Shipment average` = mean-vs-mean, new `Shipment median` = median-vs-median. Baseline dropdown is now **Camera / Shipment average (default) / Shipment median / Reference**.
