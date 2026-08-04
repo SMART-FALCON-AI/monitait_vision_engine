@@ -470,6 +470,24 @@ def ensure_inference_encoder_column():
         cur.execute("ALTER TABLE inference_results ADD COLUMN IF NOT EXISTS capture_id INTEGER;")
         conn.commit()
         cur.close()
+        # 4.0.317 — index on (encoder_value, time). The Charts tab buckets by ENCODER, and each
+        # per-bucket query filters `encoder_value BETWEEN lo AND hi`; without this index that is a
+        # full-window scan (~12s/bucket on a 9.5M-row table → minutes for 25 buckets). With it the
+        # bucket SEEKS its rows (~0.5s). Own transaction + statement_timeout=0 so a first-time build
+        # on a big table isn't killed by the pool timeout; IF NOT EXISTS = fast no-op on later boots.
+        try:
+            cur2 = conn.cursor()
+            cur2.execute("BEGIN")
+            cur2.execute("SET LOCAL statement_timeout = 0")
+            cur2.execute("SET LOCAL lock_timeout = '20s'")
+            cur2.execute("CREATE INDEX IF NOT EXISTS idx_inference_enc_time ON inference_results (encoder_value, time);")
+            conn.commit()
+            cur2.close()
+            logger.info("inference_results (encoder_value, time) index ready")
+        except Exception as _ixe:
+            logger.warning(f"encoder index create deferred (will retry next boot): {_ixe}")
+            try: conn.rollback()
+            except Exception: pass
         _inference_encoder_col_ready = True
         logger.info("inference_results.encoder_value + pipeline_id + capture_id columns ready")
         return True
@@ -489,7 +507,16 @@ def _ensure_tables_with_retry():
         ok_ej = ensure_ejection_events_table()
         ok_enc = ensure_inference_encoder_column()
         ok_ret = _reset_inference_retention_policy()
-        if ok_ej and ok_enc and ok_ret:
+        # 4.0.318 — materialized per-shipment summary + colour-stats cache (lazy import to
+        # avoid a circular dependency at module load; best-effort so it can't block the others).
+        ok_ss = True
+        try:
+            from services.shipment_stats import ensure_shipment_stats_tables
+            ok_ss = ensure_shipment_stats_tables()
+        except Exception as _sse:
+            logger.debug(f"ensure_shipment_stats_tables deferred: {_sse}")
+            ok_ss = False
+        if ok_ej and ok_enc and ok_ret and ok_ss:
             return
         _t.sleep(3)
 

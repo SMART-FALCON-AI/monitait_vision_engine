@@ -2400,7 +2400,43 @@ def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
         # possible). Absolute is stable, Relative highlights small deltas
         # between shipments in the selected window without needing the
         # operator to hit "Calibrate".
+        # 4.0.319 — prefer the MATERIALIZED score/verdict/length from shipment_summary. A finished
+        # shipment was scored ONCE at finalize, so reading it here skips the per-shipment
+        # _compute_quality_payload recompute that made this lane slow to open. Only shipments NOT
+        # in the cache (the in-progress one, or not-yet-backfilled) fall through to a live compute,
+        # so the lane self-heals exactly as before while getting fast for everything already cached.
+        _cached_scores = {}
+        try:
+            from services.shipment_stats import get_latest_shipment_scores
+            for _cs in get_latest_shipment_scores(5000):
+                if _cs.get("shipment"):
+                    _cached_scores[_cs["shipment"]] = _cs
+        except Exception:
+            _cached_scores = {}
         for ship, first_t, last_t, n_rows in rows:
+            _cs = _cached_scores.get(ship)
+            if _cs is not None and _cs.get("score") is not None:
+                out.append({
+                    "shipment": ship,
+                    "score":            _cs.get("score"),
+                    "score_absolute":   _cs.get("score_absolute"),
+                    "score_relative":   _cs.get("score"),
+                    "impact_per_unit":  None,
+                    "impact_total":     None,
+                    "verdict":          _cs.get("verdict"),
+                    "rows":             int(n_rows or 0),
+                    "first_t": first_t.isoformat() if first_t else None,
+                    "last_t":  last_t.isoformat()  if last_t  else None,
+                    "top_defects": [],
+                    "encoder_span":            _cs.get("enc_span"),
+                    "encoder_min":             _cs.get("enc_min"),
+                    "encoder_max":             _cs.get("enc_max"),
+                    "encoder_unit":            _cs.get("length_unit") or "unit",
+                    "encoder_units_per_unit":  None,
+                    "encoder_units_per_meter": None,
+                    "cached": True,
+                })
+                continue
             try:
                 qp = _compute_quality_payload(shipment=ship, window="90d")
                 out.append({
@@ -3253,7 +3289,7 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0,
 # so quality cell K, ejection cell K, colour cell K and scatter bin K ALL cover
 # the exact same encoder/time range. One query, one binning, zero drift.
 def _dc_quality_cells(cur, axis, lo, hi, n_bins, time_sql, time_args,
-                      ship_sql, ship_args, sev_map, hidden, scale):
+                      ship_sql, ship_args, sev_map, hidden, scale, frame_cap_sql=""):
     """Severity-weighted quality score per bin over [lo, hi] with n_bins.
 
     Returns a DENSE list [{bucket, score, top_class, n}] for bins 0..n_bins-1
@@ -3272,24 +3308,32 @@ def _dc_quality_cells(cur, axis, lo, hi, n_bins, time_sql, time_args,
     notnull = "AND encoder_value IS NOT NULL " if axis == "encoder" else ""
     hp_sql = " AND (det->>'name') <> ALL(%s)" if hidden else ""
     hp_args = [hidden] if hidden else []
+    # 4.0.317 — cap SOURCE frames (capped CTE + LIMIT) BEFORE the jsonb expand so a per-bucket
+    # quality query stays sub-second. Bin scores are unchanged by the cap (the impact/score is a
+    # weighted average). No-op when frame_cap_sql is "" (full-window fetch).
     cur.execute(
         f"""
+        WITH capped AS (
+          SELECT encoder_value, time, detections
+          FROM inference_results
+          WHERE {time_sql}
+            {notnull}
+            {ship_sql}
+          {frame_cap_sql}
+        )
         SELECT bucket, name, COUNT(*) AS n, AVG((det->>'confidence')::float) AS avg_conf
         FROM (
           SELECT LEAST({n_bins} - 1, GREATEST(0,
                  FLOOR((({val} - %s)::numeric * {n_bins}) / (%s - %s))))::int AS bucket,
                  (det->>'name') AS name, det
-          FROM inference_results, LATERAL jsonb_array_elements(detections) det
-          WHERE {time_sql}
-            {notnull}
-            AND (det->>'name') IS NOT NULL
+          FROM capped, LATERAL jsonb_array_elements(detections) det
+          WHERE (det->>'name') IS NOT NULL
             AND COALESCE(det->>'name', '') !~ '^_'
             {hp_sql}
-            {ship_sql}
         ) src
         GROUP BY bucket, name
         """,
-        [lo, hi, lo] + list(time_args) + hp_args + list(ship_args),
+        list(time_args) + list(ship_args) + [lo, hi, lo] + hp_args,
     )
     bd = {}
     for b, name, n, ac in cur.fetchall():
@@ -3363,7 +3407,7 @@ def _dc_ejection_cells(cur, axis, lo, hi, n_bins, time_sql, time_args, ship_sql,
     return cells
 
 
-def _dc_shipment_cells(cur, axis, lo, hi, n_bins, time_sql, time_args, ship_sql, ship_args):
+def _dc_shipment_cells(cur, axis, lo, hi, n_bins, time_sql, time_args, ship_sql, ship_args, frame_cap_sql=""):
     """DOMINANT shipment per bin over [lo, hi] — same bounds + bin formula as the
     quality / ejection / colour cells, so the shipment lane bins line up 1:1 with
     the scatter + the other strips and stream the same way. Returns a DENSE list
@@ -3391,22 +3435,30 @@ def _dc_shipment_cells(cur, axis, lo, hi, n_bins, time_sql, time_args, ship_sql,
     # the beginning and the end?" Raw FLOOR + a bucket-range filter keeps only the
     # bins that actually fall on the scatter, so the lane fills right→left in
     # lock-step with the dots and never smears to an edge.
+    # 4.0.317 — cap SOURCE rows per bucket (capped CTE + LIMIT). The dominant shipment in a bin
+    # is unchanged by sampling — the biggest shipment stays biggest — so a dense bucket (khoy's
+    # enc[0,3.7M] = ~865k rows → 1.5s) drops to sub-second. No-op when frame_cap_sql is "".
     cur.execute(
         f"""
-        SELECT bucket, shipment, COUNT(*) AS n
-        FROM (
-          SELECT FLOOR((({val} - %s)::numeric * {n_bins}) / (%s - %s))::int AS bucket,
-                 shipment
+        WITH capped AS (
+          SELECT encoder_value, time, shipment
           FROM inference_results
           WHERE {time_sql}
             {notnull}
             AND shipment IS NOT NULL AND shipment <> ''
             {ship_sql}
+          {frame_cap_sql}
+        )
+        SELECT bucket, shipment, COUNT(*) AS n
+        FROM (
+          SELECT FLOOR((({val} - %s)::numeric * {n_bins}) / (%s - %s))::int AS bucket,
+                 shipment
+          FROM capped
         ) src
         WHERE bucket >= 0 AND bucket < {n_bins}
         GROUP BY bucket, shipment
         """,
-        [lo, hi, lo] + list(time_args) + list(ship_args),
+        list(time_args) + list(ship_args) + [lo, hi, lo],
     )
     bd = {}
     for b, sh, n in cur.fetchall():
@@ -3452,7 +3504,7 @@ def _dc_load_severity():
 
 
 @router.get("/api/detection_charts")
-def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0, range_only: int = 0, enc_lo: float = 0, enc_hi: float = 0):
+def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0, range_only: int = 0, enc_lo: float = 0, enc_hi: float = 0, frame_cap: int = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
 
     Returns, scoped to an optional shipment_id and a time window:
@@ -3490,9 +3542,17 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
     # different dashboards with different filters get different cached
     # results but the same dashboard polling on a 5-s interval only hits
     # the DB once per 20-s window instead of every poll.
+    # 4.0.317 — the key MUST include every param that changes the response. It was missing
+    # enc_lo/enc_hi (added in 4.0.316) + parent_class + the colour/strip binning params, so all
+    # of an encoder ladder's per-bucket calls (same window, DIFFERENT enc range) collided on one
+    # key: the first bucket computed and the other 24 got its cached payload — every column
+    # painted the first bucket's dots (they all clustered at one encoder position). This was the
+    # real "only the newest bucket loads" bug, on top of the per-bucket slowness.
     _cache_key = _endpoint_cache_key(
         "dc", window, shipment, min_conf, baseline, phase, bins,
         since_ms, until_ms, scatter_only, dot_cap,
+        enc_lo, enc_hi, parent_class, color_axis, bin_ref_lo, bin_ref_hi,
+        include_strips, include_color_slice, range_only, frame_cap,
     )
     _cached = _endpoint_cache_get(_cache_key)
     if _cached is not None:
@@ -3564,6 +3624,19 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
     # differs. `bucket` shrinks to 1 minute so the tiny slice still splits
     # into readable time_bucket rows if the client happens to use them.
     _use_slice = bool(since_ms) and bool(until_ms) and int(until_ms) > int(since_ms)
+    # 4.0.317 — per-bucket FRAME CAP. A single bucket's colour/quality query jsonb-expands
+    # every frame the bucket touches; on khoy's 9.5M-row 7d window that is ~2-7s per bucket
+    # (× 25 buckets = minutes). But a bin's mean colour / quality score is identical whether
+    # you expand 4k frames or 400k, so cap the SOURCE frames per bucket → each bucket drops to
+    # ~0.1-0.8s and 25 buckets stream in ~30s. Cap only per-bucket (slice) queries; a full-
+    # window fetch is never capped. Frontend may override; default kicks in on any slice.
+    try:
+        _frame_cap = int(frame_cap or 0)
+    except Exception:
+        _frame_cap = 0
+    if _frame_cap <= 0 and _use_slice:
+        _frame_cap = 8000
+    _frame_cap_sql = (" LIMIT %d" % int(_frame_cap)) if _frame_cap > 0 else ""
     if _use_slice:
         bucket = "1 minute"
     empty = {"shipments": [], "size_over_time": [], "confidence_over_time": [],
@@ -3604,13 +3677,21 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # mostly empty when the line ran only recently. Pure indexed aggregate — no jsonb
         # expansion — so it returns in ms even on a huge hypertable.
         if int(range_only or 0):
+            # 4.0.316 — a PICKED shipment's extent is TIME-INDEPENDENT (operator: "the shipment
+            # selection should be independent entirely from the window timeframe"). Scope the
+            # probe to shipment ONLY so its full encoder [min,max] is returned even when the
+            # shipment predates the selected window. All-shipments keeps the window predicate.
+            if shipment:
+                _ro_where, _ro_args = "shipment = %s", [shipment]
+            else:
+                _ro_where, _ro_args = "time > NOW() - INTERVAL %s", [interval]
             cur.execute(
                 f"SELECT EXTRACT(EPOCH FROM MIN(time)) * 1000.0, "
                 f"       EXTRACT(EPOCH FROM MAX(time)) * 1000.0, "
                 f"       MIN(encoder_value), MAX(encoder_value) "
                 f"FROM inference_results "
-                f"WHERE time > NOW() - INTERVAL %s {ship_clause}",
-                tuple([interval] + ([shipment] if shipment else [])),
+                f"WHERE {_ro_where}",
+                tuple(_ro_args),
             )
             _rr = cur.fetchone() or (None, None, None, None)
             # 4.0.313 — ROBUST encoder max. The raw MAX is dominated by rare runaway rolls (one
@@ -3620,23 +3701,11 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # extent is the TYPICAL roll length: MAX encoder PER shipment, then the 90th percentile
             # ACROSS shipments — one runaway roll can't set the axis. A single shipment (picked, or a
             # one-roll window) yields its own max, so nothing is clipped there.
+            # 4.0.316 — use the TRUE encoder MAX. 4.0.314/315 "clipped" it thinking a 93M reading was
+            # a runaway-roll outlier — but the data genuinely spans there: on khoy 50% of rows sit
+            # above 25M encoder, so clipping dropped half the data. The encoder-range bucket queries
+            # are ~1s each, so bucketing the full [min,max] is fine.
             _enc_max_robust = _rr[3]
-            try:
-                cur.execute(
-                    f"""SELECT percentile_cont(0.90) WITHIN GROUP (ORDER BY roll_max)
-                        FROM (SELECT MAX(encoder_value) AS roll_max
-                              FROM inference_results
-                              WHERE time > NOW() - INTERVAL %s {ship_clause}
-                                AND encoder_value IS NOT NULL
-                              GROUP BY shipment) _rolls
-                        WHERE roll_max IS NOT NULL""",
-                    tuple([interval] + ([shipment] if shipment else [])),
-                )
-                _rmx = cur.fetchone()
-                if _rmx and _rmx[0] is not None and (_rr[2] is None or float(_rmx[0]) > float(_rr[2])):
-                    _enc_max_robust = _rmx[0]
-            except Exception as _rme:
-                logger.debug(f"robust enc max failed: {_rme}")
             # 4.0.307 — general chart metadata over the FULL window, folded into this start-of-
             # load probe so the toolbar (parent-class dropdown, colour-check gate, unit label) no
             # longer depends on the 1h hydrate — which misses parents whose _color rows are older
@@ -3795,8 +3864,16 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             WITH recent AS (
                 SELECT time, shipment, detections, image_path, pipeline_id FROM inference_results
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}{_enc_filter_sql}
-                ORDER BY time DESC
-                LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
+                  AND %s   -- 4.0.317: FALSE for an ENCODER bucket (it reads camera_scatter_encoder, not
+                           -- this time-x scatter) → CTE is empty and the whole query is trivial, so a
+                           -- per-bucket encoder request no longer pays for BOTH scatter explodes.
+                { '' if _use_slice else 'ORDER BY time DESC' }
+                LIMIT { 20000 if _use_slice else 50000 }  -- v4.0.78: bound the CTE. 4.0.317: in slice
+                             -- (per-bucket) mode DROP the ORDER BY time DESC — the (encoder_value,time)
+                             -- index seeks the bucket's rows, but sorting ALL of a dense column by time
+                             -- to pick the newest 50k was ~10s. Also a tighter 20k slice cap: a dense
+                             -- column's cold random reads dominate, and 20k frames still yield plenty
+                             -- of defects for the per-class dot_cap. A per-bucket column doesn't need "newest".
             ),
             exploded AS (
                 SELECT EXTRACT(EPOCH FROM time) * 1000 AS x_ms,
@@ -3821,7 +3898,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             ORDER BY t DESC
             LIMIT 6000
             """,
-            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + _enc_filter_args + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
+            (([int(since_ms), int(until_ms)] if _use_slice else [interval]) + ([shipment] if shipment else []) + _enc_filter_args + [not bool(_enc_filter_args)] + [float(min_conf or 0.0)] + _parent_filter_args + [int(dot_cap)]),
         )
         camera_scatter = [
             {"x": int(x), "y": cam, "cls": cls, "r": round((conf or 0), 3),
@@ -3838,8 +3915,10 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 SELECT time, shipment, detections, image_path, encoder_value, pipeline_id FROM inference_results
                 WHERE { 'time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)' if _use_slice else 'time > NOW() - INTERVAL %s' } {ship_clause}
                   AND encoder_value IS NOT NULL{_enc_filter_sql}
-                ORDER BY time DESC
-                LIMIT 50000  -- v4.0.78: bound the CTE so full-time-range scan can't blow the query
+                { '' if _use_slice else 'ORDER BY time DESC' }
+                LIMIT { 20000 if _use_slice else 50000 }  -- v4.0.78: bound the CTE. 4.0.317: drop ORDER BY
+                             -- in slice mode + tighter 20k slice cap so a dense per-bucket column
+                             -- seeks+stops instead of sorting/reading all rows (~10s cold).
             ),
             exploded AS (
                 SELECT encoder_value AS enc,
@@ -3930,17 +4009,22 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                         if _axis == "time":
                             _slice_cur.execute(
                                 f"""
-                                WITH color_rows AS (
+                                WITH src AS (
+                                    SELECT time, detections, image_path
+                                    FROM inference_results
+                                    WHERE time >= to_timestamp(%s / 1000.0)
+                                      AND time <  to_timestamp(%s / 1000.0)
+                                      {ship_clause}
+                                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                                    {_frame_cap_sql}
+                                ),
+                                color_rows AS (
                                     SELECT EXTRACT(EPOCH FROM time) * 1000.0 AS t_ms,
                                         (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
                                         (elem->>'L')::float AS L, (elem->>'E')::float AS E,
                                         (elem->>'phase') AS phase
-                                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
-                                    WHERE time >= to_timestamp(%s / 1000.0)
-                                      AND time <  to_timestamp(%s / 1000.0)
-                                      {ship_clause}
-                                      AND elem->>'name' = '_color'
-                                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                                    FROM src, LATERAL jsonb_array_elements(detections) elem
+                                    WHERE elem->>'name' = '_color'
                                       {_phase_cl_local}{_parent_cl_local}
                                 ),
                                 binned AS (
@@ -3966,20 +4050,30 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                                 [int(since_ms), int(until_ms)] + ([shipment] if shipment else []) + _phase_ar_local + _parent_ar_local + [_lo, _hi, _lo],
                             )
                         else:
+                            # 4.0.317 — cap SOURCE frames (src CTE + LIMIT) BEFORE the jsonb
+                            # expand so a per-bucket colour query stays ~0.1-0.8s. The bin means
+                            # are unchanged by the cap (spatial sample within the column via the
+                            # (encoder_value,time) index). Client recomputes delta vs the pooled
+                            # baseline, so the per-column base_E here is just a placeholder.
                             _slice_cur.execute(
                                 f"""
-                                WITH color_rows AS (
+                                WITH src AS (
+                                    SELECT encoder_value, detections, image_path
+                                    FROM inference_results
+                                    WHERE time >= to_timestamp(%s / 1000.0)
+                                      AND time <  to_timestamp(%s / 1000.0)
+                                      {ship_clause}{_enc_filter_sql}
+                                      AND encoder_value IS NOT NULL
+                                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                                    {_frame_cap_sql}
+                                ),
+                                color_rows AS (
                                     SELECT encoder_value AS enc,
                                         (regexp_match(image_path, '_p[0-9]+_([0-9]+)\\.jpg$'))[1]::int AS cam,
                                         (elem->>'L')::float AS L, (elem->>'E')::float AS E,
                                         (elem->>'phase') AS phase
-                                    FROM inference_results, LATERAL jsonb_array_elements(detections) elem
-                                    WHERE time >= to_timestamp(%s / 1000.0)
-                                      AND time <  to_timestamp(%s / 1000.0)
-                                      {ship_clause}
-                                      AND elem->>'name' = '_color'
-                                      AND encoder_value IS NOT NULL
-                                      AND image_path ~ '_p[0-9]+_[0-9]+\\.jpg$'
+                                    FROM src, LATERAL jsonb_array_elements(detections) elem
+                                    WHERE elem->>'name' = '_color'
                                       {_phase_cl_local}{_parent_cl_local}
                                 ),
                                 binned AS (
@@ -4002,7 +4096,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                                      ON cpb.cam = b.cam AND cpb.phase IS NOT DISTINCT FROM b.phase
                                 GROUP BY b.cam, b.bin ORDER BY b.cam, b.bin
                                 """,
-                                [int(since_ms), int(until_ms)] + ([shipment] if shipment else []) + _phase_ar_local + _parent_ar_local + [_lo, _hi, _lo],
+                                [int(since_ms), int(until_ms)] + ([shipment] if shipment else []) + _enc_filter_args + _phase_ar_local + _parent_ar_local + [_lo, _hi, _lo],
                             )
                         for cam, bin_idx, mL, mE, n, de, dpct in _slice_cur.fetchall():
                             _color_slice_cells.append({
@@ -4035,8 +4129,13 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     _s_lo = float(bin_ref_lo or 0.0)
                     _s_hi = float(bin_ref_hi or 0.0)
                     _s_nbins = max(4, min(192, int(bins) if bins else 48))
-                    _s_time_sql = "time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)"
-                    _s_time_args = [int(since_ms), int(until_ms)]
+                    # 4.0.316 — append the encoder-range filter so each ENCODER bucket's quality /
+                    # ejection / shipment strip is bounded to that bucket (fast, ~1s) — same as the
+                    # dots + colour. Without it, the encoder ladder had to aggregate the whole window
+                    # per strip (heavy → empty lane/strips). No-op when enc_lo/enc_hi absent.
+                    _s_time_sql = ("time >= to_timestamp(%s / 1000.0) AND time < to_timestamp(%s / 1000.0)"
+                                   + _enc_filter_sql)
+                    _s_time_args = [int(since_ms), int(until_ms)] + _enc_filter_args
                     _s_ship_sql = ship_clause  # "AND shipment = %s" or ""
                     _s_ship_args = [shipment] if shipment else []
                     _s_cur = conn.cursor()
@@ -4045,13 +4144,13 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                         _q_cells = _dc_quality_cells(
                             _s_cur, _s_axis, _s_lo, _s_hi, _s_nbins,
                             _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args,
-                            _sev_map, _hidden, _scale)
+                            _sev_map, _hidden, _scale, _frame_cap_sql)
                         _e_cells = _dc_ejection_cells(
                             _s_cur, _s_axis, _s_lo, _s_hi, _s_nbins,
                             _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args)
                         _sh_cells = _dc_shipment_cells(
                             _s_cur, _s_axis, _s_lo, _s_hi, _s_nbins,
-                            _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args)
+                            _s_time_sql, _s_time_args, _s_ship_sql, _s_ship_args, _frame_cap_sql)
                     finally:
                         _s_cur.close()
                     _payload["quality_slice"] = {
@@ -5055,6 +5154,37 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 release_db_connection(conn)
             except Exception:
                 pass
+
+
+@router.get("/api/shipment_baseline")
+def shipment_baseline_endpoint(request: Request, shipment: str = "", window: str = "7d",
+                               phase: str = "", parent_class: str = ""):
+    """4.0.318b — per-camera colour baseline from the materialized cache (instant table read).
+
+    A picked FINISHED shipment → its own cached stats; all-shipments → pooled over the window's
+    finished shipments. `current: true` with empty baselines means the pick is the in-progress
+    shipment (not finalized) → the client shows ABSOLUTE values + neighbour-bucket deltas instead
+    of a baseline comparison. Replaces the old per-bucket client-side baseline accumulation.
+    """
+    try:
+        from services.shipment_stats import get_cached_baseline
+        return JSONResponse(content=get_cached_baseline(
+            shipment=shipment, window=window, phase=phase, parent_class=parent_class))
+    except Exception as e:
+        logger.debug(f"shipment_baseline endpoint failed: {e}")
+        return JSONResponse(content={"source": "none", "current": False, "baselines": {}})
+
+
+@router.get("/api/shipment_scores")
+def shipment_scores_endpoint(request: Request, limit: int = 50):
+    """4.0.318b — the Score-per-shipment lane, read straight from shipment_summary (latest N).
+    No per-shipment recompute — a finished shipment's score was materialized at finalize time."""
+    try:
+        from services.shipment_stats import get_latest_shipment_scores
+        return JSONResponse(content={"shipments": get_latest_shipment_scores(int(limit or 50))})
+    except Exception as e:
+        logger.debug(f"shipment_scores endpoint failed: {e}")
+        return JSONResponse(content={"shipments": []})
 
 
 @router.get("/api/shipment_spans")

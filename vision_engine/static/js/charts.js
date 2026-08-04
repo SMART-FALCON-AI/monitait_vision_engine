@@ -2205,6 +2205,57 @@ function _renderStripsFromPayload(data, axis) {
 }
 window._renderStripsFromPayload = _renderStripsFromPayload;
 
+// 4.0.316 — re-derive the colour baseline over EVERY column seen so far. The colour slices
+// stream one encoder column at a time (enc-filtered so they don't time out on a 9.5M-row
+// window), but a single column's backend baseline is just that column's own mean → its
+// delta collapses toward 0. The camera/shipment baseline the operator compares against is a
+// per-camera MEAN, which is additive: accumulate Σ(E·n) and Σn across all cached cells, then
+// set each cell's delta_e / delta_pct against that pooled baseline. This is EXACT for the
+// camera / shipment-average / reference baselines (all per-cam AVG server-side) and a close
+// approximation for shipment-median during a progressive load. For a single full-span fetch
+// (periodic refresh) it reproduces the backend's own delta, so it's a no-op there.
+function _recomputeProgressiveColorDeltas() {
+    // 4.0.319 — prefer the CACHED baseline from shipment_stats (window._mveColorBaselines,
+    // fetched once at load start). It's exact (incl. median) and stable — colours don't drift
+    // as buckets stream. Fall back to the per-bucket pooled accumulation only when the cache is
+    // absent (the in-progress shipment, or before backfill has run). `_mveColorBaselineCurrent`
+    // marks the in-progress shipment: no baseline exists, so cells stay ABSOLUTE (no delta paint).
+    const cached = window._mveColorBaselines;
+    const stat = (String(localStorage.getItem('mve_heatmap_baseline') || '').toLowerCase() === 'shipment_median')
+        ? 'median' : 'avg';
+    const baseByCam = {};
+    if (cached && Object.keys(cached).length) {
+        for (const cam in cached) {
+            const v = Number(cached[cam] && cached[cam][stat]);
+            if (Number.isFinite(v)) baseByCam[cam] = v;
+        }
+    } else if (!window._mveColorBaselineCurrent) {
+        // pooled Σ(E·n)/Σn across every cached cell (interim until the table read lands)
+        const acc = new Map();
+        for (const c of _progressiveColorCells.values()) {
+            const n = Number(c.n) || 0, e = Number(c.E);
+            if (!(n > 0) || !Number.isFinite(e)) continue;
+            const a = acc.get(c.cam) || { sumE: 0, n: 0 };
+            a.sumE += e * n; a.n += n; acc.set(c.cam, a);
+        }
+        for (const [cam, a] of acc) if (a.n > 0) baseByCam[cam] = a.sumE / a.n;
+    }
+    for (const c of _progressiveColorCells.values()) {
+        const base = baseByCam[c.cam];
+        const e = Number(c.E);
+        if (base == null || !Number.isFinite(base) || base === 0 || !Number.isFinite(e)) {
+            // 4.0.319 — in-progress shipment (no baseline): show the ABSOLUTE colour value, no
+            // delta. `_absolute` tells the heatmap renderer to label the raw E instead of a %.
+            if (window._mveColorBaselineCurrent) { c._absolute = true; c.delta_e = 0; c.delta_pct = 0; }
+            continue;
+        }
+        c._absolute = false;
+        c.delta_e = Math.round((e - base) * 100) / 100;
+        c.delta_pct = Math.round((100 * (e - base) / base) * 10) / 10;
+    }
+}
+window._recomputeProgressiveColorDeltas = _recomputeProgressiveColorDeltas;
+
 // Per-bucket streamer for the quality + ejection strips — and folds in colour
 // so ONE fetch fills all three (this superseded the old colour-only streamer).
 // Called newest→oldest by the ladder AND once over the full domain by the
@@ -2266,9 +2317,20 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preDa
         const b = Math.floor((enc - r.lo) / (r.hi - r.lo) * r.n_bins);
         return Math.max(0, Math.min(r.n_bins - 1, b));
     };
-    // Colour (only when streaming it — picked shipment keeps Core's full set).
-    if (colorOn && data.color_slice && Array.isArray(data.color_slice.cells)) {
+    // Colour: paint whenever THIS payload actually carried a colour slice. The caller
+    // requests the slice only when it should stream — the all-shipments window AND (4.0.316)
+    // an encoder-bucketed pick. A picked shipment on the TIME ladder gets no slice here and
+    // keeps Core's full set. Keying off the payload (not `!shipment`) lets a pick's per-column
+    // colour cells render while never fetching them on the time-ladder path.
+    if ((window._mveColorCheckEnabled === true) && data.color_slice && Array.isArray(data.color_slice.cells)) {
         for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
+        // 4.0.316 — RE-DERIVE the baseline over ALL columns seen so far. Each column's fetch is
+        // enc-filtered (fast, no timeout) but the backend's delta_pct in it is bucket-local — its
+        // baseline is just that one column's mean, so it collapses toward 0. Mean IS additive, so
+        // Σ(E·n)/Σn over every column's cells recovers the TRUE full-span per-camera baseline (the
+        // "camera / shipment average" the operator compares against). Recompute each cell's delta
+        // against it; the colours refine as later columns stream and converge to the correct value.
+        _recomputeProgressiveColorDeltas();
         if (_insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap) {
             _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values())
                 .map(c => (typeof c._enc === 'number') ? Object.assign({}, c, { bin: _reBin(c._enc) }) : c);
@@ -2306,9 +2368,21 @@ window._extendStripsFromBucket = _extendStripsFromBucket;
 // the same ref, and _repaintProgressiveStrips re-bins by absolute _enc over the
 // current display domain — so positions stay correct no matter the load order.
 // Time axis is already pinned to [loMs,hiMs] up front, so its ref is the range as-is.
-async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket) {
+async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, encLo, encHi) {
     if (!_insightCameraScatter) return;
-    const colorOn = (window._mveColorCheckEnabled === true) && !shipment;
+    // 4.0.316 — when an encoder range is supplied, this bucket is an ENCODER column:
+    // dots + 4 strips + colour are all fetched for the SAME [encLo,encHi) slice. The enc
+    // filter is on the top-level encoder_value column, so it cuts rows BEFORE the jsonb
+    // expand → each column is ~1/N of the rows and returns in ~1s, where a single full-span
+    // colour scan over khoy's 9.5M-row 7d window timed out (leaving colour empty).
+    const _encBucket = (encLo != null && encHi != null
+        && Number.isFinite(encLo) && Number.isFinite(encHi) && encHi > encLo);
+    // Colour streams per column for the encoder ladder AND per bucket for the all-shipments
+    // time ladder. The per-bucket baseline the backend returns is WRONG (it's that column's
+    // own average) — the client ignores backend delta and re-derives the true full-span
+    // per-camera baseline by accumulating Σ(E·n)/Σn across every column (see the colour
+    // block in _extendStripsFromBucket). A picked shipment on the TIME ladder keeps Core's set.
+    const colorOn = (window._mveColorCheckEnabled === true) && (_encBucket || !shipment);
     const rng = _progressiveColorRange;
     const axisIsEncoder = !!(rng && rng.axis !== 'time');
     // Stable bin ref for the slices. Only for the ALL-shipments encoder window (a
@@ -2331,6 +2405,9 @@ async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket) {
               '&min_conf=' + minConf +
               '&scatter_only=1&dot_cap=' + _fetchCap +
               '&include_strips=1';
+    // 4.0.316 — bound the WHOLE payload (dots + strips + colour slice) to this
+    // encoder column so N buckets cover the true [min,max] span with no clipping.
+    if (_encBucket) url += '&enc_lo=' + encLo + '&enc_hi=' + encHi;
     const _refOk = stripRef && Number(stripRef.hi) > Number(stripRef.lo);
     if (_refOk) {
         // strips (quality/ejection/shipment) always need the bin ref; colour is added only when on.
@@ -2394,6 +2471,27 @@ async function refreshAdvancedCharts() {
     const myTicket = _progressiveLadderTicket;
     _ladderActive = true;
     window._mveScatterRange = null;  // 4.0.256 — only the all-shipments window branch sets this
+    // 4.0.319 — fetch the CACHED colour baseline once at load start (instant shipment_stats read),
+    // in parallel with everything else. Clear first so a stale baseline from the previous view
+    // can't paint this one; _recomputeProgressiveColorDeltas picks it up as soon as it arrives and
+    // falls back to per-bucket pooling until then. `current:true` (in-progress shipment) → absolute.
+    window._mveColorBaselines = null;
+    window._mveColorBaselineCurrent = false;
+    try {
+        const _blPhase = localStorage.getItem('mve_heatmap_phase') || '';
+        const _blParent = localStorage.getItem('mve_heatmap_parent_class') || '';
+        const _blUrl = '/api/shipment_baseline?shipment=' + encodeURIComponent(shipment || '')
+            + '&window=' + encodeURIComponent(target)
+            + '&phase=' + encodeURIComponent(_blPhase)
+            + '&parent_class=' + encodeURIComponent(_blParent);
+        fetch(_blUrl).then(r => r.json()).then(j => {
+            if (myTicket !== _progressiveLadderTicket) return;   // superseded
+            window._mveColorBaselineCurrent = !!(j && j.current);
+            window._mveColorBaselines = (j && j.baselines && Object.keys(j.baselines).length) ? j.baselines : null;
+            try { _recomputeProgressiveColorDeltas(); } catch (_) {}
+            if (_insightCameraScatter) { try { _insightCameraScatter.update('none'); } catch (_) {} }
+        }).catch(() => { /* no cache yet (backfill running) → per-bucket pooling stays */ });
+    } catch (_be) { /* non-fatal */ }
     // 4.0.312 — do NOT clear _mveParentClassesFull here. The parent list is a sticky config
     // property that must persist across loads (operator: "keep the parent list no matter what").
     try {
@@ -2472,6 +2570,9 @@ async function refreshAdvancedCharts() {
 
     // Determine the ladder's [loMs, hiMs] time range.
     let hiMs, loMs;
+    // 4.0.316 — a picked shipment's own encoder [min,max] (populated below when the
+    // axis is encoder) so the pick buckets by the SELECTED axis, same as all-shipments.
+    let _pickEncSpan = null;
     if (shipment) {
         // Authoritative span from shipment_spans (fast, ~70 ms).
         try {
@@ -2493,6 +2594,27 @@ async function refreshAdvancedCharts() {
                 catch (_e) {}
             }
             return;
+        }
+        // 4.0.316 — picked shipment + encoder axis: probe THIS shipment's own encoder
+        // extent (time-independent) so the ladder buckets by the selected axis exactly as
+        // the all-shipments view does. Failure → _pickEncSpan stays null → time-ladder
+        // fallback (the previously-working path), so a slow probe can never blank a pick.
+        if (_insightAxis === 'encoder') {
+            try {
+                const _per = await Promise.race([
+                    fetch('/api/detection_charts?range_only=1&shipment=' + encodeURIComponent(shipment))
+                        .then(r => r.json()).catch(() => null),
+                    new Promise((res) => setTimeout(() => res(null), 12000)),
+                ]);
+                if (myTicket !== _progressiveLadderTicket) return;
+                if (_per) {
+                    const _pmn = Number(_per.data_enc_min), _pmx = Number(_per.data_enc_max);
+                    if (Number.isFinite(_pmn) && Number.isFinite(_pmx) && _pmx > _pmn) {
+                        _pickEncSpan = { lo: _pmn, hi: _pmx };
+                        window._mveEncSpanFixed = { lo: _pmn, hi: _pmx };  // pin the axis for the pick too
+                    }
+                }
+            } catch (_e) { /* non-fatal — falls back to the time-ladder */ }
         }
     } else {
         // 4.0.256 — operator spec: bucket the ACTUAL data extent of the SELECTED axis,
@@ -2636,26 +2758,37 @@ async function refreshAdvancedCharts() {
     // a stationary line where no encoder span exists) keeps the time ladder — time IS
     // monotonic, so its buckets already map 1:1 to columns.
     const _fxEnc = window._mveEncSpanFixed;
-    const _useEncoderBuckets = (!shipment && _insightAxis === 'encoder'
-        && _fxEnc && Number.isFinite(_fxEnc.lo) && Number.isFinite(_fxEnc.hi) && _fxEnc.hi > _fxEnc.lo);
+    // 4.0.316 — ONE rule for both views: if the X-axis is ENCODER and we have that axis's
+    // [min,max] (window extent for all-shipments, the shipment's own extent for a pick), bucket
+    // the ENCODER range. Each column fetches its dots + strips + shipment-lane + colour together,
+    // filtered to [encLo,encHi), newest column first. Time axis (or no encoder span) → time-ladder.
+    const _encSpan = shipment
+        ? _pickEncSpan
+        : ((_fxEnc && Number.isFinite(_fxEnc.lo) && Number.isFinite(_fxEnc.hi) && _fxEnc.hi > _fxEnc.lo)
+           ? { lo: _fxEnc.lo, hi: _fxEnc.hi } : null);
+    const _useEncoderBuckets = (_insightAxis === 'encoder' && !!_encSpan);
     try {
         if (_useEncoderBuckets) {
-            const _eLo = _fxEnc.lo, _eHi = _fxEnc.hi;
+            const _eLo = _encSpan.lo, _eHi = _encSpan.hi;
             const _encStep = (_eHi - _eLo) / bins;
-            // Pin the strip/colour domain to the SAME fixed span, then fetch strips + colour
-            // ONCE over the full window (all N bins in one aggregate — cheaper than 50 slices).
+            // Pin the strip/colour bin domain to this SAME span so every column's cells land
+            // in the right bin. Each bucket fetches its dots + 4 strips + colour for its own
+            // [encLo,encHi) slice (~1s each) instead of one full-window aggregate that timed
+            // out on khoy's 9.5M-row 7d span and left the strips/lane/colour empty. The colour
+            // baseline is re-derived client-side across columns (mean is additive), so per-column
+            // fetching still yields the correct full-span per-camera baseline.
             _progressiveColorRange = { axis: 'encoder', lo: _eLo, hi: _eHi, n_bins: bins };
-            try { await _extendStripsFromBucket(loMs, hiMs, shipment, myTicket); }
-            catch (_e) { /* strips non-fatal */ }
             for (let _bi = bins - 1; _bi >= 0; _bi--) {   // rightmost (highest encoder) column first
                 if (myTicket !== _progressiveLadderTicket) return;
                 if (!_insightCameraScatter) break;
-                if ((winSel.value || '24h') !== target) break;
+                if (!shipment && (winSel.value || '24h') !== target) break;
+                if (shipment && ((document.getElementById('insight-shipment') || {}).value || '') !== shipment) break;
                 if (_insightAxis !== 'encoder') break;    // operator flipped the axis mid-load
                 const _bLo = _eLo + _bi * _encStep;
                 // widen the last (rightmost) column slightly so the exact enc_max is included
                 const _bHi = (_bi === bins - 1) ? (_eHi + Math.max(1, Math.abs(_eHi) * 1e-6)) : (_eLo + (_bi + 1) * _encStep);
-                try { await _extendScatterFromBucket(loMs, hiMs, shipment, minConf, myTicket, null, _bLo, _bHi); }
+                // ONE atomic call per encoder column — dots + 4 strips + colour, enc-filtered.
+                try { await _extendBucketAll(loMs, hiMs, shipment, minConf, myTicket, _bLo, _bHi); }
                 catch (_e) { /* per-column failure is non-fatal */ }
                 bucketCount += 1;
             }

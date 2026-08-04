@@ -268,6 +268,14 @@ async def _scheduler_loop(app):
     global _stop_event
     _stop_event = asyncio.Event()
     logger.info("notifications scheduler started")
+    # 4.0.318 — one-time historical backfill of the shipment_summary/shipment_stats cache,
+    # off-thread + idempotent (skip-if-exists), skipping the in-progress shipment. After this
+    # runs once, finished-shipment baselines/scores are instant table reads forever.
+    try:
+        from services.shipment_stats import start_backfill_async
+        start_backfill_async(_read_current_shipment())
+    except Exception as _bfe:
+        logger.debug(f"shipment_stats backfill launch failed: {_bfe}")
     last_seen_shipment = ""  # initialised on first tick
     while not _stop_event.is_set():
         try:
@@ -282,6 +290,17 @@ async def _scheduler_loop(app):
                 last_seen_shipment != "" and current_shipment != last_seen_shipment
             )
             closed_shipment = last_seen_shipment if shipment_changed else ""
+
+            # 4.0.318 — a shipment just finalized (any close path funnels through this Redis-key
+            # change). Materialize its summary + per-cam/phase/parent colour stats ONCE, off-thread
+            # so this 60s tick never blocks on the DB compute. Finished shipments are immutable, so
+            # future baseline/score queries read the tiny table instead of re-scanning millions of rows.
+            if closed_shipment and closed_shipment not in ("", "no_shipment"):
+                try:
+                    from services.shipment_stats import finalize_shipment_async
+                    finalize_shipment_async(closed_shipment)
+                except Exception as _sse:
+                    logger.debug(f"shipment_stats finalize hook failed: {_sse}")
 
             for sched in schedules:
                 if not sched.get("enabled"):
