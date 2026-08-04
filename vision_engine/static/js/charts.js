@@ -1016,47 +1016,31 @@ window._renderPhaseButtons = _renderPhaseButtons;
 // or _root-only sites don't need the picker). Buttons: leading "All",
 // then one per discovered parent_class name.
 function _renderParentClassButtons(available) {
+    // 4.0.306 — now a DROPDOWN (was a button row) to match the other toolbar pickers.
     const wrap = document.getElementById('hm-parent-class-wrap');
-    const btns = document.getElementById('hm-parent-class-buttons');
-    if (!wrap || !btns) return;
-    const list = (available || []).filter(x => x != null);
-    // Hide the whole row when there's nothing meaningful to pick between.
+    const sel = document.getElementById('hm-parent-class-select');
+    if (!wrap || !sel) return;
+    const list = (available || []).filter(x => x != null).map(String);
+    // Hide the whole row when there's nothing meaningful to pick between (≤1 parent-role class).
     if (list.length <= 1) {
         wrap.style.display = 'none';
         return;
     }
     wrap.style.display = window._mveColorCheckEnabled === true ? 'inline-flex' : 'none';
-    const sel = (localStorage.getItem('mve_heatmap_parent_class') || '');
-    const allBtn = document.getElementById('hm-parent-class-all');
-    btns.innerHTML = '';
-    if (allBtn) btns.appendChild(allBtn);
-    const setBtnActive = (btn, isActive) => {
-        if (!btn) return;
-        btn.style.background = isActive
-            ? 'linear-gradient(135deg,#10b981,#047857)'
-            : 'rgba(51,65,85,0.5)';
-        btn.style.color = isActive ? '#fff' : '#cbd5e1';
+    const cur = (localStorage.getItem('mve_heatmap_parent_class') || '');
+    // Rebuild options: "All" + one per discovered parent class.
+    sel.innerHTML = '';
+    const _add = (val, label) => {
+        const o = document.createElement('option');
+        o.value = val; o.textContent = label;
+        sel.appendChild(o);
     };
-    setBtnActive(allBtn, sel === '');
-    for (const pc of list) {
-        const pcStr = String(pc);
-        const id = 'hm-parent-class-' + pcStr.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const btn = document.createElement('button');
-        btn.id = id;
-        btn.textContent = pcStr === '_root' ? '🖼 whole frame' : pcStr;
-        btn.title = pcStr === '_root'
-            ? 'Whole-frame LAB samples (fallback when no parent class is designated).'
-            : 'Show only _color rows measured on ' + pcStr + ' bboxes.';
-        btn.style.cssText = 'border:none; padding:3px 10px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;';
-        btn.onclick = () => setHeatmapParentClass(pcStr);
-        setBtnActive(btn, sel === pcStr);
-        btns.appendChild(btn);
-    }
-    // Reset selection if it dropped out of the window's data.
-    if (sel && !list.map(String).includes(sel)) {
-        localStorage.setItem('mve_heatmap_parent_class', '');
-        setBtnActive(allBtn, true);
-    }
+    _add('', '🌐 All');
+    for (const pc of list) _add(pc, pc === '_root' ? '🖼 whole frame' : pc);
+    // Reset selection if it dropped out of the window's data, then reflect it in the dropdown.
+    const _val = list.includes(cur) ? cur : '';
+    if (_val !== cur) localStorage.setItem('mve_heatmap_parent_class', '');
+    sel.value = _val;
 }
 window._renderParentClassButtons = _renderParentClassButtons;
 

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.306] - 2026-08-04 — Parent-class picker is now a dropdown
+
+- The heatmap **Parent class** picker was a row of buttons; it's now a `<select>` dropdown matching the other toolbar pickers (X-axis, Baseline, Phase, Scale, Cells). Options are still built from `parent_classes_available` and it still hides when the colour feature is off or there's ≤1 parent-role class in the window (single-parent sites have nothing to choose between — which is why it's absent in an all-shipments view where only one class is designated parent-role). A class like TB only appears here where TB is designated parent-role in the class config.
+- Files: `static/status.html`, `static/js/charts.js`.
+
+
 ## [4.0.305] - 2026-08-03 — Bucket along the SELECTED axis (encoder buckets for the encoder axis)
 
 - **Operator's design.** The progressive ladder always bucketed by TIME. On the ENCODER axis that's wrong: encoder is roll-position and resets per roll, so it is not monotonic with time — a time-bucket's dots scattered across the whole axis and the span kept re-deriving. Now the ladder buckets along the **selected** axis: encoder-axis → divide the pinned `[enc_min, enc_max]` into N columns and load each by its encoder **start/stop** (`WHERE encoder_value >= lo AND < hi`), so every fetch fills exactly one column and the span is fixed the whole time. Time-axis keeps the time ladder (time is monotonic → already 1:1 with columns).
