@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.314] - 2026-08-04 — Encoder axis robust to runaway rolls (7d all-shipments looked empty)
+
+- On khoy the 7d all-shipments encoder view was empty except a few dots at the far right: one roll's encoder reached ~93M while typical rolls are ~4M, so the axis pinned to 93M and squished all real data into the left ~4% (and starved the 25 buckets). Since the encoder resets per roll, the range probe now derives the axis max from the **typical roll length** — MAX encoder per shipment, then the **90th percentile across shipments** — so a single runaway roll can no longer set the axis. A picked shipment (single roll) keeps its own max, so nothing is clipped there.
+- Files: `routers/timeline.py`, `static/status.html`.
+
+
 ## [4.0.313] - 2026-08-04 — General mveAi() helper + Inference row on one line with an AI "?"
 
 - **General AI helper.** New `window.mveAi(prompt)` — one place that calls the active model via `/api/ai_query` and normalizes the result + errors (incl. "AI not configured" / an unreachable endpoint). Feature buttons become thin wrappers instead of each duplicating fetch + error handling.

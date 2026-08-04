@@ -3613,6 +3613,30 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 tuple([interval] + ([shipment] if shipment else [])),
             )
             _rr = cur.fetchone() or (None, None, None, None)
+            # 4.0.313 — ROBUST encoder max. The raw MAX is dominated by rare runaway rolls (one
+            # roll's encoder hit ~93M while typical rolls are ~4M), which pinned the axis to the
+            # outlier and squished ALL real data into the left ~4% + starved the encoder buckets
+            # (operator: "what's wrong when I select 7d?"). Encoder RESETS per roll, so the meaningful
+            # extent is the TYPICAL roll length: MAX encoder PER shipment, then the 90th percentile
+            # ACROSS shipments — one runaway roll can't set the axis. A single shipment (picked, or a
+            # one-roll window) yields its own max, so nothing is clipped there.
+            _enc_max_robust = _rr[3]
+            try:
+                cur.execute(
+                    f"""SELECT percentile_cont(0.90) WITHIN GROUP (ORDER BY roll_max)
+                        FROM (SELECT MAX(encoder_value) AS roll_max
+                              FROM inference_results
+                              WHERE time > NOW() - INTERVAL %s {ship_clause}
+                                AND encoder_value IS NOT NULL
+                              GROUP BY shipment) _rolls
+                        WHERE roll_max IS NOT NULL""",
+                    tuple([interval] + ([shipment] if shipment else [])),
+                )
+                _rmx = cur.fetchone()
+                if _rmx and _rmx[0] is not None and (_rr[2] is None or float(_rmx[0]) > float(_rr[2])):
+                    _enc_max_robust = _rmx[0]
+            except Exception as _rme:
+                logger.debug(f"robust enc max failed: {_rme}")
             # 4.0.307 — general chart metadata over the FULL window, folded into this start-of-
             # load probe so the toolbar (parent-class dropdown, colour-check gate, unit label) no
             # longer depends on the 1h hydrate — which misses parents whose _color rows are older
@@ -3651,7 +3675,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "data_t_min":   float(_rr[0]) if _rr[0] is not None else None,
                 "data_t_max":   float(_rr[1]) if _rr[1] is not None else None,
                 "data_enc_min": int(_rr[2]) if _rr[2] is not None else None,
-                "data_enc_max": int(_rr[3]) if _rr[3] is not None else None,
+                "data_enc_max": int(_enc_max_robust) if _enc_max_robust is not None else None,  # 4.0.313 — robust (per-shipment p90)
                 "parent_classes_available": _range_parents,
                 "parent_color_check_enabled": _ro_color,
                 "encoder_unit": _ro_unit,
