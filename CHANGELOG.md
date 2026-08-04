@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.311] - 2026-08-04 — Parent-class dropdown lists config parent-role classes (not window colour rows)
+
+- The parent-class dropdown was empty in the all-shipments view while it appeared for a picked shipment. Cause: the list was discovered by querying `_color` rows in the selected window, so a parent-role class was dropped whenever it had no colour rows in that window — even though it's clearly a detected, configured parent. Fixed: the start-of-load probe now reads parent classes straight from **config** (`audio_settings[cls].role == "parent"`), so every parent-role class (PVB_FILM, TB, …) always appears, independent of window or recent colour data.
+- Files: `routers/timeline.py`, `static/status.html`.
+
+
 ## [4.0.310] - 2026-08-04 — Colour % labels (decimals + red/blue) + encoder-span pin survives a slow probe
 
 - **Percent labels showed "0".** The colour is stable so % deviations are small (~0.1-1.5%); `toFixed(0)` rounded them to 0. Now shown with a decimal (`0.34%` / `1.2%`) and a lower noise floor.

@@ -3618,17 +3618,19 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             # longer depends on the 1h hydrate — which misses parents whose _color rows are older
             # than the last hour (operator: "TB shows late / the parent dropdown never appears").
             # This is the "separate general-data call" the operator asked for.
+            # 4.0.311 — parent classes are a CONFIG property (audio_settings[cls].role == 'parent'),
+            # NOT a last-N-hours thing. Discovering them from the window dropped parents whose _color
+            # is older than the selected window — the operator saw the dropdown appear for a PICKED
+            # shipment (spans all its data) but NOT in the general all-shipments view (TB's colour was
+            # >24h old). Read parent-role classes straight from config so they ALWAYS show.
             _range_parents = []
             try:
-                cur.execute(
-                    f"""SELECT DISTINCT COALESCE(NULLIF(elem->>'parent_class', ''), '_root') AS pc
-                        FROM inference_results, LATERAL jsonb_array_elements(detections) elem
-                        WHERE time > NOW() - INTERVAL %s {ship_clause}
-                          AND elem->>'name' = '_color'
-                        ORDER BY 1""",
-                    tuple([interval] + ([shipment] if shipment else [])),
-                )
-                _range_parents = [r[0] for r in cur.fetchall() if r and r[0]]
+                from config import load_service_config as _lsc_pr
+                _as_pr = (_lsc_pr() or {}).get("audio_settings") or {}
+                _range_parents = sorted([
+                    str(_cls) for _cls, _cfg in _as_pr.items()
+                    if isinstance(_cfg, dict) and str(_cfg.get("role") or "").strip().lower() == "parent"
+                ])
             except Exception as _rpe:
                 logger.debug(f"range_only parent discovery failed: {_rpe}")
             try:
