@@ -302,6 +302,7 @@ async def _scheduler_loop(app):
                 except Exception as _sse:
                     logger.debug(f"shipment_stats finalize hook failed: {_sse}")
 
+            _sched_dirty = False   # 4.0.321 SCHED-SAVE — did any last_run/last_status change this tick?
             for sched in schedules:
                 if not sched.get("enabled"):
                     continue
@@ -346,9 +347,13 @@ async def _scheduler_loop(app):
                     logger.warning(f"schedule {sched.get('name')!r} fire failed: {e}")
                     sched["last_run"] = now.strftime("%Y-%m-%dT%H:%M:%S")
                     sched["last_status"] = "error"
+                _sched_dirty = True   # this schedule fired → its last_run/last_status changed
 
-            # Persist any last_run updates back to the config so reboots don't replay.
-            if schedules:
+            # 4.0.321 SCHED-SAVE — only rewrite the config when a last_run/last_status actually
+            # changed this tick. The old `if schedules:` did a full mve_config_kv upsert + a ~50KB
+            # JSON file dump EVERY 60s whenever any schedule existed — pure churn (updated_at bump +
+            # pool + disk) for nothing, forever.
+            if schedules and _sched_dirty:
                 from config import save_service_config
                 svc["notifications"] = cfg
                 try:

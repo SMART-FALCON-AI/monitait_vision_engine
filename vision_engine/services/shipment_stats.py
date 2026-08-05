@@ -114,17 +114,49 @@ def compute_and_store_shipment_stats(shipment, skip_if_exists=False):
     """
     if not shipment or shipment in ("", "no_shipment"):
         return False
+    # 4.0.321 STATS-2CONN — compute the score FIRST, on _compute_quality_payload's OWN connection,
+    # BEFORE we take the connection for our reads+writes. The old order held an idle-in-transaction
+    # connection through the two heavy jsonb scans and THEN called _compute_quality_payload (which
+    # grabs a SECOND pool connection) — so each compute pinned 2 connections, one holding a snapshot.
+    # A short-lived connection does the cheap skip check so we don't hold one during the score either.
+    if skip_if_exists:
+        _c0 = get_db_connection()
+        if _c0 is not None:
+            _exists = False
+            try:
+                _x0 = _c0.cursor()
+                _x0.execute("SELECT 1 FROM shipment_summary WHERE shipment = %s", [shipment])
+                _exists = _x0.fetchone() is not None
+                _x0.close()
+            except Exception:
+                pass
+            finally:
+                release_db_connection(_c0)
+            if _exists:
+                return True
+
+    score = score_abs = verdict = None
+    try:
+        from routers.timeline import _compute_quality_payload
+        qp = _compute_quality_payload(shipment, "90d") or {}
+        score = qp.get("score")
+        score_abs = qp.get("score_absolute")
+        verdict = qp.get("verdict")
+    except Exception as _qe:
+        logger.debug(f"score compute for {shipment} failed: {_qe}")
+
     conn = get_db_connection()
     if not conn:
         return False
     try:
         cur = conn.cursor()
-        if skip_if_exists:
-            cur.execute("SELECT 1 FROM shipment_summary WHERE shipment = %s", [shipment])
-            if cur.fetchone():
-                cur.close()
-                return True
-        cur.execute("SET LOCAL statement_timeout = 0")
+        # 4.0.321 STATS-2CONN — bounded, not 0: a hung scan can no longer camp a pooled connection
+        # forever. 4.0.321 STATS-RACE — a just-closed shipment can be in BOTH the startup backfill
+        # list and a finalize-hook call → two threads computing it at once. This transaction advisory
+        # lock serializes same-shipment computes, so the DELETE+INSERT of its stat rows can't race
+        # into a unique-violation/deadlock.
+        cur.execute("SET LOCAL statement_timeout = 300000")
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [shipment])
 
         # --- summary: time + encoder extent, reset-safe cumulative length, row count ---
         # length_raw sums only FORWARD encoder deltas so a per-roll encoder reset (a big
@@ -177,17 +209,7 @@ def compute_and_store_shipment_stats(shipment, skip_if_exists=False):
             [shipment],
         )
         stat_rows = cur.fetchall()
-
-        # --- score / verdict: reuse the live scorer (lazy import avoids a circular dep) ---
-        score = score_abs = verdict = None
-        try:
-            from routers.timeline import _compute_quality_payload
-            qp = _compute_quality_payload(shipment, "90d") or {}
-            score = qp.get("score")
-            score_abs = qp.get("score_absolute")
-            verdict = qp.get("verdict")
-        except Exception as _qe:
-            logger.debug(f"score compute for {shipment} failed: {_qe}")
+        # (score/verdict were computed above, before this connection was taken — STATS-2CONN)
 
         # --- upsert summary ---
         cur.execute(

@@ -57,8 +57,21 @@ def _release(conn) -> None:
         pass
 
 
+_schema_ready = False
+
+
 def _ensure_schema(conn) -> bool:
-    """Create the table if missing. Returns True on success."""
+    """Create the table if missing. Returns True on success.
+
+    4.0.321 CONFIG-CACHE — after the first success this SHORT-CIRCUITS. Previously the
+    `CREATE TABLE IF NOT EXISTS … ; COMMIT` ran on EVERY load_all/save_all, i.e. on every
+    config read — and the config hot paths (the SSE stream, /api/status, the encoder tick)
+    read config many times per second, so this was a DDL + COMMIT round-trip storm for no
+    reason. The table is created once; every later call is now a no-op.
+    """
+    global _schema_ready
+    if _schema_ready:
+        return True
     try:
         cur = conn.cursor()
         cur.execute(
@@ -73,6 +86,7 @@ def _ensure_schema(conn) -> bool:
         )
         conn.commit()
         cur.close()
+        _schema_ready = True
         return True
     except Exception as e:
         logger.warning(f"config_db: ensure_schema failed: {e}")

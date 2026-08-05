@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.321] - 2026-08-05 — Performance backlog batch #1: config cache, pool, batched writer, timeout leak, stats hardening
+
+Backend-only correctness + steady-state-load batch from the whole-codebase audit. Canary vteam12 first.
+
+- **CONFIG-CACHE** — `load_service_config()`/`load_data_file()` ran `CREATE TABLE IF NOT EXISTS` + a full-config SELECT + JSONB parse on EVERY call, and the hot paths (the SSE stream and `/api/status` each twice, the encoder tick per serial line) hammered it — the dominant steady-state DB/CPU load. Now: a 2s TTL cache (cached as a JSON string, re-parsed per read so a caller can't corrupt it; invalidated on save), plus a `_schema_ready` flag in `config_db` so the DDL runs once, not per read. This also removes the per-serial-line DB transaction off the ejector-timing thread (TICK-CONFIG).
+- **POOL** — root cause of the recurring `PoolError: trying to put unkeyed connection` that killed the ensure-tables + shipment-stats-backfill threads: an unlocked lazy-init race let two threads each build a pool at boot; a connection from the orphaned one, returned to the survivor, is "unkeyed". Fix: build the pool ONCE under a lock, switch `SimpleConnectionPool` → thread-safe `ThreadedConnectionPool`, and harden `release_db_connection` so a stray/closed connection is logged+closed, never raised out of a `finally:`.
+- **WRITER** — the batched-writer `VALUES (…)` template regex `\([^)]*\)` stopped at the first `)` in `VALUES (NOW(), …)`, so EVERY inference/metric/ejection insert fell back to per-row `execute` — the 240fps `execute_values` batching silently no-op'd and dropped rows under load. Greedy `\(.*\)` fixes it (verified against the three real insert strings).
+- **TIMEOUT-LEAK** — `detection_stats` ran non-`LOCAL` `SET statement_timeout=4000/6000` in autocommit, so the shortened cap PERSISTED on the connection after `putconn` and the next borrower inherited it (→ silently-empty panels). Now the pool default + `autocommit=False` are restored in a `finally:` before release.
+- **STATS-RACE / STATS-2CONN** (harden 4.0.318): the compute now takes a `pg_advisory_xact_lock(shipment)` so the finalize hook + backfill can't double-compute a shipment into a unique-violation; it computes the score BEFORE taking its own connection (never pins two at once) and uses a bounded `statement_timeout` (was `0`).
+- **SCHED-SAVE** — the 60s scheduler tick rewrote the ENTIRE config (DB upsert + ~50KB file dump) every minute whenever any schedule existed; now gated on a real `dirty` flag.
+- Deferred (each needs its own canary): the frontend load refactors (LADDER-PIPELINE, RENDER-COALESCE, HYDRATE-PARALLEL, TAB-GATE, BASELINE-SETTLE), the SSE async rewrite, and the query refactors (CHARTS-UNCAPPED, DUAL-AXIS, DOUBLE-SCAN). `INDEX-LOCK`: `CREATE INDEX CONCURRENTLY` is unsupported on TimescaleDB hypertables, so the per-chunk build + `lock_timeout` stays.
+- Files: `config.py`, `services/config_db.py`, `services/db.py`, `services/shipment_stats.py`, `services/scheduler.py`, `routers/timeline.py`.
+
+
 ## [4.0.320] - 2026-08-05 — SCORE-LANE-ENUM: the Score-per-shipment lane reads the tiny cache, not 2M rows
 
 - **The Score-per-shipment lane enumerated "the last N shipments" by scanning the recent ~2M `inference_results` rows.** On a dense site (khoy: ~150k–440k rows per shipment) 2M rows only spans ~15 shipments, so asking for 30 could never surface more — and it's a heavy scan on every open. It now reads the last N straight from `shipment_summary` (`ORDER BY t_stop DESC LIMIT N`) — a tiny-table read — and each row's score/verdict/length comes from the cache, no per-shipment recompute. The in-progress shipment (not finalized → not cached) is prepended and live-computed (just that one). Falls back to the old row-scan only when the cache is empty (a fresh deploy before the backfill runs).

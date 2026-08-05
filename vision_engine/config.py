@@ -157,15 +157,30 @@ COMMANDS_WITH_VALUE = [
 # Data file management
 # =============================================================================
 
-def load_data_file():
-    """Load the MVE configuration. DB-first (3.22.0), file fallback.
+# 4.0.321 CONFIG-CACHE — a short TTL cache in front of load_data_file(). The config hot paths
+# (the SSE stream and /api/status each read it twice, the encoder tick reads it per serial line)
+# each triggered a full DB round-trip — CREATE TABLE IF NOT EXISTS + COMMIT + a whole-config
+# SELECT + JSONB parse — many times per second, the dominant steady-state DB/CPU load on the box.
+# We now cache the loaded config as a JSON STRING and re-parse it on each read, so every caller
+# gets an INDEPENDENT copy (a reader that mutates its result can't corrupt the cache), and the DB
+# round-trip is skipped for the TTL window. Any save invalidates the cache immediately.
+import time as _time
+import threading as _threading
+_CFG_CACHE_TTL = 2.0            # seconds — config changes rarely; 2s staleness is harmless
+_cfg_cache_str = None
+_cfg_cache_ts = 0.0
+_cfg_cache_lock = _threading.Lock()
 
-    Order:
-      1. mve_config_kv table in Postgres (new source of truth)
-      2. .env.prepared_query_data on disk (legacy / DB unreachable fallback)
 
-    Returns a dict (possibly empty if both sources fail).
-    """
+def invalidate_config_cache():
+    """Drop the cached config so the next load_data_file() re-reads the source. Called on save."""
+    global _cfg_cache_str
+    with _cfg_cache_lock:
+        _cfg_cache_str = None
+
+
+def _load_data_file_uncached():
+    """The real loader: DB-first (3.22.0), file fallback. Returns a dict (possibly empty)."""
     # 3.22.0 — DB first
     try:
         from services.config_db import load_all as _db_load
@@ -186,6 +201,31 @@ def load_data_file():
     except Exception as e:
         logger.error(f"Error loading data file: {e}")
     return {}
+
+
+def load_data_file():
+    """Load the MVE configuration (DB-first, file fallback), served from a 2s TTL cache.
+
+    Each call returns a fresh independent copy (parsed from the cached JSON string), so a caller
+    that mutates the result — e.g. save_service_config — can never corrupt the cache.
+    """
+    global _cfg_cache_str, _cfg_cache_ts
+    now = _time.time()
+    with _cfg_cache_lock:
+        if _cfg_cache_str is not None and (now - _cfg_cache_ts) < _CFG_CACHE_TTL:
+            try:
+                return json.loads(_cfg_cache_str)
+            except Exception:
+                pass  # corrupt cache entry → fall through to a fresh load
+    fresh = _load_data_file_uncached()
+    try:
+        _s = json.dumps(fresh)
+        with _cfg_cache_lock:
+            _cfg_cache_str = _s
+            _cfg_cache_ts = _time.time()
+    except Exception:
+        pass  # non-JSON-serializable (shouldn't happen for config) → just don't cache
+    return fresh
 
 def save_data_file(data):
     """Persist the MVE configuration.
@@ -251,6 +291,11 @@ def save_data_file(data):
         except Exception:
             pass
 
+    # 4.0.321 CONFIG-CACHE — drop the TTL cache so the next load reflects this save immediately.
+    try:
+        invalidate_config_cache()
+    except Exception:
+        pass
     return db_ok or file_ok
 
 def load_service_config():

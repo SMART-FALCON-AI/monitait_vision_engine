@@ -3301,6 +3301,21 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0,
         return JSONResponse(content=empty)
     finally:
         if conn is not None:
+            # 4.0.321 TIMEOUT-LEAK — this endpoint runs non-LOCAL `SET statement_timeout=4000/6000`
+            # in autocommit mode, so the shortened cap PERSISTED on the connection after putconn and
+            # the NEXT borrower inherited it (→ far more likely to silently return an empty panel at
+            # 4-6s). Restore the pool default (and pool-default autocommit=False) before handing the
+            # connection back, so the leak can't cross requests. Runs on success AND on exception.
+            try:
+                conn.autocommit = True  # so the reset SET commits immediately
+                from services.db import POSTGRES_STATEMENT_TIMEOUT_MS as _pool_to
+                _rc = conn.cursor(); _rc.execute("SET statement_timeout = %s" % int(_pool_to)); _rc.close()
+            except Exception:
+                pass
+            try:
+                conn.autocommit = False  # restore the pool-default transaction mode
+            except Exception:
+                pass
             try:
                 from services.db import release_db_connection
                 release_db_connection(conn)

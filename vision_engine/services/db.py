@@ -79,71 +79,78 @@ logger.info(
 )
 
 
+# 4.0.321 POOL — one lock guarding pool creation. The old `if db_connection_pool is None:`
+# check-then-act was NOT atomic: at boot several threads (the 2 DB-writer threads, the
+# ensure-tables thread, the config migration, health probes) call get_db_connection() for the
+# first time concurrently; two of them could each see None and each build a SimpleConnectionPool.
+# The later assignment wins and the earlier pool is orphaned — and a connection handed out by the
+# orphaned pool, when later returned to the survivor (whose _rused never registered it), raises
+# psycopg2's "trying to put unkeyed connection", which killed the ensure-tables/backfill threads.
+# Fix: build the pool exactly once under this lock, and use ThreadedConnectionPool (SimpleConnectionPool
+# is documented NOT thread-safe) so concurrent getconn/putconn can't corrupt the pool bookkeeping.
+_pool_lock = threading.Lock()
+
+
+def _init_db_pool():
+    """Build the connection pool. Called ONCE, under _pool_lock, from get_db_connection()."""
+    global db_connection_pool
+    from psycopg2 import pool
+    db_connection_pool = pool.ThreadedConnectionPool(
+        1, POSTGRES_POOL_MAX,
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        database=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+        options=f'-c statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS}',
+    )
+    logger.info("Database connection pool initialized (ThreadedConnectionPool)")
+
+
 def get_db_connection():
-    """Get PostgreSQL connection from pool."""
+    """Get a PostgreSQL connection from the pool (thread-safe, init-once)."""
     global db_connection_pool
     if db_connection_pool is None:
-        try:
-            from psycopg2 import pool
-            # 4.0.50 — pool ceiling raised from 10 → 20 to accommodate the
-            # multi-thread DB writer pool + concurrent chart/API reads
-            # without any one path starving another for a connection.
-            # 4.0.74 — raised again 20 → 40. After v4.0.72+73 moved 116 endpoints
-            # off the async event loop into FastAPI's threadpool, many more
-            # queries can now run truly concurrently — a dashboard with several
-            # tabs open plus the DB writer pool (cap=12) plus the SSE stream's
-            # 30-s DB probe can easily peg 20 connections. Symptom the operator
-            # saw: `Failed to get database connection: connection pool
-            # exhausted` in the logs, then a browser `Failed to fetch` alert
-            # on the shipment-save POST because save_data_file couldn't reach
-            # the DB to persist the change (fell back to file-only write, but
-            # under enough contention the whole POST timed out at the browser).
-            # Postgres default max_connections is 100 so 40 leaves plenty of
-            # headroom for other services + external tooling.
-            # v4.0.79 — session-level statement_timeout=3s applied to EVERY
-            # pooled connection via the Postgres `options` parameter. Under
-            # heavy load (13+ hours of accumulated math_inference row spew
-            # blowing up the inference_results hypertable), the analytical
-            # endpoints (detection_charts, quality/shipments, quality/heatmap,
-            # detection_stats, shipment_quality_score, area_stats) all scan
-            # jsonb_array_elements and can hang 12–60 s per call — which
-            # cascades into the browser's 6-concurrent-request-per-origin
-            # limit filling up with pending fetches, so EVERY panel on the
-            # Charts tab looks stuck (Score per shipment, Insights, Trend,
-            # heatmap, scatter — all waiting for socket slots). Failing fast
-            # (500 in ~3 s instead of hanging indefinitely) frees the
-            # browser slot, lets the fast panels render on their own data,
-            # and produces an actionable error the operator can see.
-            #
-            # DB writer thread (services/db.py::_db_writer_loop) already
-            # catches exceptions and rolls back per row, so a 3 s cap on
-            # writes is safe — under overload we drop that row and log a
-            # warning, which is the exact behaviour v4.0.50's autoscaler
-            # already assumes. Existing db-queue-full backpressure kicks
-            # in normally.
-            db_connection_pool = pool.SimpleConnectionPool(
-                1, POSTGRES_POOL_MAX,
-                host=POSTGRES_HOST,
-                port=POSTGRES_PORT,
-                database=POSTGRES_DB,
-                user=POSTGRES_USER,
-                password=POSTGRES_PASSWORD,
-                options=f'-c statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS}',
-            )
-            logger.info("Database connection pool initialized")
-        except Exception as e:
-            logger.error(f"Failed to initialize database pool: {e}")
-            return None
+        with _pool_lock:
+            if db_connection_pool is None:  # re-check under the lock
+                try:
+                    _init_db_pool()
+                except Exception as e:
+                    logger.error(f"Failed to initialize database pool: {e}")
+                    return None
     try:
         return db_connection_pool.getconn()
     except Exception as e:
         logger.error(f"Failed to get database connection: {e}")
         return None
 
+
+# Pool sizing history (context): 10→20 (4.0.50) →40 (4.0.74) as endpoints moved to the FastAPI
+# threadpool; every pooled connection carries a session `statement_timeout` (4.0.79) so an
+# analytical jsonb scan fails fast (~POSTGRES_STATEMENT_TIMEOUT_MS) instead of hanging a slot.
+# POSTGRES_POOL_MAX defaults to 40; Postgres max_connections is 100, leaving headroom.
+
 def release_db_connection(conn):
-    """Release connection back to pool."""
-    if db_connection_pool and conn:
+    """Return a connection to the pool. HARDENED (4.0.321 POOL): must NEVER raise.
+
+    Previously a bare `putconn(conn)` could throw `PoolError: trying to put unkeyed connection`
+    (a connection the pool doesn't recognize) straight out of a `finally:` clause and kill the
+    calling background thread (this is what silently stopped ensure-tables and the shipment-stats
+    backfill). Now: skip already-closed connections, and if putconn still rejects it, log and
+    close it directly rather than propagating — a stray connection can leak at worst, never crash.
+    """
+    if not (db_connection_pool and conn):
+        return
+    try:
+        if getattr(conn, "closed", 0):
+            return  # already closed — nothing to return to the pool
         db_connection_pool.putconn(conn)
+    except Exception as e:
+        logger.debug(f"release_db_connection: putconn rejected, closing directly ({e})")
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _db_writer_loop():
@@ -179,7 +186,12 @@ def _db_writer_loop():
         when the SQL doesn't match the ...VALUES(...) tail — fallback path
         then runs per-row inside the same transaction (no data loss, no batch
         speedup for that odd SQL)."""
-        m = _re.search(r"(?is)\bVALUES\s*(\([^)]*\))\s*$", sql.strip())
+        # 4.0.321 WRITER — was `\([^)]*\)`, which stops at the FIRST `)`. Every hot insert begins
+        # `VALUES (NOW(), …)`, so it matched `(NOW()`, couldn't reach `$`, and returned (None, None)
+        # → the batch fell back to per-row execute for EVERY row, silently defeating execute_values
+        # (the 240fps batching optimization no-op'd and dropped rows under load). Greedy `\(.*\)`
+        # captures the whole balanced tuple to the final `)` so `(NOW(), %s, %s, …)` matches.
+        m = _re.search(r"(?is)\bVALUES\s*(\(.*\))\s*$", sql.strip())
         if not m:
             return None, None
         template = m.group(1)  # e.g. "(NOW(), %s, %s, ...)"
