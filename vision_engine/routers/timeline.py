@@ -2361,31 +2361,62 @@ def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
         try:
             cur = conn.cursor()
             try:
-                cur.execute("SET LOCAL statement_timeout = 15000")
+                # 4.0.320 SCORE-LANE-ENUM — read the last N from the tiny shipment_summary cache
+                # (a finished shipment was scored ONCE at finalize) instead of scanning ~2M
+                # inference_results rows. Their score/verdict/length come straight from the cache
+                # in the loop below (no per-shipment recompute). Falls back to the row-scan ONLY
+                # when the cache is empty (a fresh deploy before the backfill has run).
+                cur.execute("SET LOCAL statement_timeout = 8000")
                 cur.execute(
                     """
-                    SELECT ship, MIN(time) AS first_t, MAX(time) AS last_t, COUNT(*) AS n_rows
-                    FROM (
-                        SELECT SPLIT_PART(image_path, '/', 2) AS ship, time
-                        FROM inference_results
-                        WHERE image_path IS NOT NULL
-                        ORDER BY time DESC
-                        LIMIT 2000000
-                    ) sub
-                    WHERE ship NOT IN ('', 'no_shipment')
-                    GROUP BY ship
-                    ORDER BY last_t DESC
+                    SELECT shipment AS ship, t_start AS first_t, t_stop AS last_t, n_total AS n_rows
+                    FROM shipment_summary
+                    ORDER BY t_stop DESC NULLS LAST
                     LIMIT %s
                     """,
                     (effective_n,),
                 )
                 rows = cur.fetchall()
+                if not rows:
+                    cur.execute("SET LOCAL statement_timeout = 15000")
+                    cur.execute(
+                        """
+                        SELECT ship, MIN(time) AS first_t, MAX(time) AS last_t, COUNT(*) AS n_rows
+                        FROM (
+                            SELECT SPLIT_PART(image_path, '/', 2) AS ship, time
+                            FROM inference_results
+                            WHERE image_path IS NOT NULL
+                            ORDER BY time DESC
+                            LIMIT 2000000
+                        ) sub
+                        WHERE ship NOT IN ('', 'no_shipment')
+                        GROUP BY ship
+                        ORDER BY last_t DESC
+                        LIMIT %s
+                        """,
+                        (effective_n,),
+                    )
+                    rows = cur.fetchall()
             finally:
                 try: cur.close()
                 except Exception: pass
         finally:
             try: release_db_connection(conn)
             except Exception: pass
+
+        # 4.0.320 — the in-progress shipment isn't finalized, so it's NOT in shipment_summary.
+        # Prepend it (from Redis) so the lane still shows the active roll; the loop below live-
+        # computes just that one shipment (everything else is a cache read).
+        try:
+            import os as _os_sl
+            import redis as _rd_sl
+            _cur_ship_sl = (_rd_sl.Redis(host=_os_sl.environ.get("REDIS_HOST", "redis"),
+                                         port=6379, decode_responses=True).get("shipment") or "")
+            if (_cur_ship_sl and _cur_ship_sl not in ("", "no_shipment")
+                    and _cur_ship_sl not in [r[0] for r in rows]):
+                rows = [(_cur_ship_sl, None, None, 0)] + list(rows)
+        except Exception:
+            pass
 
         # 4.0.29d — pass through the chart's window (default 30d) so the score
         # is computed against the SAME range that picked the shipment list.

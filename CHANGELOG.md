@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.320] - 2026-08-05 — SCORE-LANE-ENUM: the Score-per-shipment lane reads the tiny cache, not 2M rows
+
+- **The Score-per-shipment lane enumerated "the last N shipments" by scanning the recent ~2M `inference_results` rows.** On a dense site (khoy: ~150k–440k rows per shipment) 2M rows only spans ~15 shipments, so asking for 30 could never surface more — and it's a heavy scan on every open. It now reads the last N straight from `shipment_summary` (`ORDER BY t_stop DESC LIMIT N`) — a tiny-table read — and each row's score/verdict/length comes from the cache, no per-shipment recompute. The in-progress shipment (not finalized → not cached) is prepended and live-computed (just that one). Falls back to the old row-scan only when the cache is empty (a fresh deploy before the backfill runs).
+- Net: `Shipments: 30` now really shows up to 30 (all cached shipments), instantly, instead of ~15 from a 2M-row scan. This is the read-side payoff of the 4.0.318 materialization.
+- Files: `routers/timeline.py` (`/api/quality/shipments` enumeration).
+
+
 ## [4.0.319] - 2026-08-05 — Read path: colour baseline from the materialized cache (no more per-bucket accumulation)
 
 - **`GET /api/shipment_baseline`** — per-camera colour baseline (`avg` + `median` ΔE) served straight from `shipment_stats`. A picked FINISHED shipment → its own cached rows; all-shipments → pooled `Σ(avg·n)/Σn` across the window's finished shipments; the in-progress shipment → `current:true` with no baseline. Phase/parent-class filtered to match the cells.
