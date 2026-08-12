@@ -130,7 +130,7 @@ function _unitLabelFromAny(row, data) {
         || 'units';
 }
 
-let _insightAxis = (function () { try { return localStorage.getItem('mve_insight_axis') || 'encoder'; } catch (e) { return 'encoder'; } })();   // 3.26.0 default encoder; 4.0.271 — persisted so a refresh keeps the operator's pick (was resetting, then getting overwritten Time by the stationary-guard fallback).
+let _insightAxis = (function () { try { return localStorage.getItem('mve_insight_axis') || 'length'; } catch (e) { return 'length'; } })();   // 3.26.0 default encoder; 4.0.271 persisted; 4.0.331 default LENGTH (operator: the continuous reset-safe ribbon is the primary view). Falls back to time when there's no length data (stationary guard).
 let _ejectionProcBar = null;
 let _ejectionProcPie = null;
 let _ejectionTimeline = null;
@@ -2140,7 +2140,17 @@ function _repaintProgressiveStrips() {
 // the scatter/heatmap. Only for the all-shipments STREAMED colour case; a picked
 // shipment keeps Core's span-scoped color_change_strip (already aligned).
 function _recomputeColorChangeFromProgressive() {
-    if (window._mveColorCheckEnabled !== true) return;
+    // 4.0.322 — CLEAR (hide) the colour-change strip. The early-returns below used to just
+    // `return`, leaving the PRIOR load's colour strip painted while every other strip
+    // repainted — the operator's "colour change strips stand still, others change". Hiding
+    // the wrap on empty/disabled keeps it in lock-step with the rest of the strips.
+    const _clear = () => {
+        const wrap = document.getElementById('color-change-strip-wrap');
+        if (wrap) wrap.style.display = 'none';
+        const strip = document.getElementById('color-change-strip');
+        if (strip) strip.innerHTML = '';
+    };
+    if (window._mveColorCheckEnabled !== true) { _clear(); return; }
     // v4.0.213 — read from the SAME colour cells the heatmap actually paints
     // (__mveHeatmap.cells). For all-shipments that's the streamed set; for a
     // PICKED shipment that's Core's full-span set (colour isn't streamed for a
@@ -2149,9 +2159,9 @@ function _recomputeColorChangeFromProgressive() {
     // when I choose a shipment" bug. One source now covers both.
     const hm = _insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap;
     const srcCells = (hm && Array.isArray(hm.cells)) ? hm.cells : [];
-    if (!srcCells.length) return;
+    if (!srcCells.length) { _clear(); return; }
     const rng = _progressiveColorRange;
-    if (!rng || !(rng.hi > rng.lo)) return;
+    if (!rng || !(rng.hi > rng.lo)) { _clear(); return; }
     const nbins = Math.max(1, Number(rng.n_bins) || 48);
     const byBin = new Map();
     for (const c of srcCells) {
@@ -2256,6 +2266,48 @@ function _recomputeProgressiveColorDeltas() {
 }
 window._recomputeProgressiveColorDeltas = _recomputeProgressiveColorDeltas;
 
+// 4.0.333 — LENGTH-ribbon colour re-pool. On the Length axis each shipment sits in its OWN
+// disjoint length-x range and is fetched one-column-at-a-time (n_bins=1), so every column's
+// backend delta is bucket-local (its baseline is just that column). Recover the operator's
+// intended metric — "each capture compared to its OWN camera+shipment centre" — by pooling the
+// per-column mean E per (camera, shipment): median of the columns' E's in `shipment_median`
+// mode (robust, matches the picked-shipment median), else the sample-weighted mean. Then delta
+// each cell against its (camera, shipment) baseline. Because shipments occupy disjoint length
+// ranges, this NEVER leaks colour across shipments (the bug 4.0.330 avoided by skipping the
+// global pool) while still filling every bucket with a correctly-referenced delta.
+function _recomputeLengthColorDeltas() {
+    const useMedian = (String(localStorage.getItem('mve_heatmap_baseline') || '').toLowerCase() === 'shipment_median');
+    const groups = new Map();                                   // `${cam}|${ship}` -> [{e,n}]
+    for (const c of _progressiveColorCells.values()) {
+        const n = Number(c.n) || 0, e = Number(c.E);
+        if (!(n > 0) || !Number.isFinite(e)) continue;
+        const k = `${c.cam}|${c._ship || ''}`;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push({ e, n });
+    }
+    const base = new Map();
+    for (const [k, arr] of groups) {
+        if (!arr.length) continue;
+        if (useMedian) {
+            const es = arr.map(o => o.e).sort((a, b) => a - b);
+            const mid = es.length >> 1;
+            base.set(k, (es.length % 2) ? es[mid] : (es[mid - 1] + es[mid]) / 2);
+        } else {
+            let sE = 0, sN = 0; for (const o of arr) { sE += o.e * o.n; sN += o.n; }
+            if (sN > 0) base.set(k, sE / sN);
+        }
+    }
+    for (const c of _progressiveColorCells.values()) {
+        const b = base.get(`${c.cam}|${c._ship || ''}`);
+        const e = Number(c.E);
+        if (b == null || !Number.isFinite(b) || b === 0 || !Number.isFinite(e)) continue;
+        c._absolute = false;
+        c.delta_e = Math.round((e - b) * 100) / 100;
+        c.delta_pct = Math.round((100 * (e - b) / b) * 10) / 10;
+    }
+}
+window._recomputeLengthColorDeltas = _recomputeLengthColorDeltas;
+
 // Per-bucket streamer for the quality + ejection strips — and folds in colour
 // so ONE fetch fills all three (this superseded the old colour-only streamer).
 // Called newest→oldest by the ladder AND once over the full domain by the
@@ -2310,7 +2362,33 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preDa
     // leftmost bucket again and again"). When degenerate, key by the raw bin INDEX
     // (distinct per bucket) exactly like the pre-v4.0.234 code that worked.
     const _degen = !(rng.hi > rng.lo);
-    const _encOf = (b) => _degen ? Number(b) : (rng.lo + ((Number(b) + 0.5) / rng.n_bins) * (rng.hi - rng.lo));
+    // 4.0.327 — LENGTH-SEQUENCE projection. On the Length axis the strips must land in the SAME
+    // cumulative-length domain the dots use (offset + local within the shipment's segment), NOT
+    // raw encoder. For a per-shipment length-ladder fetch, `rng` (binRef) is THIS shipment's
+    // encoder range and _lastLengthOffsets[shipment] gives {offset, enc_min, length_span}; map
+    // each cell's encoder centre to its length-x so quality/colour/ejection/lane tile continuously.
+    const _lenProj = (_insightAxis === 'length' && shipment && _lastLengthOffsets
+                      && _lastLengthOffsets[shipment]) ? _lastLengthOffsets[shipment] : null;
+    const _encOf = (b) => {
+        if (_degen) return Number(b);
+        const _encC = rng.lo + ((Number(b) + 0.5) / rng.n_bins) * (rng.hi - rng.lo);
+        if (_lenProj) {
+            // 4.0.328 — NORMALISE into the reset-safe segment (same as the dots' _toLengthX), so a
+            // shipment whose encoder reset mid-shipment still fills its whole strip segment.
+            const _em = Number(_lenProj.enc_min) || 0;
+            const _rr = (Number(_lenProj.enc_max) || 0) - _em;
+            const _sp = Number(_lenProj.length_span) || 0;
+            let _local;
+            if (_rr > 0 && _sp > 0) {
+                _local = Math.max(0, Math.min(1, (_encC - _em) / _rr)) * _sp;
+            } else {
+                _local = Math.max(0, _encC - _em);
+                if (_sp > 0 && _local > _sp) _local = _sp;
+            }
+            return (Number(_lenProj.offset) || 0) + _local;
+        }
+        return _encC;
+    };
     const _reBin = (enc) => {
         const r = _progressiveColorRange;
         if (!(r.hi > r.lo)) return Math.max(0, Math.min(r.n_bins - 1, Math.round(enc)));
@@ -2323,17 +2401,39 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preDa
     // keeps Core's full set. Keying off the payload (not `!shipment`) lets a pick's per-column
     // colour cells render while never fetching them on the time-ladder path.
     if ((window._mveColorCheckEnabled === true) && data.color_slice && Array.isArray(data.color_slice.cells)) {
-        for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
+        for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); c._ship = shipment || null; _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
         // 4.0.316 — RE-DERIVE the baseline over ALL columns seen so far. Each column's fetch is
         // enc-filtered (fast, no timeout) but the backend's delta_pct in it is bucket-local — its
         // baseline is just that one column's mean, so it collapses toward 0. Mean IS additive, so
         // Σ(E·n)/Σn over every column's cells recovers the TRUE full-span per-camera baseline (the
         // "camera / shipment average" the operator compares against). Recompute each cell's delta
         // against it; the colours refine as later columns stream and converge to the correct value.
-        _recomputeProgressiveColorDeltas();
+        //
+        // 4.0.330 — EXCEPT the LENGTH axis. There the ladder fetches each shipment SHIPMENT-SCOPED,
+        // so the backend already computed delta_e/delta_pct with a baseline that is GROUP BY cam over
+        // THAT shipment's frames — i.e. per (camera, shipment), which is exactly the metric the
+        // operator asked for ("each capture vs its OWN camera+shipment median"). Pooling across all
+        // shipments here would leak cross-shipment colour drift and make a uniform in-shipment shade
+        // read as a big deviation. Keep the backend's per-shipment delta for the length ribbon.
+        if (_insightAxis === 'length') {
+            // 4.0.333 — LENGTH ribbon per-column colour: each column is fetched n_bins=1, so the
+            // backend's delta is bucket-local (baseline ≈ that one column → collapses to ~0). Re-pool
+            // the baseline per (camera, shipment) and delta each cell against its own camera+shipment
+            // centre — the metric the operator asked for ("each capture vs its own camera+shipment").
+            _recomputeLengthColorDeltas();
+        } else {
+            _recomputeProgressiveColorDeltas();
+        }
         if (_insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap) {
             _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values())
                 .map(c => (typeof c._enc === 'number') ? Object.assign({}, c, { bin: _reBin(c._enc) }) : c);
+            // 4.0.324 — the cells above are binned via _reBin over _progressiveColorRange, so the
+            // heatmap plugin MUST divide by the SAME n_bins to place them at the right width. Keep
+            // __mveHeatmap.bins in lock-step with the cells (the plugin reads it live). Without this
+            // the plugin used its stale build-time bin count and drew the cells at the wrong width.
+            if (_progressiveColorRange && Number(_progressiveColorRange.n_bins) > 0) {
+                _insightCameraScatter.data.__mveHeatmap.bins = Number(_progressiveColorRange.n_bins);
+            }
             try { _insightCameraScatter.update('none'); } catch (_e) {}
         }
     }
@@ -2368,8 +2468,14 @@ window._extendStripsFromBucket = _extendStripsFromBucket;
 // the same ref, and _repaintProgressiveStrips re-bins by absolute _enc over the
 // current display domain — so positions stay correct no matter the load order.
 // Time axis is already pinned to [loMs,hiMs] up front, so its ref is the range as-is.
-async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, encLo, encHi) {
+async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, encLo, encHi, dotsOnly, frameCap, stripRefOverride) {
     if (!_insightCameraScatter) return;
+    // 4.0.323 — dotsOnly: fetch ONLY the scatter dots for this column (no strips, no colour).
+    // A picked shipment gets its colour+strips from ONE full-span call (below), so the per-column
+    // ladder only needs the lightweight dot query — which is a plain `ORDER BY time LIMIT dot_cap`
+    // (no jsonb aggregate), so it can't stall/drop on the tunnel the way the 25 heavy per-column
+    // colour scans did. frameCap overrides the backend's default per-slice source cap (0 = default).
+    dotsOnly = !!dotsOnly;
     // 4.0.316 — when an encoder range is supplied, this bucket is an ENCODER column:
     // dots + 4 strips + colour are all fetched for the SAME [encLo,encHi) slice. The enc
     // filter is on the top-level encoder_value column, so it cuts rows BEFORE the jsonb
@@ -2382,7 +2488,7 @@ async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, enc
     // own average) — the client ignores backend delta and re-derives the true full-span
     // per-camera baseline by accumulating Σ(E·n)/Σn across every column (see the colour
     // block in _extendStripsFromBucket). A picked shipment on the TIME ladder keeps Core's set.
-    const colorOn = (window._mveColorCheckEnabled === true) && (_encBucket || !shipment);
+    const colorOn = !dotsOnly && (window._mveColorCheckEnabled === true) && (_encBucket || !shipment);
     const rng = _progressiveColorRange;
     const axisIsEncoder = !!(rng && rng.axis !== 'time');
     // Stable bin ref for the slices. Only for the ALL-shipments encoder window (a
@@ -2396,6 +2502,13 @@ async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, enc
                      hi: Number(window._mveEncWindowRange.hi),
                      n_bins: (rng && rng.n_bins) || (parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48) };
     }
+    // 4.0.327 — LENGTH-SEQUENCE: the length ladder passes THIS shipment's ENCODER range as the
+    // bin_ref so the backend bins its strips/colour by encoder over the shipment; the frontend
+    // (_extendStripsFromBucket) then projects each cell to its length-x via the shipment's offset.
+    // _progressiveColorRange stays the length domain [0, Σlengths] for placement + re-binning.
+    if (stripRefOverride && Number(stripRefOverride.hi) > Number(stripRefOverride.lo)) {
+        stripRef = stripRefOverride;
+    }
     const phase = localStorage.getItem('mve_heatmap_phase') || '';
     const parentClass = localStorage.getItem('mve_heatmap_parent_class') || '';
     const _fetchCap = (window._mveScatterFetchCap || _dotCap());
@@ -2404,18 +2517,27 @@ async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, enc
               '&shipment=' + encodeURIComponent(shipment || '') +
               '&min_conf=' + minConf +
               '&scatter_only=1&dot_cap=' + _fetchCap +
-              '&include_strips=1';
+              (dotsOnly ? '' : '&include_strips=1');
     // 4.0.316 — bound the WHOLE payload (dots + strips + colour slice) to this
     // encoder column so N buckets cover the true [min,max] span with no clipping.
     if (_encBucket) url += '&enc_lo=' + encLo + '&enc_hi=' + encHi;
-    const _refOk = stripRef && Number(stripRef.hi) > Number(stripRef.lo);
+    // 4.0.323 — dotsOnly skips the bin ref entirely (no strips/colour to bin). Otherwise the
+    // strips (quality/ejection/shipment) always need the ref; colour is added only when on.
+    const _refOk = !dotsOnly && stripRef && Number(stripRef.hi) > Number(stripRef.lo);
     if (_refOk) {
-        // strips (quality/ejection/shipment) always need the bin ref; colour is added only when on.
         if (colorOn) url += '&include_color_slice=1';
         url += '&color_axis=' + encodeURIComponent(stripRef.axis || 'encoder') +
                '&bin_ref_lo=' + stripRef.lo + '&bin_ref_hi=' + stripRef.hi +
                '&bins=' + stripRef.n_bins;
+        // 4.0.330 — pass the operator's baseline mode so the backend's per-fetch delta uses the
+        // right statistic (shipment_median → median, else avg). On the LENGTH axis each fetch is
+        // shipment-scoped, so this makes the backend delta a per (camera, shipment) MEDIAN — the
+        // metric the operator asked for — and the frontend keeps it (no pooled recompute for length).
+        if (colorOn) url += '&baseline=' + encodeURIComponent(localStorage.getItem('mve_heatmap_baseline') || 'camera');
     }
+    // 4.0.323 — explicit source-frame cap override (the full-span pick call raises it so its
+    // colour/strips cover the WHOLE bounded shipment, not just the backend's default 8000).
+    if (Number(frameCap) > 0) url += '&frame_cap=' + Math.floor(Number(frameCap));
     url += '&phase=' + encodeURIComponent(phase) + '&parent_class=' + encodeURIComponent(parentClass);
     // ONE fetch, 3-try backoff — everything for this bucket shares its fate.
     let data = null;
@@ -2433,8 +2555,11 @@ async function _extendBucketAll(sinceMs, untilMs, shipment, minConf, ticket, enc
     // payload, binned over the stable stripRef.
     try { await _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket, data); }
     catch (_se) { /* dot apply non-fatal */ }
-    try { await _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, data, _refOk ? stripRef : undefined); }
-    catch (_pe) { /* strip apply non-fatal */ }
+    // 4.0.323 — dotsOnly columns carry no strips/colour, so skip the strip apply entirely.
+    if (!dotsOnly) {
+        try { await _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, data, _refOk ? stripRef : undefined); }
+        catch (_pe) { /* strip apply non-fatal */ }
+    }
 }
 window._extendBucketAll = _extendBucketAll;
 
@@ -2564,6 +2689,27 @@ async function refreshAdvancedCharts() {
             _insightCameraScatter.update('none');
         }
     } catch (_) {}
+    // 4.0.322 STRIPS-SYNC — clear ALL strip state on load-start, not just the dots. The strip
+    // accumulators + the colour heatmap cache (__mveHeatmap.cells) were reset only inside
+    // _seedProgressiveColorCache (Core), which the picked-shipment ENCODER ladder skips — so on
+    // a shipment/window change the dots cleared+refilled but the strips kept the PRIOR load's
+    // cells (operator: "the strips are not sync" / a lane showing a different shipment). Worst
+    // hit is the COLOUR-CHANGE strip: it's rebuilt from __mveHeatmap.cells, and
+    // _recomputeColorChangeFromProgressive() bails on an empty source WITHOUT clearing, so its
+    // old paint "stood still" while every other strip updated (operator: "the colour change
+    // strips stand still ... maybe a cache"). Reset every accumulator + the heatmap cache, then
+    // repaint empty so nothing lingers. Buckets refill it newest→oldest from here.
+    try {
+        _progressiveColorCells    = new Map();
+        _progressiveQualityCells  = new Map();
+        _progressiveEjectionCells = new Map();
+        _progressiveShipmentCells = new Map();
+        if (_insightCameraScatter && _insightCameraScatter.data
+            && _insightCameraScatter.data.__mveHeatmap) {
+            _insightCameraScatter.data.__mveHeatmap.cells = [];
+        }
+        _repaintProgressiveStrips();
+    } catch (_e) {}
 
     const bins = Math.max(4, Math.min(192,
         parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48));
@@ -2574,7 +2720,17 @@ async function refreshAdvancedCharts() {
     // axis is encoder) so the pick buckets by the SELECTED axis, same as all-shipments.
     let _pickEncSpan = null;
     if (shipment) {
-        // Authoritative span from shipment_spans (fast, ~70 ms).
+        // 4.0.322 — a shipment change must NOT inherit the PREVIOUS view's pinned encoder
+        // span. The all-shipments view pins _mveEncSpanFixed to the full ~93M roll extent;
+        // if we don't clear it here and the pick's span lookup drops on the tunnel, the axis
+        // stays at 93M and squishes the pick's dots into one column (operator's "why can't
+        // you draw bucket by bucket"). Clear now; re-pinned below from the shipment's OWN span.
+        window._mveEncSpanFixed = null;
+        // Authoritative span from shipment_spans (fast, ~70 ms). 4.0.322 — this endpoint now
+        // serves a finished shipment's FULL span straight from the shipment_summary cache
+        // (reset-safe enc_min/max, never truncated, can't drop on the tunnel), so read BOTH
+        // the time span (loMs/hiMs) AND the encoder span (_pickEncSpan) from this ONE reliable
+        // call instead of a separate fragile range_only probe.
         try {
             const sr = await fetch('/api/shipment_spans?window=24h&shipment=' + encodeURIComponent(shipment));
             if (myTicket !== _progressiveLadderTicket) return;
@@ -2583,6 +2739,13 @@ async function refreshAdvancedCharts() {
             if (sp && Number.isFinite(Number(sp.t_min)) && Number.isFinite(Number(sp.t_max))
                 && Number(sp.t_max) > Number(sp.t_min)) {
                 loMs = Number(sp.t_min); hiMs = Number(sp.t_max);
+            }
+            // 4.0.322 — encoder span straight from the cached shipment row → pin the axis now.
+            if (_insightAxis === 'encoder' && sp
+                && Number.isFinite(Number(sp.enc_min)) && Number.isFinite(Number(sp.enc_max))
+                && Number(sp.enc_max) > Number(sp.enc_min)) {
+                _pickEncSpan = { lo: Number(sp.enc_min), hi: Number(sp.enc_max) };
+                window._mveEncSpanFixed = { lo: Number(sp.enc_min), hi: Number(sp.enc_max) };
             }
         } catch (e) { console.warn('[progressive] shipment-span fetch failed:', e); }
         if (loMs == null || hiMs == null) {
@@ -2595,11 +2758,11 @@ async function refreshAdvancedCharts() {
             }
             return;
         }
-        // 4.0.316 — picked shipment + encoder axis: probe THIS shipment's own encoder
-        // extent (time-independent) so the ladder buckets by the selected axis exactly as
-        // the all-shipments view does. Failure → _pickEncSpan stays null → time-ladder
-        // fallback (the previously-working path), so a slow probe can never blank a pick.
-        if (_insightAxis === 'encoder') {
+        // 4.0.316/322 — FALLBACK ONLY. The cached spans call above normally sets _pickEncSpan
+        // for a finished shipment; this live range_only probe now runs only if that missed
+        // (e.g. the CURRENT in-progress shipment, not yet in shipment_summary). Failure →
+        // _pickEncSpan stays null → time-ladder fallback, so a slow probe can never blank a pick.
+        if (_insightAxis === 'encoder' && !_pickEncSpan) {
             try {
                 const _per = await Promise.race([
                     fetch('/api/detection_charts?range_only=1&shipment=' + encodeURIComponent(shipment))
@@ -2767,8 +2930,105 @@ async function refreshAdvancedCharts() {
         : ((_fxEnc && Number.isFinite(_fxEnc.lo) && Number.isFinite(_fxEnc.hi) && _fxEnc.hi > _fxEnc.lo)
            ? { lo: _fxEnc.lo, hi: _fxEnc.hi } : null);
     const _useEncoderBuckets = (_insightAxis === 'encoder' && !!_encSpan);
+    // 4.0.327 — LENGTH-SEQUENCE ladder. On the Length axis (all-shipments), lay every finished
+    // shipment in the window out back-to-back at its reset-safe length over ONE continuous span
+    // [0, Σlengths]. Fetch the offsets (reset-safe, from shipment_summary) up front, then iterate
+    // shipments in offset(==time) order and fetch each shipment-scoped: dots project via _toLengthX
+    // and strips via _extendStripsFromBucket's _lenProj, so every segment fills and there are no
+    // raw-encoder gaps. Falls through to the time-ladder if there's no length data yet.
+    const _useLengthSeq = (_insightAxis === 'length' && !shipment);
+    let _lenSeqRan = false;
     try {
-        if (_useEncoderBuckets) {
+        if (_useLengthSeq) {
+            let _off = {}, _total = 0;
+            try {
+                const _r = await fetch('/api/shipment_length_offsets?window=' + encodeURIComponent(target));
+                if (myTicket !== _progressiveLadderTicket) return;
+                const _j = await _r.json();
+                _off = _j.offsets || {};
+                _total = Number(_j.total) || 0;
+            } catch (_e) { /* fall through to time ladder */ }
+            const _segs = Object.entries(_off).map(([sid, info]) => ({
+                sid, off: Number(info.offset) || 0, span: Number(info.length_span) || 0,
+                enc_min: Number(info.enc_min) || 0, enc_max: Number(info.enc_max) || 0,
+                verdict: info.verdict || null,
+            })).filter(s => s.span > 0).sort((a, b) => a.off - b.off);
+            if (!_total && _segs.length) _total = _segs[_segs.length - 1].off + _segs[_segs.length - 1].span;
+            if (_segs.length && _total > 0) {
+                _lenSeqRan = true;
+                _lastLengthOffsets = _off;                                  // dots + strips project through this
+                _progressiveColorRange = { axis: 'length', lo: 0, hi: _total, n_bins: bins };
+                window._mveEncSpanFixed = { lo: 0, hi: _total };            // pin the x-axis to the full span
+                window._mveLenSeqTotal = _total;
+                // 4.0.327 — Core set the x-axis to the raw-encoder range; override it to the full
+                // length span so the dots (length-x via _toLengthX) and the strips (binned over
+                // _progressiveColorRange) share the exact same [0, Σlengths] domain — one continuous
+                // span, no gaps, no raw-encoder scale. _mveUnifiedX drives the strip painters.
+                try {
+                    const _xs = _insightCameraScatter && _insightCameraScatter.options
+                        && _insightCameraScatter.options.scales && _insightCameraScatter.options.scales.x;
+                    if (_xs) { _xs.min = 0; _xs.max = _total * 1.01; }
+                    window._mveUnifiedX = { axisMode: 'length', xMin: 0, xMax: _total, bins: bins };
+                    _insightCameraScatter.update('none');
+                } catch (_e) {}
+                // 4.0.332 — paint the shipment LANE from the OFFSETS, not just streamed cells: every
+                // length-bin maps to the shipment whose segment covers it, so the lane is CONTINUOUS
+                // and shows the shipment (label + verdict colour) even in buckets with no dots/colour
+                // (operator: "at least tell the shipment number in the lane"). Data strips still fill
+                // from the per-shipment fetches; this only guarantees the lane never has holes.
+                try {
+                    _progressiveShipmentCells = new Map();
+                    for (let _b = 0; _b < bins; _b++) {
+                        const _cx = (_b + 0.5) / bins * _total;              // bin centre in length-x
+                        let _seg = null;
+                        for (const s of _segs) { if (_cx >= s.off && _cx < s.off + s.span) { _seg = s; break; } }
+                        if (!_seg) _seg = _segs[_segs.length - 1];           // last bin → last shipment
+                        if (_seg) _progressiveShipmentCells.set(_b, { bucket: _b, _enc: _cx, shipment: _seg.sid, verdict: _seg.verdict, n: 1 });
+                    }
+                    _repaintProgressiveStrips();
+                } catch (_e) {}
+                for (const s of _segs) {                                     // offset order == time order → continuous
+                    if (myTicket !== _progressiveLadderTicket) return;
+                    if (!_insightCameraScatter) break;
+                    if ((winSel.value || '24h') !== target) break;
+                    if (_insightAxis !== 'length') break;                    // operator flipped axis mid-load
+                    const _eHiInc = s.enc_min + s.span + Math.max(1, Math.abs(s.enc_min + s.span) * 1e-6);
+                    // 4.0.333 — ONE atomic call PER VISIBLE COLUMN: dots + colour + strips together,
+                    // binned to THIS column only (n_bins=1). This REPLACES the old two-pass loader —
+                    // (one 4×-oversampled full-shipment colour call) + (N dots-only columns) — which
+                    // returned ~4 colour cells for every visible bucket that all projected onto the
+                    // same bucket and REPAINTED it (the operator's "a layer on top of a layer" /
+                    // "colours double"). Now each length-bucket is fetched and painted exactly once,
+                    // like the Encoder ladder. The per-column backend delta is bucket-local (baseline ≈
+                    // that column), so we ignore it and re-pool per (camera, shipment) in
+                    // _recomputeLengthColorDeltas — each capture still compares to its own camera+
+                    // shipment centre. Dots still fill every bucket (per-column fetch, as before).
+                    const _cols = Math.max(2, Math.ceil(bins * (s.span / _total)));
+                    const _range = Math.max(1, (s.enc_max || (s.enc_min + s.span)) - s.enc_min);
+                    const _cStep = _range / _cols;
+                    for (let _ci = 0; _ci < _cols; _ci++) {
+                        if (myTicket !== _progressiveLadderTicket) return;
+                        if (_insightAxis !== 'length') break;
+                        const _cLo = s.enc_min + _ci * _cStep;
+                        const _cHi = (_ci === _cols - 1) ? _eHiInc : (s.enc_min + (_ci + 1) * _cStep);
+                        const _cRef = { axis: 'encoder', lo: _cLo, hi: _cHi, n_bins: 1 };
+                        try { await _extendBucketAll(loMs, hiMs, s.sid, minConf, myTicket, _cLo, _cHi, false, 0, _cRef); }
+                        catch (_e) { /* per-column dots+colour non-fatal */ }
+                    }
+                    bucketCount += 1;
+                }
+                // 4.0.329 — re-assert the exact [0, total] domain after streaming (a dot load can
+                // re-pad the axis to -1%, which showed as "-34 Batch"). No low-side padding here.
+                try {
+                    const _xs2 = _insightCameraScatter && _insightCameraScatter.options
+                        && _insightCameraScatter.options.scales && _insightCameraScatter.options.scales.x;
+                    if (_xs2) { _xs2.min = 0; _xs2.max = _total; _insightCameraScatter.update('none'); }
+                } catch (_e) {}
+            }
+        }
+        if (_useLengthSeq && _lenSeqRan) {
+            /* length ribbon fully loaded above */
+        } else if (_useEncoderBuckets) {
             const _eLo = _encSpan.lo, _eHi = _encSpan.hi;
             const _encStep = (_eHi - _eLo) / bins;
             // Pin the strip/colour bin domain to this SAME span so every column's cells land
@@ -2778,6 +3038,21 @@ async function refreshAdvancedCharts() {
             // baseline is re-derived client-side across columns (mean is additive), so per-column
             // fetching still yields the correct full-span per-camera baseline.
             _progressiveColorRange = { axis: 'encoder', lo: _eLo, hi: _eHi, n_bins: bins };
+            // 4.0.323 — a PICKED shipment is BOUNDED, so fetch its colour + all strips ONCE over
+            // the FULL span (a single reliable call with a high frame cap that scans the whole
+            // shipment, so every bin is covered and perfectly aligned) instead of 25 separate
+            // per-column jsonb scans. Those 25 heavy scans drop on khoy's flaky tunnel and leave
+            // colour/strips painted only in the columns that happened to survive — the operator's
+            // "colour on the left, dots on the right, nothing in sync". The per-column loop below
+            // then streams ONLY dots (a light ORDER BY time LIMIT query, no jsonb aggregate) so
+            // the dots still spread evenly per category without re-introducing the drop-prone
+            // colour scans. All-shipments (shipment='') keeps per-column colour+strips — a full-
+            // span colour scan over its 9.5M-row window would time out (that's why 4.0.316 split it).
+            if (shipment) {
+                const _eHiInc = _eHi + Math.max(1, Math.abs(_eHi) * 1e-6);   // include exact enc_max
+                try { await _extendBucketAll(loMs, hiMs, shipment, minConf, myTicket, _eLo, _eHiInc, false, 2000000); }
+                catch (_e) { /* full-span colour/strips non-fatal */ }
+            }
             for (let _bi = bins - 1; _bi >= 0; _bi--) {   // rightmost (highest encoder) column first
                 if (myTicket !== _progressiveLadderTicket) return;
                 if (!_insightCameraScatter) break;
@@ -2787,8 +3062,9 @@ async function refreshAdvancedCharts() {
                 const _bLo = _eLo + _bi * _encStep;
                 // widen the last (rightmost) column slightly so the exact enc_max is included
                 const _bHi = (_bi === bins - 1) ? (_eHi + Math.max(1, Math.abs(_eHi) * 1e-6)) : (_eLo + (_bi + 1) * _encStep);
-                // ONE atomic call per encoder column — dots + 4 strips + colour, enc-filtered.
-                try { await _extendBucketAll(loMs, hiMs, shipment, minConf, myTicket, _bLo, _bHi); }
+                // 4.0.323 — picked shipment → DOTS-ONLY column (colour+strips already loaded above
+                // in one shot). All-shipments → the original atomic column (dots + 4 strips + colour).
+                try { await _extendBucketAll(loMs, hiMs, shipment, minConf, myTicket, _bLo, _bHi, !!shipment, 0); }
                 catch (_e) { /* per-column failure is non-fatal */ }
                 bucketCount += 1;
             }
@@ -3025,8 +3301,18 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
     const _toLengthX = (p) => {
         const info = lenOffsets[p.ship];
         if (!info) return p.x;
-        const localLen = Math.max(0, (p.x || 0) - (info.enc_min || 0));
-        return (info.offset || 0) + localLen;
+        // 4.0.328 — normalise into the reset-safe segment (see Core renderer note).
+        const _encMin = Number(info.enc_min) || 0;
+        const _rawRange = (Number(info.enc_max) || 0) - _encMin;
+        const span = Number(info.length_span) || 0;
+        let localLen;
+        if (_rawRange > 0 && span > 0) {
+            localLen = Math.max(0, Math.min(1, ((Number(p.x) || 0) - _encMin) / _rawRange)) * span;
+        } else {
+            localLen = Math.max(0, (Number(p.x) || 0) - _encMin);
+            if (span > 0 && localLen > span) localLen = span;
+        }
+        return (Number(info.offset) || 0) + localLen;
     };
     const rawEnc = data.camera_scatter_encoder || [];
     const points = axisMode === 'encoder'
@@ -3476,8 +3762,22 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         const _toLengthX = (p) => {
             const info = lenOffsets[p.ship];
             if (!info) return p.x; // no offset info — fall back to raw
-            const localLen = Math.max(0, (p.x || 0) - (info.enc_min || 0));
-            return (info.offset || 0) + localLen;
+            const _encMin = Number(info.enc_min) || 0;
+            const _rawRange = (Number(info.enc_max) || 0) - _encMin;
+            const span = Number(info.length_span) || 0;
+            let localLen;
+            if (_rawRange > 0 && span > 0) {
+                // 4.0.328 — NORMALISE the raw encoder position into this shipment's reset-safe
+                // segment. A shipment whose encoder reset mid-shipment has length_raw > raw span,
+                // so plain (enc - enc_min) only filled the raw part and left the segment tail empty.
+                // Scaling by (raw fraction) × length_span fills the WHOLE segment; for the common
+                // monotonic case (raw span == length_span) this is identical/exact.
+                localLen = Math.max(0, Math.min(1, ((Number(p.x) || 0) - _encMin) / _rawRange)) * span;
+            } else {
+                localLen = Math.max(0, (Number(p.x) || 0) - _encMin);
+                if (span > 0 && localLen > span) localLen = span;
+            }
+            return (Number(info.offset) || 0) + localLen;
         };
         const rawEncPoints = data.camera_scatter_encoder || [];
         const points = axisMode === 'encoder'
@@ -3811,7 +4111,20 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     for (let _i = 1; _i < _liveCells.length; _i++) { if (_liveCells[_i].bin !== _b0) { _allSame = false; break; } }
                     if (_allSame) return;
                 }
-                const binWidth = (heatmapEncMax - heatmapEncMin) / heatmapBins;
+                // 4.0.324 — LIVE bin count. `heatmapBins` is captured ONCE in this closure at
+                // chart-build time (Core). When Core's own color_heatmap payload is empty
+                // (n_bins:0 — as it is for a picked shipment whose main heatmap query returns
+                // nothing) it fell back to a stale 32/48. But the progressive / full-span loader
+                // later replaces __mveHeatmap.cells with cells binned over the OPERATOR'S bucket
+                // count (e.g. 20). Dividing by the stale closure value drew bin K at K/48 → the
+                // cells packed into the left ~40% at 1/48 width, out of sync with the strips+dots.
+                // Read the count LIVE (it travels with the cells on __mveHeatmap.bins), so the
+                // heatmap is always 1:1 with the strips + scatter for whatever bucket count is set.
+                const _hmBins = Math.max(1,
+                    Number(chart.data && chart.data.__mveHeatmap && chart.data.__mveHeatmap.bins)
+                    || (typeof _progressiveColorRange !== 'undefined' && _progressiveColorRange && Number(_progressiveColorRange.n_bins))
+                    || heatmapBins);
+                const binWidth = (heatmapEncMax - heatmapEncMin) / _hmBins;
                 // 4.0.177 — colour scale mode. In 'relative' mode we normalise the
                 // 2/5/10 CIELAB tolerance bands to the span's own max |Δ|, so
                 // a very stable window (all cells |Δ|<2) still spreads across
@@ -3838,9 +4151,9 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 // repaint on top with their actual hue below. Operator sees
                 // a continuous strip across the whole window even in stretches
                 // where MVE was off or color-check hadn't been enabled yet.
-                if (ca && heatmapBins > 0) {
+                if (ca && _hmBins > 0) {
                     const cw = ca.right - ca.left;
-                    const bw = cw / heatmapBins;
+                    const bw = cw / _hmBins;
                     const covered = new Set();
                     for (const c of _liveCells) covered.add(String(c.cam) + '|' + String(c.bin));
                     // Iterate visible cameras (Y-axis rows) × all bins
@@ -3852,7 +4165,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         const yB = yScale.getPixelForValue(idx + 0.5);
                         const y  = Math.min(yT, yB);
                         const h  = Math.abs(yB - yT);
-                        for (let b = 0; b < heatmapBins; b++) {
+                        for (let b = 0; b < _hmBins; b++) {
                             if (covered.has(String(cam) + '|' + b)) continue;
                             const x = ca.left + b * bw;
                             ctx.fillRect(x, y, bw, h);
@@ -3864,7 +4177,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     const idx = idxByCam.has(cell.cam) ? idxByCam.get(cell.cam) : null;
                     if (idx == null) continue;
                     let x, y, w, h;
-                    if (ca && heatmapBins > 1) {
+                    if (ca && _hmBins > 1) {
                         // 4.0.302 — direct pixel positioning is now the PRIMARY path. Cells are
                         // pre-binned into heatmapBins over the display range, so bin K sits at
                         // ca.left + K*chartWidth/heatmapBins — 1:1 with the scatter dots and the
@@ -3875,7 +4188,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         // green (operator: "it just create one bucket"). Bin positioning can't
                         // collapse, so it's the safe default whenever there's >1 bin.
                         const chartWidth = ca.right - ca.left;
-                        const binPixelWidth = chartWidth / heatmapBins;
+                        const binPixelWidth = chartWidth / _hmBins;
                         x = ca.left + cell.bin * binPixelWidth;
                         w = binPixelWidth;
                     } else if (heatmapBoundsCollapsed || binWidth <= 0) {
@@ -3896,7 +4209,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         // heatmapBins`, always spread across the full width,
                         // 1:1 with the strip cells below.
                         const chartWidth = ca.right - ca.left;
-                        const binPixelWidth = chartWidth / heatmapBins;
+                        const binPixelWidth = chartWidth / _hmBins;
                         x = ca.left + cell.bin * binPixelWidth;
                         w = binPixelWidth;
                     } else {

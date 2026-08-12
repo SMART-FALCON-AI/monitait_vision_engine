@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.333] - 2026-08-12 — Length axis colour: one request per bucket (kills the double-paint / oversample)
+
+The length ribbon painted colour **twice per visible bucket**: it fetched one 4×-oversampled full-shipment colour slice AND N dots-only columns, so ~4 backend colour cells projected onto every visible bucket and repainted it (operator: "a layer on top of a layer", "colours double"). Now each visible column makes **one atomic call** (dots + colour + strips, `n_bins=1`) — every length-bucket is fetched and painted exactly once, like the Encoder ladder. The per-column backend delta is bucket-local, so the client re-pools the baseline **per (camera, shipment)** (`_recomputeLengthColorDeltas`: median of the columns' E in `shipment_median` mode, else sample-weighted mean) and deltas each cell against its own camera+shipment centre — the metric the operator asked for. Because shipments occupy disjoint length ranges, this never leaks colour across shipments. Colour cells are tagged with `_ship` to key the pool.
+
+## [4.0.332] - 2026-08-11 — Length axis: dots per bucket within shipments + continuous shipment lane from offsets
+
+Two length-ribbon gaps closed: (1) the Encoder axis fills every bucket because it fetches dots per column — the length ladder now does the same **within** each shipment (split the segment's encoder range into columns, fetch each dots-only) so every length-bucket gets its own dots. (2) The shipment lane is now seeded from the offsets map, so every length-bin maps to the shipment whose segment covers it — the lane is **continuous** and shows the shipment number (and verdict colour) even in buckets with no dots/colour (operator: "at least tell the shipment number in the lane").
+
+## [4.0.331] - 2026-08-11 — Default X-axis is now Length
+
+`_insightAxis` defaults to `length` (was `encoder`) so the continuous length ribbon is what the operator sees first.
+
+## [4.0.330] - 2026-08-11 — Length axis keeps the backend per-(camera, shipment) delta
+
+On the Length axis each shipment is fetched shipment-scoped, so the backend already computes `delta_e`/`delta_pct` with a baseline that is `GROUP BY cam` over that shipment's frames — i.e. per (camera, shipment), exactly the metric requested. Skip the cross-shipment frontend pool for the length axis (it would leak colour drift between shipments), and pass `&baseline=` so the backend uses the operator's chosen statistic (median vs avg). *(Superseded for the cell values by 4.0.333's per-column re-pool, which keeps the same per-(camera, shipment) semantics.)*
+
+## [4.0.329] - 2026-08-11 — Length axis: oversample strip bins + re-assert [0, total] domain
+
+Oversample the per-shipment strip bin_ref at 4× so every length-bin inside a segment receives a projected strip/lane/colour cell (the coarse round left occasional null bins), and re-assert the exact `[0, total]` x-domain after streaming so a dot load can't re-pad the axis to −1% (which showed as "−34 Batch"). *(The 4× oversample here is what 4.0.333 removes in favour of one cell per bucket.)*
+
+## [4.0.328] - 2026-08-11 — Length axis: normalise dots into the reset-safe segment (fills within-shipment-reset gaps)
+
+Follow-up to 4.0.327. A shipment whose encoder reset **mid-shipment** has `length_raw` > raw encoder span, so dots positioned by plain `enc − enc_min` only covered the raw part and left the segment's tail empty (seen on vteam12: shipment `2608101959554`, length_raw 1.74× its raw span, from the fake encoder restarting on a redeploy). Now each dot/strip cell is positioned by `(enc − enc_min) / raw_span × length_span` — normalised into the shipment's reset-safe segment, so it fills the whole width. For the common monotonic case (raw span == length_span) this is identical/exact. `enc_max` added to the offset payload (endpoint + detection_charts) to carry the raw range.
+
+## [4.0.327] - 2026-08-11 — Length axis: full continuous ribbon (per-shipment ladder + strip projection)
+
+Builds on 4.0.326. The offsets were correct (shipments tile back-to-back), but the view still looked gappy: only the newest ~1500 dots loaded (so most segments were empty), and the quality/colour/shipment-lane strips were still binned on raw encoder, so they didn't line up with the length layout. Now the Length axis is one continuous span **[0, Σ shipment lengths]** with every segment filled.
+
+- **New `/api/shipment_length_offsets?window=` endpoint** — returns each finished shipment's `{offset, enc_min, length_span}` over the window, ordered by time, from `shipment_summary.length_raw` (reset-safe). offset = running cumulative sum; total = Σ lengths.
+- **Per-shipment Length ladder** — on the Length axis (all-shipments), the frontend fetches those offsets up front, pins the scatter x-axis + `_mveUnifiedX` + `_progressiveColorRange` to `[0, total]`, then iterates shipments in time order fetching each one shipment-scoped, so **every segment's dots load** (no newest-cap gaps).
+- **Strip projection** — `_extendBucketAll` takes a `stripRefOverride` so each shipment's strips/colour are binned over its own encoder range; `_extendStripsFromBucket` then maps each cell's encoder centre to its **length-x** (`offset + local`, clamped to the segment) via `_lastLengthOffsets`. So quality/colour/ejection/shipment-lane strips tile continuously in the same domain as the dots.
+
+## [4.0.326] - 2026-08-11 — Length axis: sequential shipments by reset-safe length (fixes 33-billion-metre blowup)
+
+Operator report: on the Length x-axis, a PLC encoder that resets to 0 at shipment boundaries produced a cumulative axis spanning tens of **billions** of metres, with all data crushed into two columns and huge empty gaps.
+
+- **Root cause:** `shipment_length_offsets` built each shipment's segment from **raw** `enc_max − enc_min`. A shipment whose encoder didn't cleanly reset (enc_max in the billions) blew up the running offset, so every later shipment landed impossibly far right.
+- **Fix:** the sequential length axis now lays each shipment out at its **reset-safe** `length_raw` (Σ forward encoder deltas, already stored per shipment in `shipment_summary`) instead of the raw span. New `get_length_raw_map()` batch-fetches those lengths; the in-progress shipment (not yet finalized) falls back to its bounded raw span. Both frontend `_toLengthX` transforms now **clamp** each dot to its shipment's segment so a within-shipment reset can't spill a dot into the next shipment's slot. Result: shipments render back-to-back in time order, each as wide as its true fabric length — the operator's ribbon layout — and the axis total is the real summed length, not a runaway encoder count.
+
+## [4.0.325] - 2026-08-10 — DEV/TEST fake-encoder generator (env-gated, default off)
+
+A box with no real Arduino/encoder line (e.g. vteam12, which runs camera-only) leaves `encoder_value` pinned at 0, so the encoder-axis charts have no spread to test against. This adds an **opt-in** synthetic encoder so such a box becomes a proper test bed for the encoder/colour views — without any hardware.
+
+- **`MVE_FAKE_ENCODER=1`** starts a daemon thread in `ArduinoSocket` that increments `self.encoder_value` on a timer, feeding the exact same field the real serial parse sets (plus `self.data` and the `_maybe_auto_cutoff()` hook), so capture gating, length, auto-cutoff and the charts behave identically to a real moving line. Tunables: `MVE_FAKE_ENCODER_STEP` (counts/tick, default 20), `MVE_FAKE_ENCODER_HZ` (ticks/sec, default 10), `MVE_FAKE_ENCODER_WRAP` (reset-to-0 ceiling, default 0 = never). **Default off → zero production impact**; the thread only starts when the flag is set (intended for vteam12).
+
+## [4.0.324] - 2026-08-05 — Colour heatmap drawn at the wrong bin count (hardcoded/stale n_bins)
+
+Operator changed the bucket count to 20 and proved the colour heatmap cells were drawn at 48-bin width, packed into the left ~40%, while the strips + dots were correctly 20-wide.
+
+- **Root cause:** the colour-heatmap canvas plugin captured `heatmapBins` **once** in its closure at chart-build time (Core). When Core's own `color_heatmap` payload is empty (`n_bins:0` — which it is for a picked shipment, whose main heatmap query returns 0 cells in ~18s), that fell back to a stale 32/48. The progressive / full-span loader then replaces `__mveHeatmap.cells` with cells binned over the operator's actual bucket count (20), but the plugin kept dividing the chart width by the stale value — so bin K was drawn at `K/48` of the width instead of `K/N`, placing 20 bins' worth of cells into the left 40% at 1/48 width each.
+- **Fix:** the plugin now reads the bin count **live** each draw — from `__mveHeatmap.bins` (which travels with the cells) → `_progressiveColorRange.n_bins` → the closure fallback — so cell width/position are always 1:1 with the strips and scatter for whatever bucket count is set. `__mveHeatmap.bins` is kept in lock-step with the cells wherever they're updated. The strips were already correct (they bin over `_progressiveColorRange.n_bins`); only the heatmap plugin used the stale value.
+
+## [4.0.323] - 2026-08-05 — Picked-shipment colour+strips in ONE full-span call (tunnel-drop fix)
+
+Follow-up to 4.0.322. With the axis correctly pinned (322 FIX A), the picked-shipment encoder ladder still streamed colour + all four strips as **25 separate per-column jsonb-aggregate scans**. On khoy's flaky reverse-SSH tunnel those heavy scans drop (verified: an equivalent diagnostic query aborted twice before succeeding), so colour/strips painted only in the columns that survived — the operator saw colour bunched on the left, dots on the right, nothing in sync — while the data was fully present (a 222k-row shipment spread evenly across its whole 4.09M→7.56M span). Backend + binning were confirmed correct (right column → global bins 23–24, mid-left → bins 9–10); the failure was purely delivery.
+
+- **A picked shipment is bounded**, so it no longer needs 25 fragile colour scans. Colour + strips now come from **one full-span call** (`_extendBucketAll` with a high `frame_cap` that scans the whole shipment, binned over the pinned span → every bin covered and aligned, in a single request with 3-try retry). The per-column loop then streams **dots only** — a light `ORDER BY time LIMIT dot_cap` query with no jsonb aggregate, so it can't stall/drop the way the colour scans did — preserving even per-category dot spread.
+- New `dotsOnly` + `frameCap` params on `_extendBucketAll`; dots-only columns skip `include_strips`/`include_color_slice`/bin-ref and the strip-apply entirely. **All-shipments is unchanged** — its 9.5M-row window can't be scanned full-span in one shot (the reason 4.0.316 split colour per-column), so it keeps per-column colour+strips. **No backend change.**
+
+## [4.0.322] - 2026-08-05 — Picked-shipment axis from cache + colour-strip freeze fix
+
+Two operator-reported Charts bugs, both rooted in a picked shipment inheriting the previous view's state on the encoder ladder. Canary vteam12 first.
+
+- **FIX A — picked-shipment axis squished ("why can't you draw bucket by bucket").** Picking a shipment fired a live `range_only&shipment=` encoder-span probe that (a) dropped on khoy's flaky tunnel and (b) on a 2M-row shipment only saw the newest 200k rows → a partial span. Meanwhile `_mveEncSpanFixed` still held the all-shipments ~93M roll extent, so the axis stayed at 93M and squished the pick's dots into one column at ~2.5M, and the bucketing never ran. Now: `/api/shipment_spans?shipment=` serves the shipment's **authoritative full span from the `shipment_summary` cache** (new `get_shipment_span()` — reset-safe enc_min/max, never truncated, instant, can't drop on the tunnel); the frontend reads BOTH the time span and the encoder span from that one reliable call, and **clears the stale `_mveEncSpanFixed` pin** at the start of the picked path. The live probe remains only as a fallback for the current in-progress shipment (not yet in the cache).
+- **FIX B — colour-change strip "stands still" while the others update.** The strip accumulators + the colour heatmap cache (`__mveHeatmap.cells`) were reset only inside `_seedProgressiveColorCache` (Core), which the picked-shipment encoder ladder skips. So on a shipment/window change the dots cleared+refilled but the strips kept the prior load's cells — worst hit the colour-change strip, which is rebuilt from `__mveHeatmap.cells` and whose `_recomputeColorChangeFromProgressive()` bailed on an empty source **without clearing**, leaving old paint frozen. Now: load-start resets every accumulator + `__mveHeatmap.cells` and repaints empty; and the colour-strip recompute **hides the strip on empty/disabled** instead of bailing, so it stays in lock-step with quality/ejection/shipment.
+
 ## [4.0.321] - 2026-08-05 — Performance backlog batch #1: config cache, pool, batched writer, timeout leak, stats hardening
 
 Backend-only correctness + steady-state-load batch from the whole-codebase audit. Canary vteam12 first.

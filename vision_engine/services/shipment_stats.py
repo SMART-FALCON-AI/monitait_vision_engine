@@ -442,6 +442,77 @@ def get_latest_shipment_scores(n=50):
         release_db_connection(conn)
 
 
+def get_shipment_span(shipment):
+    """4.0.322 — authoritative FULL-shipment span (t_start/t_stop ms + enc_min/enc_max)
+    from the shipment_summary cache. Reset-safe and NEVER truncated — unlike the
+    /api/shipment_spans live scan (LIMIT 200000), which on a 2M-row khoy shipment only
+    saw the newest 200k rows → a partial encoder span that squished the picked shipment's
+    dots into one axis column. Instant + can't drop on the tunnel. Returns None if the
+    shipment isn't finalized into the cache yet (e.g. the current in-progress shipment)."""
+    if not shipment:
+        return None
+    conn = get_db_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT EXTRACT(EPOCH FROM t_start)*1000.0, EXTRACT(EPOCH FROM t_stop)*1000.0,
+                      enc_min, enc_max, enc_span, score, verdict, n_total
+               FROM shipment_summary WHERE shipment = %s LIMIT 1""",
+            [str(shipment)],
+        )
+        r = cur.fetchone()
+        cur.close()
+        if not r:
+            return None
+        return {
+            "shipment": str(shipment),
+            "t_min":    float(r[0]) if r[0] is not None else None,
+            "t_max":    float(r[1]) if r[1] is not None else None,
+            "enc_min":  int(r[2]) if r[2] is not None else None,
+            "enc_max":  int(r[3]) if r[3] is not None else None,
+            "enc_span": int(r[4]) if r[4] is not None else None,
+            "score":    r[5],
+            "verdict":  r[6],
+            "n_rows":   int(r[7] or 0),
+        }
+    except Exception as e:
+        logger.debug(f"get_shipment_span failed: {e}")
+        return None
+    finally:
+        release_db_connection(conn)
+
+
+def get_length_raw_map(shipments):
+    """4.0.326 — {shipment: length_raw} from shipment_summary for the given ids.
+    length_raw is the RESET-SAFE fabric length (sum of forward encoder deltas), so the
+    sequential length axis lays each shipment out at its true length instead of raw
+    enc_max-enc_min (which explodes to billions when a PLC encoder didn't cleanly reset)."""
+    if not shipments:
+        return {}
+    conn = get_db_connection()
+    if not conn:
+        return {}
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT shipment, length_raw FROM shipment_summary WHERE shipment = ANY(%s)",
+            [list({str(s) for s in shipments if s})],
+        )
+        out = {}
+        for r in cur.fetchall():
+            if r[1] is not None:
+                out[str(r[0])] = float(r[1])
+        cur.close()
+        return out
+    except Exception as e:
+        logger.debug(f"get_length_raw_map failed: {e}")
+        return {}
+    finally:
+        release_db_connection(conn)
+
+
 def _window_to_interval(window):
     _map = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days",
             "30d": "30 days", "90d": "90 days"}

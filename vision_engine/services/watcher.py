@@ -919,6 +919,57 @@ class ArduinoSocket:
         # to restore from on next boot. Runs every 5 s inside persist_length_state,
         # writes only when the actual encoder/length changed.
         threading.Thread(target=self._length_state_writer_loop, daemon=True, name="length-state-writer").start()
+        # 4.0.325 — DEV/TEST fake-encoder generator. A box with no real Arduino/encoder line
+        # (e.g. vteam12, which runs camera-only) leaves encoder_value pinned at 0, so the
+        # encoder-axis charts have nothing to test against. When MVE_FAKE_ENCODER is set, a
+        # daemon thread synthesizes an incrementing encoder that feeds the SAME
+        # self.encoder_value the real serial path sets — so captured frames get a spreading
+        # encoder and the encoder views become testable. Default OFF → ZERO production impact.
+        if str(os.environ.get("MVE_FAKE_ENCODER", "")).strip().lower() in ("1", "true", "yes", "on"):
+            threading.Thread(target=self._fake_encoder_loop, daemon=True, name="fake-encoder").start()
+
+    def _fake_encoder_loop(self):
+        """4.0.325 — DEV/TEST ONLY. Synthesize an incrementing encoder so a box with no real
+        encoder hardware can exercise the encoder-axis charts. Gated by MVE_FAKE_ENCODER (the
+        caller in __init__ only starts this thread when the flag is set). Tunables (env):
+            MVE_FAKE_ENCODER_STEP  counts added per tick   (default 20)
+            MVE_FAKE_ENCODER_HZ    ticks per second        (default 10)
+            MVE_FAKE_ENCODER_WRAP  reset to 0 above this    (default 0 = never wrap)
+        Feeds self.encoder_value / self.last_encoder_value / self.data exactly like run()'s
+        real serial parse, and runs the same _maybe_auto_cutoff() hook, so downstream behaviour
+        (capture gating, length, auto-cutoff, charts) is identical to a real moving line."""
+        try:
+            step = int(os.environ.get("MVE_FAKE_ENCODER_STEP", "20"))
+        except (TypeError, ValueError):
+            step = 20
+        try:
+            hz = float(os.environ.get("MVE_FAKE_ENCODER_HZ", "10"))
+        except (TypeError, ValueError):
+            hz = 10.0
+        try:
+            wrap = int(os.environ.get("MVE_FAKE_ENCODER_WRAP", "0"))
+        except (TypeError, ValueError):
+            wrap = 0
+        period = 1.0 / max(0.1, hz)
+        logger.warning(
+            f"FAKE ENCODER ENABLED (DEV/TEST): +{step}/tick @ {hz}Hz "
+            f"(wrap={wrap or 'off'}) — no real encoder is being read"
+        )
+        while not self.stop_thread:
+            try:
+                self.last_encoder_value = self.encoder_value
+                nxt = int(self.encoder_value or 0) + step
+                if wrap and nxt > wrap:
+                    nxt = 0
+                self.encoder_value = nxt
+                self.data = {"encoder_value": self.encoder_value}
+                try:
+                    self._maybe_auto_cutoff()
+                except Exception:
+                    pass
+            except Exception as _fee:
+                logger.debug(f"fake_encoder_loop: {_fee}")
+            time.sleep(period)
 
     def _length_state_writer_loop(self):
         """v4.0.98 — Periodic length-state snapshot. Sleeps 5 s between attempts;

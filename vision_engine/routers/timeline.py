@@ -5036,6 +5036,20 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # length. Most shipments don't reset.
         shipment_length_offsets = {}
         try:
+            # 4.0.326 — SEQUENTIAL length axis, reset-safe. Each shipment's segment width is
+            # its RESET-SAFE length_raw (Σ forward encoder deltas) from shipment_summary, NOT
+            # raw enc_max-enc_min. A shipment whose PLC encoder didn't cleanly reset (enc_max in
+            # the billions) used to make _cum explode to tens of billions of metres and left the
+            # axis mostly empty. length_raw is bounded to the true fabric length, so shipments now
+            # lay out back-to-back at their real lengths in time order (operator's ribbon layout).
+            _len_raw_by_ship = {}
+            try:
+                _sids = [str(_sp.get("shipment")) for _sp in shipment_spans if _sp.get("shipment")]
+                if _sids:
+                    from services.shipment_stats import get_length_raw_map
+                    _len_raw_by_ship = get_length_raw_map(_sids) or {}
+            except Exception as _lrm:
+                logger.debug(f"length_raw map failed: {_lrm}")
             _cum = 0
             for _sp in shipment_spans:
                 _sid = _sp.get("shipment")
@@ -5043,10 +5057,16 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     continue
                 _em = int(_sp.get("enc_min") or 0)
                 _ex = int(_sp.get("enc_max") or 0)
-                _span = max(0, _ex - _em)
+                _raw_span = max(0, _ex - _em)
+                # Prefer the cached reset-safe length; fall back to the raw span only for the
+                # in-progress shipment (not finalized into shipment_summary yet). The current
+                # shipment's encoder resets cleanly at its own start, so its raw span is bounded.
+                _lr = _len_raw_by_ship.get(str(_sid))
+                _span = int(_lr) if (_lr is not None and _lr > 0) else _raw_span
                 shipment_length_offsets[_sid] = {
                     "offset": int(_cum),
                     "enc_min": int(_em),
+                    "enc_max": int(_ex),             # 4.0.328 — raw range, for normalising dots into the segment
                     "length_span": int(_span),
                     "t_min": _sp.get("t_min"),
                     "t_max": _sp.get("t_max"),
@@ -5263,6 +5283,29 @@ def shipment_spans_endpoint(request: Request, window: str = "1h", shipment: str 
     if shipment:
         interval = "90 days"
     empty = {"shipment_spans": [], "window": window}
+    # 4.0.322 — a SPECIFIC finished shipment: serve its authoritative FULL span from the
+    # shipment_summary cache (reset-safe enc_min/max, never truncated by the 200k LIMIT,
+    # instant, can't drop on the tunnel). The frontend picked-shipment ladder reads
+    # enc_min/enc_max from here to PIN the encoder axis; the old live scan of a 2M-row
+    # shipment returned only the newest 200k rows' partial span → the pick's dots squished
+    # into one axis column at ~2.5M on a stale 93M axis. Cache MISS (current in-progress
+    # shipment, not finalized yet) falls through to the live scan below unchanged.
+    if shipment:
+        try:
+            from services.shipment_stats import get_shipment_span
+            _c = get_shipment_span(shipment)
+            if _c and _c.get("enc_min") is not None and _c.get("enc_max") is not None \
+               and _c["enc_max"] > _c["enc_min"]:
+                _sp = {
+                    "shipment": shipment,
+                    "enc_min": _c["enc_min"], "enc_max": _c["enc_max"],
+                    "t_min":   _c["t_min"],   "t_max":   _c["t_max"],
+                    "n_rows":  _c["n_rows"],
+                    "verdict": _c.get("verdict"), "score": _c.get("score"),
+                }
+                return JSONResponse(content={"shipment_spans": [_sp], "window": window, "cached": True})
+        except Exception as _cse:
+            logger.debug(f"shipment_spans cache read failed: {_cse}")
     _ship_where = "AND shipment = %s" if shipment else ""
     _ship_params = [interval] + ([shipment] if shipment else [])
     conn = None
@@ -5343,6 +5386,67 @@ def shipment_spans_endpoint(request: Request, window: str = "1h", shipment: str 
         return JSONResponse(content={"shipment_spans": spans, "window": window})
     except Exception as e:
         logger.warning(f"shipment_spans standalone endpoint failed: {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
+@router.get("/api/shipment_length_offsets")
+def shipment_length_offsets_endpoint(request: Request, window: str = "24h"):
+    """4.0.327 — sequential length-axis layout. Returns, per finished shipment in the window,
+    {offset, enc_min, length_span} ordered by time, where length_span is the RESET-SAFE length_raw
+    (Σ forward encoder deltas) and offset is the running cumulative sum. The Length axis lays every
+    shipment out back-to-back over one continuous span [0, total] = Σ lengths — no raw-encoder gaps.
+    Reads straight from shipment_summary (cheap, indexed); the in-progress shipment (not finalized)
+    is omitted until it closes."""
+    _map = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days",
+            "30d": "30 days", "90d": "90 days"}
+    interval = _map.get(str(window or "24h"), "24 hours")
+    empty = {"offsets": {}, "total": 0, "window": window}
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = 8000")
+        cur.execute(
+            """SELECT shipment,
+                      EXTRACT(EPOCH FROM t_start) * 1000.0,
+                      EXTRACT(EPOCH FROM t_stop)  * 1000.0,
+                      enc_min, enc_max, length_raw, verdict
+               FROM shipment_summary
+               WHERE t_stop > NOW() - INTERVAL %s
+               ORDER BY t_start ASC NULLS LAST""",
+            [interval],
+        )
+        offsets = {}
+        cum = 0
+        for _sid, _t0, _t1, _emin, _emax, _lraw, _vrd in cur.fetchall():
+            if not _sid:
+                continue
+            _span = int(_lraw) if (_lraw is not None and _lraw > 0) \
+                else max(0, int(_emax or 0) - int(_emin or 0))
+            offsets[str(_sid)] = {
+                "offset": int(cum),
+                "enc_min": int(_emin or 0),
+                "enc_max": int(_emax or 0),          # 4.0.328 — raw range, for normalising dots into the segment
+                "length_span": int(_span),
+                "verdict": _vrd,                       # 4.0.332 — so the lane can be painted from offsets (colour + label)
+                "t_min": float(_t0) if _t0 is not None else None,
+                "t_max": float(_t1) if _t1 is not None else None,
+            }
+            cum += _span
+        cur.close()
+        return JSONResponse(content={"offsets": offsets, "total": int(cum), "window": window})
+    except Exception as e:
+        logger.warning(f"shipment_length_offsets endpoint failed: {e}")
         return JSONResponse(content=empty)
     finally:
         if conn is not None:
