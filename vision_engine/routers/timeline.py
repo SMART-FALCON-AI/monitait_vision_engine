@@ -5457,6 +5457,154 @@ def shipment_length_offsets_endpoint(request: Request, window: str = "24h"):
                 pass
 
 
+@router.get("/api/insight_layout")
+def insight_layout_endpoint(request: Request, axis: str = "length", window: str = "24h",
+                            shipment: str = "", phase: str = "", parent_class: str = "",
+                            bins: int = 48, baseline: str = "camera"):
+    """v4.0.334 — the ONE up-front call for the Detection Insights scatter refactor.
+
+    Returns everything the client needs to fix the layout and know the colour baseline BEFORE it
+    streams any bucket, so colour can be applied inline (never racing the ladder):
+      - `shipments`: the finished shipments in the window (or the one picked), each with its
+        cumulative `offset`, reset-safe `length_span`, `enc_min/enc_max`, `verdict`, time bounds,
+        and its per-camera colour `baseline` {cam: {avg, median, n}} read from shipment_stats.
+      - `domain` {lo, hi} for the chosen axis (+ `total` for length), `bins`, and `camera_y_order`.
+    Reads ONLY the materialized caches (shipment_summary + shipment_stats) — cheap, instant,
+    reset-safe. Replaces the old scatter's fan-out (fire-and-forget /api/shipment_baseline +
+    range probe + /api/shipment_length_offsets) with a single deterministic read.
+    """
+    _map = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days",
+            "30d": "30 days", "90d": "90 days"}
+    interval = _map.get(str(window or "24h"), "24 hours")
+    try:
+        _bins = max(1, int(bins or 48))
+    except Exception:
+        _bins = 48
+    empty = {"axis": axis, "window": window, "shipment": shipment, "bins": _bins,
+             "domain": {"lo": 0, "hi": 0}, "total": 0, "shipments": [],
+             "camera_y_order": [], "baseline_mode": baseline}
+    conn = None
+    try:
+        from services.db import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        if conn is None:
+            return JSONResponse(content=empty)
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = 8000")
+
+        # --- 1) shipment list: finished shipments in the window, or the one picked ---
+        if shipment:
+            cur.execute(
+                """SELECT shipment, EXTRACT(EPOCH FROM t_start)*1000.0,
+                          EXTRACT(EPOCH FROM t_stop)*1000.0, enc_min, enc_max, length_raw, verdict
+                   FROM shipment_summary WHERE shipment = %s LIMIT 1""",
+                [shipment])
+        else:
+            cur.execute(
+                """SELECT shipment, EXTRACT(EPOCH FROM t_start)*1000.0,
+                          EXTRACT(EPOCH FROM t_stop)*1000.0, enc_min, enc_max, length_raw, verdict
+                   FROM shipment_summary
+                   WHERE t_stop > NOW() - INTERVAL %s
+                   ORDER BY t_start ASC NULLS LAST""",
+                [interval])
+        ships = []
+        cum = 0
+        t_lo = t_hi = e_lo = e_hi = None
+        for _sid, _t0, _t1, _emin, _emax, _lraw, _vrd in cur.fetchall():
+            if not _sid:
+                continue
+            _emin_i = int(_emin or 0)
+            _emax_i = int(_emax or 0)
+            _span = int(_lraw) if (_lraw is not None and _lraw > 0) else max(0, _emax_i - _emin_i)
+            ships.append({
+                "sid": str(_sid), "offset": int(cum),
+                "enc_min": _emin_i, "enc_max": _emax_i, "length_span": int(_span),
+                "verdict": _vrd,
+                "t_min": float(_t0) if _t0 is not None else None,
+                "t_max": float(_t1) if _t1 is not None else None,
+                "baseline": {},
+            })
+            cum += _span
+            if _t0 is not None:
+                t_lo = _t0 if t_lo is None else min(t_lo, _t0)
+            if _t1 is not None:
+                t_hi = _t1 if t_hi is None else max(t_hi, _t1)
+            e_lo = _emin_i if e_lo is None else min(e_lo, _emin_i)
+            e_hi = _emax_i if e_hi is None else max(e_hi, _emax_i)
+
+        # --- 2) per-(camera, shipment, PARENT OBJECT) colour baseline from shipment_stats ---
+        # NO parent_class filter — return EVERY parent object's baseline so the client colours each
+        # parent against its OWN normal (operator: "get the base for each parent object separately";
+        # different parent objects are different materials with different normal colours, so pooling
+        # them corrupts the baseline). Shape: shipments[].baseline = {parent: {cam: {avg,median,n}}}.
+        _ph = " AND st.phase = %s" if str(phase or "").strip() else ""
+        _ph_a = [str(phase).strip()] if str(phase or "").strip() else []
+        by_ship = {s["sid"]: s for s in ships}
+        cams = set()
+        if by_ship:
+            if shipment:
+                cur.execute(
+                    f"""SELECT st.shipment, st.parent_class, st.cam,
+                               SUM(st.avg_e*st.n)/NULLIF(SUM(st.n),0),
+                               SUM(st.median_e*st.n)/NULLIF(SUM(st.n),0), SUM(st.n)
+                        FROM shipment_stats st
+                        WHERE st.shipment = %s {_ph}
+                        GROUP BY st.shipment, st.parent_class, st.cam""",
+                    [shipment] + _ph_a)
+            else:
+                cur.execute(
+                    f"""SELECT st.shipment, st.parent_class, st.cam,
+                               SUM(st.avg_e*st.n)/NULLIF(SUM(st.n),0),
+                               SUM(st.median_e*st.n)/NULLIF(SUM(st.n),0), SUM(st.n)
+                        FROM shipment_stats st
+                        JOIN shipment_summary su ON su.shipment = st.shipment
+                        WHERE su.t_stop > NOW() - INTERVAL %s {_ph}
+                        GROUP BY st.shipment, st.parent_class, st.cam""",
+                    [interval] + _ph_a)
+            for _sid, _pc, _cam, _avg, _med, _n in cur.fetchall():
+                if _cam is None:
+                    continue
+                cams.add(int(_cam))
+                s = by_ship.get(str(_sid))
+                if s is not None:
+                    _pkey = str(_pc) if _pc is not None else ""
+                    s["baseline"].setdefault(_pkey, {})[str(int(_cam))] = {
+                        "avg": round(float(_avg), 3) if _avg is not None else None,
+                        "median": round(float(_med), 3) if _med is not None else None,
+                        "n": int(_n or 0),
+                    }
+        cur.close()
+
+        camera_y_order = [str(c) for c in sorted(cams)]
+        total = int(cum)
+        if axis == "length":
+            domain = {"lo": 0, "hi": total}
+        elif axis == "encoder":
+            domain = {"lo": int(e_lo or 0), "hi": int(e_hi or 0)}
+        else:  # time
+            domain = {"lo": float(t_lo or 0), "hi": float(t_hi or 0)}
+
+        return JSONResponse(content={
+            "axis": axis, "window": window, "shipment": shipment, "bins": _bins,
+            "domain": domain, "total": total, "shipments": ships,
+            "camera_y_order": camera_y_order, "baseline_mode": baseline,
+        })
+    except Exception as e:
+        logger.warning(f"insight_layout endpoint failed: {e}")
+        return JSONResponse(content=empty)
+    finally:
+        if conn is not None:
+            try:
+                conn.rollback()  # SELECT-only → release clean, no idle-in-transaction
+            except Exception:
+                pass
+            try:
+                from services.db import release_db_connection
+                release_db_connection(conn)
+            except Exception:
+                pass
+
+
 @router.get("/api/ejection_stats")
 def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
     """Ejection analytics for the Charts tab (3.17.0).
@@ -6001,12 +6149,12 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
 _CSV_COLUMNS = [
     "time", "shipment", "encoder", "length", "camera", "class", "confidence",
     "severity", "impact",
-    "xmin", "ymin", "xmax", "ymax", "image_path",
+    "xmin", "ymin", "xmax", "ymax", "image_url",
     "inference_time_ms", "model_used",
 ]
 
 
-def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, unwind, min_conf_f):
+def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, unwind, min_conf_f, img_prefix=""):
     """Build one detection row (list of column values) or None if the row is
     filtered out by min_conf. Extracted so single-CSV and ZIP paths share it.
     """
@@ -6025,6 +6173,14 @@ def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max
         length_val = int(enc_max - int(enc))
     else:
         length_val = int(int(enc) - enc_min)
+    # 4.0.343 — image column is a DIRECT download URL via the /api/raw_image/<rel> serve route
+    # (operator: "put the downloadable link so they can download right away"), built on whatever host
+    # the operator is using. Falls back to the raw path when no prefix is supplied.
+    if img and img_prefix:
+        rel = img.split("raw_images/")[-1].lstrip("/") if "raw_images/" in str(img) else str(img).lstrip("/")
+        img_out = img_prefix + rel
+    else:
+        img_out = img or ""
     return [
         t.strftime("%Y-%m-%d %H:%M:%S.%f") if t else "",
         ship or "", enc if enc is not None else "",
@@ -6034,7 +6190,7 @@ def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max
         sev, impact,
         d.get("xmin", ""), d.get("ymin", ""),
         d.get("xmax", ""), d.get("ymax", ""),
-        img or "", infms or "", model or "",
+        img_out, infms or "", model or "",
     ]
 
 
@@ -6060,9 +6216,25 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
-    ship_clause = "AND shipment = %s" if shipment else ""
-    params = [interval] + ([shipment] if shipment else [])
+    # 4.0.345 — a PICKED shipment is exported by SHIPMENT ID ALONE — NO time filter whatsoever. The
+    # whole point of picking a shipment is "give me THIS shipment's rows", regardless of when it ran.
+    # The sliding window (and even 4.0.342's 90-day widen) still dropped rows for a shipment outside
+    # that span → empty CSV (operator: "when I choose a shipment, only WHERE shipment=X, nothing to
+    # do with time"). The all-shipments ZIP path keeps the window — that one genuinely means
+    # "everything in this window".
+    if shipment:
+        where_sql = "shipment = %s"
+        where_params = [shipment]
+    else:
+        where_sql = "time > NOW() - INTERVAL %s"
+        where_params = [interval]
     min_conf_f = float(min_conf or 0.0)
+    # 4.0.343 — build image download URLs off the host the operator is actually on (request.base_url),
+    # via the existing /api/raw_image/<rel> serve route, so the CSV's image column is click-to-download.
+    try:
+        img_prefix = str(request.base_url).rstrip("/") + "/api/raw_image/"
+    except Exception:
+        img_prefix = "/api/raw_image/"
 
     from services.db import get_db_connection, release_db_connection
     conn = get_db_connection()
@@ -6083,22 +6255,46 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     except Exception:
         sev_map = {}
 
+    # enc_min/enc_max feed ONLY the derived "length" column (encoder − start, or max − encoder for
+    # unwind). The raw rows don't need it.
     enc_min_global = 0
     enc_max_global = 0
-    try:
-        with conn.cursor() as _mcur:
-            _mcur.execute(
-                f"""SELECT MIN(encoder_value), MAX(encoder_value)
-                    FROM inference_results
-                    WHERE time > NOW() - INTERVAL %s {ship_clause}""",
-                params,
-            )
-            _row = _mcur.fetchone()
-            if _row:
-                enc_min_global = int(_row[0]) if _row[0] is not None else 0
-                enc_max_global = int(_row[1]) if _row[1] is not None else 0
-    except Exception as _me:
-        logger.debug(f"export_csv min/max encoder probe failed: {_me}")
+    if shipment:
+        # 4.0.346 — a PICKED shipment's encoder range comes from the shipment_summary CACHE (instant),
+        # NOT a MIN/MAX scan of every row. That aggregate had NO time bound, so on a big shipment
+        # (e.g. 196k rows) it blew past the DB's 9s statement_timeout, was cancelled, and left the
+        # connection in an ABORTED transaction — so the actual CSV stream failed with "current
+        # transaction is aborted" and returned a 2-line error file (operator: real shipment, CSV empty).
+        # A cache miss just leaves start=0 (length column = raw encoder); the rows still export fine.
+        try:
+            from services.shipment_stats import get_shipment_span
+            _sp = get_shipment_span(shipment)
+            if _sp:
+                enc_min_global = int(_sp.get("enc_min") or 0)
+                enc_max_global = int(_sp.get("enc_max") or 0)
+        except Exception as _me:
+            logger.debug(f"export_csv enc-span cache read failed: {_me}")
+    else:
+        # All-shipments: the window (idx on time) bounds the scan, so MIN/MAX is cheap.
+        try:
+            with conn.cursor() as _mcur:
+                _mcur.execute(
+                    f"""SELECT MIN(encoder_value), MAX(encoder_value)
+                        FROM inference_results
+                        WHERE {where_sql}""",
+                    where_params,
+                )
+                _row = _mcur.fetchone()
+                if _row:
+                    enc_min_global = int(_row[0]) if _row[0] is not None else 0
+                    enc_max_global = int(_row[1]) if _row[1] is not None else 0
+            conn.commit()
+        except Exception as _me:
+            logger.debug(f"export_csv min/max encoder probe failed: {_me}")
+            try:
+                conn.rollback()   # clear any aborted txn so the export below can run
+            except Exception:
+                pass
 
     _dir_tag = "_unwind" if unwind else ""
 
@@ -6114,9 +6310,9 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                     f"""SELECT time, shipment, encoder_value, image_path,
                                inference_time_ms, model_used, detections
                         FROM inference_results
-                        WHERE time > NOW() - INTERVAL %s {ship_clause}
+                        WHERE {where_sql}
                         ORDER BY time ASC""",
-                    params,
+                    where_params,
                 )
                 buf = _io.StringIO()
                 writer = _csv.writer(buf)
@@ -6130,7 +6326,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                             continue
                         row = _detection_row(t, ship, enc, img, infms, model, d,
                                              sev_map, enc_min_global, enc_max_global,
-                                             unwind, min_conf_f)
+                                             unwind, min_conf_f, img_prefix)
                         if row is None:
                             continue
                         writer.writerow(row)
@@ -6177,7 +6373,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                     continue
                 row = _detection_row(t, ship, enc, img, infms, model, d,
                                      sev_map, enc_min_global, enc_max_global,
-                                     unwind, min_conf_f)
+                                     unwind, min_conf_f, img_prefix)
                 if row is None:
                     continue
                 per_shipment_rows[ship].append(row)

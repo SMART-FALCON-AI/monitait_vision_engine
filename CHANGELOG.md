@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.346] - 2026-08-14 — CSV export: encoder range from the shipment_summary cache (no timeout-abort on big shipments)
+
+Even with 4.0.345's shipment-only filter, a big picked shipment (196k rows) still came back as a 2-line error file: the CSV's encoder MIN/MAX probe — used only for the derived `length` column — had no time bound, so it blew past the DB's 9s `statement_timeout`, was cancelled, and left the connection in an **aborted transaction**, so the actual export query then failed with *"current transaction is aborted."* Now a picked shipment reads its encoder range from the **materialized `shipment_summary` cache** (`get_shipment_span`) — instant, no scan — and a cache miss just leaves the length column relative to 0. The all-shipments path keeps its (window-bounded, cheap) MIN/MAX and rolls back on any failure so it can never poison the stream.
+
+## [4.0.345] - 2026-08-14 — CSV export: a picked shipment filters by shipment id ALONE (no time filter)
+
+4.0.342's "90-day widen" was still a time filter, so a shipment outside that span still exported empty. A picked shipment now queries `WHERE shipment = %s` with **no time predicate at all** — the whole point of picking a shipment is to get *that shipment's* rows regardless of when it ran. The all-shipments ZIP path keeps its window.
+
+## [4.0.344] - 2026-08-14 — USB camera boot: wait (backoff) for a late-enumerating by-path instead of skipping
+
+A USB camera that enumerates **late** at boot (a slow hub, or a camera that powers up after the app) has no `/dev/v4l/by-path/…` symlink yet, and the boot resolver **skipped** it immediately — so it stayed dead until a manual restart (operator: kiancord "camera6 fails on each boot"; it appears at a non-contiguous `/dev/video11-12`, the signature of late enumeration). The resolver now **polls with backoff** (0.5s → 3s, default 20s total, `MVE_CAMERA_BYPATH_WAIT_SEC`) for a missing by-path to appear before giving up. Only a missing camera pays the wait; present cameras fall straight through. The existing by-path *recovery* only handled a camera that moved (renumbered) — this handles one that's simply **not there yet**. (Physical root cause on that port still worth checking.)
+
+## [4.0.343] - 2026-08-14 — CSV image column is a direct download URL + PDF library (reportlab)
+
+The CSV's `image_path` column is now `image_url` — a **direct download link** through the existing `/api/raw_image/<rel>` serve route, built on whatever host the operator is on (`request.base_url`), so a row's image is click-to-download instead of an opaque `raw_images/…` path (operator request). Both the single-shipment CSV and the all-shipments ZIP use it. Also: `reportlab` (needed by the "Download PDF" export) was missing from the runtime — installed in the container; add it to the image's requirements for permanence.
+
+## [4.0.342] - 2026-08-14 — CSV export: a picked shipment exports its whole self (not just the window)
+
+The "CSV" button gave an **empty file** (header only, zero rows) whenever the operator picked a shipment **older than the current window** — even though the chart shows it, because the chart widens to 90 days for a pick while the single-shipment CSV was still filtered by the sliding window (`time > NOW() − <window>`). Confirmed on vteam12: shipment `2608101959554` with window=24h → 1 line; with window=7d → 21,885 rows. The single-shipment export now widens to 90 days to match the chart; the all-shipments ZIP still honours the window.
+
+## [4.0.341] - 2026-08-13 — Colour-change strip drops the near-zero cameras (agrees with the cells)
+
+The colour-change strip built ONE cross-camera number per bucket — `Σ(E·n)/Σn` over every camera — without the near-zero guard the cells use. So a blind camera (cam3 ≈ 0.4 on vteam12) stayed in the blend, and when its share of samples shifted between buckets the strip could move OPPOSITE to every camera's real trend (operator: both cells ↑ but the strip ↓). The strip now skips the same guarded (near-zero) cells the heatmap drops, so it tracks only the cameras the cells actually show and the two agree. (Literal per-camera strip rows are a possible follow-up; this makes the single summary row honest.)
+
+## [4.0.340] - 2026-08-13 — Length ladder buckets by length directly (stable numbers) + colour-change strip matches the cell palette
+
+Two fixes. (1) **Numbers no longer flip after load.** The length ladder stepped in *encoder* and made `ceil(bins·span/total)` columns that, after the reset-safe projection, landed several cells in the same *length* bin; the dedup (4.0.338) hid the extra label but the shown number still changed as a higher-sample column arrived (operator: "the numbers are changing after showing bucket by bucket"). Now it iterates the **global length bins** each shipment covers and maps each back to its own encoder sub-range — one fetch per visible bucket, one cell, a stable number. (2) **Colour-change strip** now uses the same **diverging red/blue** palette as the heatmap cells (warmer→red shades, cooler→blue shades) instead of the old yellow→red / cyan→blue ramp, for harmony.
+
+## [4.0.339] - 2026-08-13 — Colour heatmap: near-zero baseline guard (kills the exploding % on blind cameras)
+
+When a (camera, parent) baseline is essentially zero — a camera not measuring the film's colour, E ≈ 0.4 on vteam12's cam3 for recent shipments — a **percentage** deviation is meaningless and explodes: a 0.01-vs-0.4 wiggle reads as −97%. That extreme then became the max of the **Relative (span)** scale and washed out every other cell's shade the instant it loaded (the newest, near-zero shipments stream last → the operator's "sudden colour update, right side all 97%"). Cells whose baseline is below a small floor (`|base| < 5`) are now marked **neutral** (no %), so a blind camera can't produce false ±97% deviations or hijack the colour scale. (The underlying condition — cam3 reading ~0 colour — is real and worth a physical check.)
+
+## [4.0.338] - 2026-08-12 — Colour heatmap: one cell per (camera, bucket) — no double-printed labels
+
+The length ladder fetches columns in encoder steps; after the reset-safe projection to length-x, two columns can round into the same visible bucket, so `__mveHeatmap.cells` held two cells for one (camera, bucket) and the plugin drew **both** — two % labels stacked on each other (operator: "you are printing two numbers on each other"). Dedup by `cam|bin` when building the heatmap cells, keeping the higher-`n` (more representative) cell on a collision. Exactly one tile + one label per bucket now.
+
+## [4.0.337] - 2026-08-12 — Colour heatmap: diverging warm/cool palette
+
+Heatmap cells now use a **diverging** palette keyed by the SIGN of the deviation: warmer than baseline (E above its normal) → **red** and its shades; cooler (E below) → **blue** and its shades; the magnitude sets the depth of the shade, near-zero staying pale/neutral. Replaces the magnitude-only green→yellow→orange→red ramp, which painted any deviation (up or down) the same brown. Both hue-direction and depth read from the same per-cell signed `delta_e` (one colour source, per 4.0.334).
+
+## [4.0.336] - 2026-08-12 — Scatter refactor: bucketing is a function of the X-axis, independent of shipment pick
+
+The Length bucketing was gated `&& !shipment`, so picking a single shipment on the Length axis dropped it into the **time** ladder — it bucketed by time and projected each slice onto the length axis, landing as disconnected blobs on the multi-reset roll (operator: "why the loading is this?"). Bucketing must be a function of the x-axis alone: Length ⇒ bucket by length in *every* case. A picked shipment is just a one-entry shipment list (`insight_layout?shipment=X`), and the existing per-column length ladder runs over it. Now every axis buckets by its own x-axis whether or not a shipment is picked.
+
+## [4.0.335] - 2026-08-12 — Scatter refactor cont'd: per-parent-object baseline, empty frame (dots only from the bucket ladder)
+
+- **Baseline is now per (camera, PARENT OBJECT, shipment).** `insight_layout` groups the colour baseline by `parent_class` too and returns `shipments[].baseline = {parent: {cam: {avg,median,n}}}` — every parent object gets its own normal, computed server-side up front (operator: "get the base for each parent object separately"). Different parent objects are different materials with different normal colours; pooling them corrupted the baseline. The client keys the delta lookup by (shipment, parent, camera) and tags each colour cell with its parent; the pooled fallback is per (parent, camera).
+- **Empty frame — box ③.** The 1h hydrate no longer leaves its dots on the chart: after it builds the skeleton, the scatter datasets are wiped so the **only** dots come from the per-bucket ladder, bucketed by the x-axis. Fixes "all dots stored far right on the time axis" (the kept-hydrate newest-N burst) and the Length-axis right-side blob. Dots now stream newest→oldest across every bucket.
+
+## [4.0.334] - 2026-08-12 — Detection Insights scatter refactor: one up-front baseline, one colour source, no repaint race
+
+Operator-driven redesign that replaces the scatter's 3-pass repaint storm with the agreed 4-step flow: read settings once → **one** up-front call for layout + baseline → empty frame → stream each bucket once, colouring **inline** against the up-front baseline.
+
+- **Stage 1 — `/api/insight_layout`.** A single deterministic read of the materialized caches (shipment_summary + shipment_stats) returning, for the window (or a picked shipment), each shipment's `offset`/reset-safe `length_span`/`enc_min,max`/`verdict`/time-bounds **and its per-(camera, shipment) colour baseline** {cam: {avg, median, n}}, plus the axis `domain`, `bins`, and `camera_y_order`. Replaces the old 3-call fan-out (fire-and-forget `/api/shipment_baseline` + range probe + `/api/shipment_length_offsets`).
+- **Stage 2 — up-front baseline, no race.** `refreshAdvancedCharts` now fetches `insight_layout` up front and stores the per-(cam,ship) baseline (+ an n-weighted pooled per-camera fallback for encoder/time all-shipments). The fire-and-forget `/api/shipment_baseline` callback that repainted at an unpredictable moment is **removed**. The length ladder reuses the up-front layout instead of a second `/shipment_length_offsets` call.
+- **Stage 2 — one colour function.** Deleted `_recomputeProgressiveColorDeltas` and `_recomputeLengthColorDeltas`; a single `_applyUpfrontColorDeltas()` sets every cell's `delta_e`/`delta_pct` from its own (camera, shipment) up-front baseline. Deterministic — no cross-shipment pooling that drifts as buckets stream.
+- **Stage 3 — one baseline for hue AND label.** The heatmap plugin's hue (and the relative-scale span-max) now read the per-cell `delta_e` — the *same* number the % label shows — instead of the separate `_activeBaselineMap`. Colour and number can no longer disagree (the green-tile-labelled-8% bug).
+
 ## [4.0.333] - 2026-08-12 — Length axis colour: one request per bucket (kills the double-paint / oversample)
 
 The length ribbon painted colour **twice per visible bucket**: it fetched one 4×-oversampled full-shipment colour slice AND N dots-only columns, so ~4 backend colour cells projected onto every visible bucket and repainted it (operator: "a layer on top of a layer", "colours double"). Now each visible column makes **one atomic call** (dots + colour + strips, `n_bins=1`) — every length-bucket is fetched and painted exactly once, like the Encoder ladder. The per-column backend delta is bucket-local, so the client re-pools the baseline **per (camera, shipment)** (`_recomputeLengthColorDeltas`: median of the columns' E in `shipment_median` mode, else sample-weighted mean) and deltas each cell against its own camera+shipment centre — the metric the operator asked for. Because shipments occupy disjoint length ranges, this never leaks colour across shipments. Colour cells are tagged with `_ship` to key the pool.

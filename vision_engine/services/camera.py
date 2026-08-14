@@ -324,9 +324,29 @@ def _load_persisted_usb_sources_ordered() -> List[str]:
             if not isinstance(src, str) or not src:
                 continue
             if src.startswith("/dev/v4l/by-path/"):
+                # 4.0.344 — a USB camera can enumerate LATE at boot (a slow hub, or a camera that
+                # powers up after the app starts), so its /dev/v4l/by-path symlink isn't there yet.
+                # The old code skipped it immediately → the camera stayed dead until a manual restart
+                # (operator: "camera6 fails on each boot"). WAIT with backoff for the node to appear
+                # before giving up. Only a MISSING camera pays this cost; a present one falls straight
+                # through. Tunable via MVE_CAMERA_BYPATH_WAIT_SEC (default 20s; 0 disables the wait).
                 if not os.path.exists(src):
-                    logger.warning(f"persisted USB cam {cid}: by-path missing on disk, skip: {src}")
-                    continue
+                    try:
+                        _wait_s = float(os.environ.get("MVE_CAMERA_BYPATH_WAIT_SEC", "20") or 20)
+                    except Exception:
+                        _wait_s = 20.0
+                    if _wait_s > 0:
+                        logger.warning(f"persisted USB cam {cid}: by-path missing, waiting up to "
+                                       f"{_wait_s:.0f}s for late USB enumeration: {src}")
+                        _deadline = time.monotonic() + _wait_s
+                        _delay = 0.5
+                        while time.monotonic() < _deadline and not os.path.exists(src):
+                            time.sleep(_delay)
+                            _delay = min(_delay * 1.5, 3.0)   # backoff, capped at 3s
+                    if not os.path.exists(src):
+                        logger.warning(f"persisted USB cam {cid}: by-path still missing after wait, skip: {src}")
+                        continue
+                    logger.info(f"persisted USB cam {cid}: by-path appeared after wait: {src}")
                 # v4.0.143 — resolve the by-path symlink to its current
                 # /dev/videoN target so downstream code (CameraBuffer init,
                 # _register_v4l_binding, self-heal fuzzy scan's bound-set)

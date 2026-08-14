@@ -2163,10 +2163,18 @@ function _recomputeColorChangeFromProgressive() {
     const rng = _progressiveColorRange;
     if (!rng || !(rng.hi > rng.lo)) { _clear(); return; }
     const nbins = Math.max(1, Number(rng.n_bins) || 48);
+    // 4.0.341 — EXCLUDE cameras the cells guarded to neutral (near-zero baseline, e.g. a camera not
+    // seeing the film). The old blend summed EVERY camera's raw E weighted by sample count, so a
+    // near-zero camera (cam3 ≈ 0.4) dragged the cross-camera mean; when its share of samples shifted
+    // between buckets the blend could move OPPOSITE to every camera's real trend — the operator's
+    // "both cells up but the strip down". Skipping the guarded cells (the same ones the heatmap
+    // dropped) makes the strip track only the cameras the cells actually show, so they now agree.
     const byBin = new Map();
     for (const c of srcCells) {
+        if (c._absolute === true) continue;                    // guarded near-zero camera → not counted
         const b = Number(c.bin); if (!Number.isFinite(b)) continue;
         const e = Number(c.E) || 0, n = Number(c.n) || 0;
+        if (n <= 0) continue;
         if (!byBin.has(b)) byBin.set(b, { sumEw: 0, n: 0 });
         const o = byBin.get(b); o.sumEw += e * n; o.n += n;
     }
@@ -2224,39 +2232,32 @@ window._renderStripsFromPayload = _renderStripsFromPayload;
 // camera / shipment-average / reference baselines (all per-cam AVG server-side) and a close
 // approximation for shipment-median during a progressive load. For a single full-span fetch
 // (periodic refresh) it reproduces the backend's own delta, so it's a no-op there.
-function _recomputeProgressiveColorDeltas() {
-    // 4.0.319 — prefer the CACHED baseline from shipment_stats (window._mveColorBaselines,
-    // fetched once at load start). It's exact (incl. median) and stable — colours don't drift
-    // as buckets stream. Fall back to the per-bucket pooled accumulation only when the cache is
-    // absent (the in-progress shipment, or before backfill has run). `_mveColorBaselineCurrent`
-    // marks the in-progress shipment: no baseline exists, so cells stay ABSOLUTE (no delta paint).
-    const cached = window._mveColorBaselines;
-    const stat = (String(localStorage.getItem('mve_heatmap_baseline') || '').toLowerCase() === 'shipment_median')
-        ? 'median' : 'avg';
-    const baseByCam = {};
-    if (cached && Object.keys(cached).length) {
-        for (const cam in cached) {
-            const v = Number(cached[cam] && cached[cam][stat]);
-            if (Number.isFinite(v)) baseByCam[cam] = v;
-        }
-    } else if (!window._mveColorBaselineCurrent) {
-        // pooled Σ(E·n)/Σn across every cached cell (interim until the table read lands)
-        const acc = new Map();
-        for (const c of _progressiveColorCells.values()) {
-            const n = Number(c.n) || 0, e = Number(c.E);
-            if (!(n > 0) || !Number.isFinite(e)) continue;
-            const a = acc.get(c.cam) || { sumE: 0, n: 0 };
-            a.sumE += e * n; a.n += n; acc.set(c.cam, a);
-        }
-        for (const [cam, a] of acc) if (a.n > 0) baseByCam[cam] = a.sumE / a.n;
-    }
+// 4.0.334 — REFACTOR: ONE colour source, per PARENT OBJECT. Every tile's delta is its reading (E)
+// vs its own (camera, PARENT, shipment) baseline fetched UP FRONT (insight_layout, median/avg from
+// shipment_stats). Different parent objects are different materials with different normal colours,
+// so each parent is compared to ITS OWN baseline — never pooled together. Cells with no shipment id
+// (encoder/time all-shipments) fall back to the n-weighted pooled per-(parent, camera) normal.
+// Deterministic — no cross-shipment drift, no second baseline endpoint racing the ladder. Both the
+// % label AND the heatmap hue read the delta this sets, so colour and number can never disagree.
+function _applyUpfrontColorDeltas() {
+    const perShip = window._insightBaseline || {};       // {sid: {parent: {cam: E}}}
+    const pooled  = window._insightBaselinePooled || {}; // {"parent|cam": E}
+    const _activeParent = localStorage.getItem('mve_heatmap_parent_class') || '';
+    // 4.0.339 — near-zero baseline guard. When a (camera, parent) sees ~no colour (E ≈ 0, e.g. a
+    // camera not looking at the film), a PERCENTAGE deviation is meaningless and explodes — a 0.01
+    // vs 0.4 wiggle reads as −97%, which then dominates the relative-scale shading and washes the
+    // whole chart out. Below this floor we mark the cell neutral (no delta) instead of a huge %.
+    const _MIN_BASE = 5;
     for (const c of _progressiveColorCells.values()) {
-        const base = baseByCam[c.cam];
         const e = Number(c.E);
-        if (base == null || !Number.isFinite(base) || base === 0 || !Number.isFinite(e)) {
-            // 4.0.319 — in-progress shipment (no baseline): show the ABSOLUTE colour value, no
-            // delta. `_absolute` tells the heatmap renderer to label the raw E instead of a %.
-            if (window._mveColorBaselineCurrent) { c._absolute = true; c.delta_e = 0; c.delta_pct = 0; }
+        const parent = (c._parent != null) ? c._parent : _activeParent;   // cells carry their parent
+        const cam = String(c.cam);
+        const ps = c._ship && perShip[c._ship] && perShip[c._ship][parent];
+        let base = (ps && Number.isFinite(Number(ps[cam]))) ? Number(ps[cam])
+                                                            : Number(pooled[parent + '|' + cam]);
+        if (base == null || !Number.isFinite(base) || Math.abs(base) < _MIN_BASE || !Number.isFinite(e)) {
+            // no meaningful baseline (in-progress / no cache / camera sees ~no colour) → neutral, no %
+            c._absolute = true; c.delta_e = 0; c.delta_pct = 0;
             continue;
         }
         c._absolute = false;
@@ -2264,49 +2265,8 @@ function _recomputeProgressiveColorDeltas() {
         c.delta_pct = Math.round((100 * (e - base) / base) * 10) / 10;
     }
 }
-window._recomputeProgressiveColorDeltas = _recomputeProgressiveColorDeltas;
+window._applyUpfrontColorDeltas = _applyUpfrontColorDeltas;
 
-// 4.0.333 — LENGTH-ribbon colour re-pool. On the Length axis each shipment sits in its OWN
-// disjoint length-x range and is fetched one-column-at-a-time (n_bins=1), so every column's
-// backend delta is bucket-local (its baseline is just that column). Recover the operator's
-// intended metric — "each capture compared to its OWN camera+shipment centre" — by pooling the
-// per-column mean E per (camera, shipment): median of the columns' E's in `shipment_median`
-// mode (robust, matches the picked-shipment median), else the sample-weighted mean. Then delta
-// each cell against its (camera, shipment) baseline. Because shipments occupy disjoint length
-// ranges, this NEVER leaks colour across shipments (the bug 4.0.330 avoided by skipping the
-// global pool) while still filling every bucket with a correctly-referenced delta.
-function _recomputeLengthColorDeltas() {
-    const useMedian = (String(localStorage.getItem('mve_heatmap_baseline') || '').toLowerCase() === 'shipment_median');
-    const groups = new Map();                                   // `${cam}|${ship}` -> [{e,n}]
-    for (const c of _progressiveColorCells.values()) {
-        const n = Number(c.n) || 0, e = Number(c.E);
-        if (!(n > 0) || !Number.isFinite(e)) continue;
-        const k = `${c.cam}|${c._ship || ''}`;
-        if (!groups.has(k)) groups.set(k, []);
-        groups.get(k).push({ e, n });
-    }
-    const base = new Map();
-    for (const [k, arr] of groups) {
-        if (!arr.length) continue;
-        if (useMedian) {
-            const es = arr.map(o => o.e).sort((a, b) => a - b);
-            const mid = es.length >> 1;
-            base.set(k, (es.length % 2) ? es[mid] : (es[mid - 1] + es[mid]) / 2);
-        } else {
-            let sE = 0, sN = 0; for (const o of arr) { sE += o.e * o.n; sN += o.n; }
-            if (sN > 0) base.set(k, sE / sN);
-        }
-    }
-    for (const c of _progressiveColorCells.values()) {
-        const b = base.get(`${c.cam}|${c._ship || ''}`);
-        const e = Number(c.E);
-        if (b == null || !Number.isFinite(b) || b === 0 || !Number.isFinite(e)) continue;
-        c._absolute = false;
-        c.delta_e = Math.round((e - b) * 100) / 100;
-        c.delta_pct = Math.round((100 * (e - b) / b) * 10) / 10;
-    }
-}
-window._recomputeLengthColorDeltas = _recomputeLengthColorDeltas;
 
 // Per-bucket streamer for the quality + ejection strips — and folds in colour
 // so ONE fetch fills all three (this superseded the old colour-only streamer).
@@ -2401,7 +2361,11 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preDa
     // keeps Core's full set. Keying off the payload (not `!shipment`) lets a pick's per-column
     // colour cells render while never fetching them on the time-ladder path.
     if ((window._mveColorCheckEnabled === true) && data.color_slice && Array.isArray(data.color_slice.cells)) {
-        for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); c._ship = shipment || null; _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
+        // 4.0.334 — tag each colour cell with its shipment AND its parent object (the fetch is scoped
+        // to the active parent), so _applyUpfrontColorDeltas can compare it to its own (parent, cam,
+        // shipment) baseline. Ready for a future multi-parent view where cells carry different parents.
+        const _cellParent = localStorage.getItem('mve_heatmap_parent_class') || '';
+        for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); c._ship = shipment || null; c._parent = _cellParent; _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
         // 4.0.316 — RE-DERIVE the baseline over ALL columns seen so far. Each column's fetch is
         // enc-filtered (fast, no timeout) but the backend's delta_pct in it is bucket-local — its
         // baseline is just that one column's mean, so it collapses toward 0. Mean IS additive, so
@@ -2415,18 +2379,24 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preDa
         // operator asked for ("each capture vs its OWN camera+shipment median"). Pooling across all
         // shipments here would leak cross-shipment colour drift and make a uniform in-shipment shade
         // read as a big deviation. Keep the backend's per-shipment delta for the length ribbon.
-        if (_insightAxis === 'length') {
-            // 4.0.333 — LENGTH ribbon per-column colour: each column is fetched n_bins=1, so the
-            // backend's delta is bucket-local (baseline ≈ that one column → collapses to ~0). Re-pool
-            // the baseline per (camera, shipment) and delta each cell against its own camera+shipment
-            // centre — the metric the operator asked for ("each capture vs its own camera+shipment").
-            _recomputeLengthColorDeltas();
-        } else {
-            _recomputeProgressiveColorDeltas();
-        }
+        // 4.0.334 — REFACTOR: ONE colour source. Delta = each cell's reading vs its own
+        // (camera, shipment) baseline fetched UP FRONT (insight_layout); pooled per-camera fallback
+        // for cells with no shipment id. The SAME delta drives both the hue and the % label.
+        _applyUpfrontColorDeltas();
         if (_insightCameraScatter && _insightCameraScatter.data && _insightCameraScatter.data.__mveHeatmap) {
-            _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_progressiveColorCells.values())
-                .map(c => (typeof c._enc === 'number') ? Object.assign({}, c, { bin: _reBin(c._enc) }) : c);
+            // 4.0.338 — ONE cell per (camera, bucket). The length ladder fetches columns in ENCODER
+            // steps, and after the reset-safe projection to length-x two columns can round into the
+            // SAME visible bucket — the plugin then drew BOTH, printing two % labels on top of each
+            // other (operator: "you are printing two numbers on each other"). Dedup by cam|bin here,
+            // keeping the cell with more samples (more representative) on a collision.
+            const _byBin = new Map();
+            for (const c of _progressiveColorCells.values()) {
+                const _c = (typeof c._enc === 'number') ? Object.assign({}, c, { bin: _reBin(c._enc) }) : c;
+                const _k = String(_c.cam) + '|' + String(_c.bin);
+                const _prev = _byBin.get(_k);
+                if (!_prev || (Number(_c.n) || 0) >= (Number(_prev.n) || 0)) _byBin.set(_k, _c);
+            }
+            _insightCameraScatter.data.__mveHeatmap.cells = Array.from(_byBin.values());
             // 4.0.324 — the cells above are binned via _reBin over _progressiveColorRange, so the
             // heatmap plugin MUST divide by the SAME n_bins to place them at the right width. Keep
             // __mveHeatmap.bins in lock-step with the cells (the plugin reads it live). Without this
@@ -2596,27 +2566,59 @@ async function refreshAdvancedCharts() {
     const myTicket = _progressiveLadderTicket;
     _ladderActive = true;
     window._mveScatterRange = null;  // 4.0.256 — only the all-shipments window branch sets this
-    // 4.0.319 — fetch the CACHED colour baseline once at load start (instant shipment_stats read),
-    // in parallel with everything else. Clear first so a stale baseline from the previous view
-    // can't paint this one; _recomputeProgressiveColorDeltas picks it up as soon as it arrives and
-    // falls back to per-bucket pooling until then. `current:true` (in-progress shipment) → absolute.
-    window._mveColorBaselines = null;
-    window._mveColorBaselineCurrent = false;
+    // 4.0.334 — REFACTOR step ②: ONE up-front call for layout + colour baseline. Replaces the old
+    // fire-and-forget /api/shipment_baseline (which landed at an unpredictable moment and repainted —
+    // the operator's "colour lands whenever" race). insight_layout returns the per-(camera, shipment)
+    // normal from shipment_stats, KNOWN before any tile is coloured, so colour is applied inline and
+    // never races the ladder. We keep both the per-(cam,ship) map (length + picked shipment) and an
+    // n-weighted pooled per-cam map (encoder/time all-shipments, where cells carry no shipment id).
+    // The length ladder reuses window._insightLayout instead of a 2nd /shipment_length_offsets call.
+    window._insightBaseline = {};        // {sid: {cam: E}}
+    window._insightBaselinePooled = {};  // {cam: E}
+    window._insightLayout = null;
     try {
-        const _blPhase = localStorage.getItem('mve_heatmap_phase') || '';
-        const _blParent = localStorage.getItem('mve_heatmap_parent_class') || '';
-        const _blUrl = '/api/shipment_baseline?shipment=' + encodeURIComponent(shipment || '')
+        const _blMode = (localStorage.getItem('mve_heatmap_baseline') || 'camera');
+        const _useMed = (String(_blMode).toLowerCase() === 'shipment_median');
+        const _ilUrl = '/api/insight_layout?axis=' + encodeURIComponent(_insightAxis)
             + '&window=' + encodeURIComponent(target)
-            + '&phase=' + encodeURIComponent(_blPhase)
-            + '&parent_class=' + encodeURIComponent(_blParent);
-        fetch(_blUrl).then(r => r.json()).then(j => {
-            if (myTicket !== _progressiveLadderTicket) return;   // superseded
-            window._mveColorBaselineCurrent = !!(j && j.current);
-            window._mveColorBaselines = (j && j.baselines && Object.keys(j.baselines).length) ? j.baselines : null;
-            try { _recomputeProgressiveColorDeltas(); } catch (_) {}
-            if (_insightCameraScatter) { try { _insightCameraScatter.update('none'); } catch (_) {} }
-        }).catch(() => { /* no cache yet (backfill running) → per-bucket pooling stays */ });
-    } catch (_be) { /* non-fatal */ }
+            + '&shipment=' + encodeURIComponent(shipment || '')
+            + '&bins=' + (parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48)
+            + '&phase=' + encodeURIComponent(localStorage.getItem('mve_heatmap_phase') || '')
+            + '&parent_class=' + encodeURIComponent(localStorage.getItem('mve_heatmap_parent_class') || '')
+            + '&baseline=' + encodeURIComponent(_blMode);
+        const _ilResp = await fetch(_ilUrl);
+        if (myTicket !== _progressiveLadderTicket) return;   // superseded while awaiting
+        const _il = await _ilResp.json();
+        window._insightLayout = _il;
+        // baseline shape from insight_layout: shipments[].baseline = {parent: {cam: {avg,median,n}}}.
+        // Build a per-(ship, parent, cam) map + an n-weighted pooled per-(parent, cam) fallback (for
+        // encoder/time all-shipments cells that carry no shipment id). Each PARENT OBJECT keeps its
+        // own normal — pooling parents would corrupt it (operator: "base each parent separately").
+        const _perShip = {}, _poolNum = {}, _poolDen = {};
+        for (const s of (_il.shipments || [])) {
+            const _pm = {};
+            for (const parent in (s.baseline || {})) {
+                const _cams = s.baseline[parent] || {};
+                const _cm = {};
+                for (const cam in _cams) {
+                    const b = _cams[cam] || {};
+                    const v = _useMed ? b.median : b.avg;
+                    if (v == null || !Number.isFinite(Number(v))) continue;
+                    _cm[cam] = Number(v);
+                    const n = Number(b.n) || 0;
+                    const k = parent + '|' + cam;
+                    _poolNum[k] = (_poolNum[k] || 0) + Number(v) * n;
+                    _poolDen[k] = (_poolDen[k] || 0) + n;
+                }
+                _pm[parent] = _cm;
+            }
+            _perShip[s.sid] = _pm;
+        }
+        const _pooled = {};
+        for (const k in _poolDen) if (_poolDen[k] > 0) _pooled[k] = _poolNum[k] / _poolDen[k];
+        window._insightBaseline = _perShip;         // {sid: {parent: {cam: E}}}
+        window._insightBaselinePooled = _pooled;    // {"parent|cam": E}
+    } catch (_be) { /* no cache yet (in-progress shipment / backfill) → absolute colour */ }
     // 4.0.312 — do NOT clear _mveParentClassesFull here. The parent list is a sticky config
     // property that must persist across loads (operator: "keep the parent list no matter what").
     try {
@@ -2888,12 +2890,15 @@ async function refreshAdvancedCharts() {
         console.warn('[progressive] hydrate failed:', e);
     }
 
-    // 4.0.247 — DO NOT blank the hydrated dots any more. The old code emptied the
-    // scatter here so it could "carpet" bucket-by-bucket, but that made the chart
-    // depend ENTIRELY on the 48-fetch ladder completing — and on a reset-prone link
-    // enough bucket fetches failed that ZERO dots landed and the chart stayed blank.
-    // We now keep the hydrate's dots on screen and TOP THEM UP with one full-window
-    // fetch below, so a failed refill can never wipe the chart to empty.
+    // 4.0.334 — REFACTOR box ③: TRULY EMPTY FRAME. The hydrate above built the chart skeleton
+    // (axes, camera rows, lane); now WIPE its dots so the ONLY dots come from the per-bucket ladder,
+    // bucketed by the x-axis. The old 4.0.247 "keep hydrate dots" dumped the newest-N burst at the
+    // right edge and never spread — the operator's "all dots stored far right on the time axis". On a
+    // reliable link the ladder fills every bucket newest→oldest; each per-bucket fetch already retries.
+    if (_insightCameraScatter && _insightCameraScatter.data && Array.isArray(_insightCameraScatter.data.datasets)) {
+        _insightCameraScatter.data.datasets.forEach(ds => { ds.data = []; });
+        try { _insightCameraScatter.update('none'); } catch (_e) {}
+    }
 
     // Seed the dedup set with whatever's already on the chart.
     _progressiveScatterSeen = new Set();
@@ -2936,18 +2941,29 @@ async function refreshAdvancedCharts() {
     // shipments in offset(==time) order and fetch each shipment-scoped: dots project via _toLengthX
     // and strips via _extendStripsFromBucket's _lenProj, so every segment fills and there are no
     // raw-encoder gaps. Falls through to the time-ladder if there's no length data yet.
-    const _useLengthSeq = (_insightAxis === 'length' && !shipment);
+    // 4.0.336 — REFACTOR: bucketing is a function of the X-AXIS, independent of whether a shipment
+    // is picked. Length ⇒ bucket by length in EVERY case. A picked shipment is just a one-entry
+    // shipment list (insight_layout?shipment=X → shipments:[X]); the same per-column length ladder
+    // below runs over it. The old `&& !shipment` gate dropped a picked shipment into the TIME ladder,
+    // which bucketed by time and projected onto the length axis → the operator's disconnected blobs.
+    const _useLengthSeq = (_insightAxis === 'length');
     let _lenSeqRan = false;
     try {
         if (_useLengthSeq) {
             let _off = {}, _total = 0;
-            try {
-                const _r = await fetch('/api/shipment_length_offsets?window=' + encodeURIComponent(target));
-                if (myTicket !== _progressiveLadderTicket) return;
-                const _j = await _r.json();
-                _off = _j.offsets || {};
-                _total = Number(_j.total) || 0;
-            } catch (_e) { /* fall through to time ladder */ }
+            // 4.0.334 — REFACTOR: reuse the UP-FRONT insight_layout (already fetched) instead of a
+            // second /api/shipment_length_offsets round-trip. Same geometry, one fewer call.
+            {
+                const _il = window._insightLayout;
+                if (_il && Array.isArray(_il.shipments)) {
+                    for (const s of _il.shipments) {
+                        _off[s.sid] = { offset: s.offset, enc_min: s.enc_min, enc_max: s.enc_max,
+                                        length_span: s.length_span, verdict: s.verdict,
+                                        t_min: s.t_min, t_max: s.t_max };
+                    }
+                    _total = Number(_il.total) || 0;
+                }
+            }
             const _segs = Object.entries(_off).map(([sid, info]) => ({
                 sid, off: Number(info.offset) || 0, span: Number(info.length_span) || 0,
                 enc_min: Number(info.enc_min) || 0, enc_max: Number(info.enc_max) || 0,
@@ -3003,19 +3019,30 @@ async function refreshAdvancedCharts() {
                     // that column), so we ignore it and re-pool per (camera, shipment) in
                     // _recomputeLengthColorDeltas — each capture still compares to its own camera+
                     // shipment centre. Dots still fill every bucket (per-column fetch, as before).
-                    const _cols = Math.max(2, Math.ceil(bins * (s.span / _total)));
-                    const _range = Math.max(1, (s.enc_max || (s.enc_min + s.span)) - s.enc_min);
-                    const _cStep = _range / _cols;
-                    for (let _ci = 0; _ci < _cols; _ci++) {
+                    // 4.0.340 — bucket by the LENGTH x-axis DIRECTLY. Iterate the GLOBAL length bins
+                    // this shipment covers and map each back to its own encoder sub-range, fetching ONE
+                    // column per visible bucket. The old loop stepped in ENCODER and made _cols columns
+                    // that, after the reset-safe projection, landed SEVERAL cells in the same length bin
+                    // — the dedup (4.0.338) hid the extra label, but the shown NUMBER still flipped as a
+                    // higher-sample column arrived (operator: "the numbers are changing after showing
+                    // bucket by bucket"). One bin ⇒ one fetch ⇒ one cell ⇒ a stable number.
+                    const _encRange = Math.max(1, (s.enc_max || (s.enc_min + s.span)) - s.enc_min);
+                    const _bLoIdx = Math.max(0, Math.floor((s.off / _total) * bins));
+                    const _bHiIdx = Math.min(bins - 1, Math.ceil(((s.off + s.span) / _total) * bins) - 1);
+                    for (let _b = _bLoIdx; _b <= _bHiIdx; _b++) {
                         if (myTicket !== _progressiveLadderTicket) return;
                         if (_insightAxis !== 'length') break;
-                        const _cLo = s.enc_min + _ci * _cStep;
-                        const _cHi = (_ci === _cols - 1) ? _eHiInc : (s.enc_min + (_ci + 1) * _cStep);
+                        const _binLo = Math.max(s.off, (_b / bins) * _total);
+                        const _binHi = Math.min(s.off + s.span, ((_b + 1) / bins) * _total);
+                        if (_binHi <= _binLo) continue;
+                        const _cLo = s.enc_min + ((_binLo - s.off) / s.span) * _encRange;
+                        const _cHi = (_b === _bHiIdx) ? _eHiInc
+                                                      : (s.enc_min + ((_binHi - s.off) / s.span) * _encRange);
                         const _cRef = { axis: 'encoder', lo: _cLo, hi: _cHi, n_bins: 1 };
                         try { await _extendBucketAll(loMs, hiMs, s.sid, minConf, myTicket, _cLo, _cHi, false, 0, _cRef); }
-                        catch (_e) { /* per-column dots+colour non-fatal */ }
+                        catch (_e) { /* per-bin dots+colour non-fatal */ }
+                        bucketCount += 1;
                     }
-                    bucketCount += 1;
                 }
                 // 4.0.329 — re-assert the exact [0, total] domain after streaming (a dot load can
                 // re-pad the axis to -1%, which showed as "-34 Batch"). No low-side padding here.
@@ -4132,18 +4159,13 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 const _colorScaleMode = (localStorage.getItem('mve_heatmap_scale') || 'absolute');
                 let _spanMaxAbs = 0;
                 if (_colorScaleMode === 'relative') {
+                    // 4.0.334 — ONE colour source: the span-max uses the per-cell delta (from the
+                    // up-front per-(camera, shipment) baseline) — the SAME value the hue + % label use.
                     for (const c of _liveCells) {
-                        const base = _activeBaselineMap[String(c.cam)];
-                        const cellE = Number(c.E) || 0;
-                        const dv = (_activeBaselineMode === 'shipment_avg' && Number.isFinite(Number(c.delta_from_avg)))
-                            ? Number(c.delta_from_avg)
-                            : Number(c.delta_e) || 0;
-                        const d = (base && Number.isFinite(base.E))
-                            ? Math.abs(cellE - Number(base.E))
-                            : Math.abs(dv);
+                        const d = Number.isFinite(Number(c.delta_e)) ? Math.abs(Number(c.delta_e)) : 0;
                         if (d > _spanMaxAbs) _spanMaxAbs = d;
                     }
-                    if (_spanMaxAbs <= 0) _spanMaxAbs = 1; // avoid div-by-zero → falls back to absolute-ish
+                    if (_spanMaxAbs <= 0) _spanMaxAbs = 1; // avoid div-by-zero
                 }
                 ctx.save();
                 // 4.0.169 — paint a subtle "no data" tile at every (cam, bin)
@@ -4239,9 +4261,11 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     const _cellDefaultDelta = (_activeBaselineMode === 'shipment_avg' && Number.isFinite(Number(cell.delta_from_avg)))
                         ? Number(cell.delta_from_avg)
                         : Number(cell.delta_e) || 0;
-                    const de = (base && Number.isFinite(base.E))
-                        ? Math.abs(cellE - Number(base.E))
-                        : Math.abs(_cellDefaultDelta);
+                    // 4.0.334 — ONE colour source: hue from the per-cell delta (up-front
+                    // per-(camera, shipment) baseline) — the SAME number the % label shows, so the
+                    // shade and the % can never disagree.
+                    const _signed = Number.isFinite(Number(cell.delta_e)) ? Number(cell.delta_e) : (Number(_cellDefaultDelta) || 0);
+                    const de = Math.abs(_signed);
                     // 4.0.177 — pick bands based on colour-scale mode.
                     // Absolute (default): fixed 2/5/10 CIELAB tolerance bands.
                     // Relative: same 20%/50%/100% shape but on the span's own max.
@@ -4253,15 +4277,16 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     } else {
                         _b1 = 2; _b2 = 5; _b3 = 10;
                     }
-                    let hue;
-                    if (de <= _b1)       hue = 120;        // green
-                    else if (de <= _b2)  hue = 60;         // yellow
-                    else if (de <= _b3)  hue = 30;         // orange
-                    else                 hue = 0;          // red
-                    // v4.0.149 — alpha bumped 0.35 → 0.55 so low-ΔE cells
-                    // (green over the dark chart background) are visible,
-                    // not just the loud red/orange ones.
-                    ctx.fillStyle = `hsla(${hue}, 65%, 45%, 0.55)`;
+                    // 4.0.337 — DIVERGING palette (operator request): warmer (E ABOVE its baseline,
+                    // signed Δ > 0) → RED and its shades; cooler (E BELOW baseline, Δ < 0) → BLUE and
+                    // its shades. The magnitude sets how DEEP the shade is; near-zero stays pale/neutral
+                    // so an on-target cell reads faint, not loud. (_b1/_b2 kept for the label noise-floor.)
+                    const _hue = (_signed >= 0) ? 6 : 210;                 // warm red vs cool blue
+                    const _t = Math.max(0, Math.min(1, de / (_b3 || 1)));   // 0 (on-target) → 1 (worst band)
+                    const _sat = Math.round(35 + 55 * _t);                 // pale → vivid
+                    const _lig = Math.round(60 - 18 * _t);                 // light → deep
+                    const _alp = (0.22 + 0.5 * _t).toFixed(2);             // faint → strong
+                    ctx.fillStyle = `hsla(${_hue}, ${_sat}%, ${_lig}%, ${_alp})`;
                     ctx.fillRect(x, y, w, h);
                     // 4.0.38 — thin dark stroke so each cell is visually
                     // distinct from its neighbours. Without this, adjacent
@@ -6398,27 +6423,15 @@ function _colorChangeColor(delta, maxAbs) {
     // Clamp to [-1, +1] normalized by span max.
     const f = Math.max(-1, Math.min(1, delta / maxAbs));
     const mag = Math.abs(f);
-    // v4.0.221 — brightness parity with the quality/shipment strips (which are
-    // fully opaque). Operator: "why are the colour-change cells not as bright as
-    // the others?" The old 0.35..0.9 alpha ramp made cells translucent + dim.
-    // Now 0.78..1.0 so cells read as vividly as the neighbours; magnitude is
-    // still conveyed by the yellow→red / cyan→blue hue ramp below.
-    const alpha = (0.78 + 0.22 * mag).toFixed(2);
-    if (f >= 0) {
-        // warm: interpolate from near-neutral (yellow-orange) at f=~0 to red at f=1.
-        // Endpoints: (250,204,21) yellow → (239,68,68) red.
-        const r = Math.round(250 - (250 - 239) * mag);
-        const g = Math.round(204 - (204 -  68) * mag);
-        const b = Math.round( 21 - ( 21 -  68) * mag);
-        return `rgba(${r},${g},${b},${alpha})`;
-    } else {
-        // cool: neutral cyan at f=~0 → deep blue at f=-1.
-        // Endpoints: (103,232,249) cyan → (59,130,246) blue.
-        const r = Math.round(103 - (103 -  59) * mag);
-        const g = Math.round(232 - (232 - 130) * mag);
-        const b = Math.round(249 - (249 - 246) * mag);
-        return `rgba(${r},${g},${b},${alpha})`;
-    }
+    // 4.0.340 — MATCH the heatmap cells' DIVERGING palette (operator: "harmony with the cell
+    // colours"): warmer (Δ ≥ 0) → RED and its shades; cooler (Δ < 0) → BLUE and its shades; the
+    // magnitude sets the depth. Same hue/sat/lightness law as the cell fill, just more opaque so the
+    // strip keeps brightness parity with the quality/shipment strips beside it.
+    const hue = (f >= 0) ? 6 : 210;
+    const sat = Math.round(35 + 55 * mag);          // pale → vivid
+    const lig = Math.round(60 - 18 * mag);          // light → deep
+    const alpha = (0.72 + 0.28 * mag).toFixed(2);   // opaque-ish, parity with neighbour strips
+    return `hsla(${hue}, ${sat}%, ${lig}%, ${alpha})`;
 }
 function _renderColorChangeStrip(axisMode, data) {
     const wrap = document.getElementById('color-change-strip-wrap');
