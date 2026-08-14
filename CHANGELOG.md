@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.347] - 2026-08-14 — Hardware tab: Watcher Verbose Configuration panel now uses the dark theme
+
+The read-only "Watcher Verbose Configuration" panel (`.verbose-panel`) was hardcoded light — `background:#fff`, `color:#555`, light dashed border — a leftover from the old light theme, so it rendered as a jarring white box among the dark panels (and its values were nearly invisible). Now it uses the theme tokens (`var(--card-bg)`, `var(--text-primary)`, `var(--text-secondary)`, `var(--border-color)`) like every other panel.
+
 ## [4.0.346] - 2026-08-14 — CSV export: encoder range from the shipment_summary cache (no timeout-abort on big shipments)
 
 Even with 4.0.345's shipment-only filter, a big picked shipment (196k rows) still came back as a 2-line error file: the CSV's encoder MIN/MAX probe — used only for the derived `length` column — had no time bound, so it blew past the DB's 9s `statement_timeout`, was cancelled, and left the connection in an **aborted transaction**, so the actual export query then failed with *"current transaction is aborted."* Now a picked shipment reads its encoder range from the **materialized `shipment_summary` cache** (`get_shipment_span`) — instant, no scan — and a cache miss just leaves the length column relative to 0. The all-shipments path keeps its (window-bounded, cheap) MIN/MAX and rolls back on any failure so it can never poison the stream.
