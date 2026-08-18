@@ -1251,6 +1251,11 @@ function _syncTimeframeVisibility() {
     const clr  = document.getElementById('insight-shipment-clear');
     if (grp) grp.style.display = ship ? 'none' : 'inline-flex';
     if (clr) clr.style.display = ship ? 'inline-block' : 'none';
+    // 4.0.348 — the image-download button is shipment-only: showing it for
+    // "All shipments" would let an operator start a tens-of-GB, effectively
+    // unbounded job across every shipment in the window.
+    const imgBtn = document.getElementById('insight-images-btn');
+    if (imgBtn) imgBtn.style.display = ship ? 'inline-block' : 'none';
 }
 window._syncTimeframeVisibility = _syncTimeframeVisibility;
 
@@ -6679,13 +6684,10 @@ function exportInsightCSV() {
     const ship = document.getElementById('insight-shipment')?.value || '';
     // 3.21.10: honor the min_conf slider too so the CSV matches what the charts show.
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
-    // 4.0.59: unwind checkbox → inverts the length column (max_encoder − encoder)
-    // so unwind lines read "meters left to unwind" from full-roll = 0.
-    const unwind = document.getElementById('insight-unwind')?.checked ? 'true' : 'false';
+    // 4.0.350: unwind is now ALWAYS a CSV column (`unwind_length`) — no checkbox.
     const url = '/api/export_csv?window=' + encodeURIComponent(win) +
                 '&shipment=' + encodeURIComponent(ship) +
-                '&min_conf=' + minConf +
-                '&unwind=' + unwind;
+                '&min_conf=' + minConf;
     // navigate via hidden anchor so the browser handles the download with the
     // Content-Disposition filename (instead of trying to render in a new tab)
     const a = document.createElement('a');
@@ -6693,6 +6695,93 @@ function exportInsightCSV() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 window.exportInsightCSV = exportInsightCSV;
+
+// 4.0.348 — bulk image download for the selected shipment as size-capped ZIP
+// PARTS. A shipment can be 196k+ frames (~tens of GB), so one archive is
+// un-resumable over a flaky link. We ask the server to /plan the set (count +
+// est size + ~1 GiB parts), then hand the operator one resumable download per
+// part. Every frame is included BOTH raw (raw/…) and annotated (annotated/…),
+// and the first part also carries the shipment's detections CSV.
+function _fmtBytes(n) {
+    n = Number(n) || 0;
+    const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + u[i];
+}
+
+async function exportInsightImages() {
+    const win  = document.getElementById('insight-window')?.value   || '24h';
+    const ship = document.getElementById('insight-shipment')?.value || '';
+    const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
+    const base = 'window=' + encodeURIComponent(win) +
+                 '&shipment=' + encodeURIComponent(ship) +
+                 '&min_conf=' + minConf;
+    let plan;
+    try {
+        const res = await fetch('/api/export_images/plan?' + base);
+        plan = await res.json();
+    } catch (e) { alert('Could not plan image download:\n' + e); return; }
+    if (!plan || plan.error) { alert('Image download error: ' + ((plan && plan.error) || 'unknown')); return; }
+    if (!plan.count) { alert('No images found for this selection.'); return; }
+    _showImagePartsDialog(plan, base, win, ship);
+}
+
+function _showImagePartsDialog(plan, base, win, ship) {
+    document.getElementById('img-parts-overlay')?.remove();
+    const per = plan.images_per_part || plan.count;
+    const parts = plan.parts || 1;
+    const perPartBytes = parts > 0 ? (plan.est_total_bytes / parts) : plan.est_total_bytes;
+    const label = ship ? ('shipment ' + ship) : ('all shipments · ' + win);
+    const annNote = ' · <span style="color:#fbbf24">raw + annotated</span>';
+
+    const ov = document.createElement('div');
+    ov.id = 'img-parts-overlay';
+    ov.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100000; display:flex; align-items:center; justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#1e293b); color:var(--text-primary,#f8fafc); border:1px solid var(--border-color,#334155); border-radius:10px; padding:18px 20px; max-width:560px; width:92%; max-height:80vh; overflow:auto; box-shadow:0 10px 40px rgba(0,0,0,0.5);';
+
+    let html = '<div style="font-size:15px; font-weight:600; margin-bottom:4px;">Download images — ' + label + '</div>' +
+        '<div style="font-size:12px; color:var(--text-secondary,#94a3b8); margin-bottom:12px;">' +
+        plan.count.toLocaleString() + ' images · ~' + _fmtBytes(plan.est_total_bytes) + ' total' + annNote + '</div>';
+
+    if (parts <= 1) {
+        const url = '/api/export_images?' + base;
+        html += '<a href="' + url + '" download class="imgpart-link" style="display:inline-block; padding:8px 14px; background:rgba(59,130,246,0.25); color:#93c5fd; border:1px solid rgba(59,130,246,0.5); border-radius:6px; text-decoration:none; font-size:13px;">⬇ Download ZIP (~' + _fmtBytes(plan.est_total_bytes) + ')</a>';
+    } else {
+        html += '<div style="font-size:12px; color:var(--text-secondary,#94a3b8); margin-bottom:8px;">Split into <b>' + parts + ' parts</b> of ~' + _fmtBytes(perPartBytes) + ' (~' + per.toLocaleString() + ' frames each — raw + annotated). Click each part; if one fails, just click it again — parts are independent.</div>' +
+            '<div style="text-align:right; margin-bottom:8px;"><button id="img-dl-all" style="padding:5px 10px; font-size:12px; cursor:pointer; background:rgba(34,197,94,0.25); color:#86efac; border:1px solid rgba(34,197,94,0.5); border-radius:5px;">⬇ Download all parts</button></div>' +
+            '<div id="img-parts-list" style="display:flex; flex-direction:column; gap:6px;">';
+        for (let k = 0; k < parts; k++) {
+            const off = k * per;
+            const url = '/api/export_images?' + base +
+                        '&offset=' + off + '&limit=' + per + '&part=' + (k + 1) + '&parts=' + parts;
+            html += '<a href="' + url + '" download class="imgpart-link" style="display:flex; justify-content:space-between; padding:7px 12px; background:rgba(30,41,59,0.6); border:1px solid var(--border-color,#334155); border-radius:6px; text-decoration:none; color:var(--text-primary,#f8fafc); font-size:12px;">' +
+                   '<span>Part ' + (k + 1) + ' / ' + parts + '</span><span style="color:var(--text-secondary,#94a3b8)">~' + _fmtBytes(perPartBytes) + '</span></a>';
+        }
+        html += '</div>';
+    }
+    html += '<div style="text-align:right; margin-top:14px;"><button id="img-parts-close" style="padding:6px 12px; font-size:12px; cursor:pointer; background:rgba(100,116,139,0.25); color:var(--text-primary,#f8fafc); border:1px solid var(--border-color,#334155); border-radius:5px;">Close</button></div>';
+    box.innerHTML = html;
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+
+    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+    box.querySelector('#img-parts-close')?.addEventListener('click', () => ov.remove());
+    const dlAll = box.querySelector('#img-dl-all');
+    if (dlAll) {
+        dlAll.addEventListener('click', () => {
+            const links = Array.from(box.querySelectorAll('#img-parts-list a.imgpart-link'));
+            // Stagger so the browser accepts multiple downloads; each is an
+            // independent, resumable stream, so parallelism is safe (just shares
+            // bandwidth). If any fails the operator re-clicks that one part.
+            links.forEach((a, i) => setTimeout(() => a.click(), i * 1200));
+            dlAll.textContent = 'Queued ' + links.length + ' parts…';
+            dlAll.disabled = true;
+        });
+    }
+}
+window.exportInsightImages = exportInsightImages;
 
 // Auto-refresh when the Charts (grafana) tab becomes active. switchTab() lives in
 // app-core.js; we hook the click rather than patch it to stay decoupled.

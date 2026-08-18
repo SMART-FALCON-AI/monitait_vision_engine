@@ -179,16 +179,35 @@ def invalidate_config_cache():
         _cfg_cache_str = None
 
 
+# 4.0.352 TIMELINE-PERSIST — provenance of the most recent *fresh* (uncached) config
+# load. The boot path reads this to decide whether its conditional re-saves
+# (camera-normalize, legacy→procedures migration) are safe: if the DB was DOWN at
+# load time we served a stale disk snapshot, and writing it back would clobber the
+# good DB row the moment the DB recovers. Values:
+#   'db'       rows returned            — authoritative
+#   'db-empty' reachable, zero rows     — disk is the correct bootstrap source
+#   'db-down'  unreachable              — stale disk fallback; DEFER boot writes
+#   'disk'     no DB layer at all
+_last_load_source = 'disk'
+
+
 def _load_data_file_uncached():
     """The real loader: DB-first (3.22.0), file fallback. Returns a dict (possibly empty)."""
+    global _last_load_source
     # 3.22.0 — DB first
     try:
         from services.config_db import load_all as _db_load
         db_data = _db_load()
-        if db_data:  # non-empty dict (None when DB unreachable, {} when table empty)
+        if db_data:            # non-empty dict — authoritative
+            _last_load_source = 'db'
             return db_data
+        if db_data is None:    # unreachable — DB is DOWN, not merely empty
+            _last_load_source = 'db-down'
+        else:                  # {} — reachable but empty; disk is the bootstrap source
+            _last_load_source = 'db-empty'
     except Exception as e:
         logger.debug(f"DB load skipped, using file: {e}")
+        _last_load_source = 'db-down'
 
     # File fallback (legacy path — also the bootstrap source for the first DB save)
     try:
@@ -201,6 +220,41 @@ def _load_data_file_uncached():
     except Exception as e:
         logger.error(f"Error loading data file: {e}")
     return {}
+
+
+def config_db_was_down_at_load():
+    """True only if the most recent fresh config load fell back to disk because the
+    DB was UNREACHABLE (not merely empty). Boot skips its clobber-prone re-saves in
+    this case so a temporarily-down DB isn't overwritten with stale disk data."""
+    return _last_load_source == 'db-down'
+
+
+def wait_for_config_db(timeout=30.0, interval=0.5):
+    """Block (up to `timeout`s) until the config DB answers, so the boot config read
+    is DB-first rather than a stale-disk fallback that a later boot-save would clobber
+    the good DB row with. Returns True once the DB is reachable (even if empty), or
+    False on timeout (boot then proceeds on the disk fallback, with writes deferred).
+    Returns the instant the DB responds — a healthy boot barely waits.
+    """
+    import time as _t
+    deadline = _t.time() + max(0.0, float(timeout))
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            from services.config_db import load_all as _db_load
+            if _db_load() is not None:   # None == unreachable; {} == reachable-but-empty
+                if attempt > 1:
+                    logger.info(f"[BOOT-DB] config DB reachable after {attempt} attempt(s)")
+                return True
+        except Exception:
+            pass
+        if _t.time() >= deadline:
+            logger.warning(
+                f"[BOOT-DB] config DB not reachable after {timeout:.0f}s — booting on disk "
+                f"fallback; boot-time config writes deferred to avoid clobbering the DB")
+            return False
+        _t.sleep(interval)
 
 
 def load_data_file():

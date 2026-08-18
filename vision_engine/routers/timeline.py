@@ -6147,16 +6147,51 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
 # v4.0.152 — CSV export column list (shared between single-CSV and per-
 # shipment ZIP paths). Kept here so both paths can't drift.
 _CSV_COLUMNS = [
-    "time", "shipment", "encoder", "length", "camera", "class", "confidence",
+    "time", "shipment", "encoder", "length", "unwind_length", "camera", "class", "confidence",
     "severity", "impact",
     "xmin", "ymin", "xmax", "ymax", "image_url",
     "inference_time_ms", "model_used",
 ]
 
 
-def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, unwind, min_conf_f, img_prefix=""):
+def _encoder_calibration():
+    """Return (units_per_unit, unit_label) for converting raw encoder counts to
+    the operator's calibrated unit. (None, "") when uncalibrated → CSV falls back
+    to raw encoder counts with an un-suffixed header."""
+    try:
+        from config import load_service_config as _lsc
+        svc = _lsc() or {}
+        unit = str(svc.get("encoder_unit") or "").strip()
+        upu = svc.get("encoder_units_per_unit")
+        if upu in (None, "", 0):
+            upu = svc.get("encoder_units_per_meter")   # legacy key
+        upu = float(upu or 0)
+    except Exception:
+        return None, ""
+    if upu <= 0:
+        return None, ""
+    if not unit or unit == "encoder_unit":
+        unit = "meters"   # legacy encoder_units_per_meter implies meters
+    return upu, unit
+
+
+def _csv_columns_with_unit(unit):
+    """`_CSV_COLUMNS` with the two length headers suffixed by the calibrated unit,
+    e.g. `length (meters)` / `unwind_length (meters)`. Raw when unit is empty."""
+    cols = list(_CSV_COLUMNS)
+    if unit:
+        cols[3] = f"length ({unit})"
+        cols[4] = f"unwind_length ({unit})"
+    return cols
+
+
+def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, min_conf_f, img_prefix="", upm=None):
     """Build one detection row (list of column values) or None if the row is
     filtered out by min_conf. Extracted so single-CSV and ZIP paths share it.
+
+    Both length conventions ship as columns (no mode toggle):
+      length         = encoder − shipment-start  (start = 0)
+      unwind_length  = shipment-end − encoder     (end = 0, "meters left to unwind")
     """
     try:
         conf_f = float(d.get("confidence") or 0.0)
@@ -6169,10 +6204,17 @@ def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max
     impact = round((sev / 100.0) * conf_f, 3)
     if enc is None:
         length_val = ""
-    elif unwind:
-        length_val = int(enc_max - int(enc))
+        unwind_length_val = ""
     else:
-        length_val = int(int(enc) - enc_min)
+        _e = int(enc)
+        _raw_len = _e - enc_min
+        _raw_unw = enc_max - _e
+        if upm and upm > 0:
+            length_val = round(_raw_len / upm, 2)
+            unwind_length_val = round(_raw_unw / upm, 2)
+        else:
+            length_val = int(_raw_len)
+            unwind_length_val = int(_raw_unw)
     # 4.0.343 — image column is a DIRECT download URL via the /api/raw_image/<rel> serve route
     # (operator: "put the downloadable link so they can download right away"), built on whatever host
     # the operator is using. Falls back to the raw path when no prefix is supplied.
@@ -6184,7 +6226,7 @@ def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max
     return [
         t.strftime("%Y-%m-%d %H:%M:%S.%f") if t else "",
         ship or "", enc if enc is not None else "",
-        length_val,
+        length_val, unwind_length_val,
         d.get("_cam", ""), cls,
         d.get("confidence", ""),
         sev, impact,
@@ -6195,7 +6237,7 @@ def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max
 
 
 @router.get("/api/export_csv")
-def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, unwind: bool = False):
+def export_csv(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
     """Export stored detections for a window.
 
     v4.0.152 — output format now depends on the `shipment` parameter:
@@ -6208,11 +6250,12 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     one file per shipment the operator can open in Excel independently.
 
     Column list (shared):
-      time, shipment, encoder, length, camera, class, confidence, severity,
-      impact, xmin, ymin, xmax, ymax, image_path, inference_time_ms, model_used
+      time, shipment, encoder, length, unwind_length, camera, class, confidence,
+      severity, impact, xmin, ymin, xmax, ymax, image_url, inference_time_ms, model_used
 
-    `unwind=true` inverts the length column (max(encoder) − encoder) for
-    roll-unwinding lines where the operator thinks of shipment-end as 0.
+    Both length conventions are always present as columns: `length` = encoder −
+    shipment-start, `unwind_length` = shipment-end − encoder (meters left to
+    unwind, end = 0). No mode toggle.
     """
     _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
     interval = _windows.get(window, "24 hours")
@@ -6254,6 +6297,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
         sev_map = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
     except Exception:
         sev_map = {}
+    _upm, _unit = _encoder_calibration()   # convert length columns to real units
 
     # enc_min/enc_max feed ONLY the derived "length" column (encoder − start, or max − encoder for
     # unwind). The raw rows don't need it.
@@ -6296,7 +6340,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
             except Exception:
                 pass
 
-    _dir_tag = "_unwind" if unwind else ""
+    _dir_tag = ""  # unwind is now a CSV column, not a filename variant
 
     # ------------------------------------------------------------------
     # Single-CSV path (operator picked a specific shipment)
@@ -6316,7 +6360,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                 )
                 buf = _io.StringIO()
                 writer = _csv.writer(buf)
-                writer.writerow(_CSV_COLUMNS)
+                writer.writerow(_csv_columns_with_unit(_unit))
                 yield buf.getvalue(); buf.seek(0); buf.truncate(0)
                 for t, ship, enc, img, infms, model, dets in cur:
                     if not dets:
@@ -6326,7 +6370,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                             continue
                         row = _detection_row(t, ship, enc, img, infms, model, d,
                                              sev_map, enc_min_global, enc_max_global,
-                                             unwind, min_conf_f, img_prefix)
+                                             min_conf_f, img_prefix, upm=_upm)
                         if row is None:
                             continue
                         writer.writerow(row)
@@ -6373,7 +6417,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                     continue
                 row = _detection_row(t, ship, enc, img, infms, model, d,
                                      sev_map, enc_min_global, enc_max_global,
-                                     unwind, min_conf_f, img_prefix)
+                                     min_conf_f, img_prefix, upm=_upm)
                 if row is None:
                     continue
                 per_shipment_rows[ship].append(row)
@@ -6390,12 +6434,12 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                 zf.writestr(
                     "README.txt",
                     f"No detections in window={window}.\n"
-                    f"Filter used: unwind={unwind}, min_conf={min_conf_f}\n",
+                    f"Filter used: min_conf={min_conf_f}\n",
                 )
             for ship_id in sorted(per_shipment_rows.keys()):
                 sbuf = _io.StringIO()
                 w = _csv.writer(sbuf)
-                w.writerow(_CSV_COLUMNS)
+                w.writerow(_csv_columns_with_unit(_unit))
                 for r in per_shipment_rows[ship_id]:
                     w.writerow(r)
                 safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", str(ship_id))
@@ -6417,6 +6461,426 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     finally:
         try: release_db_connection(conn)
         except Exception: pass
+
+
+# =============================================================================
+# 4.0.348 — bulk image download for a shipment / window as size-capped ZIP PARTS.
+# A shipment can be 196k+ frames (~tens of GB); a single archive is un-resumable
+# over a flaky link and pointless to build on disk. So:
+#   * /api/export_images/plan            → {count, est size, images_per_part, parts}
+#   * /api/export_images?offset=&limit=  → STREAMED ZIP of just that slice
+# The ZIP is generated on the fly (ZIP_STORED, one image buffered at a time) and
+# flushed straight to the socket — nothing is written to server disk, peak RAM is
+# ~one image, and there is no temp archive to clean up. `annotated=true` draws the
+# stored boxes on each frame (reusing the render_detected renderer + its Redis
+# cache); default is the original raw JPEGs (copied byte-for-byte, no re-encode).
+# =============================================================================
+_IMG_PART_TARGET_BYTES = 1024 * 1024 * 1024   # ~1 GiB per part
+_IMG_WINDOWS = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+
+
+def _img_where(shipment, window):
+    """(where_sql, params) — a picked shipment filters by id ALONE (no time
+    bound, same rule as the CSV button); otherwise by the time window."""
+    if shipment:
+        return "shipment = %s", [shipment]
+    return "time > NOW() - INTERVAL %s", [_IMG_WINDOWS.get(window, "24 hours")]
+
+
+def _img_conf_clause(min_conf_f):
+    """min_conf>0 → only frames with at least one detection at/above threshold."""
+    if min_conf_f and min_conf_f > 0:
+        return (" AND EXISTS (SELECT 1 FROM jsonb_array_elements(detections) e "
+                "WHERE (e->>'confidence') ~ '^[0-9]*\\.?[0-9]+$' "
+                "AND (e->>'confidence')::float >= %s)")
+    return ""
+
+
+def _img_select(cols, where_sql, conf_clause):
+    # Stable order so a given (offset,limit) part always contains the same frames.
+    return (f"SELECT {cols} FROM inference_results "
+            f"WHERE {where_sql} AND image_path IS NOT NULL AND image_path <> ''"
+            f"{conf_clause} ORDER BY time ASC, image_path ASC")
+
+
+def _img_resolve(img):
+    """DB image_path → (abspath, arcname under raw_images/) or (None, None).
+    arcname keeps the `<shipment>/<frame>.jpg` shape so the ZIP unzips into a
+    folder per shipment. Path-traversal guarded exactly like serve_raw_image."""
+    s = str(img)
+    rel = (s.split("raw_images/")[-1] if "raw_images/" in s else s).lstrip("/\\")
+    try:
+        rp = (pathlib.Path("raw_images") / rel).resolve()
+        if not str(rp).startswith(str(_RAW_IMAGES_ROOT)) or not rp.exists():
+            return None, None
+    except Exception:
+        return None, None
+    return str(rp), rel
+
+
+def _img_annotate_bytes(abspath, dets, r):
+    """Raw frame at abspath with its stored boxes drawn → JPEG bytes. Shares the
+    render_detected Redis cache (key = path|<show="">|mtime) so a frame the
+    operator already hovered is a cache hit, and this export warms it for later."""
+    import os as _os, hashlib as _hl
+    try:
+        mtime_ns = _os.stat(abspath).st_mtime_ns
+    except Exception:
+        mtime_ns = 0
+    cache_key = "render:" + _hl.sha1(f"{abspath}||{mtime_ns}".encode("utf-8")).hexdigest()
+    if r is not None:
+        try:
+            cached = r.get(cache_key)
+            if cached:
+                return cached
+        except Exception:
+            pass
+    img = cv2.imread(abspath)
+    if img is None:
+        raise RuntimeError("cv2 cannot read frame")
+    try:
+        from services.render import draw_detection_on as _draw
+        kv_y = 4
+        for det in dets:
+            if isinstance(det, dict):
+                try:
+                    kv_y = _draw(img, det, kv_y=kv_y, bbox_thickness=3)
+                except Exception:
+                    pass
+    except Exception as _e:
+        logger.debug(f"export_images annotate draw failed: {_e}")
+    ok, enc = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    if not ok:
+        raise RuntimeError("jpeg encode failed")
+    data = bytes(enc)
+    if r is not None:
+        try:
+            r.setex(cache_key, 3600, data)
+        except Exception:
+            pass
+    return data
+
+
+def _stream_shipment_csv_entry(zf, sink, shipment, window, min_conf_f, img_prefix):
+    """Write the shipment's detections CSV as ONE zip entry, STREAMED (deflated,
+    row-batched) so a multi-million-row shipment neither blocks first-byte nor
+    builds the whole CSV in memory. Same columns/logic as export_csv. Yields
+    drained ZIP bytes as it goes. `zf` must be a ZipFile over the non-seekable
+    `sink`; nothing else may write to `zf` until this generator is exhausted."""
+    import csv as _csv
+    import io as _io
+    import re as _re2
+    import zipfile as _zip2
+    from services.db import get_db_connection, release_db_connection
+    try:
+        from config import load_service_config as _lsc
+        _svc = _lsc() or {}
+        _audio = _svc.get("audio_settings", {}) or {}
+        sev_map = {k: int(v.get("severity", 0) or 0) for k, v in _audio.items() if isinstance(v, dict)}
+    except Exception:
+        sev_map = {}
+    _upm, _unit = _encoder_calibration()
+    enc_min = enc_max = 0
+    try:
+        from services.shipment_stats import get_shipment_span
+        _sp = get_shipment_span(shipment)
+        if _sp:
+            enc_min = int(_sp.get("enc_min") or 0)
+            enc_max = int(_sp.get("enc_max") or 0)
+    except Exception:
+        pass
+    conn = get_db_connection()
+    if conn is None:
+        return
+    safe = _re2.sub(r"[^A-Za-z0-9_-]+", "_", str(shipment))
+    zi = _zip2.ZipInfo(f"detections_{safe}_{window}.csv")
+    zi.compress_type = _zip2.ZIP_DEFLATED   # text compresses ~10x; images stay STORED
+    cf = zf.open(zi, "w")
+    buf = _io.StringIO()
+    w = _csv.writer(buf)
+    w.writerow(_csv_columns_with_unit(_unit))
+    try:
+        cur = conn.cursor(name="export_images_csv_cursor")
+        cur.itersize = 1000
+        cur.execute(
+            """SELECT time, shipment, encoder_value, image_path,
+                      inference_time_ms, model_used, detections
+                 FROM inference_results
+                WHERE shipment = %s
+                ORDER BY time ASC""",
+            [shipment],
+        )
+        n = 0
+        for t, ship, enc, img, infms, model, dets in cur:
+            if dets:
+                for d in dets:
+                    if isinstance(d, dict):
+                        row = _detection_row(t, ship, enc, img, infms, model, d, sev_map,
+                                             enc_min, enc_max, min_conf_f, img_prefix, upm=_upm)
+                        if row is not None:
+                            w.writerow(row)
+            n += 1
+            if n % 1000 == 0:
+                cf.write(buf.getvalue().encode("utf-8"))
+                buf.seek(0); buf.truncate(0)
+                chunk = sink.drain()
+                if chunk:
+                    yield chunk
+        cf.write(buf.getvalue().encode("utf-8"))
+        cur.close()
+    except Exception as e:
+        logger.warning(f"export_images CSV stream failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            cf.close()
+        except Exception:
+            pass
+        try:
+            release_db_connection(conn)
+        except Exception:
+            pass
+    chunk = sink.drain()
+    if chunk:
+        yield chunk
+
+
+@router.get("/api/export_images/plan")
+def export_images_plan(request: Request, window: str = "24h", shipment: str = "",
+                       min_conf: float = 0.0):
+    """Count the images for a selection and propose ~1 GiB ZIP parts. Per-part
+    size is ESTIMATED from a small sample of real files (stat-ing every file
+    up-front would be slow), so parts are a fixed images-per-part derived from
+    that estimate — actual part size varies a little."""
+    import os as _os
+    min_conf_f = float(min_conf or 0.0)
+    where_sql, where_params = _img_where(shipment, window)
+    conf_clause = _img_conf_clause(min_conf_f)
+    params = list(where_params) + ([min_conf_f] if min_conf_f > 0 else [])
+
+    from services.db import get_db_connection, release_db_connection
+    conn = get_db_connection()
+    if conn is None:
+        return JSONResponse({"error": "database unavailable"}, status_code=503)
+    count = 0
+    sample = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 30000")
+            cur.execute(f"SELECT COUNT(*) FROM inference_results WHERE {where_sql} "
+                        f"AND image_path IS NOT NULL AND image_path <> ''{conf_clause}", params)
+            count = int(cur.fetchone()[0] or 0)
+            cur.execute(_img_select("image_path", where_sql, conf_clause) + " LIMIT 200", params)
+            sample = [row[0] for row in cur.fetchall() if row and row[0]]
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"export_images_plan failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return JSONResponse({"error": str(e)}, status_code=500)
+    finally:
+        try:
+            release_db_connection(conn)
+        except Exception:
+            pass
+
+    sizes = []
+    for p in sample:
+        ap, _ = _img_resolve(p)
+        if ap:
+            try:
+                sizes.append(_os.path.getsize(ap))
+            except Exception:
+                pass
+    avg_bytes = int(sum(sizes) / len(sizes)) if sizes else 150 * 1024   # 150 KB fallback
+    # Every frame ships TWICE (raw + annotated), so budget ~2× per frame when
+    # sizing the ~1 GiB parts and estimating the total.
+    per_frame_bytes = max(1, avg_bytes * 2)
+    per_part = max(1, round(_IMG_PART_TARGET_BYTES / per_frame_bytes))
+    parts = (count + per_part - 1) // per_part if count else 0
+    return JSONResponse({
+        "shipment": shipment, "window": window, "min_conf": min_conf_f,
+        "count": count, "avg_bytes": avg_bytes, "est_total_bytes": per_frame_bytes * count,
+        "images_per_part": per_part, "parts": parts,
+        "target_part_bytes": _IMG_PART_TARGET_BYTES,
+    })
+
+
+@router.get("/api/export_images")
+def export_images(request: Request, window: str = "24h", shipment: str = "",
+                  min_conf: float = 0.0, offset: int = 0, limit: int = 0,
+                  part: int = 0, parts: int = 0):
+    """Stream a ZIP of frame images for a selection (or one PART of it).
+
+    Selection mirrors the CSV button (shipment OR window + min_conf). `offset`
+    /`limit` carve out one ~1 GiB part (see /plan) so each is an independent,
+    resumable download; offset=limit=0 streams the whole selection.
+
+    Every frame is written TWICE: the original JPEG under `raw/<shipment>/…` and
+    the same frame with its stored boxes drawn under `annotated/<shipment>/…`
+    (the annotated copy reuses the render_detected renderer + its Redis cache).
+
+    Streamed on the fly, one image buffered at a time: no temp file on disk, flat
+    memory. part/parts only affect the download filename."""
+    min_conf_f = float(min_conf or 0.0)
+    where_sql, where_params = _img_where(shipment, window)
+    conf_clause = _img_conf_clause(min_conf_f)
+    cols = "image_path, detections"
+
+    # Embed the shipment's detections CSV as the FIRST entry of the FIRST part
+    # (operator: "add the csv of that shipment to the first zip"). Only for a
+    # picked shipment (the button is shipment-only) and only on part 1 / a single
+    # zip, so it isn't duplicated into every part.
+    include_csv = bool(shipment) and (int(part or 0) <= 1)
+    try:
+        img_prefix = str(request.base_url).rstrip("/") + "/api/raw_image/"
+    except Exception:
+        img_prefix = "/api/raw_image/"
+
+    from services.db import get_db_connection, release_db_connection
+    conn = get_db_connection()
+    if conn is None:
+        return Response(content="ERROR: database unavailable\n", status_code=503,
+                        media_type="text/plain")
+    rows = []
+    try:
+        sql = _img_select(cols, where_sql, conf_clause)
+        params = list(where_params) + ([min_conf_f] if min_conf_f > 0 else [])
+        if limit and limit > 0:
+            sql += " LIMIT %s OFFSET %s"
+            params += [int(limit), int(offset or 0)]
+        with conn.cursor() as cur:
+            # Bulk export, not a hot path — a large OFFSET on the last parts of a
+            # huge shipment can take a few seconds, so allow 60s (the slice is
+            # fetched here up-front, then the DB connection is released before the
+            # slow disk/network-bound ZIP stream begins).
+            cur.execute("SET LOCAL statement_timeout = 60000")
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"export_images path query failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return Response(content=f"ERROR: {e}\n", status_code=500, media_type="text/plain")
+    finally:
+        try:
+            release_db_connection(conn)
+        except Exception:
+            pass
+
+    import re as _re
+    import zipfile as _zip
+
+    # Non-seekable sink → zipfile switches to streaming mode (data descriptors),
+    # so we never need to seek back to patch headers. drain() hands each file's
+    # bytes to the generator and clears the buffer → peak RAM ≈ one image.
+    class _Sink:
+        def __init__(self):
+            self._b = bytearray()
+
+        def write(self, b):
+            self._b.extend(b)
+            return len(b)
+
+        def flush(self):
+            pass
+
+        def drain(self):
+            out = bytes(self._b)
+            del self._b[:]
+            return out
+
+    def gen():
+        sink = _Sink()
+        zf = _zip.ZipFile(sink, "w", compression=_zip.ZIP_STORED, allowZip64=True)
+        written = missing = 0
+        r = None
+        try:
+            r = Redis("redis", 6379, db=cfg_module.REDIS_DB)
+        except Exception:
+            r = None
+        try:
+            if include_csv:
+                try:
+                    for _c in _stream_shipment_csv_entry(zf, sink, shipment, window,
+                                                         min_conf_f, img_prefix):
+                        if _c:
+                            yield _c
+                except Exception as _ce:
+                    logger.warning(f"export_images: embed CSV failed: {_ce}")
+            for rec in rows:
+                img = rec[0]
+                ap, arc = _img_resolve(img)
+                if not ap:
+                    missing += 1
+                    continue
+                dets = rec[1] if len(rec) > 1 and isinstance(rec[1], list) else []
+                # A frame earns an annotated copy only if it has a REAL, drawable
+                # detection — not just metadata entries like `_color`/`_absolute`
+                # (which draw nothing, so the annotated copy would merely duplicate
+                # the raw). Operator: "why generate a blank annotated image if there
+                # is no annotation." raw/ still gets every frame.
+                has_box = any(
+                    isinstance(d, dict) and str(d.get("name", "")).strip()
+                    and not str(d.get("name", "")).startswith("_")
+                    for d in dets
+                )
+                wrote_any = False
+                # Original frame, copied byte-for-byte, under raw/<shipment>/…
+                try:
+                    zf.write(ap, "raw/" + arc)
+                    written += 1
+                    wrote_any = True
+                except Exception as we:
+                    logger.debug(f"export_images raw skip {img}: {we}")
+                # Same frame with its stored boxes drawn, under annotated/<shipment>/…
+                if has_box:
+                    try:
+                        zf.writestr("annotated/" + arc, _img_annotate_bytes(ap, dets, r))
+                        written += 1
+                        wrote_any = True
+                    except Exception as we:
+                        logger.debug(f"export_images annotated skip {img}: {we}")
+                if not wrote_any:
+                    missing += 1
+                    continue
+                chunk = sink.drain()
+                if chunk:
+                    yield chunk
+            if written == 0:
+                zf.writestr("README.txt",
+                            f"No image files were found on disk for this selection.\n"
+                            f"(matched {len(rows)} rows, {missing} files missing)\n")
+            zf.close()
+            yield sink.drain()
+            logger.info(f"export_images: ship={shipment or '(win '+window+')'} "
+                        f"annotated={annotated} offset={offset} limit={limit} "
+                        f"wrote={written} missing={missing}")
+        except Exception as e:
+            logger.warning(f"export_images stream aborted: {e}")
+            try:
+                zf.close()
+            except Exception:
+                pass
+            tail = sink.drain()
+            if tail:
+                yield tail
+
+    tag = _re.sub(r"[^A-Za-z0-9_-]+", "_", shipment) if shipment else f"all_{window}"
+    if parts and part:
+        fname = f"images_{tag}_p{int(part):02d}of{int(parts):02d}.zip"
+    else:
+        fname = f"images_{tag}.zip"
+    return StreamingResponse(gen(), media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.get("/api/raw_image/{path:path}")

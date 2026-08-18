@@ -2018,6 +2018,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 window.openDefectDrawerForFrame({
                     annotated_url: frameUrl,
                     raw_url:       rawUrl,
+                    // 4.0.351 — carry the real image_path (+ camera) so the drawer's
+                    // Upload-to-AI-Trainer / Annotate actions work when the frame is
+                    // opened from the DASHBOARD, not just from a chart dot. Without it
+                    // _currentDefectItem.image_path was empty and every action bailed
+                    // with "No frame loaded — click a chart dot first."
+                    image_path:    'raw_images/' + dPath + '.jpg',
+                    camera_index:  camId,
                     shipment:      (dPath.split('/')[0] || ''),
                     t:             col.ts ? col.ts * 1000 : null,
                     cls:           tags.join(' • '),

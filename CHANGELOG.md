@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.352] - 2026-08-18 — Fix: MVE forgetting ejection rules + timeline config on restart (DB-not-ready-at-boot race)
+
+**Symptom** (kiancord): every restart FORGOT the ejection procedures + Timeline settings (camera order, rotation) while KEEPING capture/inference. **Root cause:** config load is DB-first / disk-fallback, and `config_db.load_all()` returns `None` the instant TimescaleDB is unreachable — with **no wait/retry**. When the DB starts slower than MVE, boot reads the **stale disk** `.env.prepared_query_data`; two *conditional* boot-saves then fire *because that stale data looks incomplete* (camera by-path normalize, and the legacy→`procedures` migration that sets `procedures=[]`) and write the stale blob back — **clobbering the good DB row** once the DB recovers. `service_config` survived only because it is re-saved on many other events.
+
+**Fix (backend-only — [config.py](vision_engine/config.py), [main.py](vision_engine/main.py)):**
+- `wait_for_config_db(timeout=30)` runs **before** the boot config read (then invalidates the config cache), so the read is genuinely DB-first, not a stale-disk fallback. Returns the instant the DB responds — a healthy boot barely waits; only a truly-down DB waits out the timeout.
+- Load-provenance guard: `config_db_was_down_at_load()` distinguishes DB-**down** (`'db-down'`, unreachable → stale disk) from DB-**empty** (`'db-empty'`, reachable, fresh install). The two boot-saves are now **deferred** (logged, applied in-memory only) when the DB was down — so a temporarily-unreachable DB is never overwritten — but still run when the DB is merely empty (correct first-boot bootstrap).
+
+## [4.0.351] - 2026-08-18 — Fix: Upload-to-AI-Trainer / Annotate from a DASHBOARD frame ("No frame loaded")
+
+Opening a frame from the **Dashboard** (clicking a timeline image) rendered RAW + ANNOTATED fine, but the drawer's **Upload to AI Trainer** and **Annotate** actions failed with *"No frame loaded — click a chart dot first."* The dashboard click ([audio.js](vision_engine/static/js/audio.js)) passed `annotated_url`/`raw_url` (via `/api/timeline_frame`, so images showed) but **no `image_path`** — and those actions read `_currentDefectItem.image_path`. Now the dashboard also passes `image_path` (`raw_images/<d_path>.jpg`) + `camera_index`, so Upload/Annotate work identically whether the frame was opened from a chart dot or the dashboard.
+
+## [4.0.350] - 2026-08-15 — CSV: unwind is always a column + length in calibrated units; image ZIP skips box-less annotated copies
+
+- **`unwind_length` is now always a CSV column** (no more Unwind checkbox on Detection Insights). Every CSV/CSV-in-ZIP carries both `length` (encoder − shipment-start) and `unwind_length` (shipment-end − encoder) side by side, so the operator never has to re-export to flip convention.
+- **Length columns are calibrated to real units** using the encoder calibration (`encoder_units_per_unit` / legacy `encoder_units_per_meter`), and the unit is in the header — e.g. `length (meters)` / `unwind_length (meters)`. Uncalibrated sites fall back to raw encoder counts with un-suffixed headers.
+- **Image ZIP no longer emits a box-less `annotated/` copy** for frames with no detections (operator: "why generate a blank annotated image if there is no annotation"). `raw/` still contains every frame; `annotated/` now contains only frames that actually have boxes drawn. Fixes the "some annotated images are empty" report (those were blank *source* frames with no detections).
+
+## [4.0.349] - 2026-08-15 — Detection Insights: "⬇ Images" button — download a shipment's frames (raw + annotated) as resumable ZIP parts
+
+New **⬇ Images** button beside **⬇ CSV** on the Detection Insights panel. A shipment can be 196k+ frames (~tens of GB), so instead of one un-resumable archive:
+
+- **`GET /api/export_images/plan`** counts the selection, samples real file sizes, and proposes **~1 GiB ZIP parts** (budgeting ~2× per frame since each ships twice). The button opens a small dialog listing each part as an independent download; if one drops over a flaky link, the operator re-grabs just that part.
+- **`GET /api/export_images?offset=&limit=`** streams one part as a ZIP. It is generated **on the fly** (one image buffered at a time) and flushed straight to the socket — **nothing is ever written to server disk** (no temp archive to clean up), peak RAM ≈ one image. `allowZip64` handles the >65535-file shipments.
+- **Both raw and annotated** — every frame is written twice: the original JPEG under `raw/<shipment>/…` and the same frame with its stored boxes drawn under `annotated/<shipment>/…` (reusing the `render_detected` renderer + its Redis cache). No mode toggle — you always get both.
+- **Shipment-only** — the button is hidden for "All shipments" so an operator can't kick off an unbounded, tens-of-GB job across a whole window.
+- **CSV bundled** — the first part also carries the shipment's `detections_<id>_<window>.csv` (same columns/logic as the CSV button, **streamed + deflated** as a single zip entry so a multi-million-row shipment neither blocks first-byte nor builds the whole CSV in memory), so one download carries both the frames and their detection table.
+
 ## [4.0.347] - 2026-08-14 — Hardware tab: Watcher Verbose Configuration panel now uses the dark theme
 
 The read-only "Watcher Verbose Configuration" panel (`.verbose-panel`) was hardcoded light — `background:#fff`, `color:#555`, light dashed border — a leftover from the old light theme, so it rendered as a jarring white box among the dark panels (and its values were nearly invisible). Now it uses the theme tokens (`var(--card-bg)`, `var(--text-primary)`, `var(--text-secondary)`, `var(--border-color)`) like every other panel.

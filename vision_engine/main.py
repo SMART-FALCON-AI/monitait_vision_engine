@@ -152,11 +152,17 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
                 logger.info(f"[CAM-NORMALIZE]   cam {_cid}: {_old}  ->  {_new}")
             # Persist to DB so the next boot reads the by-path form directly.
             try:
-                from config import save_data_file
-                _payload = full_data if isinstance(full_data, dict) else {}
-                _payload["service_config"] = config
-                if not save_data_file(_payload):
-                    logger.warning("[CAM-NORMALIZE] save_data_file returned False — DB may be unreachable; in-memory config still upgraded")
+                from config import save_data_file, config_db_was_down_at_load
+                # 4.0.352 TIMELINE-PERSIST — if we booted on a stale disk fallback
+                # because the DB was DOWN, do NOT write back: it would clobber the
+                # good DB config (timeline_config/procedures) once the DB recovers.
+                if config_db_was_down_at_load():
+                    logger.warning("[CAM-NORMALIZE] DB was down at boot — by-path upgrade applied in-memory but persist DEFERRED to avoid clobbering DB config")
+                else:
+                    _payload = full_data if isinstance(full_data, dict) else {}
+                    _payload["service_config"] = config
+                    if not save_data_file(_payload):
+                        logger.warning("[CAM-NORMALIZE] save_data_file returned False — DB may be unreachable; in-memory config still upgraded")
             except Exception as _pe:
                 logger.warning(f"[CAM-NORMALIZE] persist failed: {_pe}")
     except Exception as _ne:
@@ -389,8 +395,15 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
             else:
                 app.state.timeline_config['procedures'] = []
             full_data['timeline_config'] = app.state.timeline_config
-            save_data_file(full_data)
-            logger.info("Legacy eject config migrated to procedures format")
+            # 4.0.352 TIMELINE-PERSIST — never persist this migration when we booted
+            # on a stale disk fallback (DB down); it would clobber the good DB
+            # timeline_config (procedures / camera-order) the moment the DB recovers.
+            from config import config_db_was_down_at_load
+            if config_db_was_down_at_load():
+                logger.warning("[TIMELINE-MIGRATE] DB was down at boot — legacy→procedures migration applied in-memory but persist DEFERRED to avoid clobbering DB config")
+            else:
+                save_data_file(full_data)
+                logger.info("Legacy eject config migrated to procedures format")
     else:
         # Initialize with defaults if not in config
         app.state.timeline_config = {
@@ -861,6 +874,17 @@ set_app(app)
 
 # Initialize detection module with runtime references
 detection.init(watcher, pipeline_manager, app, prepared_query_data)
+
+# 4.0.352 TIMELINE-PERSIST — wait for the config DB before the boot config read so we
+# load the authoritative DB config, not a stale disk fallback that a boot-save would
+# then clobber the good DB row with. Returns the instant the DB responds; only a
+# genuinely-down DB waits out the timeout (then boot proceeds on disk, writes deferred).
+try:
+    from config import wait_for_config_db, invalidate_config_cache
+    if wait_for_config_db(timeout=30.0):
+        invalidate_config_cache()   # force the boot read below to hit the now-ready DB, not a cached disk load
+except Exception as _dbw:
+    logger.warning(f"[BOOT-DB] wait_for_config_db failed: {_dbw}")
 
 # Load and apply saved configuration at startup
 apply_saved_config_at_startup(watcher)
