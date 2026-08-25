@@ -685,6 +685,43 @@ from routers.websocket import router as ws_router
 from routers.notifications import router as notifications_router  # 3.24.0
 from routers.anomaly import router as anomaly_router  # 4.0.50 — anomaly baseline plumbing
 from routers.knowledge import router as knowledge_router  # 4.0.224 — knowledge RAG proxy + kb_* helpers
+from routers.security import router as security_router  # 4.0.357 — auth + audit + RBAC
+
+
+# 4.0.357 — audit every mutating request to a protected path, and (ONLY when an
+# admin has enabled RBAC) enforce the minimum role. Fail-OPEN: any error logs and
+# lets the request through, so this middleware can never lock the line out.
+@app.middleware("http")
+async def _audit_rbac_mw(request, call_next):
+    from services import security as _sec
+    method, path = request.method, request.url.path
+    try:
+        gated = _sec.is_mutating_protected(method, path)
+    except Exception:
+        gated = False
+    actor, role = None, "viewer"
+    if gated:
+        try:
+            actor, role = _sec.resolve(_sec.token_from_request(request))
+        except Exception:
+            pass
+        if _sec.rbac_enabled():
+            try:
+                need = _sec.required_role_for(method, path)
+                if need and _sec.ROLE_RANK.get(role, 0) < _sec.ROLE_RANK.get(need, 0):
+                    from fastapi.responses import JSONResponse as _JR
+                    _sec.audit_record(actor, role, method, path, 403, "denied")
+                    return _JR({"error": "forbidden", "required_role": need,
+                                "detail": "Log in with a sufficient role."}, status_code=403)
+            except Exception as _e:
+                logger.warning("rbac check failed open: %s", _e)
+    response = await call_next(request)
+    if gated:
+        try:
+            _sec.audit_record(actor, role, method, path, getattr(response, "status_code", None))
+        except Exception:
+            pass
+    return response
 
 app.include_router(health_router)
 app.include_router(cameras_router)
@@ -698,6 +735,7 @@ app.include_router(ai_trainer_router)  # 3.21.22 — AI Trainer integration
 app.include_router(notifications_router)  # 3.24.0 — Telegram + AI usage
 app.include_router(anomaly_router)  # 4.0.50 — /api/anomaly/{build-baseline,baseline}
 app.include_router(knowledge_router)  # 4.0.224 — /api/kb/** proxy + /api/knowledge/status (before commands catch-all)
+app.include_router(security_router)  # 4.0.357 — /api/auth/** + /api/audit (opt-in RBAC, default OFF)
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 

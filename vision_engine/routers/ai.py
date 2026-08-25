@@ -27,6 +27,7 @@ try:
     from routers.knowledge import (
         kb_available, kb_call_federated, kb_context, kb_federated_tools,
         kb_propose_action, kb_resolve_asset, kb_search, kb_similar_issues,
+        kb_list_db_sources, kb_describe_db, kb_query_db,
     )
 except Exception as _kb_imp_exc:  # defensive: never brick boot
     logging.getLogger(__name__).warning("knowledge helpers unavailable: %s", _kb_imp_exc)
@@ -35,6 +36,9 @@ except Exception as _kb_imp_exc:  # defensive: never brick boot
     def kb_context(*a, **k): return {}
     def kb_similar_issues(*a, **k): return {}
     def kb_resolve_asset(*a, **k): return None
+    def kb_list_db_sources(*a, **k): return {}
+    def kb_describe_db(*a, **k): return {}
+    def kb_query_db(*a, **k): return {}
     def kb_federated_tools(*a, **k): return []
     def kb_call_federated(*a, **k): return {}
     def kb_propose_action(*a, **k): return {}
@@ -634,6 +638,47 @@ def get_ai_tools():
                 "required": ["title", "endpoint", "body", "rationale"],
             },
         },
+        {
+            "name": "list_factory_databases",
+            "description": (
+                "List the factory databases (ERP/MES/etc.) you may query LIVE for "
+                "up-to-the-second transactional data — current orders, WIP, inventory, "
+                "production counts. Use this for 'right now' questions that documents and "
+                "search_knowledge cannot answer. Returns each database's id, name and type."
+            ),
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "describe_factory_database",
+            "description": (
+                "Get the tables and columns of one factory database (id from "
+                "list_factory_databases) so you can write correct SQL. ALWAYS call this "
+                "before query_factory_database — never guess table or column names."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"source_id": {"type": "integer",
+                               "description": "id from list_factory_databases"}},
+                "required": ["source_id"],
+            },
+        },
+        {
+            "name": "query_factory_database",
+            "description": (
+                "Run ONE read-only SQL SELECT against a factory database and get the rows. "
+                "Write the SQL yourself from describe_factory_database's schema. Only a single "
+                "SELECT/WITH is accepted — any write is rejected server-side. Keep it targeted "
+                "(a WHERE filter + a short column list); results are capped."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "integer", "description": "id from list_factory_databases"},
+                    "sql": {"type": "string", "description": "A single read-only SELECT statement"},
+                },
+                "required": ["source_id", "sql"],
+            },
+        },
     ]
 
     # Federated tools from the customer's own MCP servers (empty unless federation
@@ -825,6 +870,48 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
                 **result,
                 "note": "Recorded as a PROPOSAL. It has NOT been applied. Tell the operator "
                         "it is waiting for their approval.",
+            }, default=str, ensure_ascii=False)
+
+        elif tool_name == "list_factory_databases":
+            r = kb_list_db_sources()
+            if r.get("error"):
+                return json.dumps({"error": "The factory-database connector is unavailable."})
+            srcs = r.get("sources") or []
+            return json.dumps({
+                "databases": [{"id": s.get("id"), "name": s.get("name"), "type": s.get("db_type")}
+                              for s in srcs],
+                "instruction": ("Call describe_factory_database(source_id) to see its tables "
+                                "before querying." if srcs else
+                                "No factory databases are connected. Tell the operator to add one "
+                                "under Knowledge → Databases."),
+            }, default=str, ensure_ascii=False)
+
+        elif tool_name == "describe_factory_database":
+            r = kb_describe_db(int(tool_input["source_id"]))
+            if r.get("error"):
+                return json.dumps({"error": r["error"]})
+            return json.dumps({
+                "tables": r.get("tables", {}),
+                "instruction": "Write ONE read-only SELECT using ONLY these tables/columns, "
+                               "then call query_factory_database.",
+            }, default=str, ensure_ascii=False)
+
+        elif tool_name == "query_factory_database":
+            r = kb_query_db(int(tool_input["source_id"]), tool_input.get("sql", ""),
+                            int(tool_input.get("max_rows", 200)))
+            if r.get("error"):
+                return json.dumps({
+                    "error": r["error"],
+                    "hint": "Only a single read-only SELECT/WITH is allowed. Re-check table and "
+                            "column names with describe_factory_database.",
+                })
+            return json.dumps({
+                "columns": r.get("columns", []),
+                "rows": r.get("rows", []),
+                "row_count": r.get("row_count", 0),
+                "truncated": r.get("truncated", False),
+                "instruction": "Answer from these rows — this is LIVE factory data. Note it as "
+                               "'(live query)'. If truncated, add a WHERE filter and re-query.",
             }, default=str, ensure_ascii=False)
 
         elif "__" in tool_name:

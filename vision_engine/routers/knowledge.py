@@ -158,6 +158,40 @@ def kb_similar_issues(text: str, limit: int = 5) -> Dict[str, Any]:
         return _fail(exc, "similar_issues")
 
 
+def kb_list_db_sources() -> Dict[str, Any]:
+    """Registered factory databases the assistant may query live (name/type/id)."""
+    try:
+        resp = requests.get(f"{KB_URL}/api/kb/db_sources", timeout=KB_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        return _fail(exc, "list_db_sources")
+
+
+def kb_describe_db(source_id: int) -> Dict[str, Any]:
+    """Tables + columns of a factory DB — the text-to-SQL context."""
+    try:
+        resp = requests.get(f"{KB_URL}/api/kb/db_sources/{source_id}/schema", timeout=KB_TIMEOUT)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        return _fail(exc, "describe_db")
+
+
+def kb_query_db(source_id: int, sql: str, max_rows: int = 200) -> Dict[str, Any]:
+    """Run ONE read-only SELECT against a factory DB (guarded service-side)."""
+    try:
+        resp = requests.post(f"{KB_URL}/api/kb/db_sources/{source_id}/query",
+                             json={"sql": sql, "max_rows": max_rows}, timeout=KB_TIMEOUT)
+        # 400 = the read-only guard or a SQL error; surface it to the model
+        if resp.status_code == 400:
+            return {"error": (resp.json() or {}).get("detail", "query rejected")}
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        return _fail(exc, "query_db")
+
+
 def kb_resolve_asset(camera_id: Optional[int] = None, procedure: Optional[str] = None,
                      channel: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Map an alarm's camera/procedure/channel to a plant asset so retrieval can

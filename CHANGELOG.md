@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.357] - 2026-08-26 — AI-STATION #2+#3: live factory-DB query tools + opt-in audit log & RBAC
+
+Two roadmap items from [MVE_AI_STATION_ROADMAP.md](docs/MVE_AI_STATION_ROADMAP.md), both **safe on a running line** — nothing here changes behaviour until an admin turns it on.
+
+**#2 — Live factory-DB query (text-to-SQL).** Beyond ingesting a DB snapshot into RAG, the assistant can now query a registered factory database *live* and read-only. New knowledge-service endpoints `GET /api/kb/db_sources/{id}/schema` (table+column introspection per engine) and `POST /api/kb/db_sources/{id}/query` (one guarded `SELECT`), proxied through [knowledge.py](vision_engine/routers/knowledge.py) (`kb_describe_db`, `kb_query_db`). Three new assistant tools in [ai.py](vision_engine/routers/ai.py) — `list_factory_databases`, `describe_factory_database`, `query_factory_database` — so "how many defects on line 3 today?" resolves against MES/ERP/SCADA in the moment. The read-only guard (`assert_read_only`) rejects anything but a single `SELECT`/`WITH`; a rejected query surfaces its reason to the model instead of raising.
+
+**#3 — Audit log + RBAC (opt-in, default OFF).** New [services/security.py](vision_engine/services/security.py) + [routers/security.py](vision_engine/routers/security.py):
+- **Audit log — always on, best-effort.** Every *mutating* request to a protected path (procedures, pipelines, camera/timeline config, ejector, config, audio) is recorded (actor / role / method / path / status / time) in `mve_audit_log`. Recording is wrapped so it can never break a request. View at `GET /api/audit`.
+- **RBAC — opt-in.** `rbac_enabled` defaults **false**: every existing install runs exactly as before, unauthenticated. When an admin flips it on (`POST /api/auth/config`, or env `MVE_RBAC_ENABLED=1`), mutating protected paths require a role — `viewer < operator < engineer < admin` — resolved from a bearer token / `mve_token` cookie issued by `POST /api/auth/login`. Enforcement **fails OPEN** on any internal error, and a default `admin`/`admin` user is seeded, so a bug or a lost password can never lock the plant out (change the password immediately).
+- Self-bootstrapping schema (`mve_users` / `mve_auth_tokens` / `mve_audit_log`) in the same TimescaleDB — no migration step. A `@app.middleware("http")` in [main.py](vision_engine/main.py) does the audit + (when enabled) enforcement; it is a near-no-op for reads and for every non-`/api` request.
+
+Cache-busters bumped to `?v=4.0.357`.
+
+## [4.0.356] - 2026-08-25 — Fix: annotation modal image/boxes misaligned in Farsi (RTL)
+
+Selecting Farsi sets `document.documentElement.dir='rtl'` on the whole page ([i18n.js](vision_engine/static/js/i18n.js):4144). The Label-Studio annotation modal (`#annotate-modal` / `#label-studio`) inherited that RTL, which flipped LSF's pixel-positioned image and box overlay so they no longer lined up ("boxes and image far from each other" on khoy). The annotation canvas is coordinate-based and must always be LTR, so both the modal and the LSF mount are now pinned `dir="ltr"` + `direction:ltr` regardless of page language. Cache-busters bumped to `?v=4.0.356`.
+
+## [4.0.355] - 2026-08-21 — PER-KEY-WRITES: stop config keys clobbering each other (the "rules/pipeline vanish" root cause)
+
+The durable fix for settings disappearing — closes the runtime path 4.0.352 didn't. Every writer used to do **load whole config blob → change one key → save whole blob** with no lock, so two overlapping writers lost each other's keys, and because the DB save was a per-key **upsert** while the disk save was a **whole-file replace**, the two stores could also diverge. Since `service_config` is written constantly (~40 sites: pipeline activate, camera tweaks, scheduler, watcher, anomaly…) and `timeline_config` (ejection + shipment-close rules) rarely, a routine `service_config` save that loaded its snapshot before your rule edit would wipe the rule from **both** stores.
+
+Fixes in [config.py](vision_engine/config.py):
+- **`save_config_key(key, value)`** — persists ONE top-level key only; a `service_config` save can no longer carry (and clobber) `timeline_config`, and vice-versa.
+- **`_CONFIG_WRITE_LOCK`** serializes all persistence so overlapping writers can't lose updates.
+- **Disk write now MERGES** the changed key into the existing snapshot instead of whole-file-replacing — a partial payload can never trim keys off disk while the DB keeps them (kills the DB↔disk divergence). `save_data_file` inherits merge semantics for whole-blob/restore callers.
+- `save_service_config`, and the two `timeline_config` writers ([timeline.py](vision_engine/routers/timeline.py) `POST /api/timeline_config`, [procedures.py](vision_engine/routers/procedures.py) `POST /api/procedures`) now use `save_config_key`.
+
+Together with 4.0.352 (boot DB-wait + defer boot-saves) this closes both the reboot and the runtime loss paths.
+
+## [4.0.354] - 2026-08-21 — USB-RESCUE: auto-recover a wedged USB camera (no SSH), + ships the 4.0.352 boot-clobber fix
+
+- **USB auto-rescue.** When a USB camera's self-heal exhausts every reopen/renumber option (`_find_replacement_v4l_path` finds no node that delivers a frame), MVE now performs a **software USB re-enumeration** of just that camera's port — toggling the backing device's sysfs `authorized` 0→1 (equivalent to an unplug/replug) — then follows the **stable by-path** to whatever `/dev/videoN` the port comes back as. This recovers the "enumerated but wedged" state (device in `lsusb`, node exists, but `open()` never streams) that previously required a manual SSH `authorized` toggle — the recurring kiancord cam-6 failure. Rate-limited to one reset per port per 45 s so a genuinely dead camera can't become a reset storm; touches only the one wedged port. Requires the privileged container's rw `/sys` (verified present on the fleet). Files: [camera.py](vision_engine/services/camera.py).
+- **Ships the 4.0.352 boot-clobber fix** (config.py + main.py) that was authored but not yet deployed: wait for the config DB before the boot read, and defer boot-time saves when the DB was down — so `timeline_config` (ejection + shipment-close rules, camera order/rotation) and `pipeline_config` (active pipeline) stop reverting on reboot.
+
+## [4.0.353] - 2026-08-18 — Fix: Timeline Configuration "Image Rotation" dropdown always showed 0° (and Apply silently reset the saved angle)
+
+The **Image Rotation** `<select>` in Timeline Configuration was never initialized from the saved config on page load, so it always displayed its HTML default **0°** — even when `image_rotation` was really 90/180/270 in the DB. Because the **Apply Timeline Configuration** handler *reads* that dropdown ([audio.js](vision_engine/static/js/audio.js):2142), any Apply that didn't touch rotation **silently overwrote the stored angle with 0**. `loadSavedConfig()` now sets `#timeline-rotation` from `cfg.image_rotation` (guarding undefined/null but not `0`, a valid value). Backend storage was already correct (verified in 4.0.352) — this was a load-time display/round-trip bug only. Cache-busters bumped to `?v=4.0.353`.
+
 ## [4.0.352] - 2026-08-18 — Fix: MVE forgetting ejection rules + timeline config on restart (DB-not-ready-at-boot race)
 
 **Symptom** (kiancord): every restart FORGOT the ejection procedures + Timeline settings (camera order, rotation) while KEEPING capture/inference. **Root cause:** config load is DB-first / disk-fallback, and `config_db.load_all()` returns `None` the instant TimescaleDB is unreachable — with **no wait/retry**. When the DB starts slower than MVE, boot reads the **stale disk** `.env.prepared_query_data`; two *conditional* boot-saves then fire *because that stale data looks incomplete* (camera by-path normalize, and the legacy→`procedures` migration that sets `procedures=[]`) and write the stale blob back — **clobbering the good DB row** once the DB recovers. `service_config` survived only because it is re-saved on many other events.
