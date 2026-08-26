@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.363] - 2026-08-26 — Merge the two OEE views into one clickable Machines legend
+
+There were two OEE displays in the Charts tab — the **Production KPIs** panel (the MVE line) and the new **Machines** panel (per watcher). Merged into one. The Machines panel is now a **clickable source legend** ([status.html](vision_engine/static/status.html)): the **MVE line** (from `/api/production_stats`) and every **Watcher** each get a row showing their **OEE** (+ A · P · Q). Clicking a row **hides/shows** that source's output line on the shared chart — the same interaction as the defect-class legend, replacing the machine dropdown. The old Production-KPIs OEE/Availability/Performance/Quality cards are hidden (OEE now lives in one place). Registration form keeps its own machine picker. Cache-busters → `?v=4.0.363`.
+
 ## [4.0.362] - 2026-08-26 — Payment / subscription / plans (backend) — pluggable gateways, safe by default
 
 Brings the console's paid-product model on-prem (billing on MVE's own TimescaleDB — no console/Stripe dependency). [services/billing.py](vision_engine/services/billing.py) + [routers/billing.py](vision_engine/routers/billing.py):
