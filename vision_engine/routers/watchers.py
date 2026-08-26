@@ -94,3 +94,32 @@ async def watcher_name(request: Request):
         return {"ok": True}
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+
+@router.post("/api/watchers/register")
+async def watcher_register(request: Request):
+    """Register / update a machine: name, line (group), sensor, type, ideal_rate
+    (units/hr, used for the OEE Performance factor). Only provided fields change."""
+    try:
+        b = await request.json()
+        ir = b.get("ideal_rate")
+        return wm.register_watcher(
+            str(b.get("register_id", "")),
+            name=b.get("name"), line=b.get("line"),
+            sensor=b.get("sensor"), wtype=b.get("type") or b.get("wtype"),
+            ideal_rate=(float(ir) if ir not in (None, "") else None),
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/api/watchers/oee")
+def watcher_oee(register_id: str, since_ms: int = 0, until_ms: int = 0):
+    """OEE (Availability × Performance × Quality) for one machine over a window."""
+    try:
+        return wm.compute_oee(register_id, since_ms or None, until_ms or None)
+    except Exception as e:
+        logger.warning("oee failed: %s", e)
+        return JSONResponse({"error": str(e), "oee": None}, status_code=500)

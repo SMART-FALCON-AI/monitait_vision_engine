@@ -82,6 +82,18 @@ def _ensure_schema() -> None:
             first_seen  TIMESTAMPTZ DEFAULT NOW(),
             last_seen   TIMESTAMPTZ
         );""")
+    # 4.0.361 — registration fields for fleet management + OEE (added idempotently so
+    # an already-deployed watcher_registry upgrades in place).
+    for col, ddl in (
+        ("line",       "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS line TEXT"),
+        ("sensor",     "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS sensor TEXT"),
+        ("wtype",      "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS wtype TEXT"),
+        ("ideal_rate", "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS ideal_rate DOUBLE PRECISION"),
+    ):
+        try:
+            _exec(ddl)
+        except Exception as e:
+            logger.info("watcher_registry: add col %s skipped (%s)", col, e)
     _schema_ready = True
 
 
@@ -166,20 +178,56 @@ def ingest(payload: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # read (for the Charts tab)
 # --------------------------------------------------------------------------- #
+ONLINE_THRESHOLD_SEC = 600   # a machine is "online" if it reported within 10 min
+
+
 def list_watchers() -> List[Dict[str, Any]]:
     _ensure_schema()
     rows = _exec("""
-        SELECT r.register_id, r.name, r.last_seen,
+        SELECT r.register_id, r.name, r.last_seen, r.line, r.sensor, r.wtype, r.ideal_rate,
                (SELECT quantity        FROM watcher_metrics m WHERE m.register_id=r.register_id ORDER BY ts DESC LIMIT 1),
                (SELECT defect_quantity FROM watcher_metrics m WHERE m.register_id=r.register_id ORDER BY ts DESC LIMIT 1),
-               (SELECT COUNT(*)        FROM watcher_metrics m WHERE m.register_id=r.register_id)
+               (SELECT COUNT(*)        FROM watcher_metrics m WHERE m.register_id=r.register_id),
+               EXTRACT(EPOCH FROM (NOW() - r.last_seen))
         FROM watcher_registry r
-        ORDER BY r.last_seen DESC NULLS LAST, r.register_id
+        ORDER BY r.line NULLS LAST, r.last_seen DESC NULLS LAST, r.register_id
     """, fetch="all") or []
-    return [{"register_id": x[0], "name": x[1] or x[0],
-             "last_seen": str(x[2]) if x[2] else None,
-             "last_quantity": x[3], "last_defect": x[4], "samples": int(x[5] or 0)}
-            for x in rows]
+    out = []
+    for x in rows:
+        age = x[10]
+        out.append({
+            "register_id": x[0], "name": x[1] or x[0],
+            "last_seen": str(x[2]) if x[2] else None,
+            "line": x[3], "sensor": x[4], "type": x[5], "ideal_rate": x[6],
+            "last_quantity": x[7], "last_defect": x[8], "samples": int(x[9] or 0),
+            "online": (age is not None and float(age) <= ONLINE_THRESHOLD_SEC),
+            "age_sec": (int(float(age)) if age is not None else None),
+        })
+    return out
+
+
+def register_watcher(register_id: str, name: Optional[str] = None,
+                     line: Optional[str] = None, sensor: Optional[str] = None,
+                     wtype: Optional[str] = None,
+                     ideal_rate: Optional[float] = None) -> Dict[str, Any]:
+    """Create/update a machine's registration (name, line/group, sensor, type,
+    ideal production rate for OEE). Only provided fields are changed."""
+    _ensure_schema()
+    reg = str(register_id or "").strip()
+    if not reg:
+        raise ValueError("register_id required")
+    _exec("INSERT INTO watcher_registry (register_id) VALUES (%s) ON CONFLICT DO NOTHING", (reg,))
+    sets, params = [], []
+    for col, val in (("name", name), ("line", line), ("sensor", sensor), ("wtype", wtype)):
+        if val is not None:
+            sets.append(f"{col}=%s")
+            params.append(str(val).strip() or None)
+    if ideal_rate is not None:
+        sets.append("ideal_rate=%s")
+        params.append(_num(ideal_rate))
+    if sets:
+        _exec(f"UPDATE watcher_registry SET {', '.join(sets)} WHERE register_id=%s", tuple(params) + (reg,))
+    return {"ok": True, "register_id": reg}
 
 
 def metrics(register_id: str, since_ms: Optional[int] = None,
@@ -224,3 +272,90 @@ def set_name(register_id: str, name: str) -> None:
     _exec("INSERT INTO watcher_registry (register_id, name) VALUES (%s,%s) "
           "ON CONFLICT (register_id) DO UPDATE SET name=EXCLUDED.name",
           (reg, str(name or "").strip() or None))
+
+
+def compute_oee(register_id: str, since_ms: Optional[int] = None,
+                until_ms: Optional[int] = None) -> Dict[str, Any]:
+    """OEE = Availability × Performance × Quality — the same decomposition the
+    Monitait console uses (efficiency × quality × (1 − downtime)).
+
+      Quality      = good / (good + defect)        — exact, from the OK/NG counters
+      Performance  = actual_rate / ideal_rate      — needs the machine's ideal_rate
+                                                      (units/hr); 1.0 until it's set
+      Availability = 1 − downtime_fraction         — from extra_info.downtime_percent
+                                                      if the device sends it; else 1.0
+
+    Counter totals are summed over POSITIVE deltas so a cumulative counter that
+    resets each shift is handled correctly. Every factor is returned so the UI can
+    show the breakdown and the operator sees which inputs are still missing."""
+    _ensure_schema()
+    reg = str(register_id or "").strip()
+    conds = ["register_id=%s"]
+    params: list = [reg]
+    if since_ms:
+        conds.append("ts >= to_timestamp(%s/1000.0)")
+        params.append(int(since_ms))
+    if until_ms:
+        conds.append("ts <= to_timestamp(%s/1000.0)")
+        params.append(int(until_ms))
+    where = " AND ".join(conds)
+    rows = _exec(
+        f"SELECT ts, quantity, defect_quantity, extra_info FROM watcher_metrics "
+        f"WHERE {where} ORDER BY ts ASC", tuple(params), fetch="all") or []
+    ideal_row = _exec("SELECT ideal_rate FROM watcher_registry WHERE register_id=%s",
+                      (reg,), fetch="one")
+    ideal_rate = float(ideal_row[0]) if ideal_row and ideal_row[0] else None
+
+    if len(rows) < 2:
+        return {"register_id": reg, "samples": len(rows), "oee": None,
+                "reason": "need at least 2 samples in the window"}
+
+    good_total = 0.0
+    defect_total = 0.0
+    prev_q = prev_d = None
+    downtime_fracs: List[float] = []
+    for ts, q, d, ex in rows:
+        if q is not None:
+            if prev_q is not None and q >= prev_q:
+                good_total += (q - prev_q)
+            prev_q = q
+        if d is not None:
+            if prev_d is not None and d >= prev_d:
+                defect_total += (d - prev_d)
+            prev_d = d
+        dp = _as_dict(ex).get("downtime_percent")
+        if isinstance(dp, (int, float)) and not isinstance(dp, bool):
+            downtime_fracs.append(dp / 100.0 if dp > 1 else float(dp))
+
+    total = good_total + defect_total
+    quality = (good_total / total) if total > 0 else None
+    availability = (1.0 - (sum(downtime_fracs) / len(downtime_fracs))) if downtime_fracs else 1.0
+    availability = max(0.0, min(1.0, availability))
+
+    t0 = rows[0][0]
+    t1 = rows[-1][0]
+    hours = 0.0
+    try:
+        hours = max(0.0, (t1 - t0).total_seconds() / 3600.0)
+    except Exception:
+        hours = 0.0
+    actual_rate = (good_total / hours) if hours > 0 else None
+    if ideal_rate and actual_rate is not None:
+        performance = max(0.0, min(1.0, actual_rate / ideal_rate))
+    else:
+        performance = 1.0
+
+    oee = (availability * performance * quality) if quality is not None else None
+    return {
+        "register_id": reg, "samples": len(rows),
+        "good": round(good_total, 2), "defect": round(defect_total, 2),
+        "hours": round(hours, 3),
+        "quality": round(quality, 4) if quality is not None else None,
+        "availability": round(availability, 4),
+        "performance": round(performance, 4),
+        "ideal_rate": ideal_rate,
+        "actual_rate": round(actual_rate, 3) if actual_rate is not None else None,
+        "oee": round(oee, 4) if oee is not None else None,
+        "missing": [k for k, v in (("ideal_rate", ideal_rate),
+                                   ("downtime_percent", downtime_fracs or None)) if not v],
+    }

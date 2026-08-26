@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.361] - 2026-08-26 — Machines: registration + OEE (console features integrated into MVE)
+
+Brings the Monitait console's watcher-management + OEE onto MVE's own TimescaleDB (no console/ES/MinIO stack needed).
+
+- **Registration / fleet fields** ([watcher_metrics.py](vision_engine/services/watcher_metrics.py)) — `watcher_registry` gains `line` (group/station), `sensor`, `wtype`, `ideal_rate`, added idempotently so deployed installs upgrade in place. `POST /api/watchers/register` sets any subset; `GET /api/watchers` now returns each machine's line/sensor/type/ideal_rate + **online/offline** (reported within 10 min) + age.
+- **OEE** ([watcher_metrics.py](vision_engine/services/watcher_metrics.py) `compute_oee`, `GET /api/watchers/oee`) — the console's exact decomposition **Availability × Performance × Quality**: Quality = good/(good+defect) exact from the OK/NG counters; Performance = actual_rate ÷ the machine's `ideal_rate` (units/hr); Availability = 1 − downtime (from `extra_info.downtime_percent` if the device sends it). Counter totals summed over positive deltas so a cumulative counter that resets per shift is handled. Every factor + what's still missing is returned.
+- **Charts-tab Machines panel** ([status.html](vision_engine/static/status.html)) — picker now shows 🟢/⚪ online + line; on select it renders the **OEE breakdown** (OEE / A / P / Q / good-defect tiles) and a collapsible **registration form** (name, line, sensor, type, ideal rate). Cache-busters → `?v=4.0.361`.
+
+Deliberately excludes the console's cloud-only parts (multi-tenant accounts, billing, OAuth). Payment/subscription is a separate, upcoming subsystem.
+
 ## [4.0.360] - 2026-08-26 — Machine metrics: the Charts-tab "Machines" panel (frontend)
 
 Second half of the Watcher-Jet feature — visualises what 4.0.359 ingests. New **🛰️ Machines** panel at the bottom of the Charts tab ([status.html](vision_engine/static/status.html)): a machine picker (from `GET /api/watchers`) and a Chart.js time-series (from `GET /api/watchers/metrics`) showing **OK/NG counts on the left axis** and every **analog signal found in `extra_info`** (temp_a/temp_b/C/…) as its own series on the **right axis**. Empty-state tells the operator exactly where to point a device (`http://<host>/api/factory/update-watcher/`). Self-contained inline script, on-demand only (loads on tab-open + manual ↻, never polls, so it can't starve MVE workers). Cache-busters bumped to `?v=4.0.360`.

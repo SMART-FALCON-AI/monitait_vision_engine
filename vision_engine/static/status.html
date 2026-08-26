@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.360"></script>
+        <script src="/static/js/i18n.js?v=4.0.361"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -1033,7 +1033,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.360"
+                <iframe src="/static/knowledge.html?v=4.0.361"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -1475,8 +1475,23 @@
                     </div>
                     <div id="watcher-body" style="display:none;">
                         <div id="watcher-meta" style="font-size:12px; color:var(--text-secondary); margin-bottom:8px;"></div>
+                        <!-- OEE breakdown (Availability × Performance × Quality) -->
+                        <div id="watcher-oee" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(105px,1fr)); gap:8px; margin-bottom:12px;"></div>
                         <div style="min-height:300px;"><canvas id="watcher-metrics-chart"></canvas></div>
                         <div style="font-size:11px; color:var(--text-secondary); margin-top:6px;">Click a series in the legend to hide/show it. Left axis = OK/NG counts, right axis = analog signals.</div>
+                        <!-- Registration / settings -->
+                        <details style="margin-top:12px;">
+                            <summary style="cursor:pointer; color:var(--text-secondary); font-size:13px;">⚙ Machine registration &amp; OEE settings</summary>
+                            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; margin-top:10px;">
+                                <input id="wr-name"   placeholder="Display name" style="padding:6px 8px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.8); border-radius:6px;">
+                                <input id="wr-line"   placeholder="Line / group" style="padding:6px 8px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.8); border-radius:6px;">
+                                <input id="wr-sensor" placeholder="Sensor (e.g. OK/NG, 4-20mA)" style="padding:6px 8px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.8); border-radius:6px;">
+                                <input id="wr-type"   placeholder="Type (e.g. Watcher Jet)" style="padding:6px 8px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.8); border-radius:6px;">
+                                <input id="wr-ideal"  type="number" step="any" placeholder="Ideal rate (units/hr) — for OEE" style="padding:6px 8px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid rgba(51,65,85,0.8); border-radius:6px;">
+                                <button id="wr-save" style="padding:6px 12px; background:rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.4); border-radius:6px; cursor:pointer;">Save</button>
+                            </div>
+                            <div id="wr-status" style="font-size:11px; color:var(--text-secondary); margin-top:6px;"></div>
+                        </details>
                     </div>
                 </div>
 
@@ -1484,31 +1499,60 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.360"></script>
+            <script src="/static/js/iframes.js?v=4.0.361"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.360"></script>
+            <script src="/static/js/charts.js?v=4.0.361"></script>
             <script>
             /* 4.0.360 — Machines (Watcher Jet) chart. Self-contained; uses global Chart
                (chart.umd, loaded just above). On-demand only (load + tab-open + manual
                refresh) — never polls, so it can't starve MVE workers. */
             (function(){
-              let _wChart = null;
+              let _wChart = null, _wList = [];
               const g = id => document.getElementById(id);
               const COLORS = ['#f59e0b','#8b5cf6','#ec4899','#14b8a6','#eab308','#38bdf8','#fb7185'];
               const _short = s => (s||'').replace('T',' ').slice(0,16);
+              const _pct = v => (v==null?'—':(Math.round(v*1000)/10)+'%');
 
               async function loadWatchers(){
                 let list = [];
                 try { const r = await fetch('/api/watchers'); list = ((await r.json()).watchers)||[]; }
                 catch(e){ list = []; }
+                _wList = list;
                 const sel = g('watcher-select'); if(!sel) return;
                 if(!list.length){ g('watcher-empty').style.display='block'; g('watcher-body').style.display='none'; sel.innerHTML=''; return; }
                 g('watcher-empty').style.display='none';
                 const prev = sel.value;
                 sel.innerHTML = list.map(w =>
-                  `<option value="${encodeURIComponent(w.register_id)}">${(w.name||w.register_id)}${w.samples?(' · '+w.samples+' pts'):''}</option>`).join('');
+                  `<option value="${encodeURIComponent(w.register_id)}">${w.online?'🟢':'⚪'} ${(w.name||w.register_id)}${w.line?(' · '+w.line):''}</option>`).join('');
                 if(prev && Array.from(sel.options).some(o=>o.value===prev)) sel.value = prev;
                 renderWatcher();
+              }
+
+              function _fillForm(reg){
+                const w = _wList.find(x=>x.register_id===reg) || {};
+                g('wr-name').value = (w.name && w.name!==reg) ? w.name : '';
+                g('wr-line').value = w.line || '';
+                g('wr-sensor').value = w.sensor || '';
+                g('wr-type').value = w.type || '';
+                g('wr-ideal').value = (w.ideal_rate!=null) ? w.ideal_rate : '';
+              }
+
+              async function _renderOee(reg){
+                const box = g('watcher-oee'); if(!box) return;
+                let o = null;
+                try { const r = await fetch('/api/watchers/oee?register_id='+encodeURIComponent(reg)); o = await r.json(); }
+                catch(e){ box.innerHTML=''; return; }
+                if(!o || o.oee==null){
+                  box.innerHTML = `<div style="grid-column:1/-1; font-size:12px; color:var(--text-secondary);">OEE: not enough data yet${o&&o.reason?(' ('+o.reason+')'):''}. Set an <b>Ideal rate</b> below and let the machine report a while.</div>`;
+                  return;
+                }
+                const cell = (label,val,color)=>`<div style="padding:9px 11px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.4px;">${label}</div><div style="font-size:20px; font-weight:700; color:${color};">${_pct(val)}</div></div>`;
+                box.innerHTML =
+                  cell('OEE', o.oee, '#10b981') +
+                  cell('Availability', o.availability, '#3b82f6') +
+                  cell('Performance', o.performance, '#8b5cf6') +
+                  cell('Quality', o.quality, '#f59e0b') +
+                  `<div style="padding:9px 11px; background:rgba(15,23,42,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; text-align:center;"><div style="font-size:10px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:.4px;">Good / Defect</div><div style="font-size:16px; font-weight:700; color:var(--text-primary);">${o.good} / ${o.defect}</div></div>`;
               }
 
               async function renderWatcher(){
@@ -1519,6 +1563,7 @@
                 catch(e){ return; }
                 const pts = d.points||[];
                 g('watcher-body').style.display='block';
+                _fillForm(reg); _renderOee(reg);
                 g('watcher-meta').textContent = pts.length
                   ? `${pts.length} samples · ${_short(pts[0].ts)} → ${_short(pts[pts.length-1].ts)}`
                   : 'No samples in range.';
@@ -1548,9 +1593,26 @@
                 });
               }
 
+              async function saveWatcherReg(){
+                const sel=g('watcher-select'); if(!sel||!sel.value) return;
+                const reg = decodeURIComponent(sel.value);
+                const body = { register_id: reg,
+                  name: g('wr-name').value.trim(), line: g('wr-line').value.trim(),
+                  sensor: g('wr-sensor').value.trim(), type: g('wr-type').value.trim(),
+                  ideal_rate: g('wr-ideal').value.trim() };
+                g('wr-status').textContent = 'Saving…';
+                try {
+                  const r = await fetch('/api/watchers/register', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+                  if(!r.ok) throw new Error('HTTP '+r.status);
+                  g('wr-status').textContent = '✓ Saved.';
+                  await loadWatchers(); _renderOee(reg);
+                } catch(e){ g('wr-status').textContent = '✗ '+e.message; }
+              }
+
               function _wire(){
                 const sel=g('watcher-select'); if(sel) sel.addEventListener('change', renderWatcher);
                 const rf=g('watcher-refresh'); if(rf) rf.addEventListener('click', loadWatchers);
+                const sv=g('wr-save'); if(sv) sv.addEventListener('click', saveWatcherReg);
                 document.querySelectorAll('.tab-button').forEach(b=>{
                   if((b.getAttribute('onclick')||'').indexOf("'grafana'")>=0)
                     b.addEventListener('click', ()=>setTimeout(loadWatchers,60));
@@ -2477,7 +2539,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.360">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.361">
         <div id="annotate-modal" dir="ltr" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center; direction:ltr;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2518,10 +2580,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.360"></script>
-        <script src="/static/js/app-core.js?v=4.0.360"></script>
+        <script src="/static/js/audio.js?v=4.0.361"></script>
+        <script src="/static/js/app-core.js?v=4.0.361"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.360"></script>
-        <script src="/static/js/annotate.js?v=4.0.360"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.361"></script>
+        <script src="/static/js/annotate.js?v=4.0.361"></script>
     </body>
 </html>
