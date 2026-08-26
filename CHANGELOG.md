@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.364] - 2026-08-26 — Fold Machines & OEE into the single Production KPIs panel
+
+Per operator ("merge all into Production KPI"), the standalone Machines panel is gone — its content (the clickable MVE-line + Watcher OEE legend, the per-source output chart, and the registration form) now lives as a sub-section **inside** the 🏭 Production KPIs panel, under a divider. One panel is the home for all production/machine metrics: totals, Eject/Downtime/Speed KPIs, the production charts, then Machines & OEE. No JS change (same element IDs, relocated). Cache-busters → `?v=4.0.364`.
+
 ## [4.0.363] - 2026-08-26 — Merge the two OEE views into one clickable Machines legend
 
 There were two OEE displays in the Charts tab — the **Production KPIs** panel (the MVE line) and the new **Machines** panel (per watcher). Merged into one. The Machines panel is now a **clickable source legend** ([status.html](vision_engine/static/status.html)): the **MVE line** (from `/api/production_stats`) and every **Watcher** each get a row showing their **OEE** (+ A · P · Q). Clicking a row **hides/shows** that source's output line on the shared chart — the same interaction as the defect-class legend, replacing the machine dropdown. The old Production-KPIs OEE/Availability/Performance/Quality cards are hidden (OEE now lives in one place). Registration form keeps its own machine picker. Cache-busters → `?v=4.0.363`.
