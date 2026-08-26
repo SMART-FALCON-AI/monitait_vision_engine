@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.360] - 2026-08-26 — Machine metrics: the Charts-tab "Machines" panel (frontend)
+
+Second half of the Watcher-Jet feature — visualises what 4.0.359 ingests. New **🛰️ Machines** panel at the bottom of the Charts tab ([status.html](vision_engine/static/status.html)): a machine picker (from `GET /api/watchers`) and a Chart.js time-series (from `GET /api/watchers/metrics`) showing **OK/NG counts on the left axis** and every **analog signal found in `extra_info`** (temp_a/temp_b/C/…) as its own series on the **right axis**. Empty-state tells the operator exactly where to point a device (`http://<host>/api/factory/update-watcher/`). Self-contained inline script, on-demand only (loads on tab-open + manual ↻, never polls, so it can't starve MVE workers). Cache-busters bumped to `?v=4.0.360`.
+
 ## [4.0.359] - 2026-08-26 — Machine metrics: ingest Watcher-Jet devices into MVE (backend)
 
 First half of "show factory machines in the Charts tab". Many machines (Monitait **Watcher Jet** — Raspberry-Pi units reading OK/NG digital signals + a 4-20mA analog signal) normally POST to the Monitait cloud; now they can point at the **local MVE** and their metrics are stored on-prem.
