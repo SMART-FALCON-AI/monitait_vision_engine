@@ -90,6 +90,7 @@
     <button data-p="issues" data-i18n="kb_issues">Issues</button>
     <button data-p="assets" data-i18n="kb_assets">Assets</button>
     <button data-p="mcp" data-i18n="kb_mcp_servers">MCP Servers</button>
+    <button data-p="databases">Databases</button>
   </div>
 
   <!-- ================= LIBRARY ================= -->
@@ -282,6 +283,52 @@
       </table>
     </div>
   </div>
+
+  <div class="pane" id="p-databases">
+    <div class="card">
+      <h2>Connect a factory database</h2>
+      <p class="muted">Read-only. A single SELECT is run and each row is ingested into the
+      knowledge base, so the assistant can answer from factory data (specs, BOMs, defect
+      catalogues, orders) <b>with citations</b>. Best for reference / slow-moving tables;
+      keep live transactional data behind an MCP tool instead.</p>
+      <div class="row">
+        <input class="grow" id="db-name" placeholder="Name — e.g. Product specs">
+        <select id="db-type" style="width:auto">
+          <option value="mssql">SQL Server</option>
+          <option value="mysql">MySQL / MariaDB</option>
+          <option value="oracle">Oracle</option>
+          <option value="db2">IBM Db2</option>
+          <option value="postgres">PostgreSQL</option>
+        </select>
+        <input id="db-host" class="grow" placeholder="Host / IP">
+        <input id="db-port" style="width:90px" placeholder="Port">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="db-database" class="grow" placeholder="Database / service name">
+        <input id="db-user" class="grow" placeholder="Username (read-only account)">
+        <input id="db-pass" type="password" class="grow" placeholder="Password">
+      </div>
+      <textarea id="db-query" rows="3" style="margin-top:8px"
+                placeholder="SELECT sku, name, material, width_cm, target_gsm FROM products"></textarea>
+      <div class="row" style="margin-top:8px">
+        <input id="db-title" class="grow" placeholder="Title column (optional) — e.g. name">
+        <button onclick="testDbSource()">Test connection</button>
+        <button onclick="saveDbSource()">Save source</button>
+      </div>
+      <p class="muted" style="margin-top:8px">⚠ Only a single read-only <code>SELECT</code>/<code>WITH</code>
+      is accepted — writes are rejected. Use a read-only DB account.</p>
+      <div id="db-status" class="muted" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Database sources</h2>
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Host / DB</th><th>Last run</th>
+                   <th>Rows</th><th></th></tr></thead>
+        <tbody id="db-sources"></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -304,7 +351,7 @@ document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('.pane').forEach(x => x.classList.remove('on'));
   b.classList.add('on');
   $('p-' + b.dataset.p).classList.add('on');
-  ({library: loadDocs, issues: loadIssues, assets: loadAssets, mcp: loadMcp}[b.dataset.p] || (()=>{}))();
+  ({library: loadDocs, issues: loadIssues, assets: loadAssets, mcp: loadMcp, databases: loadDbSources}[b.dataset.p] || (()=>{}))();
 });
 
 // --- health banner ----------------------------------------------------------
@@ -618,6 +665,66 @@ const rediscover = n => api(`/mcp/servers/${n}/discover`, {method:'POST'})
   .then(loadMcp).catch(e => alert(e.message));
 const delMcp = n => confirm(`Remove ${n}?`) &&
   api('/mcp/servers/' + n, {method:'DELETE'}).then(loadMcp);
+
+// --- factory databases -> RAG ----------------------------------------------
+function _dbForm() {
+  return {
+    name: $('db-name').value.trim(), db_type: $('db-type').value,
+    host: $('db-host').value.trim(), port: $('db-port').value ? Number($('db-port').value) : null,
+    database: $('db-database').value.trim(), username: $('db-user').value.trim(),
+    password: $('db-pass').value, query: $('db-query').value.trim(),
+    title_column: $('db-title').value.trim() || null,
+  };
+}
+const _jsonPost = body => ({method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+
+async function testDbSource() {
+  $('db-status').textContent = 'Testing…';
+  try {
+    const r = await api('/db_sources/test', _jsonPost(_dbForm()));
+    $('db-status').innerHTML = `<span style="color:#10b981">✓ Connected.</span> ${r.columns.length} columns: `
+      + `${esc(r.columns.join(', '))} — ${r.row_count_preview} sample rows (${r.elapsed_ms} ms)`;
+  } catch (e) { $('db-status').innerHTML = `<span style="color:#ef4444">✗ ${esc(e.message)}</span>`; }
+}
+async function saveDbSource() {
+  $('db-status').textContent = 'Saving…';
+  try {
+    await api('/db_sources', _jsonPost(_dbForm()));
+    $('db-status').innerHTML = '<span style="color:#10b981">✓ Saved.</span> Click <b>Ingest</b> below to pull rows into the knowledge base.';
+    $('db-name').value=''; $('db-query').value=''; $('db-pass').value='';
+    loadDbSources();
+  } catch (e) { $('db-status').innerHTML = `<span style="color:#ef4444">✗ ${esc(e.message)}</span>`; }
+}
+async function loadDbSources() {
+  try {
+    const {sources} = await api('/db_sources');
+    $('db-sources').innerHTML = (sources || []).map(s => `
+      <tr>
+        <td>${esc(s.name)}</td>
+        <td>${esc(s.db_type)}</td>
+        <td class="muted">${esc(s.host||'')}${s.database ? (' / ' + esc(s.database)) : ''}</td>
+        <td class="muted">${s.last_run ? esc(String(s.last_run).replace('T',' ').slice(0,16)) : '—'}</td>
+        <td>${s.last_rows ?? '—'}</td>
+        <td style="white-space:nowrap">
+          <button onclick="ingestDbSource(${s.id})">Ingest</button>
+          <button onclick="deleteDbSource(${s.id})" style="background:#7f1d1d">Delete</button>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="6" class="muted">No database sources yet.</td></tr>';
+  } catch (e) { $('db-sources').innerHTML = `<tr><td colspan="6" class="muted">${esc(e.message)}</td></tr>`; }
+}
+async function ingestDbSource(id) {
+  $('db-status').textContent = 'Ingesting…';
+  try {
+    const r = await api(`/db_sources/${id}/ingest`, {method:'POST'});
+    $('db-status').innerHTML = `<span style="color:#10b981">✓ Ingested ${r.ingested} of ${r.rows} rows</span> — searchable shortly.`;
+    loadDbSources();
+  } catch (e) { $('db-status').innerHTML = `<span style="color:#ef4444">✗ ${esc(e.message)}</span>`; }
+}
+async function deleteDbSource(id) {
+  if (!confirm('Delete this database source? (already-ingested documents stay in the KB)')) return;
+  try { await api(`/db_sources/${id}`, {method:'DELETE'}); loadDbSources(); }
+  catch (e) { alert(e.message); }
+}
 
 // --- boot -------------------------------------------------------------------
 // 4.0.298 — gate ALL polling on KB availability. On a site WITHOUT the knowledge

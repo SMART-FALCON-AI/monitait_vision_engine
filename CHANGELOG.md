@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.358] - 2026-08-26 — Fix: the "Databases" tab was edited into the wrong knowledge.html (never showed up)
+
+The factory-DB connector's **Databases** tab (added in 4.0.357's item #2) was authored in `knowledge_assistant/vision_engine_addons/knowledge.html`, but the Knowledge tab is an **iframe → `/static/knowledge.html`** ([status.html](vision_engine/static/status.html)), and that served copy had **diverged** (it carries the i18n work the addon copy lacks). So the tab existed in the repo but never appeared in the UI — even on 4.0.357. Ported the tab into the **served** [static/knowledge.html](vision_engine/static/knowledge.html): the `Databases` tab button, the `#p-databases` pane (connect-a-DB form + sources table), the `databases: loadDbSources` tab-switch entry, and the `testDbSource`/`saveDbSource`/`loadDbSources`/`ingestDbSource`/`deleteDbSource` handlers — preserving the served file's i18n. Iframe cache-buster bumped to `?v=4.0.358`.
+
+NOTE: for the tab to *function* (not just render) the **knowledge service** must have `db_sources.py` + its `/api/kb/db_sources*` endpoints; otherwise the tab loads and its API calls degrade to "unavailable".
+
 ## [4.0.357] - 2026-08-26 — AI-STATION #2+#3: live factory-DB query tools + opt-in audit log & RBAC
 
 Two roadmap items from [MVE_AI_STATION_ROADMAP.md](docs/MVE_AI_STATION_ROADMAP.md), both **safe on a running line** — nothing here changes behaviour until an admin turns it on.
