@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.362] - 2026-08-26 — Payment / subscription / plans (backend) — pluggable gateways, safe by default
+
+Brings the console's paid-product model on-prem (billing on MVE's own TimescaleDB — no console/Stripe dependency). [services/billing.py](vision_engine/services/billing.py) + [routers/billing.py](vision_engine/routers/billing.py):
+
+- **Plans** — `basic` (7-day retention, 2 machines, no API), `economy` (90-day, 20 machines, API), `enterprise` (unlimited + API + on-site service). Seeded, operator-editable.
+- **Monthly subscription** — `POST /api/billing/subscribe` → payment via the active gateway → activates for the plan's period. Free plans activate immediately.
+- **Pluggable, env-defined gateways** — `PAYMENT_PROVIDER` selects the driver; creds from env. Ships `manual` (offline invoice, the always-available default), `zarinpal`, `idpay`, `paypal`; adding one is a class in the registry. `GET /api/billing/gateway` reports which is active + whether it's configured.
+- **Paid API access** — `mve_api_keys` create/list/revoke, metered, gated on the plan's `api_enabled` (`verify_api_key`).
+- **On-site service requests** — `mve_service_requests` create/list/status (the "someone visits the factory" ask).
+- **Data retention** — the headline plan limit. `enforce_retention()` prunes rows older than the active plan's window. **Gated THREE ways** so it can never surprise-delete: no-op on the unlimited plan, `dry_run` by default (preview counts), and live pruning needs env `BILLING_RETENTION_ENFORCE=1`.
+
+**SAFE BY DEFAULT**: fresh installs seed an `enterprise` (unlimited) subscription, so nothing is pruned or gated until an admin subscribes to a limited plan. Frontend (billing UI) is the next increment.
+
 ## [4.0.361] - 2026-08-26 — Machines: registration + OEE (console features integrated into MVE)
 
 Brings the Monitait console's watcher-management + OEE onto MVE's own TimescaleDB (no console/ES/MinIO stack needed).

@@ -687,6 +687,7 @@ from routers.anomaly import router as anomaly_router  # 4.0.50 — anomaly basel
 from routers.knowledge import router as knowledge_router  # 4.0.224 — knowledge RAG proxy + kb_* helpers
 from routers.security import router as security_router  # 4.0.357 — auth + audit + RBAC
 from routers.watchers import router as watchers_router  # 4.0.359 — external-machine (Watcher Jet) metrics
+from routers.billing import router as billing_router  # 4.0.362 — plans/subscription/payment/API-keys/service
 
 
 # 4.0.357 — audit every mutating request to a protected path, and (ONLY when an
@@ -738,6 +739,7 @@ app.include_router(anomaly_router)  # 4.0.50 — /api/anomaly/{build-baseline,ba
 app.include_router(knowledge_router)  # 4.0.224 — /api/kb/** proxy + /api/knowledge/status (before commands catch-all)
 app.include_router(security_router)  # 4.0.357 — /api/auth/** + /api/audit (opt-in RBAC, default OFF)
 app.include_router(watchers_router)  # 4.0.359 — /api/factory/update-watcher/ ingest + /api/watchers read
+app.include_router(billing_router)  # 4.0.362 — /api/billing/** plans/subscription/payment/keys/service
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 
