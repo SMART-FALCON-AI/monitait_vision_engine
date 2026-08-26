@@ -218,6 +218,10 @@ def set_rbac_enabled(on: bool) -> None:
 def required_role_for(method: str, path: str) -> Optional[str]:
     """Minimum role to perform `method path`, or None if not gated.
     Reads (GET/HEAD/OPTIONS) are never gated, except the audit log view."""
+    if path.startswith("/api/factory/"):
+        return None                             # unauthenticated machine ingestion
+                                                # (Watcher Jet & compatible devices) — never
+                                                # gated or audited; devices can't hold a token
     if path.startswith("/api/audit"):
         return "engineer"                       # even GET of the audit log is gated
     if method.upper() in ("GET", "HEAD", "OPTIONS"):

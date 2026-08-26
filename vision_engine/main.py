@@ -686,6 +686,7 @@ from routers.notifications import router as notifications_router  # 3.24.0
 from routers.anomaly import router as anomaly_router  # 4.0.50 — anomaly baseline plumbing
 from routers.knowledge import router as knowledge_router  # 4.0.224 — knowledge RAG proxy + kb_* helpers
 from routers.security import router as security_router  # 4.0.357 — auth + audit + RBAC
+from routers.watchers import router as watchers_router  # 4.0.359 — external-machine (Watcher Jet) metrics
 
 
 # 4.0.357 — audit every mutating request to a protected path, and (ONLY when an
@@ -736,6 +737,7 @@ app.include_router(notifications_router)  # 3.24.0 — Telegram + AI usage
 app.include_router(anomaly_router)  # 4.0.50 — /api/anomaly/{build-baseline,baseline}
 app.include_router(knowledge_router)  # 4.0.224 — /api/kb/** proxy + /api/knowledge/status (before commands catch-all)
 app.include_router(security_router)  # 4.0.357 — /api/auth/** + /api/audit (opt-in RBAC, default OFF)
+app.include_router(watchers_router)  # 4.0.359 — /api/factory/update-watcher/ ingest + /api/watchers read
 app.include_router(ws_router)
 app.include_router(commands_router)  # MUST be last (catch-all /{command})
 

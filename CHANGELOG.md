@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.359] - 2026-08-26 — Machine metrics: ingest Watcher-Jet devices into MVE (backend)
+
+First half of "show factory machines in the Charts tab". Many machines (Monitait **Watcher Jet** — Raspberry-Pi units reading OK/NG digital signals + a 4-20mA analog signal) normally POST to the Monitait cloud; now they can point at the **local MVE** and their metrics are stored on-prem.
+
+- **Ingestion** ([routers/watchers.py](vision_engine/routers/watchers.py)) — Jet-compatible endpoints so only the device URL changes: `POST /api/factory/update-watcher/` (no-image), `POST /api/factory/image-update-watcher-data/` (returns an id), `POST /api/factory/image-update-watcher/` (image leg acked + discarded — this is a metrics-only build).
+- **Storage** ([services/watcher_metrics.py](vision_engine/services/watcher_metrics.py)) — self-bootstrapping `watcher_metrics` **hypertable** (ts, register_id, quantity, defect_quantity, extra_info JSONB, product_id, lot_info) + `watcher_registry` (friendly name / last-seen). Lenient parsing: bad timestamps → now, non-numeric counts → null, `extra_info` accepts dict or JSON string.
+- **Read API** for the chart — `GET /api/watchers` (machine list + last counts), `GET /api/watchers/metrics?register_id=&since_ms=&until_ms=` (time-series; also returns the numeric keys found in `extra_info` so the chart can offer analog series), `POST /api/watchers/name`.
+- **Security interaction fixed** — device paths (`/api/factory/*`) are exempted from the 4.0.357 RBAC/audit middleware ([security.py](vision_engine/services/security.py)); machines can't hold a token, so they're never gated and don't flood the audit log.
+
+Next (4.0.360): the Charts-tab UI to visualise per-machine OK/NG + analog metrics.
+
 ## [4.0.358] - 2026-08-26 — Fix: the "Databases" tab was edited into the wrong knowledge.html (never showed up)
 
 The factory-DB connector's **Databases** tab (added in 4.0.357's item #2) was authored in `knowledge_assistant/vision_engine_addons/knowledge.html`, but the Knowledge tab is an **iframe → `/static/knowledge.html`** ([status.html](vision_engine/static/status.html)), and that served copy had **diverged** (it carries the i18n work the addon copy lacks). So the tab existed in the repo but never appeared in the UI — even on 4.0.357. Ported the tab into the **served** [static/knowledge.html](vision_engine/static/knowledge.html): the `Databases` tab button, the `#p-databases` pane (connect-a-DB form + sources table), the `databases: loadDbSources` tab-switch entry, and the `testDbSource`/`saveDbSource`/`loadDbSources`/`ingestDbSource`/`deleteDbSource` handlers — preserving the served file's i18n. Iframe cache-buster bumped to `?v=4.0.358`.
