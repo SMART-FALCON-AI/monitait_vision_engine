@@ -71,6 +71,28 @@ _V4L_BOUND_PATHS: set = set()
 _V4L_BY_PATH_MEMO: Dict[str, str] = {}          # last-known-good /dev/videoN → its by-path
 _V4L_BY_PATH_MEMO_LOCK = threading.Lock()
 
+# 4.0.367 — AUTHORITATIVE config by-path per boot-resolved /dev/videoN. Unlike the
+# memo above (which is only learned AFTER a node delivers a frame), this is seeded
+# straight from the persisted config's by-path source at boot, so a camera can
+# ALWAYS re-resolve its stable /dev/v4l/by-path/… on reconnect — even when the
+# boot-resolved raw node was already stale and never delivered a single frame
+# (the kiancord cam6 "breaks on every restart" case). Keyed: resolved node → by-path.
+_CONFIG_BYPATH_FOR_SOURCE: Dict[str, str] = {}
+
+# 4.0.353 USB-RESCUE — last-resort recovery for a camera whose video node is
+# ENUMERATED but WEDGED: the device shows in lsusb and the /dev/videoN + by-path
+# symlink exist, yet cv2.VideoCapture().open() never delivers a frame (a UVC
+# streaming interface left in a bad state by a flaky USB link — exactly the
+# kiancord cam-6 case). No amount of release/reopen on the same node recovers it;
+# only a physical re-enumeration does. We force one from software by toggling the
+# backing USB device's sysfs `authorized` 0→1 (same effect as an unplug/replug),
+# then follow the STABLE by-path to whatever /dev/videoN the port re-enumerates
+# as. Requires the privileged container's rw /sys (verified present). Rate-limited
+# per USB device so a genuinely dead camera can't become a reset storm.
+_USB_RESET_LAST: Dict[str, float] = {}          # sysfs usb-device dir → last reset monotonic ts
+_USB_RESET_LOCK = threading.Lock()
+_USB_RESET_MIN_INTERVAL = 45.0                   # seconds between resets of the SAME port
+
 
 def _by_path_for_video_node(video_node: str) -> Optional[str]:
     """Return the currently-active /dev/v4l/by-path/… symlink whose target
@@ -179,6 +201,78 @@ def _probe_v4l_capture_capable(path: str, timeout_s: float = 2.0) -> bool:
                 pass
 
 
+def _usb_device_dir_for_video_node(video_node: str) -> Optional[str]:
+    """Return the sysfs USB *device* directory (e.g. /sys/bus/usb/devices/1-9)
+    that backs a /dev/videoN, or None.
+
+    Walks /sys/class/video4linux/<name>/device — which points at the USB
+    *interface* (…/1-9:1.0) — up to the first ancestor whose basename looks like
+    a USB device id (has '-', no ':'), e.g. `1-9` or `1-10.3`. That directory
+    holds the `authorized` toggle used for a soft re-enumeration.
+    Accepts a by-path symlink too (resolves it to its /dev/videoN first)."""
+    try:
+        node = video_node
+        if node and not node.startswith('/dev/video'):
+            rp = os.path.realpath(node)
+            node = rp if rp.startswith('/dev/video') else None
+        if not node:
+            return None
+        name = os.path.basename(node)                       # videoN
+        dp = f'/sys/class/video4linux/{name}/device'
+        if not os.path.exists(dp):
+            return None
+        cur = os.path.realpath(dp)                           # …/1-9:1.0 (interface)
+        for _ in range(5):
+            b = os.path.basename(cur)
+            if b and ':' not in b and '-' in b:             # …/1-9 (device)
+                return cur
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        return None
+    except Exception:
+        return None
+
+
+def _usb_reset_video_node(video_node: str) -> bool:
+    """Force a USB re-enumeration of the port backing ``video_node`` by toggling
+    its sysfs ``authorized`` 0→1 (equivalent to an unplug/replug). Rate-limited
+    per USB device (``_USB_RESET_MIN_INTERVAL``). Returns True when the toggle was
+    written (device should re-appear within a few seconds on the SAME by-path),
+    False when the sysfs path is missing, not writable, or throttled.
+
+    Safe: only touches the ONE USB device backing this camera; other cameras on
+    other ports are untouched. Best-effort — never raises."""
+    dev = _usb_device_dir_for_video_node(video_node)
+    if not dev:
+        return False
+    auth = os.path.join(dev, 'authorized')
+    if not os.path.exists(auth) or not os.access(auth, os.W_OK):
+        return False
+    now = time.monotonic()
+    with _USB_RESET_LOCK:
+        if now - _USB_RESET_LAST.get(dev, 0.0) < _USB_RESET_MIN_INTERVAL:
+            return False
+        _USB_RESET_LAST[dev] = now
+    port = os.path.basename(dev)
+    try:
+        with open(auth, 'w') as f:
+            f.write('0')
+        time.sleep(2.0)                                     # let the device fully drop
+        with open(auth, 'w') as f:
+            f.write('1')
+        time.sleep(3.0)                                     # let udev re-create node + by-path symlink
+        logger.warning(
+            f"usb-rescue: toggled authorized 0→1 on USB port {port} to recover a "
+            f"wedged camera (was {video_node})"
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"usb-rescue: reset of USB port {port} failed: {e}")
+        return False
+
+
 def _find_replacement_v4l_path(current_path: str) -> Optional[str]:
     """Look for a replacement /dev/videoN for a stale source.
 
@@ -224,6 +318,30 @@ def _find_replacement_v4l_path(current_path: str) -> Optional[str]:
     for _, p in even_candidates + odd_candidates:
         if _probe_v4l_capture_capable(p, timeout_s=2.0):
             return p
+
+    # 4.0.353 USB-RESCUE — nothing opened. The camera may be WEDGED: enumerated
+    # (lsusb + /dev/videoN + by-path all present) but its UVC streaming node never
+    # delivers a frame, so release/reopen can't recover it — only a physical
+    # re-enumeration can. Find the by-path (memo, or current_path if it already IS
+    # a by-path), resolve it to the wedged node, soft re-enumerate that USB port,
+    # then follow the SAME stable by-path to whatever /dev/videoN it comes back as.
+    bp = None
+    with _V4L_BY_PATH_MEMO_LOCK:
+        bp = _V4L_BY_PATH_MEMO.get(current_path)
+    if not bp and current_path and 'by-path' in current_path:
+        bp = current_path
+    if bp and os.path.exists(bp):
+        wedged = os.path.realpath(bp)
+        if _usb_reset_video_node(wedged):
+            # after re-enumeration udev re-points the by-path at the fresh node
+            if os.path.exists(bp):
+                fresh = os.path.realpath(bp)
+                with _V4L_BINDINGS_LOCK:
+                    _busy = fresh in _V4L_BOUND_PATHS
+                if (fresh.startswith('/dev/video') and not _busy
+                        and _probe_v4l_capture_capable(fresh, timeout_s=3.0)):
+                    logger.warning(f"usb-rescue: recovered {current_path} → {fresh} after USB re-enumeration")
+                    return fresh
     return None
 
 
@@ -365,6 +483,10 @@ def _load_persisted_usb_sources_ordered() -> List[str]:
                     logger.warning(f"persisted USB cam {cid}: by-path resolves to bad target ({resolved}), skip")
                     continue
                 logger.info(f"persisted USB cam {cid}: by-path {src} -> {resolved}")
+                # 4.0.367 — remember the AUTHORITATIVE config by-path for this
+                # boot-resolved node so the CameraBuffer can re-resolve it directly
+                # on every reconnect (independent of the frame-gated memo).
+                _CONFIG_BYPATH_FOR_SOURCE[resolved] = src
                 result.append(resolved)
             elif src.startswith("/dev/video"):
                 if not os.path.exists(src):
@@ -975,6 +1097,19 @@ class CameraBuffer:
         self.source = source
         self.auto_exposure = bool(auto_exposure)
         self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
+        # 4.0.367 — the camera's STABLE /dev/v4l/by-path/… source (from the config).
+        # If set, the reconnect loop re-resolves THIS directly to the current
+        # /dev/videoN, so a USB re-enumeration mid-run can never leave the camera
+        # hammering a vanished raw node. None for raw-path / RTSP / basler sources.
+        self._config_bypath = None
+        try:
+            if isinstance(source, str):
+                if source.startswith("/dev/v4l/by-path/"):
+                    self._config_bypath = source
+                else:
+                    self._config_bypath = _CONFIG_BYPATH_FOR_SOURCE.get(source)
+        except Exception:
+            self._config_bypath = None
         # 4.0.54 — register this V4L2 path so the self-heal resolver never
         # picks it as a "replacement" for another cam's stuck source.
         # No-op for RTSP/HTTP sources.
@@ -1169,6 +1304,29 @@ class CameraBuffer:
                             # and switch self.source. Scoped to USB — RTSP/HTTP
                             # keeps the old blind-retry behaviour.
                             if not self.is_ip_camera:
+                                # 4.0.367 — DURABLE, memo-independent recovery FIRST:
+                                # re-resolve the camera's stable config by-path to
+                                # whatever /dev/videoN its USB port has right now. This
+                                # fixes the "camera breaks on every restart / mid-run
+                                # re-enumeration" case where the boot-resolved raw node
+                                # went stale and never delivered a frame (so the
+                                # memo-based resolver below has nothing to map back).
+                                if self._config_bypath and os.path.exists(self._config_bypath):
+                                    try:
+                                        fresh = os.path.realpath(self._config_bypath)
+                                    except Exception:
+                                        fresh = None
+                                    if (fresh and fresh.startswith("/dev/video")
+                                            and os.path.exists(fresh) and fresh != self.source):
+                                        logger.warning(
+                                            f"by-path re-resolve: {self.source} → {fresh} "
+                                            f"(via config by-path {self._config_bypath})"
+                                        )
+                                        _unregister_v4l_binding(self.source)
+                                        self.source = fresh
+                                        _register_v4l_binding(self.source)
+                                        stale_reconnect_cycles = 0
+                                # Secondary: memo/fuzzy self-heal after N blind cycles.
                                 stale_reconnect_cycles += 1
                                 if stale_reconnect_cycles >= STALE_CYCLES_BEFORE_HEAL:
                                     replacement = _find_replacement_v4l_path(self.source)

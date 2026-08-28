@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.367] - 2026-08-28 — Cameras: memo-independent by-path reconnect (the "cam breaks on re-enumeration" fix)
+
+Root cause of kiancord's cam 6 (and cam 4) going dead and **staying** dead: the config correctly stores by-path, and boot resolves it to the current `/dev/videoN` — but the CameraBuffer then operates on that **raw node**. When the USB port re-enumerated mid-run (video4→video5), the reconnect loop's recovery (`_find_replacement_v4l_path` → `_recover_via_by_path`) depends on a **memo that's only populated once a node delivers a frame** — so a boot-resolved node that was already stale and never streamed had **no memo entry**, and recovery had nothing to map back. It hammered the vanished node for hours.
+
+Fix ([camera.py](vision_engine/services/camera.py)): each CameraBuffer now keeps its **authoritative config by-path** (`_CONFIG_BYPATH_FOR_SOURCE` seeded at boot from the persisted source, plus `self._config_bypath`), and the USB reconnect loop **re-resolves that by-path directly** (`os.path.realpath`) to the current node **first**, before the old memo/fuzzy fallback. This is memo-independent, so it recovers even when the stale node never streamed. Additive — the existing fallback stays as a secondary. Verified: no regression on vteam12; all 6 kiancord cameras connect on correct by-path nodes, and cam 4 followed its USB port through a video5→video4 renumber. **Also surgically back-ported to kiancord's 4.0.349** (it stays on 4.0.349 + this camera hotfix, not the full 4.0.367 stack).
+
 ## [4.0.366] - 2026-08-28 — Rows per Page: always the auto (resource) max — drop the toggle
 
 Per operator ("always keep the ceiling AUTO, no new UI feature"), removed the 4.0.365 "Auto (max)" checkbox. The dashboard "Rows per Page" now **always** follows the RAM-scaled `max_rows_per_page` from `/api/system/metrics` — the slider's max is set to it and the value is pinned there on load. No toggle, no extra controls; the existing slider just auto-sits at the resource ceiling. Cache-busters → `?v=4.0.366`.
