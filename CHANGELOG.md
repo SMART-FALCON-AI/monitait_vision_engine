@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.368] - 2026-08-28 — Cameras: PROACTIVE by-path tracking (recover before grab() fails)
+
+4.0.367 re-resolves the by-path on reconnect — but that reconnect only fires **after `max_failures`(=100) blank reads (~10s)** and only if `grab()` actually fails. A **lingering** stale node (exists but streams nothing, so `grab()` doesn't cleanly fail) could keep a camera dead far longer — operator: "suppose renumbering happens a million times, shouldn't it reconnect by-path?" Right. Now the capture loop, ~once a second, checks whether the camera's stable by-path resolves to a **different** `/dev/videoN` than it's reading; if so it **switches to the live node at once** — no grab-failure needed, no 10s wait. Recovery is now truly node-number-independent for any number of re-enumerations, whether the old node vanishes or lingers. [camera.py](vision_engine/services/camera.py).
+
 ## [4.0.367] - 2026-08-28 — Cameras: memo-independent by-path reconnect (the "cam breaks on re-enumeration" fix)
 
 Root cause of kiancord's cam 6 (and cam 4) going dead and **staying** dead: the config correctly stores by-path, and boot resolves it to the current `/dev/videoN` — but the CameraBuffer then operates on that **raw node**. When the USB port re-enumerated mid-run (video4→video5), the reconnect loop's recovery (`_find_replacement_v4l_path` → `_recover_via_by_path`) depends on a **memo that's only populated once a node delivers a frame** — so a boot-resolved node that was already stale and never streamed had **no memo entry**, and recovery had nothing to map back. It hammered the vanished node for hours.

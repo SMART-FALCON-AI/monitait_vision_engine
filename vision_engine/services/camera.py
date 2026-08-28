@@ -1262,11 +1262,42 @@ class CameraBuffer:
         # resolve a working alternate node instead of spinning forever.
         stale_reconnect_cycles = 0
         STALE_CYCLES_BEFORE_HEAL = 3
+        _bypath_ctr = 0   # 4.0.368 — throttle for the proactive by-path drift check
 
         while True:
             try:
                 if self.stop:
                     break
+                # 4.0.368 — PROACTIVE by-path tracking. The reactive reconnect below
+                # only fires after max_failures(=100) blank reads (~10s) AND only if
+                # grab() actually fails; a lingering stale node (exists but streams
+                # nothing) could keep the camera dead far longer. So ~once a second,
+                # cheaply check whether this camera's STABLE by-path now resolves to a
+                # DIFFERENT /dev/videoN than we're reading — if so the USB port
+                # re-enumerated, and we switch to the live node AT ONCE, no matter how
+                # the old node died (vanished OR lingering). This is what makes cam
+                # recovery truly node-number-independent across any number of renumbers.
+                _bypath_ctr += 1
+                if not self.is_ip_camera and self._config_bypath and _bypath_ctr >= 10:
+                    _bypath_ctr = 0
+                    try:
+                        _fresh = os.path.realpath(self._config_bypath)
+                    except Exception:
+                        _fresh = None
+                    if (_fresh and _fresh != self.source and _fresh.startswith("/dev/video")
+                            and os.path.exists(_fresh)):
+                        logger.warning(f"by-path drift: {self.source} → {_fresh} (proactive switch)")
+                        try:
+                            self.camera.release()
+                        except Exception:
+                            pass
+                        _unregister_v4l_binding(self.source)
+                        self.source = _fresh
+                        _register_v4l_binding(self.source)
+                        self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
+                        self._apply_saved_props()
+                        failure_count = 0
+                        stale_reconnect_cycles = 0
                 self.camera.grab()
                 success, frame = self.camera.retrieve(0)
                 if success:
