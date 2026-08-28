@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.365] - 2026-08-28 — Rows per Page: resource-scaled instead of a fixed 50
+
+The dashboard "Rows per Page" slider was hard-capped at 50. Now the ceiling **scales with the machine's RAM**: `/api/system/metrics` computes `max_rows_per_page = clamp(total_gb × 40, 50, 1000)` ([health.py](vision_engine/routers/health.py)), and the slider's max follows it, with the hint showing "up to N (scales with this machine's RAM)". Added an **"Auto (max)"** checkbox ([status.html](vision_engine/static/status.html)) that pins the value to that max and remembers the choice (localStorage). No backend clamp on `rows_per_page` — it sizes the frame buffer (`buffer_size = max(5, rows_per_page)`), so a bigger page just uses more of the RAM it's scaled to. Cache-busters → `?v=4.0.365`.
+
 ## [4.0.364] - 2026-08-26 — Fold Machines & OEE into the single Production KPIs panel
 
 Per operator ("merge all into Production KPI"), the standalone Machines panel is gone — its content (the clickable MVE-line + Watcher OEE legend, the per-source output chart, and the registration form) now lives as a sub-section **inside** the 🏭 Production KPIs panel, under a divider. One panel is the home for all production/machine metrics: totals, Eject/Downtime/Speed KPIs, the production charts, then Machines & OEE. No JS change (same element IDs, relocated). Cache-busters → `?v=4.0.364`.

@@ -845,6 +845,13 @@ def get_system_metrics(request: Request):
         disk_free_gb = disk.free / (1024**3)
         disk_percent = disk.percent
 
+        # 4.0.365 — resource-scaled ceiling for the dashboard "Rows per Page"
+        # control. Each kept page-row holds a frame image (browser-side + served
+        # from here), so the safe max scales with this machine's RAM (~40 rows/GB),
+        # clamped so it never drops below the old fixed 50 or blows past a sane
+        # browser ceiling. Frontend uses this as the slider max + the "Auto" value.
+        max_rows_per_page = max(50, min(1000, int(mem_total_gb * 40)))
+
         return JSONResponse(content={
             "cpu": {
                 "percent": round(cpu_percent, 1),
@@ -863,6 +870,7 @@ def get_system_metrics(request: Request):
                 "free_gb": round(disk_free_gb, 2),
                 "percent": round(disk_percent, 1)
             },
+            "max_rows_per_page": max_rows_per_page,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
     except Exception as e:
