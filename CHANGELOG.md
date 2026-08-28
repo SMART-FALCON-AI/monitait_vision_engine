@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.366] - 2026-08-28 — Rows per Page: always the auto (resource) max — drop the toggle
+
+Per operator ("always keep the ceiling AUTO, no new UI feature"), removed the 4.0.365 "Auto (max)" checkbox. The dashboard "Rows per Page" now **always** follows the RAM-scaled `max_rows_per_page` from `/api/system/metrics` — the slider's max is set to it and the value is pinned there on load. No toggle, no extra controls; the existing slider just auto-sits at the resource ceiling. Cache-busters → `?v=4.0.366`.
+
 ## [4.0.365] - 2026-08-28 — Rows per Page: resource-scaled instead of a fixed 50
 
 The dashboard "Rows per Page" slider was hard-capped at 50. Now the ceiling **scales with the machine's RAM**: `/api/system/metrics` computes `max_rows_per_page = clamp(total_gb × 40, 50, 1000)` ([health.py](vision_engine/routers/health.py)), and the slider's max follows it, with the hint showing "up to N (scales with this machine's RAM)". Added an **"Auto (max)"** checkbox ([status.html](vision_engine/static/status.html)) that pins the value to that max and remembers the choice (localStorage). No backend clamp on `rows_per_page` — it sizes the frame buffer (`buffer_size = max(5, rows_per_page)`), so a bigger page just uses more of the RAM it's scaled to. Cache-busters → `?v=4.0.365`.

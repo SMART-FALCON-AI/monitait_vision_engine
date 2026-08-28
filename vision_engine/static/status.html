@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.365"></script>
+        <script src="/static/js/i18n.js?v=4.0.366"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -1033,7 +1033,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.365"
+                <iframe src="/static/knowledge.html?v=4.0.366"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -1493,9 +1493,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.365"></script>
+            <script src="/static/js/iframes.js?v=4.0.366"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.365"></script>
+            <script src="/static/js/charts.js?v=4.0.366"></script>
             <script>
             /* 4.0.360 — Machines (Watcher Jet) chart. Self-contained; uses global Chart
                (chart.umd, loaded just above). On-demand only (load + tab-open + manual
@@ -2077,16 +2077,9 @@
                         </div>
 
                         <div class="control-item">
-                            <div class="control-label" style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
-                                <span><span data-i18n="adv_rows_per_page_label">Rows per Page:</span> <strong id="timeline-rows-value">10</strong></span>
-                                <label style="font-size:12px; font-weight:400; color:var(--text-secondary); display:inline-flex; align-items:center; gap:5px; cursor:pointer;">
-                                    <input type="checkbox" id="timeline-rows-auto" style="cursor:pointer;"> <span data-i18n="adv_rows_auto">Auto (max)</span>
-                                </label>
-                            </div>
+                            <div class="control-label"><span data-i18n="adv_rows_per_page_label">Rows per Page:</span> <strong id="timeline-rows-value">10</strong></div>
                             <input type="range" id="timeline-rows" min="1" max="50" value="10" style="width: 100%; margin-top: 8px; cursor: pointer;">
-                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;">
-                                <span data-i18n="adv_frames_per_page_hint">Frames displayed per page</span><span id="timeline-rows-cap"></span>
-                            </div>
+                            <div style="font-size: 11px; color: var(--text-secondary); margin-top: 4px;" data-i18n="adv_frames_per_page_hint">Frames displayed per page</div>
                         </div>
 
                         <!-- "Total Frames Stored" control removed in 3.21.2 — storage is now bound
@@ -2101,33 +2094,26 @@
                         </div>
                     </div>
                     <script>
-                    /* 4.0.365 — Rows per Page: resource-scaled max + "Auto (max)" instead of a fixed 50.
-                       The backend (/api/system/metrics) computes max_rows_per_page from this machine's
-                       RAM (~40 rows/GB, clamped 50–1000); the slider's ceiling follows it, and "Auto"
-                       pins the value to that max. Bigger value = bigger frame buffer = the resource cost. */
+                    /* 4.0.366 — Rows per Page is ALWAYS the resource-based ceiling (no toggle).
+                       The backend (/api/system/metrics) computes max_rows_per_page from this
+                       machine's RAM (~40 rows/GB, clamped 50–1000); we set the slider's max to it
+                       and pin the value there, so the page size auto-follows the machine's resources. */
                     (function(){
                       const slider=document.getElementById('timeline-rows');
-                      const auto=document.getElementById('timeline-rows-auto');
-                      const cap=document.getElementById('timeline-rows-cap');
                       const valEl=document.getElementById('timeline-rows-value');
-                      if(!slider||!auto) return;
-                      let MAXROWS=50; const KEY='mve_rows_auto';
-                      function pin(on){
-                        if(on){ slider.value=slider.max; slider.disabled=true; if(valEl) valEl.textContent=slider.value; }
-                        else { slider.disabled=false; }
-                        slider.dispatchEvent(new Event('input',{bubbles:true}));
-                        slider.dispatchEvent(new Event('change',{bubbles:true}));
-                      }
+                      if(!slider) return;
                       async function init(){
+                        let MAX=50;
                         try{ const m=await (await fetch('/api/system/metrics')).json();
-                             if(m&&m.max_rows_per_page) MAXROWS=Math.max(50, m.max_rows_per_page|0); }catch(e){}
-                        slider.max=MAXROWS;
-                        if(cap) cap.textContent=' · up to '+MAXROWS+' (scales with this machine’s RAM)';
-                        let savedAuto=false; try{ savedAuto=localStorage.getItem(KEY)==='1'; }catch(e){}
-                        auto.checked=savedAuto;
-                        if(savedAuto) setTimeout(()=>pin(true), 1400);   // after saved config restores the value
+                             if(m&&m.max_rows_per_page) MAX=Math.max(50, m.max_rows_per_page|0); }catch(e){}
+                        slider.max=MAX;
+                        // pin to the auto max AFTER any saved-config restore runs
+                        setTimeout(()=>{
+                          slider.value=MAX; if(valEl) valEl.textContent=MAX;
+                          slider.dispatchEvent(new Event('input',{bubbles:true}));
+                          slider.dispatchEvent(new Event('change',{bubbles:true}));
+                        }, 1400);
                       }
-                      auto.addEventListener('change',()=>{ try{localStorage.setItem(KEY, auto.checked?'1':'0');}catch(e){} pin(auto.checked); });
                       if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
                     })();
                     </script>
@@ -2584,7 +2570,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.365">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.366">
         <div id="annotate-modal" dir="ltr" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center; direction:ltr;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2625,10 +2611,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.365"></script>
-        <script src="/static/js/app-core.js?v=4.0.365"></script>
+        <script src="/static/js/audio.js?v=4.0.366"></script>
+        <script src="/static/js/app-core.js?v=4.0.366"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.365"></script>
-        <script src="/static/js/annotate.js?v=4.0.365"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.366"></script>
+        <script src="/static/js/annotate.js?v=4.0.366"></script>
     </body>
 </html>
