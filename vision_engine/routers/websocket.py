@@ -264,17 +264,30 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False) -
             padded_rows.append(row)
 
         composite = np.vstack(padded_rows)
-        # 4.0.369 — "mark ejected frames": red box around each ejected column's cells
-        # (should_eject set by _build_header_strip above). Mirrors /timeline_image.
+        # 4.0.369/4.0.371 — "mark ejected frames": red box around EACH individual
+        # frame cell of every ejected column (per camera row), inset from the cell
+        # edges so it reads as a picture-frame around one frame rather than a
+        # full-height rail down the column. Mirrors /timeline_image.
         if mark_ejects and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
+            row_bands = []
+            _y = _HEADER_HEIGHT
+            for _r in camera_rows:
+                row_bands.append((_y, _r.shape[0]))
+                _y += _r.shape[0]
+            inset = max(3, thumb_width // 20)
             for col_idx, col in enumerate(columns_meta):
-                if col.get('should_eject') is True:
-                    x0 = col_idx * thumb_width
-                    x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
-                    if x1 > x0:
-                        cv2.rectangle(composite, (x0 + 1, _HEADER_HEIGHT + 1),
-                                      (x1 - 1, comp_h - 2), (0, 0, 255), 3)
+                if col.get('should_eject') is not True:
+                    continue
+                x0 = col_idx * thumb_width + inset
+                x1 = min((col_idx + 1) * thumb_width - inset, comp_w - 1)
+                if x1 <= x0:
+                    continue
+                for (ry, rh) in row_bands:
+                    y0 = ry + inset
+                    y1 = min(ry + rh - inset, comp_h - 1)
+                    if y1 > y0:
+                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), 3)
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
         # Build metadata for frontend
