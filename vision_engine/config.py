@@ -171,6 +171,16 @@ _cfg_cache_str = None
 _cfg_cache_ts = 0.0
 _cfg_cache_lock = _threading.Lock()
 
+# 4.0.355 PER-KEY-WRITES — serialize ALL config persistence. Every writer used to
+# do load-whole-blob → change one key → save-whole-blob with NO lock, so two
+# overlapping writers (a frequent service_config save vs. a rare timeline_config /
+# rules edit) clobbered each other's key — the "my rules vanished while running"
+# bug, and, via the DB-upsert-vs-disk-replace split, the DB↔disk divergence. This
+# RLock makes each persist atomic; save_config_key() writes only the ONE key that
+# changed, so unrelated keys are never carried (nor clobbered) by another writer's
+# stale snapshot.
+_CONFIG_WRITE_LOCK = _threading.RLock()
+
 
 def invalidate_config_cache():
     """Drop the cached config so the next load_data_file() re-reads the source. Called on save."""
@@ -281,46 +291,39 @@ def load_data_file():
         pass  # non-JSON-serializable (shouldn't happen for config) → just don't cache
     return fresh
 
-def save_data_file(data):
-    """Persist the MVE configuration.
-
-    3.22.0 — dual-write:
-      1. Write to mve_config_kv table (the new source of truth)
-      2. ALWAYS dump file snapshot so legacy tooling that reads the JSON
-         directly (`cat | jq`, Advanced tab Data File Editor, pre-3.22
-         builds at remote sites) keeps working.
-
-    File write happens regardless of DB outcome — that keeps backward
-    compat solid. Returns True if at least one write succeeded.
-    """
-    # 1) DB write (best-effort; debug-logs if unreachable)
-    db_ok = False
-    try:
-        from services.config_db import save_all as _db_save
-        db_ok = _db_save(data, updated_by="mve")
-    except Exception as e:
-        logger.debug(f"DB save skipped: {e}")
-
-    # 2) File snapshot (always)
-    # 4.0.57 — atomic write. Prior code opened DATA_FILE in 'w' (truncating
-    # it immediately) then json.dump'd — a crash between the truncate and the
-    # dump would leave the persistence file empty or partially written and
-    # the next MVE boot would fall back to defaults (losing camera config,
-    # active shipment, etc.). Fix: write the full serialized payload to a
-    # sibling temp file, fsync it to force the kernel to flush the bytes,
-    # then os.replace() into place — POSIX guarantees replace is atomic on
-    # the same filesystem, so a reader/next-boot sees either the OLD file
-    # in full or the NEW file in full, never a truncated in-between state.
-    # The .backup copy is retained as an out-of-band recovery aid.
-    file_ok = False
+def _read_disk_dict():
+    """Read the on-disk config snapshot as a dict (empty dict if missing/corrupt).
+    A bare list (legacy prepared_query_data) is wrapped so a merge never loses it."""
     try:
         if os.path.exists(DATA_FILE):
-            backup_file = f"{DATA_FILE}.backup"
             with open(DATA_FILE, 'r') as f:
-                backup_data = f.read()
-            with open(backup_file, 'w') as f:
-                f.write(backup_data)
+                c = json.load(f)
+            if isinstance(c, dict):
+                return c
+            if isinstance(c, list):
+                return {"prepared_query_data": c}
+    except Exception as e:
+        logger.error(f"Error reading data file for merge: {e}")
+    return {}
 
+
+def _atomic_write_disk(data):
+    """Atomically replace DATA_FILE with `data` (tmp + fsync + os.replace), keeping
+    a .backup of the prior file. Returns True on success.
+
+    4.0.57 rationale — a plain open('w')+dump truncates first, so a crash mid-write
+    leaves an empty/partial file and the next boot falls back to defaults. Writing a
+    sibling temp, fsync'ing it, then os.replace() (atomic on one filesystem) means a
+    reader/next-boot always sees either the OLD file whole or the NEW file whole."""
+    try:
+        if os.path.exists(DATA_FILE):
+            try:
+                with open(DATA_FILE, 'r') as f:
+                    _prev = f.read()
+                with open(f"{DATA_FILE}.backup", 'w') as f:
+                    f.write(_prev)
+            except Exception:
+                pass  # backup is best-effort; never block the write
         tmp_file = f"{DATA_FILE}.tmp"
         with open(tmp_file, 'w') as f:
             json.dump(data, f, indent=2)
@@ -330,27 +333,75 @@ def save_data_file(data):
             except OSError:
                 pass  # fsync unsupported on some filesystems — best-effort
         os.replace(tmp_file, DATA_FILE)
-        file_ok = True
-        if db_ok:
-            logger.info(f"Data saved (DB + file snapshot at {DATA_FILE})")
-        else:
-            logger.info(f"Data saved (file only at {DATA_FILE} — DB unreachable)")
+        return True
     except Exception as e:
-        logger.error(f"Error saving data file: {e}")
-        # Clean up any dangling temp file so the next call starts from a
-        # clean slate. Don't let cleanup errors mask the original failure.
+        logger.error(f"Error writing data file: {e}")
         try:
             if os.path.exists(f"{DATA_FILE}.tmp"):
                 os.remove(f"{DATA_FILE}.tmp")
         except Exception:
             pass
+        return False
 
-    # 4.0.321 CONFIG-CACHE — drop the TTL cache so the next load reflects this save immediately.
-    try:
-        invalidate_config_cache()
-    except Exception:
-        pass
+
+def _merge_and_persist(partial, updated_by="mve"):
+    """Persist the top-level key(s) in `partial` WITHOUT dropping any other key from
+    either store, under _CONFIG_WRITE_LOCK so overlapping writers can't lose each
+    other's updates.
+
+    - DB: per-key upsert (`save_all` touches only the keys in `partial`).
+    - Disk: MERGE `partial` into the CURRENT on-disk snapshot, then atomic-replace —
+      so a partial payload can never trim keys off disk while the DB keeps them
+      (the DB-upsert-vs-disk-replace divergence). Merging a full blob is equivalent
+      to replacing, so whole-blob callers (full restore / boot) are unaffected.
+
+    Returns True if at least one store was written."""
+    if not isinstance(partial, dict):
+        return False
+    with _CONFIG_WRITE_LOCK:
+        db_ok = False
+        try:
+            from services.config_db import save_all as _db_save
+            db_ok = _db_save(partial, updated_by=updated_by)
+        except Exception as e:
+            logger.debug(f"DB save skipped: {e}")
+        merged = _read_disk_dict()
+        merged.update(partial)
+        file_ok = _atomic_write_disk(merged)
+        if file_ok:
+            logger.info(
+                f"Config persisted ({','.join(map(str, partial.keys()))}) "
+                f"[{'DB+disk' if db_ok else 'disk only — DB unreachable'}]"
+            )
+        try:
+            invalidate_config_cache()
+        except Exception:
+            pass
     return db_ok or file_ok
+
+
+def save_config_key(key, value, updated_by="mve"):
+    """Persist ONE top-level config key, touching nothing else in either store.
+
+    This is the SAFE writer: a `service_config` save can never drop `timeline_config`
+    (your ejection / shipment-close rules), and vice-versa, because only the one key
+    is carried. Use this instead of load-whole → modify one key → save_data_file(whole),
+    which loses concurrent updates to every OTHER key (the lost-update race)."""
+    return _merge_and_persist({key: value}, updated_by=updated_by)
+
+
+def save_data_file(data):
+    """Persist the MVE configuration (dual-write DB + disk).
+
+    4.0.355 — MERGE semantics on BOTH stores now: the DB upserts each key in `data`
+    and the disk snapshot is MERGED (not whole-file-replaced), so a partial payload
+    can no longer trim keys off disk while the DB keeps them. Serialized by
+    _CONFIG_WRITE_LOCK. Whole-blob callers (full restore, boot) are unaffected —
+    merging a full blob equals replacing it. For single-key writes prefer
+    save_config_key(), which additionally sidesteps the lost-update race.
+
+    Returns True if at least one store was written."""
+    return _merge_and_persist(data if isinstance(data, dict) else {})
 
 def load_service_config():
     """Load service configuration from data file (under 'service_config' key)."""
@@ -358,11 +409,14 @@ def load_service_config():
     return data.get("service_config", {})
 
 def save_service_config(config):
-    """Save service configuration to data file (under 'service_config' key)."""
-    data = load_data_file()
+    """Save service configuration (under 'service_config').
+
+    4.0.355 — writes ONLY the service_config key (save_config_key) instead of
+    load-whole-blob → set one key → save-whole-blob. This is what stops the ~40
+    service_config writers (pipeline activate, camera tweaks, scheduler, watcher,
+    anomaly…) from clobbering timeline_config/rules a concurrent writer just changed."""
     config["saved_at"] = datetime.now().isoformat()
-    data["service_config"] = config
-    return save_data_file(data)
+    return save_config_key("service_config", config)
 
 # Aliases for backwards compatibility
 load_camera_config = load_service_config

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from config import load_data_file, save_data_file
+from config import load_data_file, save_data_file, save_config_key
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,10 +29,9 @@ async def update_procedures(request: Request):
         config['procedures'] = procedures
         request.app.state.timeline_config = config
 
-        # Persist to DATA_FILE
-        file_data = load_data_file()
-        file_data['timeline_config'] = request.app.state.timeline_config
-        save_data_file(file_data)
+        # 4.0.355 — persist ONLY timeline_config so a concurrent service_config
+        # save can't wipe these ejection procedures (lost-update race fix).
+        save_config_key('timeline_config', request.app.state.timeline_config)
 
         logger.info(f"Procedures updated: {len(procedures)} procedure(s)")
         return {'success': True, 'procedures': procedures}

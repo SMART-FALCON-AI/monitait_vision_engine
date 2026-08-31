@@ -103,6 +103,20 @@ def _get_color_feature_enabled() -> bool:
     return _color_feature_cache["enabled"]
 
 
+def invalidate_color_feature_cache() -> None:
+    """Drop the cached parent_color_check_enabled flag so the next read
+    hits disk. Called by the /api/color_config POST handler so Save takes
+    effect immediately instead of after _STORE_TTL seconds.
+
+    Symptom this fixes: user ticks Enable Parent Object Color Check + clicks
+    Save, refreshes Charts within 5s, sees no color strip. Cache still held
+    False. Also removes the inconsistency where /api/color_config GET (which
+    goes through load_service_config → invalidated by config.save_data_file)
+    reported True while detection.py's stale cache reported False to the
+    same request cycle."""
+    _color_feature_cache["loaded_at"] = 0.0
+
+
 def _auto_register_classes(yolo_res):
     """3.21.25 — first time a class is detected, give it a stub entry in
     audio_settings with show=False so it shows up as an unticked card in

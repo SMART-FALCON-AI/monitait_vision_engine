@@ -978,6 +978,16 @@ def set_color_config(payload: Dict[str, Any]):
         if "parent_color_check_enabled" in payload:
             svc["parent_color_check_enabled"] = bool(payload["parent_color_check_enabled"])
         save_service_config(svc)
+        # config.save_data_file invalidates its own cache, but detection.py
+        # keeps a *separate* 5s TTL cache of this flag. Without this call,
+        # the frontend would tick "Enabled" + Save, refresh Charts, and
+        # still get color_strip hidden for up to 5s because the timeline
+        # payload asked detection.py rather than reloading from disk.
+        try:
+            from services.detection import invalidate_color_feature_cache
+            invalidate_color_feature_cache()
+        except Exception as _ci:
+            logger.warning(f"color feature cache invalidate skipped: {_ci}")
         return JSONResponse(content={
             "status": "ok",
             "parent_color_check_enabled": bool(svc.get("parent_color_check_enabled", False)),
