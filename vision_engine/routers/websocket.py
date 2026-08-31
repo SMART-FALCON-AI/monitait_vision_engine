@@ -187,6 +187,7 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
         columns_meta = []
         for col_idx in range(num_columns):
             col_all_dets = []
+            col_per_cam = {}   # 4.0.376 — per-camera dets, for per-camera eject attribution
             col_d_paths = {}
             col_encoder = None
             col_ts = None
@@ -195,7 +196,11 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
                 if col_idx < len(ps):
                     ts, jpeg_bytes, detections, meta = ps[col_idx]
                     if detections:
+                        for _d in detections:
+                            if isinstance(_d, dict):
+                                _d.setdefault('_cam', cam_id)
                         col_all_dets.extend(detections)
+                        col_per_cam[cam_id] = detections
                     col_d_paths[str(cam_id)] = meta.get('d_path') if meta else None
                     if meta and meta.get('encoder') is not None:
                         col_encoder = meta['encoder']
@@ -203,6 +208,7 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
                         col_ts = ts
             columns_meta.append({
                 'all_detections': col_all_dets,
+                'per_cam_dets': col_per_cam,
                 'd_paths': col_d_paths,
                 'encoder': col_encoder,
                 'ts': col_ts,
@@ -211,6 +217,7 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
 
         # Render camera rows
         camera_rows = []
+        row_cam_ids = []   # 4.0.376 — cam_id for each camera_row (parallel list)
         thumb_width = 0
         thumb_height = 240
 
@@ -243,6 +250,7 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
 
             if row_frames:
                 camera_rows.append(np.hstack(row_frames))
+                row_cam_ids.append(cam_id)
 
         if not camera_rows:
             return None
@@ -272,15 +280,39 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
         if mark_ejects and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
             box_th = min(12, max(1, int(mark_thickness or 3)))
-            # 4.0.373 — one red box around the WHOLE ejected column (all camera rows).
-            # should_eject is column-aggregated across cameras, so we can't single out
-            # one camera-row cell; operator wants the full-column box. Mirrors timeline.py.
+            # 4.0.376 — box the EXACT camera frame that fired the ejection (dets carry
+            # `_cam`), not the whole column. Fall back to a full-column box only when no
+            # single camera triggers (aggregate-count rule). Mirrors timeline.py.
+            row_bands = []
+            _y = _HEADER_HEIGHT
+            for _idx, _r in enumerate(camera_rows):
+                _cid = row_cam_ids[_idx] if _idx < len(row_cam_ids) else None
+                row_bands.append((_cid, _y, _r.shape[0]))
+                _y += _r.shape[0]
             for col_idx, col in enumerate(columns_meta):
                 if col.get('should_eject') is not True:
                     continue
                 x0 = col_idx * thumb_width + 1
                 x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
-                if x1 > x0:
+                if x1 <= x0:
+                    continue
+                per_cam = col.get('per_cam_dets') or {}
+                triggering = set()
+                for _cid, _dets in per_cam.items():
+                    try:
+                        _ej, _ = evaluate_eject_from_detections(_dets, procedures)
+                    except Exception:
+                        _ej = False
+                    if _ej:
+                        triggering.add(_cid)
+                if triggering:
+                    for (_cid, ry, rh) in row_bands:
+                        if _cid in triggering:
+                            y0 = ry + 1
+                            y1 = min(ry + rh - 2, comp_h - 1)
+                            if y1 > y0:
+                                cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
+                else:
                     cv2.rectangle(composite, (x0, _HEADER_HEIGHT + 1),
                                   (x1, comp_h - 2), (0, 0, 255), box_th)
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
