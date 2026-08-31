@@ -370,6 +370,13 @@ function connectTimelineWs() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline`);
     timelineWs.binaryType = 'arraybuffer';
+    timelineWs.onopen = () => {
+        // 4.0.374 — announce our page + mark-ejects + thickness on every (re)connect
+        // so server-pushed live frames carry the red box immediately. Without this a
+        // silent WS reconnect reset the server's mark state to OFF, so the box would
+        // "sometimes" vanish until the operator next toggled or navigated.
+        try { timelineWsSendPage(timelineWsPage || 0); } catch (e) {}
+    };
     timelineWs.onmessage = (e) => {
         if (typeof e.data === 'string') {
             // Parse timeline metadata JSON
