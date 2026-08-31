@@ -85,11 +85,10 @@ manager = ConnectionManager()
 # ---------------------------------------------------------------------------
 # Timeline composite cache
 # ---------------------------------------------------------------------------
-_timeline_cache_version = -1
-_timeline_cache_bytes: bytes = b""
-_timeline_cache_page: int = 0
-_timeline_cache_mark: bool = False   # 4.0.369 — last-rendered mark_ejects state
-_timeline_cache_thick: int = 3       # 4.0.372 — last-rendered box thickness
+# 4.0.377 — the shared global timeline cache was removed: it broadcast one client's
+# render (with that client's mark state) to every timeline connection, which made the
+# red box flicker on/off across tabs/reconnects. Each connection now renders + caches
+# its own last-sent state locally (see ws_timeline). No module-level cache remains.
 
 
 def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, mark_thickness: int = 3) -> Optional[Tuple[bytes, dict]]:
@@ -357,27 +356,46 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
 # ---------------------------------------------------------------------------
 @router.websocket("/ws/timeline")
 async def ws_timeline(websocket: WebSocket):
-    global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark, _timeline_cache_thick
-
     app_state = websocket.app.state
     await manager.connect("timeline", websocket)
     client_page = 0
-    client_mark = False   # 4.0.369 — mark-ejected-frames toggle from the client
-    client_thick = 3      # 4.0.372 — box border thickness from the client
-
+    # 4.0.377 — seed mark/thickness from the connect query string so the FIRST frame
+    # after any (re)connect already carries the right box state — no no-box flash.
     try:
-        # Send current composite immediately on connect
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state, client_mark, client_thick)
+        _qp = websocket.query_params
+        client_mark = (_qp.get('mark') == '1')
+        client_thick = min(12, max(1, int(_qp.get('thick', 3))))
+    except Exception:
+        client_mark = False
+        client_thick = 3
+
+    loop = asyncio.get_event_loop()
+
+    # 4.0.377 — the red box "flickered" on/off because every connection's Redis loop
+    # BROADCAST its render (built with ITS OWN mark state) to ALL timeline clients via
+    # a shared global cache: a second tab or a reconnect-overlap with mark=OFF would
+    # broadcast a no-box frame to everyone, then the mark=ON loop re-broadcast boxes,
+    # alternating at the Redis tick rate. Now each connection renders with its OWN
+    # mark/thickness and sends ONLY to itself, tracking its own last-sent state — no
+    # shared cache, no cross-connection broadcast, no flicker.
+    last = {"version": -1, "page": None, "mark": None, "thick": None}
+
+    async def _render_and_send_self():
+        result = await loop.run_in_executor(
+            None, _build_timeline_composite, client_page, app_state, client_mark, client_thick
+        )
         if result:
             jpeg, meta = result
-            _timeline_cache_bytes = jpeg
-            _timeline_cache_version = cfg.timeline_frame_counter
-            _timeline_cache_page = client_page
-            _timeline_cache_mark = client_mark
-            _timeline_cache_thick = client_thick
+            last["version"] = cfg.timeline_frame_counter
+            last["page"] = client_page
+            last["mark"] = client_mark
+            last["thick"] = client_thick
             await manager.send_text(websocket, json.dumps(meta))
             await manager.send_binary(websocket, jpeg)
+
+    try:
+        # Immediate frame on connect (mark/thickness already known from the query string)
+        await _render_and_send_self()
 
         # Start two concurrent tasks: listen for client messages + subscribe to Redis updates
         async def _listen_client():
@@ -394,14 +412,7 @@ async def ws_timeline(websocket: WebSocket):
                             client_thick = min(12, max(1, int(parts[2])))
                         except (ValueError, TypeError):
                             client_thick = 3
-                    # Immediately rebuild for this client's new page/mark/thickness
-                    result = await loop.run_in_executor(
-                        None, _build_timeline_composite, client_page, app_state, client_mark, client_thick
-                    )
-                    if result:
-                        jpeg, meta = result
-                        await manager.send_text(websocket, json.dumps(meta))
-                        await manager.send_binary(websocket, jpeg)
+                    await _render_and_send_self()
                 except (WebSocketDisconnect, RuntimeError):
                     break
                 except Exception:
@@ -410,7 +421,6 @@ async def ws_timeline(websocket: WebSocket):
         async def _listen_redis():
             """Subscribe to timeline updates from inference workers via Redis Pub/Sub."""
             nonlocal client_page, client_mark, client_thick
-            global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark, _timeline_cache_thick
 
             def _wait_for_message(pubsub, timeout=1.0):
                 """Blocking Redis get_message — runs in executor thread."""
@@ -426,23 +436,12 @@ async def ws_timeline(websocket: WebSocket):
                     msg = await loop.run_in_executor(None, _wait_for_message, pubsub, 2.0)
                     if msg and msg["type"] == "message":
                         current_version = cfg.timeline_frame_counter
-                        # Only rebuild if version changed or page differs
-                        if (current_version != _timeline_cache_version
-                                or client_page != _timeline_cache_page
-                                or client_mark != _timeline_cache_mark
-                                or client_thick != _timeline_cache_thick):
-                            result = await loop.run_in_executor(
-                                None, _build_timeline_composite, client_page, app_state, client_mark, client_thick
-                            )
-                            if result:
-                                jpeg, meta = result
-                                _timeline_cache_version = current_version
-                                _timeline_cache_bytes = jpeg
-                                _timeline_cache_page = client_page
-                                _timeline_cache_mark = client_mark
-                                _timeline_cache_thick = client_thick
-                                await manager.broadcast_text("timeline", json.dumps(meta))
-                                await manager.broadcast_binary("timeline", jpeg)
+                        # Rebuild for THIS connection only when its own view changed.
+                        if (current_version != last["version"]
+                                or client_page != last["page"]
+                                or client_mark != last["mark"]
+                                or client_thick != last["thick"]):
+                            await _render_and_send_self()
             except (WebSocketDisconnect, RuntimeError):
                 pass
             except Exception as e:

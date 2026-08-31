@@ -368,7 +368,12 @@ let timelineWs = null;
 let timelineWsPage = 0;
 function connectTimelineWs() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline`);
+    // 4.0.377 — pass mark/thickness on the connect URL so the very first frame after a
+    // (re)connect already carries the red box (no no-box flash while the server waits
+    // for our first message).
+    const _m = (window._markEjectsOn && window._markEjectsOn()) ? '1' : '0';
+    const _t = (window._markEjectsThickness ? window._markEjectsThickness() : 3);
+    timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline?mark=${_m}&thick=${_t}`);
     timelineWs.binaryType = 'arraybuffer';
     timelineWs.onopen = () => {
         // 4.0.374 — announce our page + mark-ejects + thickness on every (re)connect
