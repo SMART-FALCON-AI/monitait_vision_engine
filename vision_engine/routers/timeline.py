@@ -374,7 +374,7 @@ def get_timeline_composite(request: Request):
 
 
 @router.get("/timeline_image")
-def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0):
+def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_thickness: int = 3):
     """Get timeline frames for a specific page. Horizontal = time, vertical = cameras.
 
     Args:
@@ -382,6 +382,7 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0):
         mark_ejects: 1 = draw a red box around the frame cells of every column an
                      ejection rule fired on (operator "mark ejected frames" toggle),
                      so the operator sees exactly which frame to zoom into.
+        mark_thickness: box border thickness in px (1–12, default 3).
     """
     try:
         # Get configuration (with defaults)
@@ -595,6 +596,7 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0):
         # picture-frame around one frame — not a full-height rail down the column.
         if mark_ejects and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
+            box_th = min(12, max(1, int(mark_thickness or 3)))
             # y-offset + height of each camera row within the composite
             # (the header comes first, then one row per camera).
             row_bands = []
@@ -614,7 +616,7 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0):
                     y0 = ry + inset
                     y1 = min(ry + rh - inset, comp_h - 1)
                     if y1 > y0:
-                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), 3)
+                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
 
         logger.info(f"Timeline page {page}: {len(camera_rows)} camera(s), {max_total_frames} max frames")
 

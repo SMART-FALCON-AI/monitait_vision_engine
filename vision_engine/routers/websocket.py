@@ -89,9 +89,10 @@ _timeline_cache_version = -1
 _timeline_cache_bytes: bytes = b""
 _timeline_cache_page: int = 0
 _timeline_cache_mark: bool = False   # 4.0.369 — last-rendered mark_ejects state
+_timeline_cache_thick: int = 3       # 4.0.372 — last-rendered box thickness
 
 
-def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False) -> Optional[Tuple[bytes, dict]]:
+def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, mark_thickness: int = 3) -> Optional[Tuple[bytes, dict]]:
     """Build the timeline composite JPEG + metadata (runs in executor thread).
     Returns (jpeg_bytes, metadata_dict) or None."""
     try:
@@ -270,6 +271,7 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False) -
         # full-height rail down the column. Mirrors /timeline_image.
         if mark_ejects and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
+            box_th = min(12, max(1, int(mark_thickness or 3)))
             row_bands = []
             _y = _HEADER_HEIGHT
             for _r in camera_rows:
@@ -287,7 +289,7 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False) -
                     y0 = ry + inset
                     y1 = min(ry + rh - inset, comp_h - 1)
                     if y1 > y0:
-                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), 3)
+                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
         # Build metadata for frontend
@@ -330,39 +332,46 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False) -
 # ---------------------------------------------------------------------------
 @router.websocket("/ws/timeline")
 async def ws_timeline(websocket: WebSocket):
-    global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark
+    global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark, _timeline_cache_thick
 
     app_state = websocket.app.state
     await manager.connect("timeline", websocket)
     client_page = 0
     client_mark = False   # 4.0.369 — mark-ejected-frames toggle from the client
+    client_thick = 3      # 4.0.372 — box border thickness from the client
 
     try:
         # Send current composite immediately on connect
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state, client_mark)
+        result = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state, client_mark, client_thick)
         if result:
             jpeg, meta = result
             _timeline_cache_bytes = jpeg
             _timeline_cache_version = cfg.timeline_frame_counter
             _timeline_cache_page = client_page
             _timeline_cache_mark = client_mark
+            _timeline_cache_thick = client_thick
             await manager.send_text(websocket, json.dumps(meta))
             await manager.send_binary(websocket, jpeg)
 
         # Start two concurrent tasks: listen for client messages + subscribe to Redis updates
         async def _listen_client():
-            """Receive page navigation + mark-ejects toggle (msg = "page" or "page|mark")."""
-            nonlocal client_page, client_mark
+            """Receive page navigation + mark-ejects toggle (msg = "page" or "page|mark|thickness")."""
+            nonlocal client_page, client_mark, client_thick
             while True:
                 try:
                     msg = await websocket.receive_text()
                     parts = str(msg).split('|')
                     client_page = int(parts[0])
                     client_mark = (len(parts) > 1 and parts[1] == '1')
-                    # Immediately rebuild for this client's new page/mark
+                    if len(parts) > 2:
+                        try:
+                            client_thick = min(12, max(1, int(parts[2])))
+                        except (ValueError, TypeError):
+                            client_thick = 3
+                    # Immediately rebuild for this client's new page/mark/thickness
                     result = await loop.run_in_executor(
-                        None, _build_timeline_composite, client_page, app_state, client_mark
+                        None, _build_timeline_composite, client_page, app_state, client_mark, client_thick
                     )
                     if result:
                         jpeg, meta = result
@@ -375,8 +384,8 @@ async def ws_timeline(websocket: WebSocket):
 
         async def _listen_redis():
             """Subscribe to timeline updates from inference workers via Redis Pub/Sub."""
-            nonlocal client_page, client_mark
-            global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark
+            nonlocal client_page, client_mark, client_thick
+            global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark, _timeline_cache_thick
 
             def _wait_for_message(pubsub, timeout=1.0):
                 """Blocking Redis get_message — runs in executor thread."""
@@ -395,9 +404,10 @@ async def ws_timeline(websocket: WebSocket):
                         # Only rebuild if version changed or page differs
                         if (current_version != _timeline_cache_version
                                 or client_page != _timeline_cache_page
-                                or client_mark != _timeline_cache_mark):
+                                or client_mark != _timeline_cache_mark
+                                or client_thick != _timeline_cache_thick):
                             result = await loop.run_in_executor(
-                                None, _build_timeline_composite, client_page, app_state, client_mark
+                                None, _build_timeline_composite, client_page, app_state, client_mark, client_thick
                             )
                             if result:
                                 jpeg, meta = result
@@ -405,6 +415,7 @@ async def ws_timeline(websocket: WebSocket):
                                 _timeline_cache_bytes = jpeg
                                 _timeline_cache_page = client_page
                                 _timeline_cache_mark = client_mark
+                                _timeline_cache_thick = client_thick
                                 await manager.broadcast_text("timeline", json.dumps(meta))
                                 await manager.broadcast_binary("timeline", jpeg)
             except (WebSocketDisconnect, RuntimeError):

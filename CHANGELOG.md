@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.372] - 2026-08-31 — Mark ejected frames: settable box border thickness
+
+Operator: "can we set the border px thickness?" Added a **Box border thickness (px)** input next to the 🔴 Mark ejected frames toggle in **Advanced → Timeline Configuration** ([status.html](vision_engine/static/status.html)), 1–12 px, default 3, remembered per browser. It rides the same plumbing as the toggle: the HTTP timeline src gains `&mark_thickness=N` ([audio.js](vision_engine/static/js/audio.js)) and the WebSocket page message becomes `page|mark|thickness` ([app-core.js](vision_engine/static/js/app-core.js)). Both renderers — `/timeline_image` ([timeline.py](vision_engine/routers/timeline.py)) and `_build_timeline_composite` ([websocket.py](vision_engine/routers/websocket.py)) — clamp it to 1–12 and use it as the `cv2.rectangle` thickness; the WS cache key includes the thickness so changing it re-renders instantly. Cache-busters → `?v=4.0.372`.
+
 ## [4.0.371] - 2026-08-31 — Mark ejected frames: a real box per frame, not a full-height rail
 
 Operator on the red-box toggle (4.0.369): "it should be a box over a frame — why is it not a box?" The 4.0.369 code drew a single rectangle from just under the header strip to the very bottom of the whole composite, so with the ejected columns' header already red and neighbouring columns adjacent, it rendered as full-height red rails down every column instead of a frame around a frame. Now both renderers — `/timeline_image` ([timeline.py](vision_engine/routers/timeline.py)) and the live WebSocket `_build_timeline_composite` ([websocket.py](vision_engine/routers/websocket.py)) — walk the actual camera-row bands of the composite and draw a **separate inset box around each individual frame cell** (camera row × ejected column). The inset (≈thumb_width/20) leaves a clear gap from the cell edges and the header, so each ejected frame gets its own visible red picture-frame. Cache-busters → `?v=4.0.371`.

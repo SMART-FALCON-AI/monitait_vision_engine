@@ -402,9 +402,11 @@ function startTimelineRefresh() { connectTimelineWs(); }
 function timelineWsSendPage(page) {
     timelineWsPage = page;
     if (timelineWs && timelineWs.readyState === WebSocket.OPEN) {
-        // 4.0.369 — carry the "mark ejected frames" toggle to the server (page|mark)
+        // 4.0.369/4.0.372 — carry the "mark ejected frames" toggle + box thickness
+        // to the server (page|mark|thickness).
         const mark = (window._markEjectsOn && window._markEjectsOn()) ? '1' : '0';
-        timelineWs.send(String(page) + '|' + mark);
+        const thick = (window._markEjectsThickness ? window._markEjectsThickness() : 3);
+        timelineWs.send(String(page) + '|' + mark + '|' + thick);
     }
 }
 

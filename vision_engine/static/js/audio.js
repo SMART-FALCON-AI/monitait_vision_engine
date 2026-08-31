@@ -1804,7 +1804,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // When paused, WebSocket onmessage drops images, so always use HTTP for manual nav
         if (!autoUpdate) {
             const timestamp = new Date().getTime();
-            slide.src = `/timeline_image?page=${page}&t=${timestamp}${(window._markEjectsOn && window._markEjectsOn()) ? '&mark_ejects=1' : ''}`;
+            slide.src = `/timeline_image?page=${page}&t=${timestamp}${(window._markEjectsOn && window._markEjectsOn()) ? ('&mark_ejects=1&mark_thickness=' + (window._markEjectsThickness ? window._markEjectsThickness() : 3)) : ''}`;
             fetch('/api/timeline_meta?page=' + page)
                 .then(r => r.json())
                 .then(meta => { if (meta.type === 'timeline_meta') window._timelineMeta = meta; })
@@ -1824,7 +1824,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 timelineWsSendPage(0);
             } else {
                 const timestamp = new Date().getTime();
-                slide.src = `/timeline_image?page=0&t=${timestamp}${(window._markEjectsOn && window._markEjectsOn()) ? '&mark_ejects=1' : ''}`;
+                slide.src = `/timeline_image?page=0&t=${timestamp}${(window._markEjectsOn && window._markEjectsOn()) ? ('&mark_ejects=1&mark_thickness=' + (window._markEjectsThickness ? window._markEjectsThickness() : 3)) : ''}`;
             }
             updateCounter();
         }
