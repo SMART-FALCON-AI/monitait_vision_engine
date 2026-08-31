@@ -287,7 +287,84 @@ def get_cameras_status(request: Request):
                 cam_info["config"] = {}
         cameras.append(cam_info)
 
+    # 4.0.370 — also surface DETECTED-but-unconfigured USB cameras, so a newly
+    # plugged-in camera is VISIBLE in the list (configured=False) instead of being
+    # silently ignored — the operator can then add it. Enumerate the stable
+    # /dev/v4l/by-path capture symlinks and skip any already bound to a config
+    # camera (whether it's currently up OR down).
+    for c in cameras:
+        c["configured"] = True
+    try:
+        import glob as _glob
+        from services.camera import _by_path_for_video_node as _bp_for
+        used = set()
+        for c in cameras:
+            if c.get("by_path"):
+                used.add(c["by_path"])
+            p = c.get("path") or ""
+            if isinstance(p, str) and p.startswith("/dev/video"):
+                b = _bp_for(p)
+                if b:
+                    used.add(b)
+        try:  # also cover configured-but-DOWN cameras via their persisted by-path source
+            for _c in (load_service_config() or {}).get("cameras", {}).values():
+                s = str((_c or {}).get("source") or "")
+                if s.startswith("/dev/v4l/by-path/"):
+                    used.add(s)
+        except Exception:
+            pass
+        next_id = max([c["id"] for c in cameras], default=0) + 1
+        for link in sorted(_glob.glob('/dev/v4l/by-path/*-video-index0')):
+            if link in used:
+                continue
+            node = os.path.realpath(link)
+            cameras.append({
+                "id": next_id, "path": node, "by_path": link,
+                "name": "Detected camera (not configured)", "type": "usb",
+                "connected": False, "running": False,
+                "device_exists": os.path.exists(node),
+                "configured": False, "detected": True,
+            })
+            next_id += 1
+    except Exception as e:
+        logger.warning("detected-camera enumeration failed: %s", e)
+
     return JSONResponse(content=cameras)
+
+
+@router.post("/api/cameras/add-detected")
+async def add_detected_camera(request: Request):
+    """4.0.370 — add a DETECTED-but-unconfigured USB camera (by its stable by-path)
+    to the config as a new camera. Persists; the camera opens on the next restart."""
+    try:
+        body = await request.json()
+        by_path = str(body.get("by_path") or "").strip()
+        if not by_path.startswith("/dev/v4l/by-path/"):
+            return JSONResponse({"error": "by_path (a /dev/v4l/by-path/… source) required"}, status_code=400)
+        svc = load_service_config() or {}
+        cams = dict(svc.get("cameras") or {})
+        for _c in cams.values():
+            if str((_c or {}).get("source") or "") == by_path:
+                return JSONResponse({"error": "camera already configured", "source": by_path}, status_code=409)
+        ids = [int(k) for k in cams.keys() if str(k).isdigit()]
+        new_id = (max(ids) + 1) if ids else 1
+        tmpl = cams[str(min(ids))] if ids else {}
+        def _g(k, dflt): return (tmpl or {}).get(k, dflt)
+        cams[str(new_id)] = {
+            "name": str(body.get("name") or f"USB Camera {new_id}"), "type": "usb",
+            "source": by_path,
+            "fps": _g("fps", 10), "gain": _g("gain", 100), "exposure": _g("exposure", 10),
+            "brightness": _g("brightness", 100), "contrast": _g("contrast", 0), "saturation": _g("saturation", 50),
+            "auto_exposure": _g("auto_exposure", False), "px_per_mm": None,
+            "roi_enabled": False, "roi_xmin": 0, "roi_ymin": 0, "roi_xmax": 1280, "roi_ymax": 720,
+        }
+        svc["cameras"] = cams
+        save_service_config(svc)
+        return {"ok": True, "id": new_id, "source": by_path,
+                "note": "Added. Restart the vision engine to open it."}
+    except Exception as e:
+        logger.warning("add-detected camera failed: %s", e)
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @router.post("/api/cameras/rescan")

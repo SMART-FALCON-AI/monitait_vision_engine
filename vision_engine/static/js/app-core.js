@@ -1967,6 +1967,24 @@ function tip(text) {
     return `<span class="info-tooltip">i<span class="info-tooltip-text">${text}</span></span>`;
 }
 
+// 4.0.370 — add a detected-but-unconfigured camera (by its by-path) to the config.
+async function addDetectedCamera(byPath, btn) {
+    if (!byPath) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
+    try {
+        const r = await fetch('/api/cameras/add-detected', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ by_path: byPath })
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+        alert('Added as Camera ' + d.id + '. Restart the vision engine (or reboot) to open it.');
+    } catch (e) {
+        alert('Add failed: ' + e.message);
+        if (btn) { btn.disabled = false; btn.textContent = '＋ Add this camera'; }
+    }
+}
+
 function createCameraCard(cameraId, camera) {
     const div = document.createElement('div');
     div.className = 'camera-card';
@@ -1976,6 +1994,30 @@ function createCameraCard(cameraId, camera) {
     const isConnected = camera.connected;
     const isIPCamera = camera.type === 'ip';
     const cameraName = camera.name || `Camera ${cameraId}`;
+
+    // 4.0.370 — a DETECTED-but-unconfigured camera: show it so the operator sees a
+    // newly-plugged camera (not silently ignored), with a one-click Add.
+    if (camera.detected || camera.configured === false) {
+        div.className = 'camera-card camera-detected';
+        const bp = (camera.by_path || '').replace('/dev/v4l/by-path/', '');
+        div.innerHTML = `
+            <div class="camera-card-header">
+                <span class="camera-card-title">🔌 ${cameraName}</span>
+                <span class="camera-status-badge" style="background:rgba(245,158,11,0.2); color:#fbbf24; border:1px solid rgba(245,158,11,0.5);">DETECTED — NOT IN USE</span>
+            </div>
+            <div class="camera-card-content" style="padding:14px;">
+                <div style="font-size:12px; color:var(--text-secondary); margin-bottom:10px;">
+                    A camera is plugged into this USB port but isn't in the config yet. Add it to start using it.
+                </div>
+                <div style="font-size:11px; color:var(--text-secondary); word-break:break-all; margin-bottom:12px;">
+                    <b>By-path:</b> ${bp}<br><b>Node:</b> ${camera.path || ''}
+                </div>
+                <button class="control-button" style="background:#10b981; color:#fff; font-weight:600;"
+                        onclick="addDetectedCamera('${(camera.by_path || '').replace(/'/g, '')}', this)">＋ Add this camera</button>
+                <div class="camera-message" id="camera-msg-${cameraId}" style="margin-top:8px;"></div>
+            </div>`;
+        return div;
+    }
 
     div.innerHTML = `
         <div class="camera-card-header">
