@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.373] - 2026-08-31 — Mark ejected frames: back to one box per column + Rows per Page honors the set value
+
+Two operator corrections:
+
+**1. Rows per Page was forced to the max.** 4.0.366 pinned the slider's value to the resource-based ceiling after every config restore, so the operator's chosen page size was silently overwritten with the max on every Save. Now the resource number is only the **ceiling** (slider max) — the value honors whatever was set in Advanced (restored from saved `num_rows`), and `loadSavedConfig` raises the ceiling first so a high saved value isn't clamped ([status.html](vision_engine/static/status.html), [audio.js](vision_engine/static/js/audio.js)). Set your Rows per Page in Advanced → Apply and it now sticks.
+
+**2. The red box marked every camera-row cell.** 4.0.371/372 drew a separate box around each camera row in an ejected column — the operator wants only the exact ejection frame, or, failing that, the previous full-column box. `should_eject` is aggregated across all cameras per time-column, so a single camera-row cell can't be singled out here; reverted to **one red box around the whole ejected column** (header strip → bottom), keeping the 4.0.372 settable thickness. Both renderers ([timeline.py](vision_engine/routers/timeline.py), [websocket.py](vision_engine/routers/websocket.py)). Cache-busters → `?v=4.0.373`.
+
 ## [4.0.372] - 2026-08-31 — Mark ejected frames: settable box border thickness
 
 Operator: "can we set the border px thickness?" Added a **Box border thickness (px)** input next to the 🔴 Mark ejected frames toggle in **Advanced → Timeline Configuration** ([status.html](vision_engine/static/status.html)), 1–12 px, default 3, remembered per browser. It rides the same plumbing as the toggle: the HTTP timeline src gains `&mark_thickness=N` ([audio.js](vision_engine/static/js/audio.js)) and the WebSocket page message becomes `page|mark|thickness` ([app-core.js](vision_engine/static/js/app-core.js)). Both renderers — `/timeline_image` ([timeline.py](vision_engine/routers/timeline.py)) and `_build_timeline_composite` ([websocket.py](vision_engine/routers/websocket.py)) — clamp it to 1–12 and use it as the `cv2.rectangle` thickness; the WS cache key includes the thickness so changing it re-renders instantly. Cache-busters → `?v=4.0.372`.

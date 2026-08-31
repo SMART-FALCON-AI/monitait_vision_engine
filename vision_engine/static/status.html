@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.372"></script>
+        <script src="/static/js/i18n.js?v=4.0.373"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -1033,7 +1033,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.372"
+                <iframe src="/static/knowledge.html?v=4.0.373"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -1493,9 +1493,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.372"></script>
+            <script src="/static/js/iframes.js?v=4.0.373"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.372"></script>
+            <script src="/static/js/charts.js?v=4.0.373"></script>
             <script>
             /* 4.0.360 — Machines (Watcher Jet) chart. Self-contained; uses global Chart
                (chart.umd, loaded just above). On-demand only (load + tab-open + manual
@@ -2110,10 +2110,14 @@
                         </div>
                     </div>
                     <script>
-                    /* 4.0.366 — Rows per Page is ALWAYS the resource-based ceiling (no toggle).
-                       The backend (/api/system/metrics) computes max_rows_per_page from this
-                       machine's RAM (~40 rows/GB, clamped 50–1000); we set the slider's max to it
-                       and pin the value there, so the page size auto-follows the machine's resources. */
+                    /* 4.0.373 — Rows per Page: the resource-based value is only the CEILING
+                       (slider max), NOT a forced value. The backend (/api/system/metrics)
+                       computes max_rows_per_page from this machine's RAM (~40 rows/GB, clamped
+                       50–1000); we raise the slider's max to it so the operator CAN go that high,
+                       but we honor whatever value they set in Advanced (restored from the saved
+                       num_rows by loadSavedConfig). Earlier (4.0.366) we pinned the value to the
+                       max, which silently overwrote the operator's chosen page size on every
+                       Save — that pin is removed. */
                     (function(){
                       const slider=document.getElementById('timeline-rows');
                       const valEl=document.getElementById('timeline-rows-value');
@@ -2122,13 +2126,10 @@
                         let MAX=50;
                         try{ const m=await (await fetch('/api/system/metrics')).json();
                              if(m&&m.max_rows_per_page) MAX=Math.max(50, m.max_rows_per_page|0); }catch(e){}
-                        slider.max=MAX;
-                        // pin to the auto max AFTER any saved-config restore runs
-                        setTimeout(()=>{
-                          slider.value=MAX; if(valEl) valEl.textContent=MAX;
-                          slider.dispatchEvent(new Event('input',{bubbles:true}));
-                          slider.dispatchEvent(new Event('change',{bubbles:true}));
-                        }, 1400);
+                        // ceiling follows the machine; never below the current saved value so a
+                        // high saved num_rows isn't clamped when loadSavedConfig restores it.
+                        slider.max=Math.max(MAX, parseInt(slider.value,10)||0);
+                        if(valEl) valEl.textContent=slider.value;
                       }
                       if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init); else init();
                     })();
@@ -2619,7 +2620,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.372">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.373">
         <div id="annotate-modal" dir="ltr" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center; direction:ltr;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2660,10 +2661,10 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.372"></script>
-        <script src="/static/js/app-core.js?v=4.0.372"></script>
+        <script src="/static/js/audio.js?v=4.0.373"></script>
+        <script src="/static/js/app-core.js?v=4.0.373"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.372"></script>
-        <script src="/static/js/annotate.js?v=4.0.372"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.373"></script>
+        <script src="/static/js/annotate.js?v=4.0.373"></script>
     </body>
 </html>

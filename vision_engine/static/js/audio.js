@@ -2076,8 +2076,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 qualityValue.textContent = cfg.image_quality + '%';
             }
             if (cfg.num_rows) {
-                rowsSlider.value = cfg.num_rows;
-                rowsValue.textContent = cfg.num_rows;
+                // 4.0.373 — raise the ceiling first so a high saved value isn't clamped
+                // by the slider's current max; then honor the operator's configured value.
+                const nr = parseInt(cfg.num_rows, 10) || 10;
+                if (parseInt(rowsSlider.max, 10) < nr) rowsSlider.max = nr;
+                rowsSlider.value = nr;
+                rowsValue.textContent = rowsSlider.value;
             }
             // buffer slider removed in 3.21.2 — storage now bound to num_rows
             if (cfg.buffer_size && bufferSlider) {

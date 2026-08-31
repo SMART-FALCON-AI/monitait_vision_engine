@@ -597,26 +597,18 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
         if mark_ejects and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
             box_th = min(12, max(1, int(mark_thickness or 3)))
-            # y-offset + height of each camera row within the composite
-            # (the header comes first, then one row per camera).
-            row_bands = []
-            _y = _HEADER_HEIGHT
-            for _r in camera_rows:
-                row_bands.append((_y, _r.shape[0]))
-                _y += _r.shape[0]
-            inset = max(3, thumb_width // 20)
+            # 4.0.373 — one red box around the WHOLE ejected column (all camera rows),
+            # header strip to composite bottom. should_eject is column-aggregated
+            # (across every camera), so we can't single out one camera-row cell here;
+            # the operator asked to keep the full-column box rather than mark all cells.
             for col_idx, col in enumerate(columns_meta):
                 if col.get('should_eject') is not True:
                     continue
-                x0 = col_idx * thumb_width + inset
-                x1 = min((col_idx + 1) * thumb_width - inset, comp_w - 1)
-                if x1 <= x0:
-                    continue
-                for (ry, rh) in row_bands:
-                    y0 = ry + inset
-                    y1 = min(ry + rh - inset, comp_h - 1)
-                    if y1 > y0:
-                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
+                x0 = col_idx * thumb_width + 1
+                x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
+                if x1 > x0:
+                    cv2.rectangle(composite, (x0, _HEADER_HEIGHT + 1),
+                                  (x1, comp_h - 2), (0, 0, 255), box_th)
 
         logger.info(f"Timeline page {page}: {len(camera_rows)} camera(s), {max_total_frames} max frames")
 
