@@ -6161,6 +6161,15 @@ async def update_mark_config(request: Request):
                 tc['mark_ejects_thickness'] = 3
         request.app.state.timeline_config = tc
         save_config_key('timeline_config', tc)
+        # 4.0.378 — force an IMMEDIATE repaint on every connected timeline client, even
+        # when the line is stopped (no new frames pushing). Bump the frame counter and
+        # publish the same ws:timeline_update signal a new frame sends, so every WS loop
+        # rebuilds now with the new box state instead of "after a while" (next frame).
+        try:
+            cfg_module.timeline_frame_counter += 1
+            Redis("redis", 6379, db=cfg_module.REDIS_DB).publish("ws:timeline_update", "mark_config")
+        except Exception as _pe:
+            logger.warning(f"mark_config repaint nudge skipped: {_pe}")
         return {'success': True,
                 'mark_ejects_enabled': tc.get('mark_ejects_enabled', False),
                 'mark_ejects_thickness': tc.get('mark_ejects_thickness', 3)}

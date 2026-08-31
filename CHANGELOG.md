@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.379] - 2026-08-31 — Mark ejected frames: repaint every client the instant the box setting changes
+
+Follow-up to 4.0.378. When the line is **stopped** (no new frames pushing over the WebSocket), toggling the box on/off only took effect "after a while" — each client repaints on the next frame, and there wasn't one. Now `POST /api/timeline/mark_config` ([timeline.py](vision_engine/routers/timeline.py)) bumps the timeline frame counter and publishes the same `ws:timeline_update` signal a new frame sends, so **every connected client rebuilds immediately** with the new box state regardless of whether the line is moving. Cache-busters → `?v=4.0.379`.
+
 ## [4.0.378] - 2026-08-31 — Mark ejected frames is now a server-side setting (box shows the instant the strip goes red)
 
 Operator: "when you plot the red/green strip on top of a column, plot the red box at that same moment — it appears only after a while, this is not good." Root fix: the box was gated by a **per-client flag** sent over the WebSocket (or the HTTP URL), so it only appeared once that flag made it to the server — a reconnect or slow first message delayed it. Now "mark ejected frames" (on/off) and the box thickness live in **timeline_config** and are read in the **same server render pass** that draws the red/green header strip ([timeline.py](vision_engine/routers/timeline.py), [websocket.py](vision_engine/routers/websocket.py)) — so if a column's strip is red, its box is drawn at that instant, always, for every viewer. The checkbox + thickness POST to a new `POST /api/timeline/mark_config` (instant per-key save) and restore from the server config on load ([status.html](vision_engine/static/status.html)); the legacy client flag still forces it on for back-compat. Cache-busters → `?v=4.0.378`.
