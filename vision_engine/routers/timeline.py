@@ -1,7 +1,7 @@
 import pathlib
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response, FileResponse
-from config import (load_data_file, save_data_file, TIMELINE_REDIS_PREFIX,
+from config import (load_data_file, save_data_file, save_config_key, TIMELINE_REDIS_PREFIX,
                     TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT,
                     latest_detections, latest_detections_timestamp,
                     DETECTION_EVENTS_REDIS_KEY)
@@ -374,11 +374,14 @@ def get_timeline_composite(request: Request):
 
 
 @router.get("/timeline_image")
-def timeline_image(request: Request, page: int = 0):
+def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0):
     """Get timeline frames for a specific page. Horizontal = time, vertical = cameras.
 
     Args:
         page: Page number (0=latest frames, 1=previous page, etc.)
+        mark_ejects: 1 = draw a red box around the frame cells of every column an
+                     ejection rule fired on (operator "mark ejected frames" toggle),
+                     so the operator sees exactly which frame to zoom into.
     """
     try:
         # Get configuration (with defaults)
@@ -583,6 +586,20 @@ def timeline_image(request: Request, page: int = 0):
             padded_rows.append(row)
 
         composite = np.vstack(padded_rows)
+
+        # 4.0.369 — "mark ejected frames" operator toggle. For every column an
+        # ejection rule fired on (should_eject set by _build_header_strip above),
+        # draw a red box around that column's frame cells (below the header strip)
+        # so the operator can immediately see which frame to zoom into.
+        if mark_ejects and thumb_width > 0:
+            comp_h, comp_w = composite.shape[:2]
+            for col_idx, col in enumerate(columns_meta):
+                if col.get('should_eject') is True:
+                    x0 = col_idx * thumb_width
+                    x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
+                    if x1 > x0:
+                        cv2.rectangle(composite, (x0 + 1, _HEADER_HEIGHT + 1),
+                                      (x1 - 1, comp_h - 2), (0, 0, 255), 3)
 
         logger.info(f"Timeline page {page}: {len(camera_rows)} camera(s), {max_total_frames} max frames")
 
@@ -6036,10 +6053,9 @@ async def update_timeline_config(request: Request):
             'procedures': procedures
         }
 
-        # Save to DATA_FILE
-        file_data = load_data_file()
-        file_data['timeline_config'] = request.app.state.timeline_config
-        save_data_file(file_data)
+        # 4.0.355 — persist ONLY timeline_config (per-key) so a concurrent
+        # service_config save can't wipe these timeline settings / rules.
+        save_config_key('timeline_config', request.app.state.timeline_config)
 
         # Clear timeline buffer so new frames with new quality settings are captured
         redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)

@@ -88,9 +88,10 @@ manager = ConnectionManager()
 _timeline_cache_version = -1
 _timeline_cache_bytes: bytes = b""
 _timeline_cache_page: int = 0
+_timeline_cache_mark: bool = False   # 4.0.369 — last-rendered mark_ejects state
 
 
-def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dict]]:
+def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False) -> Optional[Tuple[bytes, dict]]:
     """Build the timeline composite JPEG + metadata (runs in executor thread).
     Returns (jpeg_bytes, metadata_dict) or None."""
     try:
@@ -263,6 +264,17 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
             padded_rows.append(row)
 
         composite = np.vstack(padded_rows)
+        # 4.0.369 — "mark ejected frames": red box around each ejected column's cells
+        # (should_eject set by _build_header_strip above). Mirrors /timeline_image.
+        if mark_ejects and thumb_width > 0:
+            comp_h, comp_w = composite.shape[:2]
+            for col_idx, col in enumerate(columns_meta):
+                if col.get('should_eject') is True:
+                    x0 = col_idx * thumb_width
+                    x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
+                    if x1 > x0:
+                        cv2.rectangle(composite, (x0 + 1, _HEADER_HEIGHT + 1),
+                                      (x1 - 1, comp_h - 2), (0, 0, 255), 3)
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
         # Build metadata for frontend
@@ -305,35 +317,39 @@ def _build_timeline_composite(page: int, app_state) -> Optional[Tuple[bytes, dic
 # ---------------------------------------------------------------------------
 @router.websocket("/ws/timeline")
 async def ws_timeline(websocket: WebSocket):
-    global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page
+    global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark
 
     app_state = websocket.app.state
     await manager.connect("timeline", websocket)
     client_page = 0
+    client_mark = False   # 4.0.369 — mark-ejected-frames toggle from the client
 
     try:
         # Send current composite immediately on connect
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state)
+        result = await loop.run_in_executor(None, _build_timeline_composite, client_page, app_state, client_mark)
         if result:
             jpeg, meta = result
             _timeline_cache_bytes = jpeg
             _timeline_cache_version = cfg.timeline_frame_counter
             _timeline_cache_page = client_page
+            _timeline_cache_mark = client_mark
             await manager.send_text(websocket, json.dumps(meta))
             await manager.send_binary(websocket, jpeg)
 
         # Start two concurrent tasks: listen for client messages + subscribe to Redis updates
         async def _listen_client():
-            """Receive page navigation from client."""
-            nonlocal client_page
+            """Receive page navigation + mark-ejects toggle (msg = "page" or "page|mark")."""
+            nonlocal client_page, client_mark
             while True:
                 try:
                     msg = await websocket.receive_text()
-                    client_page = int(msg)
-                    # Immediately rebuild for this client's new page
+                    parts = str(msg).split('|')
+                    client_page = int(parts[0])
+                    client_mark = (len(parts) > 1 and parts[1] == '1')
+                    # Immediately rebuild for this client's new page/mark
                     result = await loop.run_in_executor(
-                        None, _build_timeline_composite, client_page, app_state
+                        None, _build_timeline_composite, client_page, app_state, client_mark
                     )
                     if result:
                         jpeg, meta = result
@@ -346,8 +362,8 @@ async def ws_timeline(websocket: WebSocket):
 
         async def _listen_redis():
             """Subscribe to timeline updates from inference workers via Redis Pub/Sub."""
-            nonlocal client_page
-            global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page
+            nonlocal client_page, client_mark
+            global _timeline_cache_version, _timeline_cache_bytes, _timeline_cache_page, _timeline_cache_mark
 
             def _wait_for_message(pubsub, timeout=1.0):
                 """Blocking Redis get_message — runs in executor thread."""
@@ -364,15 +380,18 @@ async def ws_timeline(websocket: WebSocket):
                     if msg and msg["type"] == "message":
                         current_version = cfg.timeline_frame_counter
                         # Only rebuild if version changed or page differs
-                        if current_version != _timeline_cache_version or client_page != _timeline_cache_page:
+                        if (current_version != _timeline_cache_version
+                                or client_page != _timeline_cache_page
+                                or client_mark != _timeline_cache_mark):
                             result = await loop.run_in_executor(
-                                None, _build_timeline_composite, client_page, app_state
+                                None, _build_timeline_composite, client_page, app_state, client_mark
                             )
                             if result:
                                 jpeg, meta = result
                                 _timeline_cache_version = current_version
                                 _timeline_cache_bytes = jpeg
                                 _timeline_cache_page = client_page
+                                _timeline_cache_mark = client_mark
                                 await manager.broadcast_text("timeline", json.dumps(meta))
                                 await manager.broadcast_binary("timeline", jpeg)
             except (WebSocketDisconnect, RuntimeError):

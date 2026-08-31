@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.369] - 2026-08-28 — Dashboard: "mark ejected frames" toggle (red box on the timeline)
+
+Operator request: a checkbox that boxes the exact timeline frames where an ejection rule fired, so you can see where to zoom. Added **🔴 Mark ejected frames** in **Advanced → Timeline Configuration** ([status.html](vision_engine/static/status.html)); when on, the Dashboard timeline draws a **red box** around every column an ejection rule fired on. `should_eject` is already computed per column for the red/green header strip, so both timeline renderers reuse it: `/timeline_image` ([timeline.py](vision_engine/routers/timeline.py)) and the live WebSocket push `_build_timeline_composite` ([websocket.py](vision_engine/routers/websocket.py)) each take a `mark_ejects` flag and draw the box below the header strip. The toggle rides the URL (`&mark_ejects=1`) and the WS page message (`page|mark`), is remembered per browser, and re-renders instantly — works in both paused (HTTP) and live (WS) modes. Cache-busters → `?v=4.0.369`.
+
 ## [4.0.368] - 2026-08-28 — Cameras: PROACTIVE by-path tracking (recover before grab() fails)
 
 4.0.367 re-resolves the by-path on reconnect — but that reconnect only fires **after `max_failures`(=100) blank reads (~10s)** and only if `grab()` actually fails. A **lingering** stale node (exists but streams nothing, so `grab()` doesn't cleanly fail) could keep a camera dead far longer — operator: "suppose renumbering happens a million times, shouldn't it reconnect by-path?" Right. Now the capture loop, ~once a second, checks whether the camera's stable by-path resolves to a **different** `/dev/videoN` than it's reading; if so it **switches to the live node at once** — no grab-failure needed, no 10s wait. Recovery is now truly node-number-independent for any number of re-enumerations, whether the old node vanishes or lingers. [camera.py](vision_engine/services/camera.py).

@@ -1804,7 +1804,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // When paused, WebSocket onmessage drops images, so always use HTTP for manual nav
         if (!autoUpdate) {
             const timestamp = new Date().getTime();
-            slide.src = `/timeline_image?page=${page}&t=${timestamp}`;
+            slide.src = `/timeline_image?page=${page}&t=${timestamp}${(window._markEjectsOn && window._markEjectsOn()) ? '&mark_ejects=1' : ''}`;
             fetch('/api/timeline_meta?page=' + page)
                 .then(r => r.json())
                 .then(meta => { if (meta.type === 'timeline_meta') window._timelineMeta = meta; })
@@ -1824,7 +1824,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 timelineWsSendPage(0);
             } else {
                 const timestamp = new Date().getTime();
-                slide.src = `/timeline_image?page=0&t=${timestamp}`;
+                slide.src = `/timeline_image?page=0&t=${timestamp}${(window._markEjectsOn && window._markEjectsOn()) ? '&mark_ejects=1' : ''}`;
             }
             updateCounter();
         }
@@ -2094,6 +2094,15 @@ document.addEventListener('DOMContentLoaded', function() {
             if (cfg.custom_camera_order) {
                 const input = document.getElementById('custom-camera-order');
                 if (input) input.value = cfg.custom_camera_order;
+            }
+            // 4.0.353 — restore the Image Rotation dropdown. It was NEVER initialized
+            // from the saved config, so the <select> always showed its HTML default
+            // (0°) regardless of the real angle — and because Apply READS this dropdown,
+            // any Apply silently overwrote the stored rotation with 0. Guard undefined/
+            // null but NOT 0 (0° is a valid saved value).
+            const rotSel = document.getElementById('timeline-rotation');
+            if (rotSel && cfg.image_rotation !== undefined && cfg.image_rotation !== null) {
+                rotSel.value = String(cfg.image_rotation);
             }
             if (cfg.object_filters) {
                 const filters = cfg.object_filters;
