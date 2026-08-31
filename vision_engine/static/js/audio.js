@@ -2083,6 +2083,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 rowsSlider.value = nr;
                 rowsValue.textContent = rowsSlider.value;
             }
+            // 4.0.375 — restore the detection box padding (pdpx)
+            const padEl = document.getElementById('timeline-bbox-padding');
+            if (padEl && cfg.bbox_padding_px !== undefined && cfg.bbox_padding_px !== null) {
+                padEl.value = Math.max(0, parseInt(cfg.bbox_padding_px, 10) || 0);
+            }
             // buffer slider removed in 3.21.2 — storage now bound to num_rows
             if (cfg.buffer_size && bufferSlider) {
                 bufferSlider.value = cfg.buffer_size;
@@ -2179,6 +2184,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     num_rows: parseInt(rows),
                     buffer_size: parseInt(buffer),
                     image_rotation: rotation,
+                    bbox_padding_px: Math.max(0, parseInt((document.getElementById('timeline-bbox-padding') || {}).value, 10) || 0),
                 })
             });
 

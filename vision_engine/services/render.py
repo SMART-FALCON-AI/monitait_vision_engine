@@ -44,6 +44,7 @@ def draw_detection_on(
     font_scale: Optional[float] = None,
     obj_filters: Optional[Dict[str, Dict[str, Any]]] = None,
     audio_settings: Optional[Dict[str, Dict[str, Any]]] = None,
+    bbox_pad_px: Optional[int] = None,
 ) -> int:
     """Draw one detection on `img` (mutates in place). Returns the next
     available y for the kv-overlay column so the caller can chain.
@@ -103,12 +104,31 @@ def draw_detection_on(
             return kv_y + kh + 8
 
         # Else: original rectangle + label.
-        cv2.rectangle(img, (x1, y1), (x2, y2), _RECT_COLOR, bbox_thickness)
+        # 4.0.375 — optional padding (pdpx) grows the drawn box a few px beyond the
+        # tight detection so the defect is easier to see. pdpx is in the detection's
+        # native pixel space (matches xmin-pdpx … xmax+pdpx), scaled to this image and
+        # clamped to its bounds ("never larger than the image"). The 90%-area rule
+        # above still uses the UNPADDED box, so padding can't flip a box into kv-text.
+        if bbox_pad_px is None:
+            try:
+                from services.draw_filters import bbox_padding_px
+                bbox_pad_px = bbox_padding_px()
+            except Exception:
+                bbox_pad_px = 0
+        pad = int(bbox_pad_px or 0)
+        if pad > 0:
+            px = int(round(pad * sx))
+            py = int(round(pad * sy))
+            rx1 = max(0, x1 - px); ry1 = max(0, y1 - py)
+            rx2 = min(w - 1, x2 + px); ry2 = min(h - 1, y2 + py)
+        else:
+            rx1, ry1, rx2, ry2 = x1, y1, x2, y2
+        cv2.rectangle(img, (rx1, ry1), (rx2, ry2), _RECT_COLOR, bbox_thickness)
         label = f"{name} {confidence:.0%}"
         (lw, lh), _ = cv2.getTextSize(label, _FONT, fs, label_thickness)
-        cv2.rectangle(img, (x1, y1 - lh - 6),
-                      (x1 + lw + 6, y1), _RECT_COLOR, -1)
-        cv2.putText(img, label, (x1 + 3, y1 - 3),
+        cv2.rectangle(img, (rx1, ry1 - lh - 6),
+                      (rx1 + lw + 6, ry1), _RECT_COLOR, -1)
+        cv2.putText(img, label, (rx1 + 3, ry1 - 3),
                     _FONT, fs, _LABEL_FG, label_thickness, cv2.LINE_AA)
         return kv_y
     except Exception:

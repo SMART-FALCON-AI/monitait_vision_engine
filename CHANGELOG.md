@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.375] - 2026-08-31 — Detections: settable box padding (pdpx) so defects are easier to see
+
+Operator: the detection box hugs the defect too tightly — add a padding so the box is a few px larger. Added **Detection box padding (px)** in **Advanced → Timeline Configuration** ([status.html](vision_engine/static/status.html)), 0–200 px, applied with the Apply button (it changes the annotated image itself, so it's server-side config, not a per-browser toggle). The single-source-of-truth annotator `draw_detection_on` ([render.py](vision_engine/services/render.py)) now grows each drawn box by `pdpx` on every side — `xmin-pdpx … ymax+pdpx` in the detection's native pixel space, scaled to the render and **clamped to the image edges** (never larger than the frame). The value is read centrally via a cached `bbox_padding_px()` in [draw_filters.py](vision_engine/services/draw_filters.py) (invalidated on save), so **all** render paths — timeline grid, live streams, single-frame popup, on-disk `_DETECTED.jpg` — honor it uniformly. The 90%-area "kv-text instead of box" rule still uses the unpadded box, so padding can't flip a detection into text. Cache-busters → `?v=4.0.375`.
+
 ## [4.0.374] - 2026-08-31 — Fix: the red box "sometimes" vanished (WS reconnect reset the mark state)
 
 Operator: "sometimes it doesn't show the red box." Root cause: the live Dashboard timeline is pushed over a WebSocket that silently reconnects after any network blip (`onclose` → reconnect every 2 s). The server only learns the client's "mark ejected frames" state when the client **sends** it (on toggle or page-nav), and there was **no `onopen` handler** — so after every reconnect the server defaulted to mark=OFF and every auto-pushed frame lost the box until the operator next interacted. Added an `onopen` that re-announces `page|mark|thickness` on every (re)connect ([app-core.js](vision_engine/static/js/app-core.js)), so the box is restored immediately and stays on. Cache-busters → `?v=4.0.374`.

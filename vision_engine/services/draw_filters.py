@@ -38,8 +38,9 @@ def invalidate_cache() -> None:
     """Drop the audio_settings cache. Called by any endpoint that mutates
     service_config so the next draw decision picks up the new value
     immediately (no waiting for the TTL backstop)."""
-    global _cache_loaded_at
+    global _cache_loaded_at, _pad_loaded_at
     _cache_loaded_at = 0.0
+    _pad_loaded_at = 0.0   # 4.0.375 — also drop the bbox-padding cache
 
 
 def _load_audio_settings() -> Dict[str, Dict[str, Any]]:
@@ -69,6 +70,31 @@ def should_draw_class(name: str) -> bool:
         return False
     au = _load_audio_settings().get(name)
     return isinstance(au, dict) and au.get("show") is True
+
+
+# 4.0.375 — bbox drawing padding (pdpx). Extra pixels to grow each drawn box by,
+# from timeline_config.bbox_padding_px. Own small cache so we don't parse the config
+# blob on every detection; invalidated together with the audio_settings cache.
+_pad_cache_px: int = 0
+_pad_loaded_at: float = 0.0
+
+
+def bbox_padding_px() -> int:
+    """Extra pixels to expand each drawn detection box by on every side, from
+    timeline_config.bbox_padding_px (default 0, never negative). Cached for
+    _TTL_SEC; invalidate_cache() drops it so a Save takes effect at once."""
+    global _pad_cache_px, _pad_loaded_at
+    now = time.time()
+    if _pad_loaded_at and now - _pad_loaded_at < _TTL_SEC:
+        return _pad_cache_px
+    try:
+        import config as cfg
+        tl = cfg.load_data_file().get("timeline_config", {}) or {}
+        _pad_cache_px = max(0, int(tl.get("bbox_padding_px", 0) or 0))
+    except Exception as e:
+        logger.warning(f"draw_filters could not load bbox_padding_px: {e}")
+    _pad_loaded_at = now
+    return _pad_cache_px
 
 
 def min_confidence_for(name: str, default: float = 0.01) -> float:

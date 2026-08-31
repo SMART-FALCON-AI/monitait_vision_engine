@@ -6036,6 +6036,13 @@ async def update_timeline_config(request: Request):
         buffer_size = data.get('buffer_size', 20)  # Total frames to store
         image_rotation = data.get('image_rotation', 0)  # 0, 90, 180, 270
         procedures = data.get('procedures', getattr(request.app.state, 'timeline_config', {}).get('procedures', []))
+        # 4.0.375 — bbox drawing padding (pdpx): extra px to grow each drawn detection
+        # box by, so the defect is easier to see. Clamp to >=0; preserve prior on absence.
+        _prev_pad = (getattr(request.app.state, 'timeline_config', {}) or {}).get('bbox_padding_px', 0)
+        try:
+            bbox_padding_px = max(0, int(data.get('bbox_padding_px', _prev_pad) or 0))
+        except (TypeError, ValueError):
+            bbox_padding_px = 0
 
         # 3.21.22 — object_filters is deprecated. The Process tab's
         # audio_settings.<class>.show is the canonical source of truth for the
@@ -6059,12 +6066,21 @@ async def update_timeline_config(request: Request):
             'buffer_size': buffer_size,
             'image_rotation': image_rotation,
             'object_filters': preserved_object_filters,
-            'procedures': procedures
+            'procedures': procedures,
+            'bbox_padding_px': bbox_padding_px,
         }
 
         # 4.0.355 — persist ONLY timeline_config (per-key) so a concurrent
         # service_config save can't wipe these timeline settings / rules.
         save_config_key('timeline_config', request.app.state.timeline_config)
+
+        # 4.0.375 — bbox padding is read by services.draw_filters (cached); drop that
+        # cache so the new padding takes effect immediately instead of after the TTL.
+        try:
+            from services.draw_filters import invalidate_cache as _inv_draw
+            _inv_draw()
+        except Exception as _e:
+            logger.warning(f"draw_filters cache invalidate skipped: {_e}")
 
         # Clear timeline buffer so new frames with new quality settings are captured
         redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
