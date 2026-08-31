@@ -598,15 +598,17 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
 
         composite = np.vstack(padded_rows)
 
-        # 4.0.369/4.0.371 — "mark ejected frames" operator toggle. For every column
-        # an ejection rule fired on (should_eject set by _build_header_strip above),
-        # draw a red box around each individual frame cell in that column so the
-        # operator can see exactly which frame to zoom into. 4.0.371: box each
-        # camera-row cell separately, inset from the cell edges, so it reads as a
-        # picture-frame around one frame — not a full-height rail down the column.
-        if mark_ejects and thumb_width > 0:
+        # 4.0.378 — "mark ejected frames" is now a SERVER-SIDE setting in timeline_config
+        # (mark_ejects_enabled / mark_ejects_thickness), read in the SAME render pass that
+        # draws the red/green header strip. That's the fix for the box "appearing after a
+        # while": it no longer depends on a client WS/URL flag that a reconnect could drop
+        # — if the header strip is red, the box is drawn at that same moment, always. The
+        # legacy client flag (mark_ejects query/WS param) still forces it on for back-compat.
+        _tlc = getattr(request.app.state, 'timeline_config', {}) or {}
+        mark_on = bool(mark_ejects) or bool(_tlc.get('mark_ejects_enabled', False))
+        if mark_on and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
-            box_th = min(12, max(1, int(mark_thickness or 3)))
+            box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
             # 4.0.376 — box the EXACT camera frame that fired the ejection, not the whole
             # column. For each ejected column we re-run the rule per camera (dets carry
             # `_cam`); only the camera rows whose OWN detections trigger get a box. If no
@@ -6138,6 +6140,33 @@ async def update_timeline_config(request: Request):
             status_code=500,
             content={'success': False, 'error': str(e)}
         )
+
+
+@router.post("/api/timeline/mark_config")
+async def update_mark_config(request: Request):
+    """4.0.378 — persist the 'mark ejected frames' box setting (enabled + thickness) into
+    timeline_config so BOTH renderers draw the box SERVER-SIDE, in the same pass as the
+    red/green header strip. Instant (per-key save), survives WS reconnects, and is shared
+    by every viewer of this machine — replaces the fragile per-client WS/URL flag that made
+    the box 'appear after a while'."""
+    try:
+        data = await request.json()
+        tc = getattr(request.app.state, 'timeline_config', {}) or {}
+        if 'enabled' in data:
+            tc['mark_ejects_enabled'] = bool(data.get('enabled'))
+        if 'thickness' in data:
+            try:
+                tc['mark_ejects_thickness'] = min(12, max(1, int(data.get('thickness'))))
+            except (TypeError, ValueError):
+                tc['mark_ejects_thickness'] = 3
+        request.app.state.timeline_config = tc
+        save_config_key('timeline_config', tc)
+        return {'success': True,
+                'mark_ejects_enabled': tc.get('mark_ejects_enabled', False),
+                'mark_ejects_thickness': tc.get('mark_ejects_thickness', 3)}
+    except Exception as e:
+        logger.error(f"Error updating mark config: {e}")
+        return JSONResponse(status_code=500, content={'success': False, 'error': str(e)})
 
 
 @router.get("/api/recent_detections")

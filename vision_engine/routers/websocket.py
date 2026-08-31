@@ -272,13 +272,16 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
             padded_rows.append(row)
 
         composite = np.vstack(padded_rows)
-        # 4.0.369/4.0.371 — "mark ejected frames": red box around EACH individual
-        # frame cell of every ejected column (per camera row), inset from the cell
-        # edges so it reads as a picture-frame around one frame rather than a
-        # full-height rail down the column. Mirrors /timeline_image.
-        if mark_ejects and thumb_width > 0:
+        # 4.0.378 — "mark ejected frames" is a SERVER-SIDE timeline_config setting read in
+        # the same pass that draws the red/green header strip, so the box appears at the
+        # same moment the strip goes red — no dependency on a client WS flag that a
+        # reconnect could drop (the "box appears after a while" bug). Legacy client flag
+        # still forces it on. Mirrors /timeline_image.
+        _tlc = tl_config or {}
+        mark_on = bool(mark_ejects) or bool(_tlc.get('mark_ejects_enabled', False))
+        if mark_on and thumb_width > 0:
             comp_h, comp_w = composite.shape[:2]
-            box_th = min(12, max(1, int(mark_thickness or 3)))
+            box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
             # 4.0.376 — box the EXACT camera frame that fired the ejection (dets carry
             # `_cam`), not the whole column. Fall back to a full-column box only when no
             # single camera triggers (aggregate-count rule). Mirrors timeline.py.
