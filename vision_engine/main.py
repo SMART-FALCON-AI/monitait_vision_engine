@@ -756,6 +756,26 @@ async def _start_notifications_scheduler():
         logger.warning(f"notifications scheduler failed to start: {_e}")
 
 
+@app.on_event("startup")
+async def _start_support_command_listener():
+    # 4.0.384 — support-side !commands. Runs regardless of whether anyone has the
+    # Support tab open, so support can pull diagnostics from an unattended site.
+    try:
+        from routers.support import start_command_listener
+        start_command_listener(app)
+    except Exception as _e:
+        logger.warning(f"support command listener failed to start: {_e}")
+
+
+@app.on_event("shutdown")
+async def _stop_support_command_listener():
+    try:
+        from routers.support import stop_command_listener
+        stop_command_listener()
+    except Exception:
+        pass
+
+
 @app.on_event("shutdown")
 async def _stop_notifications_scheduler():
     try:

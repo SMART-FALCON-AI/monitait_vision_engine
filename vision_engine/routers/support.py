@@ -21,8 +21,36 @@ Configuration (all env, nothing hard-coded per site):
     MVE_SUPPORT_ROOM_ID      !abc:virasad.ir              (explicit room; skips resolve/create)
     MVE_SUPPORT_ROOM_ALIAS   #mve-hashtgerd:virasad.ir    (resolved, else CREATED with this alias)
     MVE_SUPPORT_INVITE       @ali:virasad.ir,@sara:...    (invited when the room is created)
-    MVE_SUPPORT_SITE         Hashtgerd                    (room name / label; defaults to hostname)
+    MVE_SUPPORT_SITE         Hashtgerd                    (human room NAME; defaults to hostname)
+    MVE_SUPPORT_FINGERPRINT  a3f9c21b4e77                 (clone guard; see below)
+    MVE_SUPPORT_ADMINS       @support:chat.virasad.ir     (may run !commands; default = _INVITE)
+    MVE_SUPPORT_COMMANDS     1                            (0 disables the listener entirely)
+    MVE_SUPPORT_POLL_SEC     15                           (command listener poll interval)
     MVE_SUPPORT_TIMEOUT      15                           (seconds, per HTTP call)
+
+Support-side commands (4.0.384). Rather than making the OPERATOR decide what to
+attach — they don't know what's useful, and attaching everything to every message
+is noise — support PULLS what it needs by typing a command in the room:
+
+    !help  !status  !diag  !cameras  !logs [n]  !version
+
+A background listener runs from MVE boot, independent of whether anyone has the
+Support tab open, so support can pull diagnostics from a site at 3am. It is
+strictly READ-ONLY and strictly ALLOW-LISTED: there is no shell, no arbitrary
+verb, and nothing that mutates state. Only senders in MVE_SUPPORT_ADMINS are
+obeyed, only in this site's own room, and each event is executed at most once.
+
+Identity is the machine's HARDWARE FINGERPRINT (services/machine_id.py), not a
+hand-typed name. With no MVE_SUPPORT_ROOM_ALIAS set, the room alias defaults to
+`#mve-<fingerprint>`, so a new site needs NO per-site configuration at all — it
+resolves or creates its own room on first use. MVE_SUPPORT_SITE stays a purely
+cosmetic display name for the room, safe to change at any time.
+
+Clone guard: set MVE_SUPPORT_FINGERPRINT to the fingerprint the credential was
+issued for. If the machine reports a different one — i.e. this disk image was
+cloned onto other hardware — support REFUSES to connect rather than authenticate
+as, and post into the room of, the machine it was cloned from. DMI/SMBIOS is read
+from the motherboard, so a disk clone always reports a different value.
 
 Design contract (do not weaken) — mirrors routers/knowledge.py:
   - Every call is timeout-bounded and returns a structured error instead of
@@ -46,7 +74,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+
+from services.machine_id import machine_fingerprint, fingerprint_sources
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -112,6 +142,34 @@ def _scrub(text: Any) -> str:
     if tok and len(tok) >= 8:
         out = out.replace(tok, "***")
     return out
+
+
+def _fingerprint() -> str:
+    try:
+        return machine_fingerprint()
+    except Exception as e:
+        logger.warning("[support] fingerprint unavailable: %s", e)
+        return ""
+
+
+def clone_mismatch() -> Optional[str]:
+    """Non-None when this credential was issued for DIFFERENT hardware.
+
+    Returns a human-readable reason. Guards the golden-image clone case: an image
+    copied to a new machine must not keep authenticating as the machine it came
+    from and posting into that site's room.
+    """
+    expected = _env("MVE_SUPPORT_FINGERPRINT")
+    if not expected:
+        return None                      # guard not armed for this site
+    actual = _fingerprint()
+    if not actual:
+        return None                      # cannot read hardware id — do not lock the site out
+    if actual != expected:
+        return ("support credential was issued for machine {} but this machine is {} "
+                "- refusing to use another site's identity (re-enroll this machine)"
+                .format(expected, actual))
+    return None
 
 
 def is_configured() -> bool:
@@ -243,9 +301,16 @@ def _resolve_room() -> str:
 
     alias = _env("MVE_SUPPORT_ROOM_ALIAS")
     if not alias:
-        raise SupportError(
-            "support chat has no room configured "
-            "(set MVE_SUPPORT_ROOM_ID or MVE_SUPPORT_ROOM_ALIAS)", 503)
+        # 4.0.382 - no per-site configuration needed: derive the alias from the
+        # hardware fingerprint. Stable for the life of the motherboard, unique
+        # across the fleet, and requires nothing typed by an operator.
+        fp = _fingerprint()
+        if not fp:
+            raise SupportError(
+                "support chat has no room configured and this machine has no readable "
+                "hardware id (set MVE_SUPPORT_ROOM_ID or MVE_SUPPORT_ROOM_ALIAS)", 503)
+        alias = "mve-" + fp
+        logger.info("[support] no room alias configured; using fingerprint alias #%s", alias)
     if not alias.startswith("#"):
         alias = "#" + alias
     if ":" not in alias[1:]:
@@ -296,6 +361,11 @@ def collect_diagnostics(app_state) -> Dict[str, Any]:
     never stop the operator's message from being sent."""
     d: Dict[str, Any] = {"site": _site_name()}
     try:
+        d["machine"] = _fingerprint()
+        d["machine_sources"] = fingerprint_sources()
+    except Exception:
+        pass
+    try:
         from routers.health import get_current_version
         d["version"] = get_current_version("")
     except Exception:
@@ -342,7 +412,7 @@ def collect_diagnostics(app_state) -> Dict[str, Any]:
 
 def _format_diagnostics(d: Dict[str, Any]) -> str:
     lines = ["— MVE diagnostics (" + str(d.get("site", "?")) + ") —"]
-    for key in ("version", "hostname", "camera_count", "current_state", "shipment",
+    for key in ("version", "machine", "hostname", "camera_count", "current_state", "shipment",
                 "pipeline", "cpu_percent", "mem_percent", "disk_percent"):
         if d.get(key) is not None:
             lines.append("{}: {}".format(key, d[key]))
@@ -354,14 +424,40 @@ def _format_diagnostics(d: Dict[str, Any]) -> str:
 
 # --- blocking workers (always run via asyncio.to_thread) --------------------
 
+def _guard_or_raise():
+    mismatch = clone_mismatch()
+    if mismatch:
+        raise SupportError(mismatch, 409)
+
+
 def _send_sync(text: str, diagnostics: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    _guard_or_raise()
     room = _resolve_room()
     body = text if not diagnostics else text + "\n\n" + _format_diagnostics(diagnostics)
+    # 4.0.384 - always identify the box in one short line. The operator used to
+    # have to tick "attach diagnostics", which asked them to judge something they
+    # cannot: they do not know what support needs, and attaching everything to
+    # every message buries the actual question. One header line, plus support
+    # pulling !diag on demand, is strictly better for both sides.
+    try:
+        _hdr = "[{} - v{}]".format(_site_name(), _short_version())
+        if _hdr not in body:
+            body = _hdr + "\n" + body
+    except Exception:
+        pass
     txn = "mve{}".format(int(time.time() * 1000))
     res = _call("PUT",
                 "/_matrix/client/v3/rooms/{}/send/m.room.message/{}".format(_quote(room), txn),
                 json_body={"msgtype": "m.text", "body": body})
     return {"ok": True, "event_id": res.get("event_id"), "room_id": room}
+
+
+def _short_version() -> str:
+    try:
+        from routers.health import get_current_version
+        return get_current_version("") or "?"
+    except Exception:
+        return "?"
 
 
 def _whoami_cached() -> Optional[str]:
@@ -379,6 +475,7 @@ def _whoami_cached() -> Optional[str]:
 
 
 def _messages_sync(limit: int) -> Dict[str, Any]:
+    _guard_or_raise()
     room = _resolve_room()
     me = _whoami_cached()
     res = _call("GET", "/_matrix/client/v3/rooms/{}/messages".format(_quote(room)),
@@ -387,20 +484,74 @@ def _messages_sync(limit: int) -> Dict[str, Any]:
     for ev in (res.get("chunk") or []):
         if ev.get("type") != "m.room.message":
             continue
-        body = (ev.get("content") or {}).get("body")
+        content = ev.get("content") or {}
+        body = content.get("body")
         if not body:
-            continue  # redacted, or a non-text message type
+            continue  # redacted event
         sender = ev.get("sender")
-        out.append({
+        msgtype = content.get("msgtype") or "m.text"
+        item = {
             "event_id": ev.get("event_id"),
             "sender": sender,
             "sender_name": (sender or "").lstrip("@").split(":", 1)[0],
             "mine": bool(me and sender == me),
             "body": body,
+            "msgtype": msgtype,
             "ts": ev.get("origin_server_ts"),
-        })
+        }
+        # 4.0.383 - attachments. For m.image/m.file/m.video/m.audio the `body` is only
+        # the FILENAME; the bytes live at an mxc:// URI that needs the bot's token to
+        # fetch. Hand the UI a same-origin proxy URL instead of the mxc, so the browser
+        # never sees a Matrix token and authenticated-media servers still work.
+        mxc = content.get("url")
+        if isinstance(mxc, str) and mxc.startswith("mxc://"):
+            item["mxc"] = mxc
+            item["media_url"] = "/api/support/media?mxc=" + requests.utils.quote(mxc, safe="")
+            info = content.get("info") or {}
+            item["mimetype"] = info.get("mimetype")
+            item["width"] = info.get("w")
+            item["height"] = info.get("h")
+            item["size"] = info.get("size")
+        out.append(item)
     out.reverse()  # dir=b returns newest-first; the UI renders oldest-first
     return {"ok": True, "room_id": room, "messages": out}
+
+
+def _media_sync(mxc: str):
+    """Fetch an mxc:// attachment as (bytes, content_type).
+
+    Synapse 1.100+ serves media through an AUTHENTICATED endpoint; the legacy
+    unauthenticated one is being retired. Try the authenticated route first and
+    fall back, so this keeps working on both old and new homeservers.
+    """
+    _guard_or_raise()
+    if not isinstance(mxc, str) or not mxc.startswith("mxc://"):
+        raise SupportError("not a media URI", 400)
+    rest = mxc[len("mxc://"):]
+    if "/" not in rest:
+        raise SupportError("malformed media URI", 400)
+    server, media_id = rest.split("/", 1)
+    if not server or not media_id or "/" in media_id or ".." in media_id:
+        raise SupportError("malformed media URI", 400)
+
+    paths = (
+        "/_matrix/client/v1/media/download/{}/{}".format(_quote(server), _quote(media_id)),
+        "/_matrix/media/v3/download/{}/{}".format(_quote(server), _quote(media_id)),
+    )
+    headers = {"Authorization": "Bearer " + _token()}
+    last = None
+    for path in paths:
+        try:
+            r = _SESSION.get(_homeserver() + path, headers=headers,
+                             timeout=_timeout(), stream=False)
+        except requests.RequestException as e:
+            last = "cannot reach the support server: " + str(e)
+            continue
+        if r.status_code == 200:
+            ctype = r.headers.get("Content-Type") or "application/octet-stream"
+            return r.content, ctype
+        last = "HTTP {}: {}".format(r.status_code, _err_of(r))
+    raise SupportError("could not fetch attachment ({})".format(last or "unknown"), 502)
 
 
 def _status_sync() -> Dict[str, Any]:
@@ -410,9 +561,16 @@ def _status_sync() -> Dict[str, Any]:
         "homeserver": _homeserver(),
         "site": _site_name(),
     }
+    info["fingerprint"] = _fingerprint()
     if not info["configured"]:
         info["connected"] = False
         info["error"] = "not configured"
+        return info
+    mismatch = clone_mismatch()
+    if mismatch:
+        info["connected"] = False
+        info["cloned"] = True
+        info["error"] = mismatch
         return info
     try:
         who = _call("GET", "/_matrix/client/v3/account/whoami")
@@ -428,6 +586,233 @@ def _status_sync() -> Dict[str, Any]:
         info["connected"] = False
         info["error"] = _scrub(e)
     return info
+
+
+# --- in-memory log ring (feeds !logs) ---------------------------------------
+# A logging handler is cheaper and far more portable than shelling out to
+# `docker logs`: it needs no docker socket, works identically on every site, and
+# cannot be used to read anything but MVE's own log records.
+
+_LOG_RING: List[str] = []
+_LOG_RING_MAX = 400
+_LOG_RING_LOCK = threading.Lock()
+
+
+class _RingHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            line = self.format(record)
+        except Exception:
+            return
+        with _LOG_RING_LOCK:
+            _LOG_RING.append(line)
+            if len(_LOG_RING) > _LOG_RING_MAX:
+                del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
+
+
+def install_log_ring():
+    """Attach the ring handler to the root logger. Idempotent."""
+    root = logging.getLogger()
+    for h in root.handlers:
+        if isinstance(h, _RingHandler):
+            return
+    h = _RingHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    h.setLevel(logging.INFO)
+    root.addHandler(h)
+    logger.info("[support] log ring installed (%d lines)", _LOG_RING_MAX)
+
+
+def _recent_logs(n: int) -> str:
+    with _LOG_RING_LOCK:
+        lines = _LOG_RING[-max(1, min(n, 200)):]
+    return "\n".join(lines) if lines else "(no log lines buffered yet)"
+
+
+# --- commands ---------------------------------------------------------------
+
+def _admins() -> List[str]:
+    """Who may run commands. Defaults to whoever was invited to the room."""
+    raw = _env("MVE_SUPPORT_ADMINS") or _env("MVE_SUPPORT_INVITE")
+    return [_full_user_id(u.strip()) for u in raw.split(",") if u.strip()]
+
+
+def _cmd_help(app_state) -> str:
+    return ("MVE support commands (read-only):\n"
+            "  !status        health summary\n"
+            "  !diag          full diagnostics snapshot\n"
+            "  !cameras       per-camera source / ok / gain\n"
+            "  !logs [n]      last n log lines (default 50, max 200)\n"
+            "  !version       MVE version + machine fingerprint\n"
+            "  !help          this list")
+
+
+def _cmd_status(app_state) -> str:
+    d = collect_diagnostics(app_state)
+    return ("status: site={} version={} machine={}\n"
+            "cameras={} state={} shipment={}\n"
+            "cpu={}% mem={}% disk={}%").format(
+        d.get("site"), d.get("version"), d.get("machine"),
+        d.get("camera_count"), d.get("current_state"), d.get("shipment"),
+        d.get("cpu_percent"), d.get("mem_percent"), d.get("disk_percent"))
+
+
+def _cmd_diag(app_state) -> str:
+    return _format_diagnostics(collect_diagnostics(app_state))
+
+
+def _cmd_cameras(app_state) -> str:
+    d = collect_diagnostics(app_state)
+    cams = d.get("cameras") or []
+    if not cams:
+        return "no cameras configured"
+    return "\n".join("cam {}: ok={} gain={} {}".format(
+        c.get("id"), c.get("ok"), c.get("gain"), c.get("source")) for c in cams)
+
+
+def _cmd_version(app_state) -> str:
+    d = collect_diagnostics(app_state)
+    return "version={} machine={} site={}\nsources={}".format(
+        d.get("version"), d.get("machine"), d.get("site"), d.get("machine_sources"))
+
+
+_COMMANDS = {
+    "help": _cmd_help,
+    "status": _cmd_status,
+    "diag": _cmd_diag,
+    "diagnostics": _cmd_diag,
+    "cameras": _cmd_cameras,
+    "version": _cmd_version,
+}
+
+
+def handle_command(body: str, app_state) -> Optional[str]:
+    """Map one '!verb args' line to its reply, or None if it is not a command."""
+    text = (body or "").strip()
+    if not text.startswith("!"):
+        return None
+    parts = text[1:].split()
+    if not parts:
+        return None
+    verb = parts[0].lower()
+    if verb in ("logs", "log"):
+        n = 50
+        if len(parts) > 1:
+            try:
+                n = int(parts[1])
+            except ValueError:
+                pass
+        return "last {} log lines:\n{}".format(min(max(n, 1), 200), _recent_logs(n))
+    fn = _COMMANDS.get(verb)
+    if not fn:
+        return "unknown command '!{}'. Try !help".format(verb)
+    try:
+        return fn(app_state)
+    except Exception as e:
+        return "command failed: {}".format(_scrub(e))
+
+
+# --- background command listener --------------------------------------------
+# Runs from MVE boot regardless of whether the Support tab is open, so support can
+# pull diagnostics from an unattended site. Independent of the UI poller.
+
+_CMD_STATE: Dict[str, Any] = {"since_ts": 0, "done": set(), "task": None}
+
+
+def _poll_sec() -> float:
+    try:
+        v = float(_env("MVE_SUPPORT_POLL_SEC", "15") or 15)
+        return v if v >= 5 else 15.0
+    except Exception:
+        return 15.0
+
+
+def _commands_enabled() -> bool:
+    return _env("MVE_SUPPORT_COMMANDS", "1") not in ("0", "false", "no", "off")
+
+
+def _scan_commands_sync(app_state) -> int:
+    """One pass: find unhandled commands from an allowed sender and answer them."""
+    if not is_configured() or clone_mismatch():
+        return 0
+    admins = set(_admins())
+    if not admins:
+        return 0
+    me = _whoami_cached()
+    room = _resolve_room()
+    res = _call("GET", "/_matrix/client/v3/rooms/{}/messages".format(_quote(room)),
+                params={"dir": "b", "limit": 20})
+    events = list(res.get("chunk") or [])
+    events.reverse()   # oldest-first so replies come out in order
+
+    # First pass ever: don't answer backlog, just mark the high-water mark.
+    if not _CMD_STATE["since_ts"]:
+        for ev in events:
+            _CMD_STATE["since_ts"] = max(_CMD_STATE["since_ts"], ev.get("origin_server_ts") or 0)
+        return 0
+
+    handled = 0
+    for ev in events:
+        ts = ev.get("origin_server_ts") or 0
+        eid = ev.get("event_id")
+        if ts <= _CMD_STATE["since_ts"] or eid in _CMD_STATE["done"]:
+            continue
+        _CMD_STATE["since_ts"] = max(_CMD_STATE["since_ts"], ts)
+        if ev.get("type") != "m.room.message":
+            continue
+        sender = ev.get("sender")
+        if sender == me or sender not in admins:
+            continue   # never obey ourselves; never obey a non-admin
+        body = (ev.get("content") or {}).get("body") or ""
+        reply = handle_command(body, app_state)
+        if reply is None:
+            continue
+        _CMD_STATE["done"].add(eid)
+        if len(_CMD_STATE["done"]) > 500:
+            _CMD_STATE["done"] = set(list(_CMD_STATE["done"])[-250:])
+        logger.info("[support] command from %s: %s", sender, body.strip()[:60])
+        try:
+            _send_sync(reply[:8000], None)
+            handled += 1
+        except SupportError as e:
+            logger.warning("[support] could not answer command: %s", e.message)
+    return handled
+
+
+async def _command_loop(app):
+    logger.info("[support] command listener started (every %.0fs)", _poll_sec())
+    while True:
+        try:
+            await asyncio.sleep(_poll_sec())
+            if not _commands_enabled():
+                continue
+            await asyncio.to_thread(_scan_commands_sync, app.state)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # A listener failure must never take the app down or stop the loop.
+            logger.warning("[support] command listener pass failed: %s", _scrub(e))
+
+
+def start_command_listener(app):
+    """Called from main.py's startup event. No-op when support isn't configured."""
+    if not _commands_enabled():
+        logger.info("[support] command listener disabled by env")
+        return
+    if not is_configured():
+        logger.info("[support] command listener not started (support not configured)")
+        return
+    if _CMD_STATE.get("task"):
+        return
+    install_log_ring()
+    _CMD_STATE["task"] = asyncio.create_task(_command_loop(app))
+
+
+def stop_command_listener():
+    task = _CMD_STATE.get("task")
+    if task:
+        task.cancel()
+        _CMD_STATE["task"] = None
 
 
 # --- routes -----------------------------------------------------------------
@@ -487,6 +872,23 @@ async def support_send(request: Request):
         return JSONResponse(content={"ok": False, "error": e.message}, status_code=e.status)
     except Exception as e:
         logger.warning("[support] send failed: %s", _scrub(e))
+        return JSONResponse(content={"ok": False, "error": _scrub(e)}, status_code=502)
+
+
+@router.get("/api/support/media")
+async def support_media(mxc: str = ""):
+    """Stream one attachment from the room, authenticated server-side.
+
+    The browser gets a same-origin URL and never handles a Matrix access token.
+    """
+    try:
+        data, ctype = await asyncio.to_thread(_media_sync, mxc)
+        return Response(content=data, media_type=ctype,
+                        headers={"Cache-Control": "private, max-age=3600"})
+    except SupportError as e:
+        return JSONResponse(content={"ok": False, "error": e.message}, status_code=e.status)
+    except Exception as e:
+        logger.warning("[support] media fetch failed: %s", _scrub(e))
         return JSONResponse(content={"ok": False, "error": _scrub(e)}, status_code=502)
 
 

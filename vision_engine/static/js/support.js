@@ -92,13 +92,49 @@ function _supportRenderMessage(m) {
     who.textContent = (mine ? (t('support_you') || 'You') : (m.sender_name || 'support')) +
         ' · ' + _supportTime(m.ts);
 
-    var body = document.createElement('div');
-    body.textContent = m.body;
-
     bubble.appendChild(who);
-    bubble.appendChild(body);
+    bubble.appendChild(_supportBody(m));
     row.appendChild(bubble);
     list.appendChild(row);
+}
+
+// 4.0.383 - an attachment's `body` is only its FILENAME; the bytes come from the
+// server-side proxy at m.media_url. Images render inline, anything else renders as
+// a labelled link, so a screenshot from support is actually visible in the tab.
+function _supportBody(m) {
+    var wrap = document.createElement('div');
+
+    if (m.media_url && (m.msgtype === 'm.image' ||
+                        (m.mimetype || '').indexOf('image/') === 0)) {
+        var img = document.createElement('img');
+        img.src = m.media_url;
+        img.alt = m.body || 'image';
+        img.loading = 'lazy';
+        img.style.cssText = 'display:block; max-width:100%; max-height:320px; ' +
+            'border-radius:6px; margin-top:2px; cursor:zoom-in; background:rgba(0,0,0,0.2);';
+        img.onclick = function () { window.open(m.media_url, '_blank'); };
+        // A broken fetch must still tell the operator SOMETHING was sent.
+        img.onerror = function () {
+            wrap.textContent = (m.body || 'image') + ' \u2014 ' +
+                (t('support_media_failed') || 'attachment could not be loaded');
+        };
+        wrap.appendChild(img);
+        return wrap;
+    }
+
+    if (m.media_url) {
+        var a = document.createElement('a');
+        a.href = m.media_url;
+        a.target = '_blank';
+        a.rel = 'noopener';
+        a.textContent = '\uD83D\uDCCE ' + (m.body || 'attachment');
+        a.style.cssText = 'color:inherit; text-decoration:underline;';
+        wrap.appendChild(a);
+        return wrap;
+    }
+
+    wrap.textContent = m.body;
+    return wrap;
 }
 
 function refreshSupportMessages(scroll) {
@@ -129,10 +165,9 @@ function sendSupportMessage() {
     var text = (input.value || '').trim();
     if (!text) return;
 
-    var payload = {
-        text: text,
-        include_diagnostics: !!(_supportEl('support-attach-diag') || {}).checked
-    };
+    // 4.0.384 - no operator decision here any more. Every message carries a one-line
+    // site header from the backend, and support pulls detail with !diag when it needs it.
+    var payload = { text: text };
     if (_supportPending) {           // transcript escalated from the AI tab
         payload.context = _supportPending;
         _supportPending = null;

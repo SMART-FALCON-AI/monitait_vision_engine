@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.384] - 2026-09-01 - Support pulls diagnostics with a command; the operator no longer decides
+
+Operator: *"instead of a checkbox by the operator, can the support send a command and get the log or other diagnostic data? because it is sending a lot of data and the user may not know to send or not send anyway."* Exactly right - the tickbox asked the operator to judge something they cannot. They do not know what support needs, and attaching a full snapshot to every message buries the actual question.
+
+**The checkbox is gone.** Every message now carries one short header - `[vteam12 - v4.0.384]` - so support always knows which box it is talking to, and nothing else.
+
+**Support pulls what it needs** by typing in the room: `!help`, `!status`, `!diag`, `!cameras`, `!logs [n]`, `!version`. A background listener starts at MVE boot and runs **regardless of whether anyone has the Support tab open**, so a site can be interrogated while unattended - the UI poller only ever ran while the tab was visible, which would have made commands useless at 3am.
+
+Safety, deliberately narrow: strictly **read-only**, strictly **allow-listed** verbs - there is no shell and no arbitrary command. Only senders in `MVE_SUPPORT_ADMINS` (default: whoever `MVE_SUPPORT_INVITE` named) are obeyed, only in this site's own room, never the bot itself, and each event executes at most once. On first start the listener records a high-water mark instead of replaying room backlog. A listener failure is caught and logged without stopping the loop or the app. `MVE_SUPPORT_COMMANDS=0` disables it entirely; `MVE_SUPPORT_POLL_SEC` tunes the interval (min 5s, default 15s).
+
+`!logs` reads an in-memory ring of MVE's own log records (400 lines) installed as a logging handler - no docker socket, identical on every site, and incapable of reading anything but MVE's own output.
+
+## [4.0.383] - 2026-09-01 - Fix: images from support showed as a filename instead of the picture
+
+Operator: *"the image are not shown."* Support sent `pvb.jpg` from Element and the tab rendered the literal text `pvb.jpg`. For an `m.image` event the `body` field IS just the filename - the bytes live at an `mxc://` URI that needs the bot's access token to fetch, and Synapse 1.100+ serves media only from an **authenticated** endpoint.
+
+`_messages_sync` now carries `msgtype`, the `mxc` URI, mimetype and dimensions through, and a new **`GET /api/support/media?mxc=...`** streams the attachment from the homeserver with the bot's token applied server-side - it tries the authenticated `/_matrix/client/v1/media/download/...` first and falls back to legacy `/_matrix/media/v3/...`, so it works on old and new homeservers. The browser only ever sees a same-origin URL, never a Matrix token. Images render inline (click to open full size), other attachments as a labelled link, and a fetch failure still shows the filename rather than a broken image. Cache-busters -> `?v=4.0.383`.
+
+## [4.0.382] - 2026-09-01 - Support identity is the machine's hardware fingerprint, not a typed name
+
+Operator: *"use machine hardware fingerprint as a unique id."* New [machine_id.py](vision_engine/services/machine_id.py) derives a stable id for the **physical box** from SMBIOS/DMI (`product_uuid` + `board_serial`, hashed to 12 hex chars), with MAC addresses as a last-resort fallback and an OEM-placeholder filter so junk values like `Default string` / `System Serial Number` are never mistaken for identity.
+
+Everything softer was rejected for a concrete reason: `/etc/machine-id` **inside the container** is the container's own and is regenerated on every `docker compose up`; the **host's** is copied verbatim by a disk clone, so every clone of the golden image would claim one identity; and a hand-typed site name is a manual step that gets skipped or duplicated. DMI is read from the motherboard, so a disk cloned onto different hardware reports a different value - which is exactly the property needed below. Verified readable from inside the privileged MVE container on vteam12.
+
+Two things follow from it:
+
+- **A new site needs no per-site configuration.** With no `MVE_SUPPORT_ROOM_ALIAS` set, the room alias defaults to `#mve-<fingerprint>` - unique across the fleet, stable for the life of the motherboard, and requiring nothing typed by an operator. `MVE_SUPPORT_SITE` becomes purely the room's cosmetic display name.
+- **Clone guard.** `MVE_SUPPORT_FINGERPRINT` records the machine a credential was issued for. If the running machine reports a different one, support refuses to connect (`409` on send/messages, `cloned:true` on status) instead of authenticating as - and posting into the room of - the machine the image was cloned from. Without this, cloning the golden image would silently route site B's support requests into site A's channel; the same class of bug as the vteam8 config-leak from vteam12. Unset = guard disarmed; unreadable hardware id = fail open, so a site can never be locked out of asking for help.
+
+Diagnostics now carry `machine` plus the raw `machine_sources` they were derived from.
+
 ## [4.0.381] - 2026-09-01 - Support tab: operators ask a question, a human answers, without leaving MVE
 
 New **Support** tab. The operator types a question and a real person answers, in MVE's own UI, in the operator's own language - no Matrix account, no login, no second app to install.
