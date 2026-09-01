@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.388] - 2026-09-01 - The ejected-frame outline is no longer optional
+
+Operator, for the third time: *"why you show the red strip on top and you didn't show the red box simultaneously? you can't just show the red strip on top while you didn't show the red box on frames."*
+
+4.0.386 made the strip and the outline **one decision**. They were still **two switches**. The header strip is drawn unconditionally, but the outline was gated behind `mark_ejects_enabled` - and on vteam12 that was `False`. Result: every column's strip red, not a single box. A red strip with no outline is worse than useless: it says "there is a defect in this column" and then refuses to say where.
+
+The gate is gone from both render paths. If a column's strip is red, its outline is drawn - same decision, same pass, same switch, no exceptions. The setting survives as **thickness only**, and the Advanced on/off checkbox is removed rather than left as a way to re-break it (the input is kept hidden and forced on so any script reading it keeps working).
+
+## [4.0.387] - 2026-09-01 - Centre the tab strip
+
+Follow-up to 4.0.386. Once all ten tabs fit, flex packed them hard against the brand on the left, leaving dead space between **Support** and the language selector. `justify-content: safe center` centres the group in its grid column - `safe` rather than plain `center` so that if a narrower window ever does overflow, it degrades to `flex-start` and the leading tabs stay reachable by scrolling instead of being pushed off the left edge where they cannot be scrolled back to.
+
 ## [4.0.386] - 2026-09-01 - The red outline is drawn from the SAME decision that reddens the strip
 
 Operator: *"why sometimes you draw a big red box and sometime frame red box? ... I need the frame red outline be inserted exactly when you decide to insert the red strip on top column."*

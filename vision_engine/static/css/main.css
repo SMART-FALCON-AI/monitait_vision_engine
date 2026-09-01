@@ -900,6 +900,13 @@ body {
     /* 4.0.386 - tightened so all 10 tabs fit without horizontal scrolling;
        Support was off the right edge and needed a scroll to reach. */
     gap: 4px;
+    /* 4.0.387 - centre the strip in its grid column. Now that all ten tabs fit,
+       flex packed them hard against the brand and left dead space before the
+       language selector. `safe center` so that if a narrower window DOES overflow,
+       it degrades to flex-start and the leading tabs stay reachable by scrolling
+       (plain `center` pushes them off the left edge, unscrollable). */
+    justify-content: center;
+    justify-content: safe center;
     border-bottom: none;
     margin-bottom: 0;
     background: rgba(30, 41, 59, 0.3);

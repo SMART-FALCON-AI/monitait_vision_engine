@@ -656,8 +656,13 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
         # — if the header strip is red, the box is drawn at that same moment, always. The
         # legacy client flag (mark_ejects query/WS param) still forces it on for back-compat.
         _tlc = getattr(request.app.state, 'timeline_config', {}) or {}
-        mark_on = bool(mark_ejects) or bool(_tlc.get('mark_ejects_enabled', False))
-        if mark_on and thumb_width > 0:
+        # 4.0.388 NO-GATE — the outline is NOT optional. The header strip is drawn
+        # unconditionally, so gating the box behind mark_ejects_enabled produced the
+        # exact thing the operator kept reporting: "you show the red strip on top and
+        # you didn't show the red box". A red strip with no box is a lie about where
+        # the defect is. Same decision (4.0.386) AND now the same switch: if the strip
+        # is red, the outline is drawn, always. The setting survives as thickness only.
+        if thumb_width > 0:
             box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
             draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th)
 
