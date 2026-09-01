@@ -26,7 +26,7 @@ from typing import Dict, Any, List
 
 import config as cfg
 from services.camera import (
-    CameraBuffer, DETECTED_CAMERAS, detect_video_devices,
+    CameraBuffer, DETECTED_CAMERAS, detect_video_devices, persisted_cfg_id_for_source,
     CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
     apply_camera_config_from_saved,
 )
@@ -818,7 +818,23 @@ class ArduinoSocket:
         _cam_cfgs = camera_configs or {}
         for idx, cam_path in enumerate(camera_paths, start=1):
             try:
-                cc = _cam_cfgs.get(str(idx), {})
+                # 4.0.380 CAM-ID-STABLE — settings must follow the PHYSICAL camera,
+                # not its position in the boot list. Look the config up under the ID
+                # this source was actually persisted with; only fall back to the
+                # positional index when there is no persisted identity (fresh install
+                # or auto-detect). Without this, a non-contiguous persisted ID set
+                # (left behind by a deleted or ghost camera) hands each camera the
+                # settings of a different one — or CameraBuffer defaults.
+                _cfg_id = persisted_cfg_id_for_source(cam_path)
+                if _cfg_id is not None and _cfg_id in _cam_cfgs:
+                    cc = _cam_cfgs.get(_cfg_id, {})
+                    if _cfg_id != str(idx):
+                        logger.info(
+                            f"Camera {idx}: using persisted config id {_cfg_id} "
+                            f"for {cam_path} (positional lookup would have read id {idx})"
+                        )
+                else:
+                    cc = _cam_cfgs.get(str(idx), {})
                 cam = CameraBuffer(
                     cam_path,
                     exposure=cc.get('exposure', 100),

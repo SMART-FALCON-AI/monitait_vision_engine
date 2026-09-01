@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.380] - 2026-09-01 — Fix: camera settings landed on the WRONG camera when config IDs weren't 1..N
+
+Operator (hashtgerd): *"the configs are not setting — I set all gain 10 / exposure 100 but they come back different."* Three of six cameras came back at `gain=100` after a reboot.
+
+Root cause, entirely in the boot path. USB cameras are keyed **positionally** — `services/watcher.py` does `for idx, cam_path in enumerate(camera_paths, start=1)` and then reads `_cam_cfgs.get(str(idx))` — while `_load_persisted_usb_sources_ordered()` ([camera.py](vision_engine/services/camera.py)) returns a **bare list of sources with the persisted IDs discarded**. Position and ID agree only while the persisted IDs happen to be a contiguous `1..N`. Hashtgerd's were `3,4,6,7,8,9` (two ghost entries had been removed — a dead raw `/dev/video14`, and a UVC **`-video-index1` metadata node** added as if it were a capture device), so every camera read the config of a *different* physical camera, and positions `1,2,5` — which matched no key at all — silently fell back to `CameraBuffer` defaults (`gain=100`). The wrong values were then auto-saved, leaving a config that *looked* consistent while three cameras had quietly lost their settings.
+
+Fix: `_load_persisted_usb_sources_ordered()` now records `resolved node → persisted config ID` in `_PERSISTED_CFG_ID_FOR_SOURCE` (rebuilt, never merged, on every scan) and exposes `persisted_cfg_id_for_source()`. The watcher looks the config up **under the ID the source was actually persisted with**, falling back to the positional index only when there is no persisted identity (fresh install / auto-detect), and logs whenever the two disagree. Cameras still get stable contiguous `1..N` runtime IDs — the settings now follow the *physical* camera instead of its list position.
+
+Also note: `POST /api/camera/{id}/config` ([cameras.py](vision_engine/routers/cameras.py)) 404s on an unknown ID, so a browser tab left open across a restart that renumbered cameras posts to IDs that no longer exist and Apply/Save appears to do nothing — hard-reload the Cameras tab after an MVE restart.
+
 ## [4.0.379] - 2026-08-31 — Mark ejected frames: repaint every client the instant the box setting changes
 
 Follow-up to 4.0.378. When the line is **stopped** (no new frames pushing over the WebSocket), toggling the box on/off only took effect "after a while" — each client repaints on the next frame, and there wasn't one. Now `POST /api/timeline/mark_config` ([timeline.py](vision_engine/routers/timeline.py)) bumps the timeline frame counter and publishes the same `ws:timeline_update` signal a new frame sends, so **every connected client rebuilds immediately** with the new box state regardless of whether the line is moving. Cache-busters → `?v=4.0.379`.

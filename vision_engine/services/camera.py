@@ -79,6 +79,31 @@ _V4L_BY_PATH_MEMO_LOCK = threading.Lock()
 # (the kiancord cam6 "breaks on every restart" case). Keyed: resolved node → by-path.
 _CONFIG_BYPATH_FOR_SOURCE: Dict[str, str] = {}
 
+# 4.0.380 CAM-ID-STABLE — persisted config ID per boot-resolved source. USB cameras
+# are keyed POSITIONALLY by the watcher (`enumerate(camera_paths, start=1)`), but the
+# persisted `cameras` dict is keyed by the operator's camera ID. Those two agree only
+# while the persisted IDs happen to be a contiguous 1..N. Once a middle entry is
+# removed — a deleted camera, or a ghost entry (a dead raw /dev/videoN, or a UVC
+# `-video-index1` METADATA node added as if it were a capture device) — every source
+# after the gap reads the config of a DIFFERENT physical camera, and any position with
+# no matching key silently falls back to CameraBuffer defaults (gain=100/exposure=100).
+# The wrong values are then auto-saved, so the config LOOKS consistent afterwards while
+# cameras quietly lost their settings (hashtgerd 2026-09-01: keys 3,4,6,7,8,9 → cams
+# 1,2,5 reset to gain 100). Keyed: resolved node → persisted config ID (str).
+_PERSISTED_CFG_ID_FOR_SOURCE: Dict[str, str] = {}
+
+
+def persisted_cfg_id_for_source(source: str):
+    """Config ID the given boot-resolved source was persisted under, or None.
+
+    None means "no persisted identity" (fresh install, auto-detect fallback, or a
+    camera added after boot) — callers fall back to the positional index.
+    """
+    try:
+        return _PERSISTED_CFG_ID_FOR_SOURCE.get(source)
+    except Exception:
+        return None
+
 # 4.0.353 USB-RESCUE — last-resort recovery for a camera whose video node is
 # ENUMERATED but WEDGED: the device shows in lsusb and the /dev/videoN + by-path
 # symlink exist, yet cv2.VideoCapture().open() never delivers a frame (a UVC
@@ -433,6 +458,7 @@ def _load_persisted_usb_sources_ordered() -> List[str]:
         except (ValueError, TypeError):
             ordered_ids = sorted(cams.keys())
         result = []
+        _PERSISTED_CFG_ID_FOR_SOURCE.clear()   # 4.0.380 CAM-ID-STABLE — rebuild, never merge
         for cid in ordered_ids:
             c = cams.get(cid) or {}
             ct = str(c.get("type") or "usb").lower()
@@ -487,11 +513,16 @@ def _load_persisted_usb_sources_ordered() -> List[str]:
                 # boot-resolved node so the CameraBuffer can re-resolve it directly
                 # on every reconnect (independent of the frame-gated memo).
                 _CONFIG_BYPATH_FOR_SOURCE[resolved] = src
+                # 4.0.380 CAM-ID-STABLE — carry the persisted ID through so the
+                # watcher can pair this source with ITS OWN saved settings
+                # instead of the settings at its list position.
+                _PERSISTED_CFG_ID_FOR_SOURCE[resolved] = str(cid)
                 result.append(resolved)
             elif src.startswith("/dev/video"):
                 if not os.path.exists(src):
                     logger.warning(f"persisted USB cam {cid}: raw path missing on disk, skip: {src}")
                     continue
+                _PERSISTED_CFG_ID_FOR_SOURCE[src] = str(cid)   # 4.0.380 CAM-ID-STABLE
                 result.append(src)
             # anything else (rtsp/http/basler/...) doesn't belong in the USB
             # boot list — it's added elsewhere.
