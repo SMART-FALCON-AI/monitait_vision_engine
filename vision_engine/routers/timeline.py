@@ -661,15 +661,18 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
         # So the gate is back, honestly: ticked -> every red column gets its outline in
         # the same pass as the strip; unticked -> no outline anywhere. What must never
         # happen again is the box silently OFF while the operator believes it is on.
-        # 4.0.389 ONE-GATE — the checkbox in Advanced (timeline_config.mark_ejects_enabled)
-        # is the ONLY thing that decides whether outlines are drawn. The legacy per-client
-        # flag (`?mark_ejects=1` / the WS `?mark=` param) is deliberately IGNORED: it was a
-        # second gate that arrived AFTER the first frames on every reconnect, so a column's
-        # strip went red while its outline was still missing, then the boxes popped in a
-        # moment later. That is the "you show the red strip on top first, then you draw the
-        # red boxes" the operator reported as confusing. With one server-side gate every
-        # client renders identically, and strip + outline land in the same pass, always.
-        if bool(_tlc.get('mark_ejects_enabled', False)) and thumb_width > 0:
+        # 4.0.390 — STRIP AND OUTLINE ARE THE SAME EVENT. _build_header_strip painted a
+        # column's strip red the instant evaluate_eject_from_detections() returned True
+        # and stored that on col['should_eject']; this runs immediately after, on the same
+        # composite, from that same stored value. No gate, no config lookup, no second
+        # decision — a red strip therefore ALWAYS carries its outline, in one JPEG.
+        #
+        # There used to be a gate (timeline_config.mark_ejects_enabled) and it is exactly
+        # what produced "you show the red strip without the red frames": POST
+        # /api/timeline_config rebuilds timeline_config from a fixed key list and DROPS
+        # mark_ejects_enabled, so every "Apply Timeline Configuration" silently deleted the
+        # key and the outlines stopped. A setting that erases itself is not a setting.
+        if thumb_width > 0:
             box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
             draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th)
 
@@ -6119,8 +6122,14 @@ async def update_timeline_config(request: Request):
         if 'object_filters' in data:
             logger.info("update_timeline_config: ignoring deprecated `object_filters` field in payload (use POST /api/audio_settings instead)")
 
-        # Store configuration in app state
-        request.app.state.timeline_config = {
+        # Store configuration in app state.
+        # 4.0.390 — start from the EXISTING config instead of a bare dict. This handler
+        # listed nine keys and rebuilt from scratch, so every "Apply Timeline
+        # Configuration" silently deleted every other key — mark_ejects_enabled and
+        # mark_ejects_thickness among them (they came back as None, not False). Any key
+        # this endpoint does not manage is now carried through untouched.
+        _merged = dict(_prev_tc)
+        _merged.update({
             'show_bounding_boxes': show_bounding_boxes,
             'camera_order': camera_order,
             'custom_camera_order': custom_camera_order,
@@ -6131,7 +6140,8 @@ async def update_timeline_config(request: Request):
             'object_filters': preserved_object_filters,
             'procedures': procedures,
             'bbox_padding_px': bbox_padding_px,
-        }
+        })
+        request.app.state.timeline_config = _merged
 
         # 4.0.355 — persist ONLY timeline_config (per-key) so a concurrent
         # service_config save can't wipe these timeline settings / rules.

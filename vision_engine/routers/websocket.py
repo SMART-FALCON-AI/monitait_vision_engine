@@ -287,15 +287,18 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
         # So the gate is back, honestly: ticked -> every red column gets its outline in
         # the same pass as the strip; unticked -> no outline anywhere. What must never
         # happen again is the box silently OFF while the operator believes it is on.
-        # 4.0.389 ONE-GATE — the checkbox in Advanced (timeline_config.mark_ejects_enabled)
-        # is the ONLY thing that decides whether outlines are drawn. The legacy per-client
-        # flag (`?mark_ejects=1` / the WS `?mark=` param) is deliberately IGNORED: it was a
-        # second gate that arrived AFTER the first frames on every reconnect, so a column's
-        # strip went red while its outline was still missing, then the boxes popped in a
-        # moment later. That is the "you show the red strip on top first, then you draw the
-        # red boxes" the operator reported as confusing. With one server-side gate every
-        # client renders identically, and strip + outline land in the same pass, always.
-        if bool(_tlc.get('mark_ejects_enabled', False)) and thumb_width > 0:
+        # 4.0.390 — STRIP AND OUTLINE ARE THE SAME EVENT. _build_header_strip painted a
+        # column's strip red the instant evaluate_eject_from_detections() returned True
+        # and stored that on col['should_eject']; this runs immediately after, on the same
+        # composite, from that same stored value. No gate, no config lookup, no second
+        # decision — a red strip therefore ALWAYS carries its outline, in one JPEG.
+        #
+        # There used to be a gate (timeline_config.mark_ejects_enabled) and it is exactly
+        # what produced "you show the red strip without the red frames": POST
+        # /api/timeline_config rebuilds timeline_config from a fixed key list and DROPS
+        # mark_ejects_enabled, so every "Apply Timeline Configuration" silently deleted the
+        # key and the outlines stopped. A setting that erases itself is not a setting.
+        if thumb_width > 0:
             box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
             draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th)
 

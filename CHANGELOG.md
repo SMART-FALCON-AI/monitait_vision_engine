@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.390] - 2026-09-01 - Red strip and red outline are the same event
+
+Operator: *"just check where you draw this red strip, and exactly at that time draw the red box for frames."*
+
+**Where the strip is drawn:** `_build_header_strip` - `evaluate_eject_from_detections()` returns `should_eject=True`, it is stored on `col['should_eject']`, and the column's strip is painted red. **The outline now happens from that same stored value, immediately after, on the same composite, with no gate and no config lookup.** A red strip always carries its outline, in one JPEG.
+
+**Why it kept failing:** the outline was behind `timeline_config.mark_ejects_enabled`, and that key **erases itself**. `POST /api/timeline_config` - the "Apply Timeline Configuration" button - rebuilt the whole config from a fixed nine-key dict, silently deleting every key it did not list, including `mark_ejects_enabled` and `mark_ejects_thickness`. That is why they read back as `None` rather than `False`: not turned off, *deleted*. Every time the operator applied any timeline setting, the outlines stopped, and no amount of fixing the save path helped because the save was never the problem.
+
+That handler now starts from the existing config and updates its own keys, so anything it does not manage survives - which also protects every future key from the same fate.
+
+Verified on vteam12: `mark_ejects_enabled` read `None` with 0 red pixels below the header strip; after the change the outline is drawn from the strip's own decision with no setting involved.
+
 ## [4.0.389] - 2026-09-01 - One gate for the ejected-frame outline; the checkbox is back
 
 Two corrections to 4.0.388, both mine.
