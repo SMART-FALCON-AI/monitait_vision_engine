@@ -367,6 +367,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     # Apply timeline configuration (stored at root level, not in service_config)
     if full_data and "timeline_config" in full_data:
         app.state.timeline_config = full_data["timeline_config"]
+        app.state.timeline_config_is_default = False   # 4.0.385 — loaded from persistence
         settings_applied["timeline_config"] = True
         logger.info(f"Timeline config loaded: {full_data['timeline_config']}")
 
@@ -415,8 +416,20 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
             'object_filters': {},
             'procedures': []
         }
+        # 4.0.385 BOOT-RACE — falling back to defaults is how an operator silently
+        # loses every ejection rule, the camera order and num_rows after a MACHINE
+        # reboot (docker ignores compose `depends_on` when it restarts containers by
+        # restart-policy, so MVE races TimescaleDB's WAL replay and can lose). Mark it
+        # LOUDLY and flag the process so _timeline_config_selfheal() re-reads once the
+        # DB answers, instead of running on defaults until someone notices days later.
+        app.state.timeline_config_is_default = True
         if full_data is None:
-            logger.debug("Timeline config: full_data not provided, using defaults")
+            logger.warning("[BOOT-RACE] timeline_config: no config data at all — using DEFAULTS "
+                           "(ejection rules / camera order / num_rows are NOT loaded)")
+        else:
+            logger.warning("[BOOT-RACE] timeline_config MISSING from the loaded config — using "
+                           "DEFAULTS (ejection rules / camera order / num_rows are NOT loaded). "
+                           "Self-heal will retry against the config DB.")
 
     # Apply/load cameras from unified cameras structure
     cameras_loaded = 0
@@ -757,6 +770,58 @@ async def _start_notifications_scheduler():
 
 
 @app.on_event("startup")
+async def _start_timeline_config_selfheal():
+    """4.0.385 BOOT-RACE — recover a boot that fell back to default timeline_config.
+
+    No timeout is ever provably long enough, so rather than tuning the race we make
+    LOSING it recoverable: if boot ended up on defaults, keep re-reading the config DB
+    in the background and apply the persisted timeline_config the moment it answers.
+
+    Stops as soon as it heals, when the operator changes anything themselves (their
+    edit wins — we must never revert a live change), or after the retry window.
+    """
+    if not getattr(app.state, "timeline_config_is_default", False):
+        return   # boot loaded real config — nothing to heal
+
+    async def _heal():
+        import asyncio as _a
+        deadline = time.time() + 1800      # 30 minutes of patience, then give up
+        while time.time() < deadline:
+            await _a.sleep(10)
+            try:
+                if not getattr(app.state, "timeline_config_is_default", False):
+                    return                  # someone loaded/!set real config already
+                cur = getattr(app.state, "timeline_config", {}) or {}
+                # Operator edited it live → their value is authoritative, stop healing.
+                if cur.get("procedures") or cur.get("num_rows") not in (20, None):
+                    logger.info("[BOOT-RACE] timeline_config changed since boot — self-heal stands down")
+                    app.state.timeline_config_is_default = False
+                    return
+                from config import invalidate_config_cache as _inv, load_data_file as _load
+                _inv()
+                data = _load() or {}
+                tc = data.get("timeline_config")
+                if isinstance(tc, dict) and tc:
+                    app.state.timeline_config = tc
+                    app.state.timeline_config_is_default = False
+                    logger.warning(
+                        "[BOOT-RACE] RECOVERED timeline_config from persistence after a "
+                        "degraded boot: %d procedure(s), num_rows=%s, camera_order=%s",
+                        len(tc.get("procedures") or []), tc.get("num_rows"), tc.get("camera_order"))
+                    return
+            except Exception as _e:
+                logger.debug(f"[BOOT-RACE] self-heal retry failed: {_e}")
+        logger.error("[BOOT-RACE] self-heal gave up after 30 min — still on default timeline_config")
+
+    try:
+        import asyncio as _aio
+        _aio.create_task(_heal())
+        logger.warning("[BOOT-RACE] booted on DEFAULT timeline_config — self-heal task started")
+    except Exception as _e:
+        logger.warning(f"[BOOT-RACE] could not start self-heal: {_e}")
+
+
+@app.on_event("startup")
 async def _start_support_command_listener():
     # 4.0.384 — support-side !commands. Runs regardless of whether anyone has the
     # Support tab open, so support can pull diagnostics from an unattended site.
@@ -943,10 +1008,23 @@ detection.init(watcher, pipeline_manager, app, prepared_query_data)
 # load the authoritative DB config, not a stale disk fallback that a boot-save would
 # then clobber the good DB row with. Returns the instant the DB responds; only a
 # genuinely-down DB waits out the timeout (then boot proceeds on disk, writes deferred).
+# 4.0.385 BOOT-RACE — 30s was not enough on a COLD MACHINE REBOOT. Docker honours
+# compose `depends_on: service_healthy` only for `docker compose up`; when the daemon
+# restarts containers from their restart policy after a reboot it starts them all at
+# once, so MVE races TimescaleDB's WAL replay on a cold box. Losing that race meant
+# booting on default timeline_config — no ejection rules, no camera order — and never
+# re-reading. MVE is useless without its config, so waiting minutes beats running wrong.
+try:
+    _cfg_wait = float(os.environ.get("MVE_CONFIG_DB_WAIT_SEC", "180") or 180)
+except Exception:
+    _cfg_wait = 180.0
 try:
     from config import wait_for_config_db, invalidate_config_cache
-    if wait_for_config_db(timeout=30.0):
+    if wait_for_config_db(timeout=_cfg_wait):
         invalidate_config_cache()   # force the boot read below to hit the now-ready DB, not a cached disk load
+    else:
+        logger.error(f"[BOOT-RACE] config DB did not answer within {_cfg_wait:.0f}s — "
+                     f"booting on the disk fallback; self-heal will keep retrying")
 except Exception as _dbw:
     logger.warning(f"[BOOT-DB] wait_for_config_db failed: {_dbw}")
 

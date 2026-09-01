@@ -888,6 +888,30 @@ def get_all_cameras() -> List[str]:
 DETECTED_CAMERAS = get_all_cameras()
 
 
+def _bypath_for_node(node: str):
+    """Find the /dev/v4l/by-path/… symlink that resolves to `node`, or None.
+
+    Filesystem-only and frame-independent: unlike the by-path memo it works for a
+    camera that has never delivered a single frame, which is exactly the camera that
+    most needs a stable path recorded.
+    """
+    try:
+        base = "/dev/v4l/by-path"
+        target = os.path.realpath(node)
+        for name in os.listdir(base):
+            if not name.endswith("-video-index0"):
+                continue          # index1+ are metadata siblings, never capture nodes
+            link = os.path.join(base, name)
+            try:
+                if os.path.realpath(link) == target:
+                    return link
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
     """Extract camera configuration for saving."""
     if cam is None:
@@ -940,6 +964,15 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
             if isinstance(_src_to_save, str) and _src_to_save.startswith('/dev/video'):
                 with _V4L_BY_PATH_MEMO_LOCK:
                     _bp = _V4L_BY_PATH_MEMO.get(_src_to_save)
+                if not (_bp and os.path.exists(_bp)):
+                    # 4.0.385 — the memo is only learned AFTER a node delivers a frame, so a
+                    # camera that never streams (a flapping USB port, a wedged UVC device)
+                    # had its RAW /dev/videoN frozen into persistence — and a raw path cannot
+                    # survive re-enumeration, so it could never recover and never earn a memo
+                    # entry either. A self-perpetuating trap; it is how kiancord's cam6 ended
+                    # up stored as /dev/video10. Resolve the by-path straight off the
+                    # filesystem instead, which works with zero frames delivered.
+                    _bp = _bypath_for_node(_src_to_save)
                 if _bp and os.path.exists(_bp):
                     _src_to_save = _bp
         except Exception:

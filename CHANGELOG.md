@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.385] - 2026-09-01 - Fix the real cause of "config disappears on reboot" (kiancord)
+
+Operator: *"again the configured data are missing again!!!!"* on kiancord. **Nothing was ever lost.** The `TB` shipment-close procedure, `num_rows: 34`, `camera_order: custom (2,1,3,6,5,4)` and `image_rotation: 270` were all sitting in the DB under the `timeline_config` key, untouched since 2026-08-28 - while the running process served the hardcoded defaults from `main.py`. A `docker restart` restored everything instantly, which is the whole story.
+
+Root cause, and why every previous fix missed it: **Docker honours compose `depends_on: condition: service_healthy` only for `docker compose up`.** When the daemon restarts containers from their restart policy after a **machine reboot**, it starts them all at once and ignores `depends_on` entirely. kiancord's evidence: machine up at 18:34:25, MVE container up 18 seconds later, alongside TimescaleDB. MVE waited a hardcoded **30s** for the config DB, TimescaleDB was still replaying WAL on a cold box, MVE gave up, fell back - and then **ran on defaults forever, because nothing ever re-read the config**. This only reproduces on a cold machine reboot; 4.0.352 was verified with `docker restart` against a warm database, so it looked correct.
+
+Three changes, and the third is the one that actually matters:
+
+- The boot DB wait is now `MVE_CONFIG_DB_WAIT_SEC`, **default 180s** (was hardcoded 30). MVE is useless without its config; waiting minutes beats running wrong.
+- Falling back to default `timeline_config` now logs at **WARNING/ERROR** naming exactly what was not loaded (ejection rules, camera order, num_rows), instead of passing silently.
+- **Self-heal.** No timeout is ever provably long enough, so rather than tuning the race, losing it is now recoverable: a degraded boot starts a background task that re-reads the config DB every 10s for 30 minutes and applies the persisted `timeline_config` the moment it answers. It stands down immediately if the operator changes anything themselves - a live edit always wins and is never reverted.
+
+Also hardened the by-path save path ([camera.py](vision_engine/services/camera.py)). The raw-to-by-path normaliser only consulted a memo learned **after** a node delivers a frame, so a camera that never streams had its raw `/dev/videoN` frozen into persistence - and a raw path cannot survive re-enumeration, so it could never recover and never earn a memo entry either. A self-perpetuating trap, and how kiancord's cam6 came to be stored as `/dev/video10`. It now falls back to resolving the by-path directly off the filesystem, which works with zero frames delivered.
+
 ## [4.0.384] - 2026-09-01 - Support pulls diagnostics with a command; the operator no longer decides
 
 Operator: *"instead of a checkbox by the operator, can the support send a command and get the log or other diagnostic data? because it is sending a lot of data and the user may not know to send or not send anyway."* Exactly right - the tickbox asked the operator to judge something they cannot. They do not know what support needs, and attaching a full snapshot to every message buries the actual question.
