@@ -19,7 +19,7 @@
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.379"></script>
+        <script src="/static/js/i18n.js?v=4.0.381"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: start; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 12px;">
@@ -43,6 +43,7 @@
                     <button class="tab-button" onclick="switchTab('infrastructure')">🔮 <span data-i18n="tab_inference">Inference</span></button>
                     <button class="tab-button" onclick="switchTab('process')">⚙️ <span data-i18n="tab_process">Process</span></button>
                     <button class="tab-button" onclick="switchTab('advanced')">⚡ <span data-i18n="tab_advanced">Advanced</span></button>
+                    <button class="tab-button" data-tab-name="support" onclick="switchTab('support')">🛟 <span data-i18n="tab_support">Support</span></button>
                 </div>
 
                 <!-- RIGHT: Language + Save -->
@@ -1033,7 +1034,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.379"
+                <iframe src="/static/knowledge.html?v=4.0.381"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -1493,9 +1494,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.379"></script>
+            <script src="/static/js/iframes.js?v=4.0.381"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.379"></script>
+            <script src="/static/js/charts.js?v=4.0.381"></script>
             <script>
             /* 4.0.360 — Machines (Watcher Jet) chart. Self-contained; uses global Chart
                (chart.umd, loaded just above). On-demand only (load + tab-open + manual
@@ -1662,6 +1663,7 @@
                              Clear History control; the chat and its restored history render in
                              the pane below (loadChatHistory reads localStorage on tab-open). -->
                         <div style="display:flex; justify-content:flex-end; align-items:center; padding:5px 12px; background:rgba(30,41,59,0.5); border-bottom:1px solid rgba(51,65,85,0.6);">
+                            <button onclick="escalateToSupport()" title="Send this conversation to a human on the support team" data-i18n-prefix="🛟 " data-i18n="support_ask_human" style="padding:3px 10px; margin-right:8px; background:rgba(59,130,246,0.18); border:1px solid rgba(59,130,246,0.45); border-radius:6px; color:var(--text-primary); cursor:pointer; font-size:11px;">🛟 Ask a human</button>
                             <button onclick="clearChatHistory()" title="Clear the saved chat history stored in this browser" data-i18n-prefix="🗑️ " data-i18n="clear_history" style="padding:3px 10px; background:rgba(148,163,184,0.15); border:1px solid rgba(148,163,184,0.3); border-radius:6px; color:var(--text-secondary); cursor:pointer; font-size:11px;">🗑️ Clear History</button>
                         </div>
 
@@ -2034,6 +2036,51 @@
             <!-- End Process Tab -->
 
             <!-- Advanced Tab -->
+            <!-- 4.0.381 — Support: MVE's own chat UI relayed to a Matrix room by
+                 routers/support.py. The operator never logs in to Matrix; a human
+                 answers from Element on the configured homeserver. -->
+            <div id="tab-support" class="tab-content">
+                <div style="height: calc(100vh - 150px); display:flex; flex-direction:column; gap:10px;">
+                    <div id="support-setup" style="display:none; padding:16px; background:rgba(30,41,59,0.5); border:1px solid rgba(51,65,85,0.6); border-radius:8px; color:var(--text-secondary); font-size:13px; line-height:1.7;">
+                        <div style="font-weight:600; color:var(--text-primary); margin-bottom:8px;" data-i18n="support_not_configured">Support chat is not configured on this machine.</div>
+                        <div data-i18n="support_setup_hint">Set the support environment variables and restart MVE:</div>
+                        <pre style="margin:10px 0 0 0; padding:10px; background:rgba(15,23,42,0.6); border-radius:6px; overflow-x:auto; font-size:12px;">MVE_SUPPORT_HOMESERVER=https://chat.virasad.ir
+MVE_SUPPORT_USER=@mve-&lt;site&gt;:virasad.ir
+MVE_SUPPORT_PASSWORD=...
+MVE_SUPPORT_ROOM_ALIAS=#mve-&lt;site&gt;:virasad.ir
+MVE_SUPPORT_INVITE=@support1:virasad.ir,@support2:virasad.ir
+MVE_SUPPORT_SITE=&lt;site&gt;</pre>
+                    </div>
+
+                    <div id="support-chat-wrap" style="display:none; flex:1; min-height:0; flex-direction:column; background:rgba(30,41,59,0.4); border:1px solid rgba(51,65,85,0.6); border-radius:8px; overflow:hidden;">
+                        <div style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:rgba(30,41,59,0.6); border-bottom:1px solid rgba(51,65,85,0.6);">
+                            <span id="support-conn-dot" style="width:9px; height:9px; border-radius:50%; background:#ef4444; flex-shrink:0;"></span>
+                            <span id="support-conn-label" style="font-size:12px; color:var(--text-secondary);"></span>
+                            <span style="flex:1;"></span>
+                            <button onclick="refreshSupportStatus().then(function(){return refreshSupportMessages(true);})" style="padding:3px 10px; background:rgba(148,163,184,0.15); border:1px solid rgba(148,163,184,0.3); border-radius:6px; color:var(--text-secondary); cursor:pointer; font-size:11px;" data-i18n-prefix="🔄 " data-i18n="refresh">🔄 Refresh</button>
+                        </div>
+
+                        <div id="support-banner" style="display:none; margin:8px 12px 0 12px; padding:8px 10px; background:rgba(15,23,42,0.6); border-radius:6px; font-size:12px; color:var(--text-primary);"></div>
+                        <div id="support-context-note" style="display:none; margin:8px 12px 0 12px; padding:8px 10px; background:rgba(59,130,246,0.15); border-left:4px solid var(--primary-color); border-radius:6px; font-size:12px; color:var(--text-primary);" data-i18n="support_context_note">Your AI Assistant conversation will be attached to the next message you send.</div>
+
+                        <div id="support-messages" style="flex:1; min-height:0; overflow-y:auto; padding:16px; background:rgba(15,23,42,0.3);">
+                            <div id="support-empty" style="padding:15px; background:rgba(30,41,59,0.6); border-radius:8px; border-left:4px solid var(--primary-color); font-size:13px; color:var(--text-primary);" data-i18n="support_empty">No messages yet. Describe your problem below and our support team will reply here.</div>
+                        </div>
+
+                        <div style="padding:12px 15px; background:rgba(30,41,59,0.6); border-top:1px solid rgba(51,65,85,0.6);">
+                            <label style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-secondary); margin-bottom:8px; cursor:pointer;">
+                                <input type="checkbox" id="support-attach-diag" checked style="cursor:pointer;">
+                                <span data-i18n="support_attach_diag">Attach diagnostics (version, cameras, state, resources)</span>
+                            </label>
+                            <div style="display:flex; gap:8px; align-items:stretch;">
+                                <input type="text" id="support-input" class="control-input" placeholder="Describe your problem..." data-i18n-placeholder="support_input_ph" style="flex:1; margin:0; font-size:14px; min-width:0; width:100%;" onkeypress="if(event.key === 'Enter') sendSupportMessage()">
+                                <button id="support-send-btn" class="control-button" onclick="sendSupportMessage()" style="background: var(--primary-color); padding:8px 12px; font-size:20px; white-space:nowrap; width:50px; flex-shrink:0;">🚀</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div id="tab-advanced" class="tab-content">
                 <!-- Timeline Configuration Section -->
                 <div class="control-section">
@@ -2644,7 +2691,7 @@
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.379">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.381">
         <div id="annotate-modal" dir="ltr" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center; direction:ltr;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2685,10 +2732,11 @@
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.379"></script>
-        <script src="/static/js/app-core.js?v=4.0.379"></script>
+        <script src="/static/js/audio.js?v=4.0.381"></script>
+        <script src="/static/js/app-core.js?v=4.0.381"></script>
+        <script src="/static/js/support.js?v=4.0.381"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.379"></script>
-        <script src="/static/js/annotate.js?v=4.0.379"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.381"></script>
+        <script src="/static/js/annotate.js?v=4.0.381"></script>
     </body>
 </html>

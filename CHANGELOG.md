@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.381] - 2026-09-01 - Support tab: operators ask a question, a human answers, without leaving MVE
+
+New **Support** tab. The operator types a question and a real person answers, in MVE's own UI, in the operator's own language - no Matrix account, no login, no second app to install.
+
+Backed by Matrix ([support.py](vision_engine/routers/support.py)). Support staff answer from ordinary Element on the configured homeserver, so they get real history, notifications and multi-agent handover for free; MVE never embeds an Element iframe. Each site authenticates as **one bot account** and all of its conversation lives in **one room**, so the site *is* the identity - the operator never sees a credential.
+
+- `GET /api/support/status` - configured / connected / room, safe to poll, never 5xx.
+- `GET /api/support/messages` - normalised timeline, oldest-first, `mine` flag per message.
+- `POST /api/support/send` - `{text, include_diagnostics?, context?}`.
+- `GET /api/support/diagnostics` - preview exactly what gets attached.
+
+**Diagnostics attach automatically** (checkbox, on by default): version, hostname, per-camera source/ok/gain, current state, shipment, pipeline, CPU/mem/disk. That is most of what a support call spends its first ten minutes extracting by hand.
+
+**Escalation from the AI Assistant**: an "Ask a human" button grabs the visible AI transcript, switches to Support, and stages it as context so the operator's next message arrives with everything the AI already tried. The AI answers first; a human picks up where it gave up.
+
+Configuration is entirely env-driven - `MVE_SUPPORT_HOMESERVER` (default `https://chat.virasad.ir`), `MVE_SUPPORT_USER`/`_PASSWORD` or `_TOKEN`, `_ROOM_ID` or `_ROOM_ALIAS`, `_INVITE`, `_SITE`, `_TIMEOUT`. With nothing set the tab renders a setup panel and MVE is otherwise untouched; the room is resolved from its alias, or created (inviting `_INVITE`) on first use. Follows the `knowledge.py` contract: every call timeout-bounded, blocking `requests` off the event loop via `asyncio.to_thread`, structured errors instead of raises, and secrets scrubbed from every string that can reach a client or the log. Polling runs **only while the tab is open**. UI strings translated across all 9 languages. Cache-busters -> `?v=4.0.381`.
+
 ## [4.0.380] - 2026-09-01 — Fix: camera settings landed on the WRONG camera when config IDs weren't 1..N
 
 Operator (hashtgerd): *"the configs are not setting — I set all gain 10 / exposure 100 but they come back different."* Three of six cameras came back at `gain=100` after a reboot.

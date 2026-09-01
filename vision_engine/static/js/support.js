@@ -1,0 +1,221 @@
+// ===== Support chat (4.0.381) =====
+// Operator-facing support channel. MVE renders this chat itself and relays through
+// /api/support/** to a Matrix room; the operator never logs in to anything. A human
+// answers from Element on the configured homeserver.
+//
+// Contract: the Support tab must NEVER throw into the rest of the dashboard. Every
+// failure renders as an inline banner and the poller keeps going.
+
+var _supportPollTimer = null;
+var _supportSeen = {};          // event_id -> true, so a poll never double-renders
+var _supportRoomReady = false;
+var _supportPending = null;     // transcript carried in from the AI tab, if any
+
+function _supportEl(id) { return document.getElementById(id); }
+
+function _supportEsc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _supportTime(ts) {
+    try { return new Date(ts).toLocaleString(); } catch (e) { return ''; }
+}
+
+function _supportBanner(kind, text) {
+    var box = _supportEl('support-banner');
+    if (!box) return;
+    if (!text) { box.style.display = 'none'; return; }
+    var color = kind === 'error' ? '#ef4444' : (kind === 'warn' ? '#f59e0b' : '#22c55e');
+    box.style.display = 'block';
+    box.style.borderLeft = '4px solid ' + color;
+    box.innerHTML = _supportEsc(text);
+}
+
+// --- status -----------------------------------------------------------------
+
+function refreshSupportStatus() {
+    return fetch('/api/support/status')
+        .then(function (r) { return r.json(); })
+        .then(function (s) {
+            var dot = _supportEl('support-conn-dot');
+            var label = _supportEl('support-conn-label');
+            var setup = _supportEl('support-setup');
+            var chat = _supportEl('support-chat-wrap');
+            _supportRoomReady = !!(s && s.connected);
+
+            if (dot) dot.style.background = _supportRoomReady ? '#22c55e' : '#ef4444';
+            if (label) {
+                label.textContent = _supportRoomReady
+                    ? ((s.site || '') + ' · ' + (s.user_id || ''))
+                    : (t('support_offline') || 'Not connected');
+            }
+            // Not configured at all → show the setup hint instead of a broken chat.
+            if (setup) setup.style.display = (s && s.configured) ? 'none' : 'block';
+            if (chat) chat.style.display = (s && s.configured) ? 'flex' : 'none';
+
+            if (s && s.configured && !s.connected) {
+                _supportBanner('error', (t('support_conn_failed') || 'Cannot reach support') +
+                    ': ' + (s.error || ''));
+            } else {
+                _supportBanner(null, null);
+            }
+            return s;
+        })
+        .catch(function (e) {
+            _supportBanner('error', 'status: ' + e);
+        });
+}
+
+// --- messages ---------------------------------------------------------------
+
+function _supportRenderMessage(m) {
+    var list = _supportEl('support-messages');
+    if (!list || _supportSeen[m.event_id]) return;
+    _supportSeen[m.event_id] = true;
+
+    var mine = !!m.mine;
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex; margin-bottom:10px; ' +
+        (mine ? 'justify-content:flex-end;' : 'justify-content:flex-start;');
+
+    var bubble = document.createElement('div');
+    bubble.style.cssText = 'max-width:78%; padding:9px 12px; border-radius:10px; ' +
+        'font-size:13px; line-height:1.5; white-space:pre-wrap; word-break:break-word; ' +
+        (mine
+            ? 'background:var(--primary-color); color:#fff; border-bottom-right-radius:2px;'
+            : 'background:rgba(51,65,85,0.75); color:var(--text-primary); border-bottom-left-radius:2px;');
+
+    var who = document.createElement('div');
+    who.style.cssText = 'font-size:10px; opacity:0.7; margin-bottom:3px;';
+    who.textContent = (mine ? (t('support_you') || 'You') : (m.sender_name || 'support')) +
+        ' · ' + _supportTime(m.ts);
+
+    var body = document.createElement('div');
+    body.textContent = m.body;
+
+    bubble.appendChild(who);
+    bubble.appendChild(body);
+    row.appendChild(bubble);
+    list.appendChild(row);
+}
+
+function refreshSupportMessages(scroll) {
+    if (!_supportRoomReady) return Promise.resolve();
+    return fetch('/api/support/messages?limit=60')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) {
+                if (d && d.error) _supportBanner('error', d.error);
+                return;
+            }
+            var list = _supportEl('support-messages');
+            var atBottom = !list || (list.scrollHeight - list.scrollTop - list.clientHeight < 60);
+            var empty = _supportEl('support-empty');
+            if (empty) empty.style.display = (d.messages && d.messages.length) ? 'none' : 'block';
+            (d.messages || []).forEach(_supportRenderMessage);
+            if (list && (scroll || atBottom)) list.scrollTop = list.scrollHeight;
+        })
+        .catch(function (e) { _supportBanner('error', 'messages: ' + e); });
+}
+
+// --- sending ----------------------------------------------------------------
+
+function sendSupportMessage() {
+    var input = _supportEl('support-input');
+    var btn = _supportEl('support-send-btn');
+    if (!input) return;
+    var text = (input.value || '').trim();
+    if (!text) return;
+
+    var payload = {
+        text: text,
+        include_diagnostics: !!(_supportEl('support-attach-diag') || {}).checked
+    };
+    if (_supportPending) {           // transcript escalated from the AI tab
+        payload.context = _supportPending;
+        _supportPending = null;
+        var note = _supportEl('support-context-note');
+        if (note) note.style.display = 'none';
+    }
+
+    input.value = '';
+    if (btn) btn.disabled = true;
+    _supportBanner(null, null);
+
+    fetch('/api/support/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (!d || !d.ok) {
+                _supportBanner('error', (t('support_send_failed') || 'Could not send') +
+                    ': ' + ((d && d.error) || '?'));
+                input.value = text;   // give the operator their text back
+                return;
+            }
+            return refreshSupportMessages(true);
+        })
+        .catch(function (e) {
+            _supportBanner('error', 'send: ' + e);
+            input.value = text;
+        })
+        .then(function () { if (btn) btn.disabled = false; });
+}
+
+// --- escalation from the AI tab ---------------------------------------------
+
+// Called by the "Ask a human about this" button in the AI Assistant. Grabs the
+// visible AI conversation, switches to Support, and stages it as context so the
+// operator's next message arrives WITH what the AI already tried.
+function escalateToSupport() {
+    var lines = [];
+    try {
+        var pane = document.getElementById('ai-chat-messages');
+        if (pane) {
+            pane.querySelectorAll('.chat-message, .message, div[data-role]').forEach(function (n) {
+                var txt = (n.innerText || '').trim();
+                if (txt) lines.push(txt);
+            });
+            if (!lines.length) {
+                var whole = (pane.innerText || '').trim();
+                if (whole) lines.push(whole);
+            }
+        }
+    } catch (e) { /* an unreadable transcript must not block escalation */ }
+
+    var transcript = lines.join('\n').slice(-3000);
+    _supportPending = transcript
+        ? ((t('support_from_ai') || '[Escalated from AI Assistant]') + '\n' + transcript)
+        : null;
+
+    var btn = document.querySelector('.tab-button[data-tab-name="support"]');
+    if (btn) { btn.click(); } else if (typeof switchTab === 'function') {
+        try { switchTab('support'); } catch (e) { /* no event object — ignore */ }
+    }
+
+    var note = _supportEl('support-context-note');
+    if (note) note.style.display = _supportPending ? 'block' : 'none';
+    var input = _supportEl('support-input');
+    if (input) setTimeout(function () { input.focus(); }, 150);
+}
+
+// --- lifecycle --------------------------------------------------------------
+
+function openSupportTab() {
+    refreshSupportStatus().then(function () { refreshSupportMessages(true); });
+    if (_supportPollTimer) clearInterval(_supportPollTimer);
+    // Poll only while the tab is open — no background traffic to the homeserver.
+    _supportPollTimer = setInterval(function () {
+        var pane = document.getElementById('tab-support');
+        if (!pane || !pane.classList.contains('active')) {
+            clearInterval(_supportPollTimer);
+            _supportPollTimer = null;
+            return;
+        }
+        refreshSupportMessages(false);
+    }, 5000);
+}

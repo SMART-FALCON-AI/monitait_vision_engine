@@ -1693,6 +1693,15 @@ function switchTab(tabName) {
         setTimeout(() => loadChatHistory(), 100);
     }
 
+    // 4.0.381 — Support tab: connect + start the message poller only while it is
+    // open, so a site with support configured makes no background traffic to the
+    // homeserver. openSupportTab() clears its own interval when the tab closes.
+    if (tabName === 'support') {
+        setTimeout(function () {
+            try { if (typeof openSupportTab === 'function') openSupportTab(); } catch (e) {}
+        }, 100);
+    }
+
     // v4.0.222 — Charts tab: the Score-per-shipment card renders BLANK on open
     // (its canvas is 0×0 while the tab is hidden, so Chart.js draws nothing, and
     // switchTab never actually triggered a load). Run the self-healing watchdog
