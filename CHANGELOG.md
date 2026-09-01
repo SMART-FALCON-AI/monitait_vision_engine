@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.386] - 2026-09-01 - The red outline is drawn from the SAME decision that reddens the strip
+
+Operator: *"why sometimes you draw a big red box and sometime frame red box? ... I need the frame red outline be inserted exactly when you decide to insert the red strip on top column."*
+
+There were **two decisions**, not one. `_build_header_strip` evaluated the rules over the column's detections to colour the strip - and then the box block **re-ran the entire rule set once per camera** to decide where to draw. That second evaluation is a separate decision that can disagree with the first, and it cost roughly 200 extra rule evaluations per rendered frame on a 6-camera site with 34 rows, three times a second.
+
+It also explains the shape flip exactly, using kiancord's live `Dot` procedure (`LTX count_greater 4` OR `SPZ count_greater 4`): with LTX spread 2+2+1 across three cameras the **aggregate** fires (5 > 4) so the strip goes red, but **no single camera exceeds 4**, so the per-camera re-run found nothing and fell back to a full-column box. Put all 5 on one camera and you got a frame box. Same rule, same operator, different picture.
+
+Now `evaluate_eject_from_detections()` takes `matched_cams_out` and reports, from the **one** evaluation that decides the strip, the `_cam` of every detection that actually satisfied a triggering procedure. `_build_header_strip` stores that as `col['eject_cams']` at the instant it sets `col['should_eject']`, and the painter just reads it. The outline is therefore derived from the strip's own decision, at the same moment, from the same data - it cannot disagree, and cannot arrive a frame apart. A trigger with no camera-attributable detections (a `shipment_*` condition) contributes no cameras and still marks the whole column, so an ejection is never left unmarked.
+
+The drawing code was **duplicated byte-for-byte** between `timeline.py` (HTTP `/timeline_image`) and `websocket.py` (`/ws/timeline`), so the two views could silently drift apart. Both now call a single `draw_eject_boxes()`.
+
+Verified against the real `Dot` rule: LTX 2+2+1 across cams 1,2,3 - strip red in both old and new, old drew a big column box, new boxes cams 1, 2 and 3. LTX 5 on one camera is unchanged. Below threshold stays green with no box.
+
+Also: the tab strip no longer scrolls. With ten tabs, **Support** sat off the right edge and needed a horizontal scroll to reach. Tightened the header grid gap (20 -> 10px), the brand column (`min-width` 150 -> 96px; the title already wraps to three short lines, so the extra width was reserving space nothing used), the tab gap (6 -> 4px), strip padding (8 -> 6px), and button padding (`9px 18px` -> `8px 11px`) with font 12 -> 11.5px. Reclaims roughly 265px, enough for all ten.
+
+And a latent bug found while doing it: **`main.css` was linked with no cache-buster at all** ([status.html:18](vision_engine/static/status.html#L18)) while every other asset had one - so any CSS change ever shipped would sit unseen in browser caches indefinitely. It is now `?v=` versioned like the rest.
+
 ## [4.0.385] - 2026-09-01 - Fix the real cause of "config disappears on reboot" (kiancord)
 
 Operator: *"again the configured data are missing again!!!!"* on kiancord. **Nothing was ever lost.** The `TB` shipment-close procedure, `num_rows: 34`, `camera_order: custom (2,1,3,6,5,4)` and `image_rotation: 270` were all sitting in the DB under the `timeline_config` key, untouched since 2026-08-28 - while the running process served the hardcoded defaults from `main.py`. A `docker restart` restored everything instantly, which is the whole story.

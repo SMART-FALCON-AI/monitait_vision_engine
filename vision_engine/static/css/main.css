@@ -897,11 +897,13 @@ body {
 .tab-navigation {
     display: flex;
     flex-wrap: nowrap;
-    gap: 6px;
+    /* 4.0.386 - tightened so all 10 tabs fit without horizontal scrolling;
+       Support was off the right edge and needed a scroll to reach. */
+    gap: 4px;
     border-bottom: none;
     margin-bottom: 0;
     background: rgba(30, 41, 59, 0.3);
-    padding: 8px;
+    padding: 6px;
     border-radius: 8px;
     overflow-x: auto;
     overflow-y: hidden;
@@ -924,13 +926,13 @@ body {
 }
 
 .tab-button {
-    padding: 9px 18px;
+    padding: 8px 11px;   /* 4.0.386 - was 9px 18px; reclaims ~140px over 10 tabs */
     background: rgba(30, 41, 59, 0.3);
     border: 1px solid rgba(51, 65, 85, 0.4);
     border-radius: 7px;
     cursor: pointer;
     font-family: inherit;
-    font-size: 12px;
+    font-size: 11.5px;
     font-weight: 500;
     color: var(--text-secondary);
     transition: all 0.25s ease;

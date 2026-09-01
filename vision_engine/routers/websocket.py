@@ -20,7 +20,8 @@ import config as cfg
 from config import TIMELINE_REDIS_PREFIX
 from services.detection import evaluate_eject_from_detections
 from services.render import draw_detection_on
-from routers.timeline import _unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT
+from routers.timeline import (_unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT,
+                              draw_eject_boxes)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -277,46 +278,15 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
         # same moment the strip goes red — no dependency on a client WS flag that a
         # reconnect could drop (the "box appears after a while" bug). Legacy client flag
         # still forces it on. Mirrors /timeline_image.
+        # 4.0.386 ONE-DECISION — identical rendering to /timeline_image, because both
+        # now call the SAME draw_eject_boxes(). The attribution came from the strip's
+        # own evaluation, so outline and strip can never disagree or arrive apart.
         _tlc = tl_config or {}
         mark_on = bool(mark_ejects) or bool(_tlc.get('mark_ejects_enabled', False))
         if mark_on and thumb_width > 0:
-            comp_h, comp_w = composite.shape[:2]
             box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
-            # 4.0.376 — box the EXACT camera frame that fired the ejection (dets carry
-            # `_cam`), not the whole column. Fall back to a full-column box only when no
-            # single camera triggers (aggregate-count rule). Mirrors timeline.py.
-            row_bands = []
-            _y = _HEADER_HEIGHT
-            for _idx, _r in enumerate(camera_rows):
-                _cid = row_cam_ids[_idx] if _idx < len(row_cam_ids) else None
-                row_bands.append((_cid, _y, _r.shape[0]))
-                _y += _r.shape[0]
-            for col_idx, col in enumerate(columns_meta):
-                if col.get('should_eject') is not True:
-                    continue
-                x0 = col_idx * thumb_width + 1
-                x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
-                if x1 <= x0:
-                    continue
-                per_cam = col.get('per_cam_dets') or {}
-                triggering = set()
-                for _cid, _dets in per_cam.items():
-                    try:
-                        _ej, _ = evaluate_eject_from_detections(_dets, procedures)
-                    except Exception:
-                        _ej = False
-                    if _ej:
-                        triggering.add(_cid)
-                if triggering:
-                    for (_cid, ry, rh) in row_bands:
-                        if _cid in triggering:
-                            y0 = ry + 1
-                            y1 = min(ry + rh - 2, comp_h - 1)
-                            if y1 > y0:
-                                cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
-                else:
-                    cv2.rectangle(composite, (x0, _HEADER_HEIGHT + 1),
-                                  (x1, comp_h - 2), (0, 0, 255), box_th)
+            draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th)
+
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
         # Build metadata for frontend

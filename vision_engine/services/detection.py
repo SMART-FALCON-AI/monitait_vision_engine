@@ -395,7 +395,7 @@ def _has_color_delta_procedure():
         return False
 
 
-def evaluate_eject_from_detections(detections_list, procedures):
+def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out=None):
     """Evaluate eject rules from stored detections and procedures config.
 
     Supports 9 condition types:
@@ -415,6 +415,15 @@ def evaluate_eject_from_detections(detections_list, procedures):
     Args:
         detections_list: list of detection dicts (from one or more cameras)
         procedures: list of procedure configs from timeline_config
+
+    4.0.386 ONE-DECISION — `matched_cams_out`, when a set is passed, receives the
+    `_cam` of every detection that actually satisfied a procedure which set
+    should_eject. That makes the eject decision and its per-camera attribution ONE
+    evaluation instead of two: the timeline used to re-run this whole function once
+    per camera just to decide where to draw the red box, which is a SECOND decision
+    that can disagree with the strip (and cost ~200 extra evaluations per rendered
+    frame). A rule with no camera-attributable detections — a shipment_* condition —
+    simply contributes no cameras, and the caller draws a full-column box.
 
     Returns:
         (should_eject: bool, reasons: list[str])  — reasons are human-readable
@@ -442,7 +451,25 @@ def evaluate_eject_from_detections(detections_list, procedures):
         else:
             proc_dets = detections_list  # all cameras
 
+        proc_matched = []   # 4.0.386 — detections that satisfied a rule of THIS procedure
+
         def _eval_rule(rule, dets=proc_dets):
+            """Evaluate one rule and, when it passes, remember which detections
+            satisfied it so the caller can attribute the eject to real cameras."""
+            res = _eval_rule_inner(rule, dets)
+            if res:
+                try:
+                    _obj = rule.get('object', '')
+                    _mc = rule.get('min_confidence', 0) / 100.0
+                    for _d in dets:
+                        if (isinstance(_d, dict) and _d.get('name') == _obj
+                                and _d.get('confidence', 0) >= _mc):
+                            proc_matched.append(_d)
+                except Exception:
+                    pass   # attribution is best-effort; never break the decision
+            return res
+
+        def _eval_rule_inner(rule, dets=proc_dets):
             obj = rule.get('object', '')
             cond = rule.get('condition', 'count_equals')
             min_conf = rule.get('min_confidence', 0) / 100.0
@@ -652,6 +679,19 @@ def evaluate_eject_from_detections(detections_list, procedures):
 
             should_eject = True
             eject_reasons.append(reason)
+
+            # 4.0.386 ONE-DECISION — hand the caller the cameras this procedure
+            # actually fired on, from THIS evaluation. Empty means the trigger was
+            # not camera-attributable (e.g. a shipment_* condition) and the caller
+            # should mark the whole column.
+            if matched_cams_out is not None:
+                try:
+                    for _d in proc_matched:
+                        _c = _d.get('_cam') if isinstance(_d, dict) else None
+                        if _c is not None:
+                            matched_cams_out.add(_c)
+                except Exception:
+                    pass
 
             # 3.21.10 — persist ejection event right here, at the eval point.
             # This runs on EVERY caller of evaluate_eject_from_detections

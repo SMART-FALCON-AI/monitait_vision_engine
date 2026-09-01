@@ -95,6 +95,49 @@ def _unpack_timeline_entry(frame_data):
     return ts, jpeg_bytes, detections, meta if isinstance(meta, dict) else {}
 
 
+def draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th):
+    """Paint the red eject outline. THE only place this is drawn.
+
+    4.0.386 — previously duplicated byte-for-byte in timeline.py and websocket.py,
+    so the HTTP and WebSocket views could drift apart. One copy now; both import it.
+
+    The attribution comes from `col['eject_cams']`, set by _build_header_strip in the
+    very same evaluation that coloured the strip — so the outline appears exactly when
+    and where the strip decides, never from a second opinion.
+    """
+    comp_h, comp_w = composite.shape[:2]
+    row_bands = []          # (cam_id, y, height) per camera row
+    _y = _HEADER_HEIGHT
+    for _idx, _r in enumerate(camera_rows):
+        _cid = row_cam_ids[_idx] if _idx < len(row_cam_ids) else None
+        row_bands.append((_cid, _y, _r.shape[0]))
+        _y += _r.shape[0]
+
+    for col_idx, col in enumerate(columns_meta):
+        if col.get('should_eject') is not True:
+            continue
+        x0 = col_idx * thumb_width + 1
+        x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
+        if x1 <= x0:
+            continue
+        triggering = col.get('eject_cams') or set()
+        drawn = False
+        if triggering:
+            for (_cid, ry, rh) in row_bands:
+                if _cid in triggering:
+                    y0 = ry + 1
+                    y1 = min(ry + rh - 2, comp_h - 1)
+                    if y1 > y0:
+                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
+                        drawn = True
+        if not drawn:
+            # Nothing camera-attributable fired (a shipment_* condition, or the
+            # triggering camera is not on this page) — mark the whole column so an
+            # ejection is never left unmarked.
+            cv2.rectangle(composite, (x0, _HEADER_HEIGHT + 1),
+                          (x1, comp_h - 2), (0, 0, 255), box_th)
+
+
 def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, current_encoder, ejector_offset):
     """Render a metadata header strip above the timeline composite.
 
@@ -122,14 +165,22 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
         # Evaluate eject from detections
         all_dets = col.get('all_detections', [])
         if procedures and all_dets:
-            should_eject, reasons = evaluate_eject_from_detections(all_dets, procedures)
+            # 4.0.386 ONE-DECISION — the SAME call that decides the strip colour also
+            # reports which cameras fired, so the red outline is derived from this
+            # decision at this instant. Previously the box block re-ran the rules per
+            # camera afterwards: a second decision, able to disagree with the strip.
+            _cams = set()
+            should_eject, reasons = evaluate_eject_from_detections(
+                all_dets, procedures, matched_cams_out=_cams)
         else:
             should_eject = None  # unknown
             reasons = []
+            _cams = set()
 
         # Store reasons back in col for metadata
         col['should_eject'] = should_eject
         col['eject_reasons'] = reasons
+        col['eject_cams'] = _cams          # 4.0.386 — attribution from the strip's own decision
 
         # Background color
         if should_eject is True:
@@ -607,46 +658,8 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
         _tlc = getattr(request.app.state, 'timeline_config', {}) or {}
         mark_on = bool(mark_ejects) or bool(_tlc.get('mark_ejects_enabled', False))
         if mark_on and thumb_width > 0:
-            comp_h, comp_w = composite.shape[:2]
             box_th = min(12, max(1, int(_tlc.get('mark_ejects_thickness', mark_thickness) or 3)))
-            # 4.0.376 — box the EXACT camera frame that fired the ejection, not the whole
-            # column. For each ejected column we re-run the rule per camera (dets carry
-            # `_cam`); only the camera rows whose OWN detections trigger get a box. If no
-            # single camera triggers (an aggregate-count rule summing across cameras), we
-            # fall back to a full-column box so the ejection is never left unmarked.
-            row_bands = []   # (cam_id, y, height) per camera row
-            _y = _HEADER_HEIGHT
-            for _idx, _r in enumerate(camera_rows):
-                _cid = row_cam_ids[_idx] if _idx < len(row_cam_ids) else None
-                row_bands.append((_cid, _y, _r.shape[0]))
-                _y += _r.shape[0]
-            for col_idx, col in enumerate(columns_meta):
-                if col.get('should_eject') is not True:
-                    continue
-                x0 = col_idx * thumb_width + 1
-                x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
-                if x1 <= x0:
-                    continue
-                per_cam = col.get('per_cam_dets') or {}
-                triggering = set()
-                for _cid, _dets in per_cam.items():
-                    try:
-                        _ej, _ = evaluate_eject_from_detections(_dets, procedures)
-                    except Exception:
-                        _ej = False
-                    if _ej:
-                        triggering.add(_cid)
-                if triggering:
-                    for (_cid, ry, rh) in row_bands:
-                        if _cid in triggering:
-                            y0 = ry + 1
-                            y1 = min(ry + rh - 2, comp_h - 1)
-                            if y1 > y0:
-                                cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
-                else:
-                    # aggregate-only trigger → mark the whole column
-                    cv2.rectangle(composite, (x0, _HEADER_HEIGHT + 1),
-                                  (x1, comp_h - 2), (0, 0, 255), box_th)
+            draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th)
 
         logger.info(f"Timeline page {page}: {len(camera_rows)} camera(s), {max_total_frames} max frames")
 
