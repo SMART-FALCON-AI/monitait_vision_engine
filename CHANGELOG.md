@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.389] - 2026-09-01 - One gate for the ejected-frame outline; the checkbox is back
+
+Two corrections to 4.0.388, both mine.
+
+**The checkbox is restored.** 4.0.388 deleted it, on a misreading: when the operator said *"you can't show the red strip while you didn't show the red box"* I took it as "force the box permanently on". They meant the opposite of what I built - keep the switch, make it work. *"This is only one gate to show or not show, this is it."*
+
+**And the actual bug, in the operator's words:** *"you show the red strip on top column first, then you draw the red boxes for frames - which sometimes is confusing."* The outline was gated by **two** things: the server-side `mark_ejects_enabled`, **or** a legacy per-client flag (`?mark_ejects=1` on the HTTP URL, `?mark=` on the WebSocket connect). That second gate is the defect. It arrives only *after* a socket connects, so the first frames after any reconnect render with the strip red and no outline, and the boxes pop in a moment later. Same for a browser whose localStorage disagrees with the server.
+
+The client flag is now **ignored by both renderers and no longer sent by either client path**. `timeline_config.mark_ejects_enabled` - the Advanced checkbox - is the single gate. Every viewer of a machine renders identically, and because 4.0.386 already made the strip and the outline one decision in one pass, they now land together in the same JPEG, always: red strip implies red outline, with no window in between.
+
+The checkbox save is also no longer fire-and-forget. It POSTed with no error handling and nothing read back, so a failed or later-clobbered save left the box looking ticked while the server had it off - indistinguishable from "the feature is broken". It now reads the server's echo, sets the checkbox from what actually persisted, and shows `saved: on · thickness N` or a red `NOT saved` next to the control.
+
 ## [4.0.388] - 2026-09-01 - The ejected-frame outline is no longer optional
 
 Operator, for the third time: *"why you show the red strip on top and you didn't show the red box simultaneously? you can't just show the red strip on top while you didn't show the red box on frames."*

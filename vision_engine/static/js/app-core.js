@@ -373,7 +373,10 @@ function connectTimelineWs() {
     // for our first message).
     const _m = (window._markEjectsOn && window._markEjectsOn()) ? '1' : '0';
     const _t = (window._markEjectsThickness ? window._markEjectsThickness() : 3);
-    timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline?mark=${_m}&thick=${_t}`);
+    // 4.0.389 ONE-GATE - no per-client mark flag. The server decides from
+    // timeline_config, so a reconnect can never deliver a red strip whose
+    // outline has not arrived yet.
+    timelineWs = new WebSocket(`${proto}//${location.host}/ws/timeline`);
     timelineWs.binaryType = 'arraybuffer';
     timelineWs.onopen = () => {
         // 4.0.374 — announce our page + mark-ejects + thickness on every (re)connect
