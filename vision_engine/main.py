@@ -777,26 +777,42 @@ async def _start_timeline_config_selfheal():
     LOSING it recoverable: if boot ended up on defaults, keep re-reading the config DB
     in the background and apply the persisted timeline_config the moment it answers.
 
-    Stops as soon as it heals, when the operator changes anything themselves (their
-    edit wins — we must never revert a live change), or after the retry window.
+    Stops as soon as it heals, or when the operator changes anything themselves
+    (their edit wins — we must never revert a live change).
+
+    4.0.391 — the task ALWAYS starts, even on a clean boot, because it also carries
+    the disk->DB reconcile: a config written while the database was unreachable lives
+    only on disk, and the next boot prefers the DB, so without a re-push the older
+    database copy silently wins. That can happen on a perfectly healthy boot, so it
+    must not be gated on the timeline_config repair.
     """
-    if not getattr(app.state, "timeline_config_is_default", False):
-        return   # boot loaded real config — nothing to heal
 
     async def _heal():
+        # 4.0.391 — runs for the LIFE OF THE PROCESS. The 4.0.385 version gave up after
+        # 30 minutes, which was a guessed bound on something whose whole purpose is that
+        # no bound is provable: if the DB was slow to come back, the site then served
+        # default config until a human noticed. It now keeps trying, cheaply (one small
+        # read per tick), and stops only when it heals or the operator edits the config.
         import asyncio as _a
-        deadline = time.time() + 1800      # 30 minutes of patience, then give up
-        while time.time() < deadline:
-            await _a.sleep(10)
+        tick = 0
+        while True:
+            tick += 1
+            await _a.sleep(10 if tick <= 30 else 60)   # eager for 5 min, then relaxed
             try:
+                # opportunistically push a disk-only write back into the DB
+                try:
+                    from config import reconcile_db_from_disk as _recon
+                    _recon()
+                except Exception:
+                    pass
                 if not getattr(app.state, "timeline_config_is_default", False):
-                    return                  # someone loaded/!set real config already
+                    continue                # config is fine; keep running for reconcile only
                 cur = getattr(app.state, "timeline_config", {}) or {}
                 # Operator edited it live → their value is authoritative, stop healing.
                 if cur.get("procedures") or cur.get("num_rows") not in (20, None):
                     logger.info("[BOOT-RACE] timeline_config changed since boot — self-heal stands down")
                     app.state.timeline_config_is_default = False
-                    return
+                    continue
                 from config import invalidate_config_cache as _inv, load_data_file as _load
                 _inv()
                 data = _load() or {}
@@ -808,15 +824,21 @@ async def _start_timeline_config_selfheal():
                         "[BOOT-RACE] RECOVERED timeline_config from persistence after a "
                         "degraded boot: %d procedure(s), num_rows=%s, camera_order=%s",
                         len(tc.get("procedures") or []), tc.get("num_rows"), tc.get("camera_order"))
-                    return
+                    continue
+                if tick % 30 == 0:
+                    logger.warning("[BOOT-RACE] STILL on default timeline_config after %d "
+                                   "attempts — ejection rules / camera order are NOT loaded", tick)
             except Exception as _e:
                 logger.debug(f"[BOOT-RACE] self-heal retry failed: {_e}")
-        logger.error("[BOOT-RACE] self-heal gave up after 30 min — still on default timeline_config")
+        logger.error("[BOOT-RACE] self-heal loop exited unexpectedly")
 
     try:
         import asyncio as _aio
         _aio.create_task(_heal())
-        logger.warning("[BOOT-RACE] booted on DEFAULT timeline_config — self-heal task started")
+        if getattr(app.state, "timeline_config_is_default", False):
+            logger.warning("[BOOT-RACE] booted on DEFAULT timeline_config — self-heal task started")
+        else:
+            logger.info("[ONE-KEY] config reconcile task started (disk->DB re-push watchdog)")
     except Exception as _e:
         logger.warning(f"[BOOT-RACE] could not start self-heal: {_e}")
 

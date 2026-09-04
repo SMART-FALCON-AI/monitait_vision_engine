@@ -59,6 +59,18 @@ def _release(conn) -> None:
 
 _schema_ready = False
 
+# 4.0.391 ONE-KEY — the config lives in exactly ONE row. Previously every top-level
+# key was its own row, so the store could hold data the boot path never reads: boot
+# only ever looked at `service_config` + `timeline_config`, and anything else (a
+# `states` row, a `cameras` row…) was invisible forever. That is precisely how a
+# site could show default settings while the real ones sat in the database. One row
+# makes that class of bug unrepresentable.
+CONFIG_KEY = "mve_config"
+
+# The two keys the old layout was ALLOWED to have. Anything else found at the top
+# level of the legacy table was a stray created by an unwrapped save_data_file().
+_LEGACY_CANONICAL = ("service_config", "timeline_config")
+
 
 def _ensure_schema(conn) -> bool:
     """Create the table if missing. Returns True on success.
@@ -119,8 +131,18 @@ def is_db_empty() -> Optional[bool]:
 
 
 def load_all() -> Optional[Dict[str, Any]]:
-    """Read every (key, value) row. Returns dict on success; None if DB
-    unreachable so the caller can fall back to file."""
+    """Return the whole config bundle from its single row.
+
+    Returns the bundle dict on success, {} when the store is genuinely empty, and
+    None when the DB is UNREACHABLE — callers rely on that distinction to fall back
+    to disk without treating "down" as "empty".
+
+    On first run against a pre-4.0.391 database this migrates the old multi-row
+    layout into the single row, in one transaction. Stray rows (anything beyond
+    service_config / timeline_config) are NOT merged blindly — guessing which copy
+    of `states` is authoritative could destroy the good one — they are left in place
+    and logged loudly so they can be recovered deliberately.
+    """
     conn = _conn()
     if conn is None:
         return None
@@ -128,36 +150,77 @@ def load_all() -> Optional[Dict[str, Any]]:
         if not _ensure_schema(conn):
             return None
         cur = conn.cursor()
-        cur.execute("SELECT key, value FROM mve_config_kv")
-        rows = cur.fetchall()
-        cur.close()
-        if not rows:
-            return {}
-        out: Dict[str, Any] = {}
-        for k, v in rows:
-            # psycopg2 hands JSONB back as already-parsed python; tolerate
-            # the rare case where it didn't.
+        cur.execute("SELECT value FROM mve_config_kv WHERE key = %s", (CONFIG_KEY,))
+        row = cur.fetchone()
+        if row is not None:
+            cur.close()
+            v = row[0]
             if isinstance(v, (str, bytes)):
                 try:
                     v = json.loads(v)
                 except Exception:
                     pass
-            out[str(k)] = v
-        return out
+            return v if isinstance(v, dict) else {}
+
+        # --- no single row yet: legacy layout (or a fresh, empty store) ---
+        cur.execute("SELECT key, value FROM mve_config_kv")
+        rows = cur.fetchall()
+        if not rows:
+            cur.close()
+            return {}
+
+        bundle: Dict[str, Any] = {}
+        strays = []
+        for k, v in rows:
+            if isinstance(v, (str, bytes)):
+                try:
+                    v = json.loads(v)
+                except Exception:
+                    pass
+            k = str(k)
+            if k in _LEGACY_CANONICAL:
+                bundle[k] = v
+            else:
+                strays.append(k)
+
+        cur.execute(
+            """
+            INSERT INTO mve_config_kv (key, value, updated_by)
+            VALUES (%s, %s::jsonb, %s)
+            ON CONFLICT (key) DO UPDATE
+                SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by
+            """,
+            (CONFIG_KEY, json.dumps(bundle), "migration:4.0.391"),
+        )
+        conn.commit()
+        cur.close()
+        logger.warning("[ONE-KEY] migrated legacy config rows %s into the single '%s' row",
+                       sorted(bundle.keys()), CONFIG_KEY)
+        if strays:
+            logger.error(
+                "[ONE-KEY] %d STRAY config row(s) left untouched: %s — these were written by an "
+                "unwrapped save_data_file() and the boot path never read them. Inspect before "
+                "deleting; they may hold settings that went missing.", len(strays), sorted(strays))
+        return bundle
     except Exception as e:
         logger.warning(f"config_db: load_all failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return None
     finally:
         _release(conn)
 
 
 def save_all(data: Dict[str, Any], updated_by: str = "mve") -> bool:
-    """Upsert every top-level key from `data`. Returns True on success.
+    """Replace the ENTIRE config bundle in its single row. Returns True on success.
 
-    Atomicity: all upserts run in a single transaction — either every key
-    lands or none do. Operator-visible writes (`POST /api/audio_settings`,
-    Save All Configuration, etc.) all funnel through `save_data_file` →
-    here, so the DB always sees a consistent snapshot.
+    4.0.391 ONE-KEY — this now REPLACES rather than upserting key-by-key, so `data`
+    must always be the complete bundle. config.py::_merge_and_persist guarantees
+    that by merging the caller's partial onto the current authoritative bundle
+    before calling here, and writing that same object to disk — which is what keeps
+    the two stores byte-identical instead of drifting apart.
     """
     if not isinstance(data, dict):
         return False
@@ -168,18 +231,17 @@ def save_all(data: Dict[str, Any], updated_by: str = "mve") -> bool:
         if not _ensure_schema(conn):
             return False
         cur = conn.cursor()
-        for k, v in data.items():
-            cur.execute(
-                """
-                INSERT INTO mve_config_kv (key, value, updated_by)
-                VALUES (%s, %s::jsonb, %s)
-                ON CONFLICT (key) DO UPDATE
-                    SET value      = EXCLUDED.value,
-                        updated_at = NOW(),
-                        updated_by = EXCLUDED.updated_by
-                """,
-                (str(k), json.dumps(v), updated_by),
-            )
+        cur.execute(
+            """
+            INSERT INTO mve_config_kv (key, value, updated_by)
+            VALUES (%s, %s::jsonb, %s)
+            ON CONFLICT (key) DO UPDATE
+                SET value      = EXCLUDED.value,
+                    updated_at = NOW(),
+                    updated_by = EXCLUDED.updated_by
+            """,
+            (CONFIG_KEY, json.dumps(data), updated_by),
+        )
         conn.commit()
         cur.close()
         return True

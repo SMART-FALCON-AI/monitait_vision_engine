@@ -344,31 +344,62 @@ def _atomic_write_disk(data):
         return False
 
 
+# 4.0.391 — set when a persist could not reach the DB; cleared once re-pushed.
+_db_write_pending = False
+
+
 def _merge_and_persist(partial, updated_by="mve"):
-    """Persist the top-level key(s) in `partial` WITHOUT dropping any other key from
-    either store, under _CONFIG_WRITE_LOCK so overlapping writers can't lose each
-    other's updates.
+    """Merge `partial` into the current config and write the SAME object to BOTH stores.
 
-    - DB: per-key upsert (`save_all` touches only the keys in `partial`).
-    - Disk: MERGE `partial` into the CURRENT on-disk snapshot, then atomic-replace —
-      so a partial payload can never trim keys off disk while the DB keeps them
-      (the DB-upsert-vs-disk-replace divergence). Merging a full blob is equivalent
-      to replacing, so whole-blob callers (full restore / boot) are unaffected.
+    4.0.391 ONE-KEY / ONE-WRITE. The old version built the two writes from DIFFERENT
+    base states — the DB got a per-key upsert of `partial`, while the disk snapshot
+    was rebuilt from whatever was already ON DISK. Any moment the disk copy was stale
+    (a write while the DB was down, a restore, a hand-edit) the two stores diverged
+    permanently, and the disk fallback then loaded the drifted copy. Now there is one
+    authoritative base (DB first, disk only if the DB is unreachable), one merged
+    object, and both stores receive it verbatim — so they cannot disagree.
 
-    Returns True if at least one store was written."""
+    Returns True if at least one store was written.
+    """
+    global _db_write_pending
     if not isinstance(partial, dict):
         return False
     with _CONFIG_WRITE_LOCK:
-        db_ok = False
+        # 1. authoritative base: the DB, falling back to disk only when it is DOWN.
+        base = None
         try:
-            from services.config_db import save_all as _db_save
-            db_ok = _db_save(partial, updated_by=updated_by)
+            from services.config_db import load_all as _db_load
+            base = _db_load()               # None == unreachable, {} == empty
         except Exception as e:
-            logger.debug(f"DB save skipped: {e}")
-        merged = _read_disk_dict()
+            logger.debug(f"DB read before persist skipped: {e}")
+        db_reachable = base is not None
+        if not db_reachable:
+            base = _read_disk_dict()
+
+        merged = dict(base or {})
         merged.update(partial)
+
+        # 2. write the SAME object to both stores.
+        db_ok = False
+        if db_reachable:
+            try:
+                from services.config_db import save_all as _db_save
+                db_ok = _db_save(merged, updated_by=updated_by)
+            except Exception as e:
+                logger.debug(f"DB save skipped: {e}")
         file_ok = _atomic_write_disk(merged)
-        if file_ok:
+
+        # 3. if the DB could not take it, remember to push disk up when it returns —
+        #    otherwise a DB that comes back with older data silently wins on next boot.
+        if not db_ok:
+            _db_write_pending = True
+            logger.warning(
+                "[ONE-KEY] config written to DISK ONLY (DB unreachable) — will re-push "
+                "to the database as soon as it answers")
+        else:
+            _db_write_pending = False
+
+        if file_ok or db_ok:
             logger.info(
                 f"Config persisted ({','.join(map(str, partial.keys()))}) "
                 f"[{'DB+disk' if db_ok else 'disk only — DB unreachable'}]"
@@ -378,6 +409,38 @@ def _merge_and_persist(partial, updated_by="mve"):
         except Exception:
             pass
     return db_ok or file_ok
+
+
+def reconcile_db_from_disk():
+    """Push the disk bundle into the DB after a disk-only write.
+
+    Called periodically once the DB is back. Without this, a write made while the DB
+    was down lives only on disk, and the next boot — which prefers the DB — quietly
+    serves the older database copy instead. Returns True when a push happened.
+    """
+    global _db_write_pending
+    if not _db_write_pending:
+        return False
+    with _CONFIG_WRITE_LOCK:
+        if not _db_write_pending:
+            return False
+        disk = _read_disk_dict()
+        if not disk:
+            return False
+        try:
+            from services.config_db import save_all as _db_save
+            if _db_save(disk, updated_by="reconcile:disk->db"):
+                _db_write_pending = False
+                logger.warning("[ONE-KEY] re-pushed the disk config into the database "
+                               "after a disk-only write")
+                try:
+                    invalidate_config_cache()
+                except Exception:
+                    pass
+                return True
+        except Exception as e:
+            logger.debug(f"reconcile_db_from_disk failed: {e}")
+    return False
 
 
 def save_config_key(key, value, updated_by="mve"):

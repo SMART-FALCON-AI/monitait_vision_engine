@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.391] - 2026-09-04 - ONE KEY: the config store can no longer hold data the app never reads
+
+Operator, after losing settings on kiancord and nafis again: *"can you use only one key? why did you separate them? why are the database and disk diverging?"* All three questions had the same root, and it was a storage-layer design fault, not a boot-timing one.
+
+**One key.** The DB kept one row per top-level config key, while the boot path read only two of them (`service_config`, `timeline_config`). Anything else in the table was invisible forever. That is exactly how nafis ended up serving defaults while `states`, `cameras`, `inference` and `pipeline_config` sat in the same table, written by an unwrapped `save_data_file()` -> `save_all()` (the bundle shape of `POST /api/cameras/config/upload` does this). The config now lives in **one row**, `mve_config`, holding the whole bundle - the mismatch is no longer representable. Reading a pre-391 database migrates the old rows into it automatically; stray rows are deliberately NOT merged (guessing which copy of `states` is authoritative could destroy the good one) but left in place and logged at ERROR so they can be recovered on purpose.
+
+**Why disk and DB diverged.** `_merge_and_persist` built its two writes from *different base states* - the DB got a per-key upsert of the caller's partial, while the disk snapshot was rebuilt from **whatever was already on disk**. Any moment the disk copy was stale, the two stores drifted apart permanently, and the disk fallback then loaded the drifted copy. There is now one authoritative base (DB first, disk only when the DB is unreachable), one merged object, and **both stores receive it verbatim**.
+
+**Disk-only writes are no longer silently lost.** A write made while the DB is down now sets a pending flag, and a watchdog re-pushes the disk bundle as soon as the database answers. Without it, the next boot - which prefers the DB - quietly serves the older database copy.
+
+**The self-heal no longer gives up.** 4.0.385 stopped retrying after 30 minutes, a guessed bound on something whose entire premise is that no bound is provable; if the DB was slow to return, the site served default config until a human noticed. It now runs for the life of the process (10s ticks for five minutes, then 60s), logs a WARNING every ~30 ticks while still on defaults so the evidence survives log rotation, and stands down only on success or an operator edit. The task also always starts now, even on a clean boot, because it carries the disk->DB reconcile.
+
+No call sites changed: all ~50 config readers and writers go through the same five functions in `config.py`, so this is contained to the storage layer.
+
 ## [4.0.390] - 2026-09-01 - Red strip and red outline are the same event
 
 Operator: *"just check where you draw this red strip, and exactly at that time draw the red box for frames."*
