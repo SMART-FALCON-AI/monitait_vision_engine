@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.393] - 2026-09-05 - Fix: scatter dots never appear on a line that has been idle
+
+Operator, with 4.0.392 installed and the strips finally full: *"where the fuck is dots?"* The dots were being fetched correctly - the API returns 6000 of them for a 30d window - and then clipped off the chart.
+
+The scatter renders in two phases: a base render, then a progressive ladder of `scatter_only=1` buckets. **The base render always uses a `1h` window.** On a line idle longer than an hour that comes back empty, so its `camera_y_order` was `[]`, and two things followed from that:
+
+- the Y axis is pinned with `max: Math.max(0.5, camOrder.length - 0.5)` -> **[-0.5, 0.5]**
+- with no order, `_camToIdx` falls back to the **raw camera id**, so dots plot at y = 1, 2, 3
+
+Every bucket dot therefore landed outside the axis and was clipped. The spinner never finished, the axis showed a meaningless -0.5/0/0.5, and no amount of waiting helped. Any site whose line has been stopped for more than an hour hits this - which is exactly when an operator goes looking at charts.
+
+The server's `scatter_only` payload hard-coded `"camera_y_order": []` with the comment *"order was set on the initial render"* - true only when the initial render had data. It now also returns **`camera_y_order_fallback`**, derived from the scatter rows already being returned (no extra query), and the client adopts it **only when it still has no order**, then re-pins the Y axis. A configured custom camera order can never be overridden, so the v4.0.108 double-row bug does not come back.
+
 ## [4.0.392] - 2026-09-05 - "Last 30 days" silently served 24 hours
 
 Operator on mohtasham: *"why nothing is shown when I select last 30 days?"* The Charts tab has offered `<option value="30d">Last 30 days</option>` since it was built, but **ten endpoints had no "30d" entry** in their window map, so `_windows.get(window, _windows["24h"])` quietly fell back to **24 hours**.

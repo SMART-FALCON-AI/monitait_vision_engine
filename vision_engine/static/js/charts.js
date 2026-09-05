@@ -3360,10 +3360,32 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
     // renderer). Without this, bucket dots plotted at Y=raw-cam-id while
     // base dots plotted at Y=display-index — same camera appeared twice
     // on the Y axis.
-    const camOrder = Array.isArray(data.camera_y_order) && data.camera_y_order.length > 0
+    // 4.0.393 — repair an axis the base render could not build. Phase 1 renders a
+    // '1h' window; on a line idle longer than an hour that is empty, so the base
+    // response carried camera_y_order: [] and the Y axis got pinned to [-0.5, 0.5]
+    // while _camToIdx fell back to the RAW camera id. Every bucket dot then landed
+    // outside the axis and was clipped — dots never appeared and the spinner never
+    // finished. When we still have no order, adopt the server's per-bucket fallback
+    // and re-pin the axis. Only ever fills an EMPTY order, so a configured custom
+    // order is never overridden.
+    let camOrder = Array.isArray(data.camera_y_order) && data.camera_y_order.length > 0
         ? data.camera_y_order
         : _lastCameraYOrder;
-    const idxByCam = new Map(camOrder.map(function (cid, i) { return [cid, i]; }));
+    if ((!camOrder || camOrder.length === 0) &&
+        Array.isArray(data.camera_y_order_fallback) && data.camera_y_order_fallback.length > 0) {
+        camOrder = data.camera_y_order_fallback.slice();
+        _lastCameraYOrder = camOrder;
+        try {
+            const _ys = _insightCameraScatter && _insightCameraScatter.options
+                && _insightCameraScatter.options.scales && _insightCameraScatter.options.scales.y;
+            if (_ys) {
+                _ys.min = -0.5;
+                _ys.max = Math.max(0.5, camOrder.length - 0.5);
+            }
+        } catch (e) { /* axis re-pin is best-effort; never block the dots */ }
+        try { console.info('[charts] adopted camera_y_order fallback', camOrder); } catch (e) {}
+    }
+    const idxByCam = new Map((camOrder || []).map(function (cid, i) { return [cid, i]; }));
     const _camToIdx = function (cid) { return idxByCam.has(cid) ? idxByCam.get(cid) : cid; };
 
     const dsByLabel = new Map();

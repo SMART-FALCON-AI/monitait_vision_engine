@@ -4107,6 +4107,19 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "camera_scatter": camera_scatter,
                 "camera_scatter_encoder": camera_scatter_encoder,
                 "camera_y_order": [],  # order was set on the initial render; keep as-is
+                # 4.0.393 — …EXCEPT when the initial render had no data to build one
+                # from. Phase 1 renders a '1h' window; on a line idle longer than an
+                # hour that comes back empty, so camera_y_order was [] and the client
+                # pinned the Y axis to [-0.5, 0.5] and mapped dots to their RAW camera
+                # id — putting every later bucket dot outside the axis, invisible, with
+                # the spinner stuck on "Loading dots". This fallback is derived from the
+                # rows we are already returning (no extra query) and the client adopts
+                # it ONLY when it has no order yet, so a configured custom order is
+                # never overridden.
+                "camera_y_order_fallback": sorted(
+                    {p["y"] for p in camera_scatter
+                     if isinstance(p, dict) and isinstance(p.get("y"), int)}
+                ),
                 "window": window,
                 "since_ms": int(since_ms) if _use_slice else 0,
                 "until_ms": int(until_ms) if _use_slice else 0,
