@@ -1186,7 +1186,7 @@ def get_active_classes(window: str = "1h"):
         "counts":   {"TB": 14524, "mean_L": 312, ...},
       }
     """
-    _windows = {"15m": "15 minutes", "1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    _windows = {"15m": "15 minutes", "1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "1 hour")
     out = {"window": window, "names": [], "by_camera": {}, "counts": {}}
     try:
@@ -2198,7 +2198,7 @@ def shipment_quality_score_trend(
     Slope label: "improving" / "stable" / "degrading" based on
     `slope_pct = (last_third_avg - first_third_avg) / max(first_third_avg, eps)`.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "24 hours")
     # Bucket width: aim for `buckets` slots across the window.
     _bucket_for = {
@@ -2717,7 +2717,7 @@ def quality_ejection_axis(
         "encoder_min": int, "encoder_max": int, "width_per_bucket": int,
     }
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "24 hours")
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
     if shipment:
@@ -2956,7 +2956,7 @@ def quality_heatmap(
     target is "1 detection of severity 50 at confidence 0.5 per bucket
     counts as ~10 points off". Tunable later.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "24 hours")
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
     if shipment:
@@ -3701,6 +3701,11 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         "6h":  ("6 hours",  "5 minutes"),
         "24h": ("24 hours", "30 minutes"),
         "7d":  ("7 days",   "6 hours"),
+        # 4.0.392 — the UI has offered `<option value="30d">Last 30 days</option>` all
+        # along, but this map had no "30d", so `_windows.get(window, _windows["24h"])`
+        # silently served 24 HOURS instead. Charts looked empty on any line whose data
+        # was older than a day, and CSV/PDF exported 24h of rows labelled "30 days".
+        "30d": ("30 days",  "1 day"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
 
@@ -5714,6 +5719,11 @@ def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
         "6h":  ("6 hours",  "5 minutes"),
         "24h": ("24 hours", "30 minutes"),
         "7d":  ("7 days",   "6 hours"),
+        # 4.0.392 — the UI has offered `<option value="30d">Last 30 days</option>` all
+        # along, but this map had no "30d", so `_windows.get(window, _windows["24h"])`
+        # silently served 24 HOURS instead. Charts looked empty on any line whose data
+        # was older than a day, and CSV/PDF exported 24h of rows labelled "30 days".
+        "30d": ("30 days",  "1 day"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
@@ -5803,6 +5813,11 @@ def production_stats(request: Request, window: str = "24h", shipment: str = ""):
         "6h":  ("6 hours",  "5 minutes"),
         "24h": ("24 hours", "30 minutes"),
         "7d":  ("7 days",   "6 hours"),
+        # 4.0.392 — the UI has offered `<option value="30d">Last 30 days</option>` all
+        # along, but this map had no "30d", so `_windows.get(window, _windows["24h"])`
+        # silently served 24 HOURS instead. Charts looked empty on any line whose data
+        # was older than a day, and CSV/PDF exported 24h of rows labelled "30 days".
+        "30d": ("30 days",  "1 day"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
@@ -5944,6 +5959,11 @@ def quality_charts(request: Request, window: str = "24h", shipment: str = "", mi
         "6h":  ("6 hours",  "5 minutes"),
         "24h": ("24 hours", "30 minutes"),
         "7d":  ("7 days",   "6 hours"),
+        # 4.0.392 — the UI has offered `<option value="30d">Last 30 days</option>` all
+        # along, but this map had no "30d", so `_windows.get(window, _windows["24h"])`
+        # silently served 24 HOURS instead. Charts looked empty on any line whose data
+        # was older than a day, and CSV/PDF exported 24h of rows labelled "30 days".
+        "30d": ("30 days",  "1 day"),
     }
     interval, bucket = _windows.get(window, _windows["24h"])
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
@@ -6222,7 +6242,7 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
     rows from inference_results that contain at least one detection of `cls`, with
     the annotated image path so the UI can show a thumbnail grid. Capped at `limit`.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "24 hours")
     limit = max(1, min(100, int(limit or 24)))
     empty = {"items": [], "class": cls, "shipment": shipment, "window": window}
@@ -6407,7 +6427,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     shipment-start, `unwind_length` = shipment-end − encoder (meters left to
     unwind, end = 0). No mode toggle.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
     interval = _windows.get(window, "24 hours")
     # 4.0.345 — a PICKED shipment is exported by SHIPMENT ID ALONE — NO time filter whatsoever. The
     # whole point of picking a shipment is "give me THIS shipment's rows", regardless of when it ran.

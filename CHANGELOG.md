@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.392] - 2026-09-05 - "Last 30 days" silently served 24 hours
+
+Operator on mohtasham: *"why nothing is shown when I select last 30 days?"* The Charts tab has offered `<option value="30d">Last 30 days</option>` since it was built, but **ten endpoints had no "30d" entry** in their window map, so `_windows.get(window, _windows["24h"])` quietly fell back to **24 hours**.
+
+On any line whose newest data is older than a day the plot is simply empty, with nothing to indicate the window was ignored. It is also why the bottom strips and the scatter disagreed on that screenshot: `get_color_drift`, `get_area_stats`, `_compute_quality_payload` and `calibrate_score_scale` DO handle 30d, so the strips rendered the real data while the scatter above them showed nothing.
+
+Worse than a blank chart: **CSV and PDF export shared the bug**, so choosing "Last 30 days" produced 24 hours of rows labelled as 30 days.
+
+Added `"30d"` to all ten: `detection_charts`, `quality_charts`, `quality_heatmap`, `quality_ejection_axis`, `ejection_stats`, `production_stats`, `recent_detections`, `export_csv`, `get_active_classes`, `shipment_quality_score_trend`. The bucketed endpoints use a `1 day` bucket (30 buckets, comparable to 7d's 28) - `quality_shipments` already supported 30d/90d and is unchanged.
+
+Note this widens the row scan 4x versus 7d. `quality_shipments` carries a comment that the scatter endpoints "would time out" on 90d windows, and statement timeouts have been observed on data-heavy sites, so 30d should be timed on a large installation before a fleet ripple.
+
 ## [4.0.391] - 2026-09-04 - ONE KEY: the config store can no longer hold data the app never reads
 
 Operator, after losing settings on kiancord and nafis again: *"can you use only one key? why did you separate them? why are the database and disk diverging?"* All three questions had the same root, and it was a storage-layer design fault, not a boot-timing one.
