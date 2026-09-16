@@ -43,6 +43,24 @@ def _load_svc_cfg_for_status():
 _VERSION_FILE_CACHE = {"path": None, "mtime": 0.0, "value": None}
 
 
+def _sse_cam_connected(watcher, cam_id, cam) -> bool:
+    """4.0.394 — the ONE connection test, shared by the SSE camera dict so the
+    Dashboard status table agrees with /api/cameras and the camera cards.
+    A USB camera is connected iff its buffer is delivering frames (cam.success)
+    AND its device node still exists; IP/pro cameras rely on cam.success alone."""
+    try:
+        if cam is None:
+            return False
+        paths = getattr(watcher, 'camera_paths', []) or []
+        cam_path = paths[cam_id - 1] if isinstance(cam_id, int) and 0 < cam_id <= len(paths) else None
+        meta = (getattr(watcher, 'camera_metadata', {}) or {}).get(cam_id, {})
+        is_usb = str(meta.get('type', 'usb')) == 'usb'
+        device_exists = os.path.exists(cam_path) if (is_usb and cam_path) else True
+        return bool(getattr(cam, 'success', False) and device_exists)
+    except Exception:
+        return False
+
+
 def get_current_version(app_version: str = "") -> str:
     """Return the version string operators should see. Reads the VERSION file
     fresh whenever its mtime changes; falls back to `app_version` (the value
@@ -1217,8 +1235,16 @@ async def status_stream(request: Request):
                 procedures=(getattr(request.app.state, 'timeline_config', {}) or {}).get('procedures'),
             ),
                     # Camera status
+                    # 4.0.394 — emit a real `connected` boolean computed the SAME way
+                    # as /api/cameras (cam.success AND the device node exists), so the
+                    # Dashboard "Camera Connection Status" table matches the camera cards.
+                    # BUG it fixes: the table read `cameras[key]` as truthy, but this dict
+                    # emitted an OBJECT per camera — always truthy — so every camera showed
+                    # "OK" even when disconnected. `active` (last frame present) is kept for
+                    # back-compat but is NOT a connection signal (it latches the last frame).
                     "cameras": {
                         name: {
+                            "connected": _sse_cam_connected(watcher, name, cam),
                             "active": hasattr(cam, 'frame') and cam.frame is not None,
                             "name": getattr(cam, 'name', name),
                             "type": getattr(cam, 'camera_type', 'unknown'),

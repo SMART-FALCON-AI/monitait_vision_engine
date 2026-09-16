@@ -679,11 +679,16 @@ function updateCameraTable(cameras) {
         return na - nb;
     });
     for (const key of camKeyOrder) {
-        const status = cameras[key];
+        // 4.0.394 — the SSE emits a per-camera OBJECT {connected, active, name, type};
+        // older sources emit a plain boolean. Reading the object as truthy made EVERY
+        // camera show "OK" (an object is always truthy) even when disconnected. Read the
+        // real `connected` flag from the object; fall back to the boolean shape.
+        const v = cameras[key];
+        const ok = (v && typeof v === 'object') ? !!v.connected : !!v;
         const row = document.createElement('tr');
         row.innerHTML = `
             <td style="padding: 6px 10px; color: var(--text-primary, #e2e8f0); border: 1px solid var(--border-color, #334155);">${prettyCamName(key)}</td>
-            <td class="${status ? 'camera-ok' : 'camera-fail'}" style="padding: 6px 10px; border: 1px solid var(--border-color, #334155); color: ${status ? '#22c55e' : '#ef4444'}; font-weight: 600;">${status ? 'OK' : 'FAIL'}</td>
+            <td class="${ok ? 'camera-ok' : 'camera-fail'}" style="padding: 6px 10px; border: 1px solid var(--border-color, #334155); color: ${ok ? '#22c55e' : '#ef4444'}; font-weight: 600;">${ok ? 'OK' : 'DISCONNECTED'}</td>
         `;
         tbody.appendChild(row);
     }

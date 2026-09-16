@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.394] - 2026-09-16 - Camera Connection Status table said "OK" for disconnected cameras
+
+Operator: *"why do I always see a camera state flagged OK, but disconnected? what's the point of saying OK although it is disconnected?"*
+
+The Dashboard "Camera Connection Status" table showed **OK for every camera, always** — even ones the camera cards correctly showed as DISCONNECTED. Root cause: the table is fed by the SSE status stream, whose per-camera value is an **object** `{active, name, type}`, but `updateCameraTable` rendered `cameras[key] ? 'OK' : 'FAIL'` — and **an object is always truthy**, so it never actually tested the connection. The card list (`/api/cameras`) computes a real `connected` boolean, which is why the two disagreed.
+
+Fixed on both sides so there is now ONE connection test:
+- The SSE stream emits a real **`connected`** boolean per camera, computed the same way as `/api/cameras` (`cam.success` AND the device node exists) via a shared `_sse_cam_connected()` helper. `active` (last frame present) is kept for back-compat but is not a connection signal — it latches the last frame.
+- `updateCameraTable` reads `.connected` from the object (falling back to the old boolean shape), and shows **DISCONNECTED** instead of the misleading FAIL/OK-only wording.
+
+Note on retry (the operator's second question): the capture loop DOES reconnect (`services/camera.py` buffer loop re-opens after `max_failures`, plus proactive by-path drift re-resolution). But a camera whose stored source is a RAW `/dev/videoN` (e.g. behnoor cam 6 = `/dev/video4`) cannot recover when that node vanishes on re-enumeration — there is no by-path to re-resolve to. The fix for that specific camera is to persist its source as `/dev/v4l/by-path/...` so the reconnect can follow it. Cache-busters -> `?v=4.0.394`.
+
 ## [4.0.393] - 2026-09-05 - Fix: scatter dots never appear on a line that has been idle
 
 Operator, with 4.0.392 installed and the strips finally full: *"where the fuck is dots?"* The dots were being fetched correctly - the API returns 6000 of them for a 30d window - and then clipped off the chart.
