@@ -332,7 +332,33 @@ def _atomic_write_disk(data):
                 os.fsync(f.fileno())
             except OSError:
                 pass  # fsync unsupported on some filesystems — best-effort
-        os.replace(tmp_file, DATA_FILE)
+        try:
+            os.replace(tmp_file, DATA_FILE)
+        except OSError as _re:
+            # 4.0.396 — DATA_FILE is often a Docker FILE bind-mount (compose mounts
+            # `./vision_engine/.env.prepared_query_data` explicitly so --force-recreate
+            # can't wipe it). You CANNOT rename over a bind-mount point — os.replace
+            # raises EBUSY ("Device or resource busy"), especially on Windows/WSL hosts.
+            # Before this, EVERY disk write failed and the file stayed FROZEN at whatever
+            # it held when first mounted; the DB-first/disk-fallback boot path then kept
+            # loading that stale copy over the good DB config, wiping the operator's
+            # settings on the next restart that lost the DB race. Fall back to an IN-PLACE
+            # overwrite (writing to a bind-mounted file works fine — only renaming over it
+            # does not) so the disk snapshot stays current. Less crash-atomic than the
+            # rename, but the DB is the primary store and a .backup was written above.
+            logger.warning(f"os.replace failed ({_re}); writing {DATA_FILE} in place")
+            with open(DATA_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except Exception:
+                pass
         return True
     except Exception as e:
         logger.error(f"Error writing data file: {e}")

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.397] - 2026-10-01 - Perf: marginal (yellow) pass only runs when a marginal band is actually configured
+
+4.0.395 added a second eject evaluation per timeline column (the marginal/yellow pass). On sites that don't use a marginal band — i.e. everyone until they opt in — that doubled the eject eval in the hot dashboard-render path for zero benefit. Observed on behnoor: `timeline_image` for a 44-column × 6-camera board (an 11.5 MB composite) ran ~16 s.
+
+Fix: `_has_marginal_band(procedures)` is computed once; the marginal pass in `_build_header_strip` and `timeline_meta` is skipped entirely unless some enabled rule has a `marginal_confidence` that differs from its `min_confidence`. So the eject eval is back to ONE call per column (pre-4.0.395 cost) everywhere the feature isn't in use, and only pays the second pass where yellow is actually wanted.
+
+## [4.0.396] - 2026-09-30 - CRITICAL: config wiped on restart — the disk snapshot could never be written (bind-mount rename fails)
+
+Operator (nafis-hashtgerd, a Windows/WSL Docker host): *"AGAIN SETTINGS REMOVED WHILE RESTART!"* — camera order (`5,6,3,2,1,4`) and rotation (`270`) reverted to `normal`/`90` after a restart, even on 4.0.394 with the one-key store.
+
+Root cause: `_atomic_write_disk` (config.py) writes a `.tmp` then `os.replace(tmp, DATA_FILE)`. `DATA_FILE` (`.env.prepared_query_data`) is a Docker **file bind-mount**, and **you cannot rename over a bind-mount point** — `os.replace` raises `EBUSY` ("Device or resource busy"), reliably on Windows/WSL hosts. So **every disk write had silently failed** and the disk file was **frozen at its April-2026 contents** (`image_rotation=90`, `camera_order=normal`, `num_rows=17`). The boot config load is DB-first with a **disk fallback**; whenever a restart lost the DB-ready race, MVE loaded that **stale disk snapshot** and then persisted it into the `mve_config` DB blob, overwriting the correct settings. The DB actually still held the right values (in the frozen legacy `timeline_config` row), but the app read the clobbered blob.
+
+Fix: when `os.replace` fails, fall back to an **in-place overwrite** of `DATA_FILE` (writing to a bind-mounted file works fine — only renaming over it does not), so the disk snapshot stays current and can never again feed a stale copy back over the DB. Less crash-atomic than the rename, but the DB is the primary store and a `.backup` is still written first.
+
+Also recovered nafis-hashtgerd's live settings (order `5,6,3,2,1,4` / rot `270` / rows `54`) into both stores and reboot-tested persistence.
+
+## [4.0.395] - 2026-09-28 - Fullscreen the live view + Marginal/Critical ejector thresholds (yellow vs red)
+
+Two customer-requested features.
+
+**1. Fullscreen the Dashboard live stream.** Added a **⛶ Fullscreen** button to the live-view footer, next to Stop/Resume and Reset (`static/status.html` `#timeline-footer`). It fullscreens the slideshow container (`#timeline-slideshow-container`), Esc exits, and `f` toggles; the icon flips ⛶↔✕ and zoom re-fits on enter/exit. Wired in `static/js/audio.js` (mirrors the existing `toggleFullscreen` in `routers/timeline.py`); CSS in `static/css/main.css` lets the image grow to fill the screen (it is fixed at 500px normally) while the footer stays pinned.
+
+**2. Two-tier confidence in ejector procedures — Marginal (yellow, warn) + Critical (red, eject).** Each rule now has an optional lower **`marginal_confidence`** band alongside the existing `min_confidence`, which is now the **Critical** (eject) threshold. A detection in the marginal band paints a **YELLOW** box/strip on the dashboard as an operator heads-up but does **not** eject; a detection at/above Critical paints **RED** and fires the hardware ejector as before.
+- Backward-compatible: existing procedures have no `marginal_confidence`, so it falls back to `min_confidence` (marginal = critical) → **no yellow, identical behavior** to today. Existing single-threshold procedures eject exactly as before.
+- Backend: `services/detection.py` `evaluate_eject_from_detections(..., conf_mode='critical'|'marginal')` — the critical pass is unchanged (still the ONLY pass that ejects, closes shipments, or writes `ejection_events`); the marginal pass is a pure warning pass (no side effects). `main.py` needs no change — it only ever runs the critical pass.
+- Rendering (server-side, both HTTP `/timeline_image` and the WebSocket push): `_build_header_strip` runs a second marginal pass on non-critical columns and stores `eject_level` (`critical`/`marginal`/`ok`/`None`) + `marginal_cams`; `draw_eject_boxes` paints RED for critical cameras and YELLOW for marginal-only ones. Client meta now carries `eject_level` for tooltips (`websocket.py`, `timeline.py` `timeline_meta`).
+- UI: the Process → Ejection Procedures rule editor now shows two inputs — **⚠ Marg** and **⛔ Crit** — per rule (`static/js/audio.js`). New rules seed both equal (no yellow band until Marginal is lowered).
+
+Cache-busters -> `?v=4.0.395`.
+
 ## [4.0.394] - 2026-09-16 - Camera Connection Status table said "OK" for disconnected cameras
 
 Operator: *"why do I always see a camera state flagged OK, but disconnected? what's the point of saying OK although it is disconnected?"*

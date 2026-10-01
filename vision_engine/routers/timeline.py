@@ -96,13 +96,15 @@ def _unpack_timeline_entry(frame_data):
 
 
 def draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_width, box_th):
-    """Paint the red eject outline. THE only place this is drawn.
+    """Paint the eject outlines. THE only place they are drawn.
 
     4.0.386 — previously duplicated byte-for-byte in timeline.py and websocket.py,
     so the HTTP and WebSocket views could drift apart. One copy now; both import it.
 
-    The attribution comes from `col['eject_cams']`, set by _build_header_strip in the
-    very same evaluation that coloured the strip — so the outline appears exactly when
+    4.0.395 MARGINAL/CRITICAL — RED outline for CRITICAL columns (an eject fired) and
+    YELLOW outline for MARGINAL ones (warning only, no eject). Both attributions come
+    from `col['eject_cams']` / `col['marginal_cams']`, set by _build_header_strip in the
+    very same evaluation that coloured the strip — so the outlines appear exactly when
     and where the strip decides, never from a second opinion.
     """
     comp_h, comp_w = composite.shape[:2]
@@ -113,29 +115,56 @@ def draw_eject_boxes(composite, columns_meta, camera_rows, row_cam_ids, thumb_wi
         row_bands.append((_cid, _y, _r.shape[0]))
         _y += _r.shape[0]
 
-    for col_idx, col in enumerate(columns_meta):
-        if col.get('should_eject') is not True:
-            continue
+    RED = (0, 0, 255)          # BGR
+    YELLOW = (0, 190, 225)     # BGR amber — must match the strip's marginal colour
+
+    def _paint(col_idx, cams, color, full_fallback):
         x0 = col_idx * thumb_width + 1
         x1 = min((col_idx + 1) * thumb_width - 1, comp_w - 1)
         if x1 <= x0:
-            continue
-        triggering = col.get('eject_cams') or set()
+            return
         drawn = False
-        if triggering:
+        if cams:
             for (_cid, ry, rh) in row_bands:
-                if _cid in triggering:
+                if _cid in cams:
                     y0 = ry + 1
                     y1 = min(ry + rh - 2, comp_h - 1)
                     if y1 > y0:
-                        cv2.rectangle(composite, (x0, y0), (x1, y1), (0, 0, 255), box_th)
+                        cv2.rectangle(composite, (x0, y0), (x1, y1), color, box_th)
                         drawn = True
-        if not drawn:
+        if not drawn and full_fallback:
             # Nothing camera-attributable fired (a shipment_* condition, or the
             # triggering camera is not on this page) — mark the whole column so an
             # ejection is never left unmarked.
             cv2.rectangle(composite, (x0, _HEADER_HEIGHT + 1),
-                          (x1, comp_h - 2), (0, 0, 255), box_th)
+                          (x1, comp_h - 2), color, box_th)
+
+    for col_idx, col in enumerate(columns_meta):
+        if col.get('should_eject') is True:
+            # CRITICAL — red, with a full-column fallback so an eject is never unmarked.
+            _paint(col_idx, col.get('eject_cams') or set(), RED, full_fallback=True)
+        else:
+            # MARGINAL — yellow, per attributed camera only (the strip already carries
+            # the column-level warning colour, so no full-column fallback here).
+            marg = col.get('marginal_cams') or set()
+            if marg:
+                _paint(col_idx, marg, YELLOW, full_fallback=False)
+
+
+def _has_marginal_band(procedures):
+    """True iff some enabled procedure has a rule whose marginal_confidence is set AND
+    differs from its min_confidence (critical). 4.0.397 — when this is False the marginal
+    (yellow) pass produces nothing, so the renderer skips it and the eject eval stays ONE
+    call per column (the pre-4.0.395 cost). Avoids doubling render work on the vast
+    majority of sites, which never configure a marginal band."""
+    for p in (procedures or []):
+        if not p.get('enabled', False):
+            continue
+        for r in (p.get('rules') or []):
+            mc = r.get('marginal_confidence')
+            if mc is not None and mc != r.get('min_confidence'):
+                return True
+    return False
 
 
 def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, current_encoder, ejector_offset):
@@ -158,37 +187,66 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
 
     ejector_target = (current_encoder - ejector_offset) if current_encoder is not None else None
 
+    _marg_enabled = _has_marginal_band(procedures)   # 4.0.397 — skip marginal pass if unused
+
     for i, col in enumerate(columns_meta):
         x_start = i * thumb_width
         x_end = x_start + thumb_width
 
         # Evaluate eject from detections
         all_dets = col.get('all_detections', [])
+        _cams = set()        # 4.0.386 — CRITICAL (red) cameras
+        _marg_cams = set()   # 4.0.395 — MARGINAL (yellow) cameras
+        marg_reasons = []
+        marginal_hit = False
         if procedures and all_dets:
             # 4.0.386 ONE-DECISION — the SAME call that decides the strip colour also
             # reports which cameras fired, so the red outline is derived from this
             # decision at this instant. Previously the box block re-ran the rules per
             # camera afterwards: a second decision, able to disagree with the strip.
-            _cams = set()
             should_eject, reasons = evaluate_eject_from_detections(
                 all_dets, procedures, matched_cams_out=_cams)
+            # 4.0.395 — MARGINAL/CRITICAL. On a non-critical column, a second, WARNING-
+            # only pass at the lower marginal_confidence band paints the YELLOW layer.
+            # Skipped when the column is already critical (red wins) OR when no rule
+            # configures a marginal band (4.0.397 — then it's pure overhead; keeps cost
+            # at ONE eval per column, the pre-4.0.395 render cost).
+            if should_eject is True or not _marg_enabled:
+                marginal_hit = False
+            else:
+                marginal_hit, marg_reasons = evaluate_eject_from_detections(
+                    all_dets, procedures, matched_cams_out=_marg_cams, conf_mode='marginal')
         else:
             should_eject = None  # unknown
             reasons = []
-            _cams = set()
+
+        _yellow_cams = _marg_cams - _cams   # critical takes precedence per camera
 
         # Store reasons back in col for metadata
         col['should_eject'] = should_eject
         col['eject_reasons'] = reasons
         col['eject_cams'] = _cams          # 4.0.386 — attribution from the strip's own decision
+        # 4.0.395 — severity for the client (tooltips) + the yellow box layer.
+        col['marginal_cams'] = _yellow_cams
+        col['marginal_reasons'] = marg_reasons
+        if should_eject is True:
+            col['eject_level'] = 'critical'
+        elif marginal_hit:
+            col['eject_level'] = 'marginal'
+        elif should_eject is False:
+            col['eject_level'] = 'ok'
+        else:
+            col['eject_level'] = None
 
         # Background color
         if should_eject is True:
-            color = (0, 0, 180)  # red BGR
+            color = (0, 0, 180)    # red BGR — CRITICAL (eject fired)
+        elif marginal_hit:
+            color = (0, 190, 225)  # amber/yellow BGR — MARGINAL (warning only)
         elif should_eject is False:
-            color = (0, 140, 0)  # green BGR
+            color = (0, 140, 0)    # green BGR
         else:
-            color = (60, 60, 60)  # gray
+            color = (60, 60, 60)   # gray
 
         cv2.rectangle(header, (x_start, 0), (x_end - 1, _HEADER_HEIGHT - 1), color, -1)
 
@@ -208,15 +266,22 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
             cv2.putText(header, label, (x_start + 2, 12),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.25, (220, 220, 220), 1)
 
-        # Eject reason text (bottom-left, small, only for red columns)
+        # Eject reason text (bottom-left, small) — for red (critical) and yellow
+        # (marginal) columns; 4.0.395 marginal text is drawn dark so it reads on amber.
+        _rtext = None
+        _rcolor = (255, 255, 255)
         if should_eject is True and reasons:
-            reason_text = "; ".join(reasons)
+            _rtext = "; ".join(reasons)
+        elif marginal_hit and marg_reasons:
+            _rtext = "~ " + "; ".join(marg_reasons)   # '~' hints "marginal"
+            _rcolor = (20, 20, 20)
+        if _rtext:
             # Truncate to fit column width (~6px per char at scale 0.25)
             max_chars = max(5, (thumb_width - 6) // 5)
-            if len(reason_text) > max_chars:
-                reason_text = reason_text[:max_chars - 2] + ".."
-            cv2.putText(header, reason_text, (x_start + 2, _HEADER_HEIGHT - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, (255, 255, 255), 1)
+            if len(_rtext) > max_chars:
+                _rtext = _rtext[:max_chars - 2] + ".."
+            cv2.putText(header, _rtext, (x_start + 2, _HEADER_HEIGHT - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.25, _rcolor, 1)
 
         # Ejector position marker (downward triangle)
         if ejector_target is not None and enc_val is not None:
@@ -7498,6 +7563,7 @@ def timeline_meta(request: Request, page: int = 0):
 
         # Build per-column metadata
         columns = []
+        _marg_enabled = _has_marginal_band(procedures)   # 4.0.397 — skip marginal pass if unused
         for col_idx in range(num_columns):
             col_all_dets = []
             col_d_paths = {}
@@ -7517,15 +7583,27 @@ def timeline_meta(request: Request, page: int = 0):
 
             should_eject = False
             eject_reasons = []
+            eject_level = None          # 4.0.395 — 'critical' | 'marginal' | 'ok' | None
+            marginal_reasons = []
             if procedures and col_all_dets:
                 should_eject, eject_reasons = evaluate_eject_from_detections(col_all_dets, procedures)
+                if should_eject is True:
+                    eject_level = 'critical'
+                elif _marg_enabled:
+                    _marg, marginal_reasons = evaluate_eject_from_detections(
+                        col_all_dets, procedures, conf_mode='marginal')
+                    eject_level = 'marginal' if _marg else 'ok'
+                else:
+                    eject_level = 'ok'
 
             columns.append({
                 "index": col_idx,
                 "ts": col_ts,
                 "encoder": col_encoder,
                 "should_eject": should_eject,
+                "eject_level": eject_level,
                 "eject_reasons": eject_reasons,
+                "marginal_reasons": marginal_reasons,
                 "d_paths": col_d_paths,
             })
 

@@ -395,8 +395,21 @@ def _has_color_delta_procedure():
         return False
 
 
-def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out=None):
+def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out=None,
+                                   conf_mode='critical'):
     """Evaluate eject rules from stored detections and procedures config.
+
+    4.0.395 MARGINAL/CRITICAL — `conf_mode` selects which per-rule confidence
+    threshold gates the detections:
+        'critical' (default): uses rule['min_confidence'] — the eject threshold.
+            Behaviour is IDENTICAL to before; this is the only pass that ejects,
+            closes shipments, or writes ejection_events. main.py calls only this.
+        'marginal': uses rule['marginal_confidence'] (a LOWER, optional band),
+            falling back to min_confidence when unset. Pure WARNING pass — it never
+            ejects, never closes a shipment, never writes the DB. The dashboard
+            renderer calls it to paint YELLOW (marginal) boxes/strip separately from
+            the RED (critical) ones. When marginal_confidence is unset it equals the
+            critical result, so no yellow appears (backward-compatible).
 
     Supports 9 condition types:
         count_equals  — exactly N instances detected
@@ -434,6 +447,21 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
     if not detections_list:
         return False, []
 
+    def _conf_for(rule):
+        """Per-rule confidence gate (0..1) for the active conf_mode. 'marginal'
+        uses the lower marginal_confidence band, falling back to the critical
+        min_confidence when it is not set."""
+        if conf_mode == 'marginal':
+            v = rule.get('marginal_confidence', None)
+            if v is None:
+                v = rule.get('min_confidence', 0)
+        else:
+            v = rule.get('min_confidence', 0)
+        try:
+            return (float(v) or 0) / 100.0
+        except (TypeError, ValueError):
+            return 0.0
+
     # --- Procedure rules ---
     for proc in (procedures or []):
         if not proc.get('enabled', False):
@@ -460,7 +488,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             if res:
                 try:
                     _obj = rule.get('object', '')
-                    _mc = rule.get('min_confidence', 0) / 100.0
+                    _mc = _conf_for(rule)
                     for _d in dets:
                         if (isinstance(_d, dict) and _d.get('name') == _obj
                                 and _d.get('confidence', 0) >= _mc):
@@ -472,7 +500,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
         def _eval_rule_inner(rule, dets=proc_dets):
             obj = rule.get('object', '')
             cond = rule.get('condition', 'count_equals')
-            min_conf = rule.get('min_confidence', 0) / 100.0
+            min_conf = _conf_for(rule)
             expected_count = rule.get('count', 1)
 
             # Filtered detections for this object above confidence
@@ -631,7 +659,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
                 return f"'{obj}' E out of range"
 
             expected = rule.get('count', 1)
-            min_conf = rule.get('min_confidence', 0) / 100.0
+            min_conf = _conf_for(rule)
             actual = len([d for d in proc_dets
                          if isinstance(d, dict) and d.get('name') == obj
                          and d.get('confidence', 0) >= min_conf])
@@ -655,6 +683,10 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             # action is "eject" (existing behavior).
             action = str(proc.get('action', 'eject') or 'eject').strip().lower()
             if action == 'shipment_close':
+                # shipment_close is a CRITICAL-only shipment operation, not an
+                # eject-severity warning — the marginal (yellow) pass ignores it.
+                if conf_mode != 'critical':
+                    continue
                 try:
                     if _watcher is not None:
                         # 4.0.189 — pass procedure name as prefix override so
@@ -700,7 +732,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             # Dedupe per (encoder, procedure_name, shipment) using a Redis
             # set with a short TTL — avoids inserting the same eject twice
             # when the dashboard re-evaluates the same column on refresh.
-            if proc.get('store'):
+            if conf_mode == 'critical' and proc.get('store'):
                 try:
                     from services.db import write_ejection_event_to_db
                     rc = _get_timeline_redis()

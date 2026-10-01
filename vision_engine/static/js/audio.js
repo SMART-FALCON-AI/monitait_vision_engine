@@ -1170,7 +1170,10 @@ function addRule(procId) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc) return;
     const firstClass = detectedObjectClasses.size > 0 ? Array.from(detectedObjectClasses).sort()[0] : '';
-    proc.rules.push({ object: firstClass, condition: 'count_equals', min_confidence: 30, count: 1, area: 10000, max_delta_e: 5.0, reference_mode: 'previous' });
+    // 4.0.395 — min_confidence is the CRITICAL (red / eject) threshold; marginal_confidence
+    // is the optional lower MARGINAL (yellow / warn-only) band. Seed them equal so a new
+    // rule has no yellow band until the operator lowers Marginal.
+    proc.rules.push({ object: firstClass, condition: 'count_equals', min_confidence: 30, marginal_confidence: 30, count: 1, area: 10000, max_delta_e: 5.0, reference_mode: 'previous' });
     renderProcedures();
 }
 
@@ -1201,9 +1204,10 @@ function toggleProcedureStore(procId, checked) {
 function updateRuleField(procId, ruleIndex, field, value) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc || !proc.rules[ruleIndex]) return;
-    if (field === 'min_confidence' || field === 'count' || field === 'area') {
+    if (field === 'min_confidence' || field === 'marginal_confidence' || field === 'count' || field === 'area') {
         proc.rules[ruleIndex][field] = Math.max(0, parseInt(value) || 0);
-        if (field === 'min_confidence') proc.rules[ruleIndex][field] = Math.min(100, proc.rules[ruleIndex][field]);
+        // 4.0.395 — confidence fields clamp to 0..100 (percent).
+        if (field === 'min_confidence' || field === 'marginal_confidence') proc.rules[ruleIndex][field] = Math.min(100, proc.rules[ruleIndex][field]);
     } else if (field === 'max_delta_e') {
         proc.rules[ruleIndex][field] = Math.max(0, parseFloat(value) || 5.0);
     } else {
@@ -1358,11 +1362,17 @@ function renderProcedures() {
                 ${colorControls}
                 ${shipInput}
                 ${_isShipObj ? '' : `
-                    <span style="font-size: 11px; color: var(--text-secondary);">min:</span>
+                    <span style="font-size: 11px; color: #eab308;" title="MARGINAL — detections at/above this confidence show a YELLOW warning box on the dashboard. No hardware ejection.">⚠ Marg:</span>
+                    <input type="number" value="${(rule.marginal_confidence != null ? rule.marginal_confidence : rule.min_confidence)}" min="0" max="100" step="1"
+                        onchange="updateRuleField('${proc.id}', ${ri}, 'marginal_confidence', this.value)"
+                        title="MARGINAL confidence (%) — YELLOW warning box only, NO ejection. Set below Critical to open a warning band; set equal to Critical for no warning band."
+                        style="width: 48px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(234,179,8,0.55); border-radius: 4px; font-size: 11px; text-align: center;">
+                    <span style="font-size: 11px; color: var(--text-secondary);">%</span>
+                    <span style="font-size: 11px; color: #ef4444;" title="CRITICAL — detections at/above this confidence show a RED box AND fire the hardware ejector.">⛔ Crit:</span>
                     <input type="number" value="${rule.min_confidence}" min="0" max="100" step="1"
                         onchange="updateRuleField('${proc.id}', ${ri}, 'min_confidence', this.value)"
-                        title="Minimum detection confidence (%) — only detections above this threshold are considered"
-                        style="width: 50px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px; text-align: center;">
+                        title="CRITICAL confidence (%) — RED box + hardware EJECTION. Detections at/above this threshold trigger the ejector."
+                        style="width: 48px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(239,68,68,0.55); border-radius: 4px; font-size: 11px; text-align: center;">
                     <span style="font-size: 11px; color: var(--text-secondary);">%</span>
                 `}
                 <button onclick="removeRule('${proc.id}', ${ri})"
@@ -1930,6 +1940,44 @@ document.addEventListener('DOMContentLoaded', function() {
     document.getElementById("timeline-zoom-in")?.addEventListener('click', () => { panzoom.zoomIn(); scheduleZoomReset(); });
     document.getElementById("timeline-zoom-out")?.addEventListener('click', () => { panzoom.zoomOut(); scheduleZoomReset(); });
     document.getElementById("timeline-reset-zoom")?.addEventListener('click', panzoom.reset);
+
+    // 4.0.395 — Fullscreen the live-stream view (customer request), beside Stop/Resume +
+    // Reset. Mirrors the toggleFullscreen in routers/timeline.py; targets the slideshow
+    // container so the footer buttons stay usable while fullscreen. Esc exits (browser
+    // default), 'f' toggles, and the button icon reflects state.
+    (function () {
+        const fsBtn = document.getElementById("timeline-fullscreen");
+        const fsTarget = document.getElementById("timeline-slideshow-container");
+        if (!fsBtn || !fsTarget) return;
+        const enter = fsTarget.requestFullscreen || fsTarget.webkitRequestFullscreen;
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        function inFullscreen() {
+            const el = document.fullscreenElement || document.webkitFullscreenElement;
+            return el === fsTarget;
+        }
+        function toggleFullscreen() {
+            try {
+                if (!inFullscreen()) { if (enter) enter.call(fsTarget); }
+                else { if (exit) exit.call(document); }
+            } catch (e) { console.warn('[Timeline] fullscreen toggle failed', e); }
+        }
+        fsBtn.addEventListener('click', toggleFullscreen);
+        function syncFsBtn() {
+            const on = inFullscreen();
+            fsBtn.textContent = on ? '✕' : '⛶';   // ✕ / ⛶
+            fsBtn.title = on ? 'Exit fullscreen (f)' : 'Fullscreen (f)';
+            try { panzoom.reset(); } catch (e) {}   // re-fit image to the new viewport
+        }
+        document.addEventListener('fullscreenchange', syncFsBtn);
+        document.addEventListener('webkitfullscreenchange', syncFsBtn);
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'f' && e.key !== 'F') return;
+            const tag = ((e.target || {}).tagName || '');
+            if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (e.target || {}).isContentEditable) return;
+            // Only when the dashboard stream is on-screen (or already fullscreen).
+            if (inFullscreen() || fsTarget.offsetParent !== null) { e.preventDefault(); toggleFullscreen(); }
+        });
+    })();
 
     // Auto-reset zoom after 30s of inactivity (industrial kiosk — no one to un-zoom)
     let _zoomResetTimer = null;

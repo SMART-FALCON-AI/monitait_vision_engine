@@ -995,6 +995,15 @@ body {
     background: #800;
 }
 
+/* 4.0.395 — Fullscreen the live-stream view. When the slideshow container is the
+   fullscreen element, let the image wrapper grow to fill the screen (it is fixed at
+   500px normally) and keep the footer buttons pinned at the bottom. */
+#timeline-slideshow-container:fullscreen { display: flex; flex-direction: column; background: #000; }
+#timeline-slideshow-container:-webkit-full-screen { display: flex; flex-direction: column; background: #000; }
+#timeline-slideshow-container:fullscreen #timeline-slide-wrapper { height: auto; flex: 1 1 auto; min-height: 0; }
+#timeline-slideshow-container:-webkit-full-screen #timeline-slide-wrapper { height: auto; flex: 1 1 auto; min-height: 0; }
+#timeline-slideshow-container:fullscreen #timeline-footer { flex: 0 0 auto; }
+
 /* Responsive Design for Mobile */
 @media (max-width: 768px) {
     body {

@@ -304,19 +304,20 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
 
         _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
 
-        # Build metadata for frontend
+        # Build metadata for frontend. 4.0.395 — reuse the values _build_header_strip
+        # already computed on each column (should_eject / eject_level / reasons) instead
+        # of a second evaluate call, so the meta, strip and outline are ONE decision and
+        # the client sees marginal vs critical.
         meta_columns = []
         for i, cm in enumerate(columns_meta):
-            should_eject = False
-            eject_reasons = []
-            if procedures and cm['all_detections']:
-                should_eject, eject_reasons = evaluate_eject_from_detections(cm['all_detections'], procedures)
             meta_columns.append({
                 "index": i,
                 "ts": cm['ts'],
                 "encoder": cm['encoder'],
-                "should_eject": should_eject,
-                "eject_reasons": eject_reasons,
+                "should_eject": bool(cm.get('should_eject') is True),
+                "eject_level": cm.get('eject_level'),            # 'critical' | 'marginal' | 'ok' | None
+                "eject_reasons": cm.get('eject_reasons', []),
+                "marginal_reasons": cm.get('marginal_reasons', []),
                 "d_paths": cm['d_paths'],
             })
 
