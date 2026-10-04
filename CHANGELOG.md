@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.404] - 2026-10-04 - Header: "Last saved" timestamp back below the Save button
+
+Reverted the 4.0.401 tweak that moved the "Last saved" line onto the same row as a shrunk Save button — operator wanted it back as a line BELOW the Save button, like before 4.0.401. Save button restored to its original padding; right column is the original 3-row stack (language / Save / Last).
+
 ## [4.0.403] - 2026-10-04 - Support tab: operator can now UPLOAD images / logs / files to support
 
 The Support tab was text-only outbound — you could receive attachments from support (4.0.383) but not send any. Added a 📎 attach button next to the message box: pick any file (screenshot, log, exported config, PDF…) and it's uploaded to the support room.
