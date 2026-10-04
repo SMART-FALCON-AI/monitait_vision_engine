@@ -154,12 +154,14 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
             custom_order_str = tl_config.get('custom_camera_order', '') if tl_config else ''
             order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
             if order_list:
-                def _custom_cam_key(cid):
-                    try:
-                        return order_list.index(cid)
-                    except ValueError:
-                        return len(order_list) + cid
-                sorted_cam_ids = sorted(camera_frames_raw.keys(), key=_custom_cam_key)
+                # 4.0.398 — custom order is a WHITELIST: the live dashboard shows ONLY the
+                # listed cameras, in this order. Previously non-listed cameras were appended
+                # at the bottom (sort, not filter), so their stale buffered frames kept
+                # showing after you removed them from the order.
+                _order_set = set(order_list)
+                sorted_cam_ids = sorted(
+                    (c for c in camera_frames_raw.keys() if c in _order_set),
+                    key=lambda cid: order_list.index(cid))
             else:
                 sorted_cam_ids = sorted(camera_frames_raw.keys())
         else:
@@ -391,8 +393,26 @@ async def ws_timeline(websocket: WebSocket):
             """Receive page navigation + mark-ejects toggle (msg = "page" or "page|mark|thickness")."""
             nonlocal client_page, client_mark, client_thick
             while True:
+                # 4.0.402 — receive() and message-processing are now in SEPARATE try blocks.
+                # Previously ONE `except Exception: pass` wrapped the whole body, so when
+                # websocket.receive_text() raised anything other than WebSocketDisconnect/
+                # RuntimeError — e.g. ConnectionClosedError from an UNCLEAN drop over a flaky
+                # tunnel — the error was swallowed and `while True` span again IMMEDIATELY.
+                # That busy-looped the uvicorn event loop at ~100% CPU and wedged the ENTIRE
+                # web server: every HTTP request (incl. the /health watchdog) starved, so the
+                # container went "unhealthy" while detection kept running on its own threads.
+                # (Confirmed live with py-spy on kiancord: the loop was pinned here.)
+                # A dead socket must BREAK; only a malformed MESSAGE should be ignored+skipped.
                 try:
                     msg = await websocket.receive_text()
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+                except Exception:
+                    # receive() failed with something other than a clean disconnect — the
+                    # socket is dead/half-open. Breaking lets the connection clean up instead
+                    # of spinning the event loop.
+                    break
+                try:
                     parts = str(msg).split('|')
                     client_page = int(parts[0])
                     client_mark = (len(parts) > 1 and parts[1] == '1')
@@ -402,9 +422,8 @@ async def ws_timeline(websocket: WebSocket):
                         except (ValueError, TypeError):
                             client_thick = 3
                     await _render_and_send_self()
-                except (WebSocketDisconnect, RuntimeError):
-                    break
                 except Exception:
+                    # malformed message or a transient send hiccup — ignore and keep listening
                     pass
 
         async def _listen_redis():

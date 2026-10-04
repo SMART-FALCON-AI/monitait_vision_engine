@@ -73,7 +73,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import requests
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, UploadFile, File
 from fastapi.responses import JSONResponse, Response
 
 from services.machine_id import machine_fingerprint, fingerprint_sources
@@ -554,6 +554,82 @@ def _media_sync(mxc: str):
     raise SupportError("could not fetch attachment ({})".format(last or "unknown"), 502)
 
 
+# --- outbound attachments (operator -> support) -----------------------------
+# 4.0.403 — the operator can now send a screenshot / log / exported config INTO
+# the support room, mirroring the inbound media path (_media_sync). Upload the
+# bytes to the homeserver media repo, then post an m.image/m.file message whose
+# `url` is the returned mxc:// — exactly the shape _messages_sync already renders.
+
+def _msgtype_for(ctype: str) -> str:
+    c = (ctype or "").lower()
+    if c.startswith("image/"):
+        return "m.image"
+    if c.startswith("video/"):
+        return "m.video"
+    if c.startswith("audio/"):
+        return "m.audio"
+    return "m.file"
+
+
+def _max_upload_bytes() -> int:
+    try:
+        mb = int(_env("MVE_SUPPORT_MAX_UPLOAD_MB", "25") or 25)
+        return max(1, mb) * 1024 * 1024
+    except Exception:
+        return 25 * 1024 * 1024
+
+
+def _upload_sync(file_bytes: bytes, filename: str, content_type: str) -> Dict[str, Any]:
+    """Upload a file to the homeserver and post it into the room as m.image/m.file."""
+    _guard_or_raise()
+    if not file_bytes:
+        raise SupportError("empty file", 400)
+    cap = _max_upload_bytes()
+    if len(file_bytes) > cap:
+        raise SupportError("file too large (max {} MB)".format(cap // (1024 * 1024)), 413)
+    room = _resolve_room()
+    fname = (filename or "upload").replace("\n", " ").replace("\r", " ").strip() or "upload"
+    ctype = (content_type or "application/octet-stream").split(";", 1)[0].strip() or "application/octet-stream"
+
+    # 1) upload the raw bytes (NOT json) to the media repo; re-login once on a bad token
+    def _do_upload(tok: str):
+        return _SESSION.post(
+            _homeserver() + "/_matrix/media/v3/upload",
+            params={"filename": fname},
+            data=file_bytes,
+            headers={"Authorization": "Bearer " + tok, "Content-Type": ctype},
+            timeout=max(_timeout(), 60.0),
+        )
+    try:
+        r = _do_upload(_token())
+        if r.status_code in (401, 403) and not _env("MVE_SUPPORT_TOKEN"):
+            r = _do_upload(_token(force_new=True))
+    except requests.RequestException as e:
+        raise SupportError("cannot reach the support server: " + str(e), 502)
+    if r.status_code >= 400:
+        raise SupportError("media upload failed (HTTP {}): {}".format(r.status_code, _err_of(r)), 502)
+    try:
+        mxc = (r.json() or {}).get("content_uri")
+    except Exception:
+        mxc = None
+    if not isinstance(mxc, str) or not mxc.startswith("mxc://"):
+        raise SupportError("media upload returned no content uri", 502)
+
+    # 2) post the attachment message into the room (same shape the UI renders inbound)
+    content = {
+        "msgtype": _msgtype_for(ctype),
+        "body": fname,
+        "url": mxc,
+        "info": {"mimetype": ctype, "size": len(file_bytes)},
+    }
+    txn = "mveup{}".format(int(time.time() * 1000))
+    res = _call("PUT",
+                "/_matrix/client/v3/rooms/{}/send/m.room.message/{}".format(_quote(room), txn),
+                json_body=content)
+    return {"ok": True, "event_id": res.get("event_id"), "room_id": room,
+            "mxc": mxc, "msgtype": content["msgtype"], "filename": fname}
+
+
 def _status_sync() -> Dict[str, Any]:
     """Never raises — this is what the tab polls to decide what to render."""
     info: Dict[str, Any] = {
@@ -889,6 +965,30 @@ async def support_media(mxc: str = ""):
         return JSONResponse(content={"ok": False, "error": e.message}, status_code=e.status)
     except Exception as e:
         logger.warning("[support] media fetch failed: %s", _scrub(e))
+        return JSONResponse(content={"ok": False, "error": _scrub(e)}, status_code=502)
+
+
+@router.post("/api/support/upload")
+async def support_upload(file: UploadFile = File(...)):
+    """Operator sends a screenshot / log / exported config into the support room.
+
+    multipart/form-data with field `file`. Uploaded to the homeserver media repo,
+    then posted as m.image (images) or m.file (everything else).
+    """
+    try:
+        data = await file.read()
+    except Exception as e:
+        logger.warning("[support] upload read failed: %s", _scrub(e))
+        return JSONResponse(content={"ok": False, "error": "could not read the file"}, status_code=400)
+    try:
+        res = await asyncio.to_thread(
+            _upload_sync, data, file.filename or "upload",
+            file.content_type or "application/octet-stream")
+        return JSONResponse(content=res)
+    except SupportError as e:
+        return JSONResponse(content={"ok": False, "error": e.message}, status_code=e.status)
+    except Exception as e:
+        logger.warning("[support] upload failed: %s", _scrub(e))
         return JSONResponse(content={"ok": False, "error": _scrub(e)}, status_code=502)
 
 

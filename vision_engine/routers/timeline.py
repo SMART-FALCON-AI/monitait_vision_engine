@@ -421,13 +421,12 @@ def get_timeline_composite(request: Request):
             custom_order_str = tl_config.get('custom_camera_order', '') if tl_config else ''
             order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
             if order_list:
-                def _custom_key(key):
-                    cid = extract_cam_id(key)
-                    try:
-                        return order_list.index(cid)
-                    except ValueError:
-                        return len(order_list) + cid
-                all_keys.sort(key=_custom_key)
+                # 4.0.398 — custom order is a WHITELIST (show ONLY these cameras), not just
+                # a sort; otherwise non-listed cameras with stale buffered frames keep
+                # rendering at the bottom.
+                _order_set = set(order_list)
+                all_keys = [k for k in all_keys if extract_cam_id(k) in _order_set]
+                all_keys.sort(key=lambda key: order_list.index(extract_cam_id(key)))
             else:
                 all_keys.sort(key=extract_cam_id)
         else:
@@ -575,12 +574,16 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
             custom_order_str = tl_config.get('custom_camera_order', '')
             order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
             if order_list:
-                def _custom_cam_key(cid):
-                    try:
-                        return order_list.index(cid)
-                    except ValueError:
-                        return len(order_list) + cid
-                sorted_cam_ids = sorted(camera_frames_raw.keys(), key=_custom_cam_key)
+                # 4.0.398 — a custom order is a WHITELIST: render ONLY these cameras, in
+                # this order. Previously non-listed cameras were appended at the bottom
+                # (sort, not filter), so removing a camera from the order did NOT hide it —
+                # its stale buffered frames kept showing (e.g. after switching to a state
+                # that captures fewer cameras). Operators expect the list to control
+                # exactly which cameras appear on the timeline.
+                _order_set = set(order_list)
+                sorted_cam_ids = sorted(
+                    (c for c in camera_frames_raw.keys() if c in _order_set),
+                    key=lambda cid: order_list.index(cid))
             else:
                 sorted_cam_ids = sorted(camera_frames_raw.keys())
         else:

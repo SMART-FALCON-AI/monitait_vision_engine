@@ -201,6 +201,62 @@ function sendSupportMessage() {
         .then(function () { if (btn) btn.disabled = false; });
 }
 
+// --- attachment upload (operator -> support) --------------------------------
+// 4.0.403 — send a screenshot / log / exported config INTO the support room.
+// multipart POST to /api/support/upload; the backend uploads to Matrix and posts
+// an m.image/m.file message, which refreshSupportMessages() then renders inline.
+function uploadSupportFile(input) {
+    if (!input || !input.files || !input.files.length) return;
+    var file = input.files[0];
+    var statusEl = _supportEl('support-upload-status');
+    var attachBtn = _supportEl('support-attach-btn');
+    var sendBtn = _supportEl('support-send-btn');
+    var MAX = 25 * 1024 * 1024;   // keep in sync with MVE_SUPPORT_MAX_UPLOAD_MB (default 25)
+
+    function setStatus(msg, isErr) {
+        if (!statusEl) return;
+        statusEl.style.display = msg ? 'block' : 'none';
+        statusEl.textContent = msg || '';
+        statusEl.style.color = isErr ? 'var(--danger-color, #ef4444)' : 'var(--text-secondary)';
+    }
+    function done() {
+        if (attachBtn) attachBtn.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+        input.value = '';   // reset so the SAME file can be picked again
+    }
+
+    if (file.size > MAX) {
+        setStatus((t('support_file_too_big') || 'File too large (max 25 MB)'), true);
+        input.value = '';
+        return;
+    }
+
+    if (attachBtn) attachBtn.disabled = true;
+    if (sendBtn) sendBtn.disabled = true;
+    setStatus((t('support_uploading') || 'Uploading') + ' ' + file.name + ' …', false);
+
+    var fd = new FormData();
+    fd.append('file', file, file.name);   // do NOT set Content-Type; browser adds the boundary
+
+    fetch('/api/support/upload', { method: 'POST', body: fd })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+            var d = res.d || {};
+            if (!res.ok || !d.ok) {
+                setStatus((t('support_upload_failed') || 'Upload failed') + ': ' + (d.error || '?'), true);
+                done();
+                return;
+            }
+            setStatus(null, false);
+            done();
+            return refreshSupportMessages(true);
+        })
+        .catch(function (e) {
+            setStatus((t('support_upload_failed') || 'Upload failed') + ': ' + e, true);
+            done();
+        });
+}
+
 // --- escalation from the AI tab ---------------------------------------------
 
 // Called by the "Ask a human about this" button in the AI Assistant. Grabs the

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.403] - 2026-10-04 - Support tab: operator can now UPLOAD images / logs / files to support
+
+The Support tab was text-only outbound — you could receive attachments from support (4.0.383) but not send any. Added a 📎 attach button next to the message box: pick any file (screenshot, log, exported config, PDF…) and it's uploaded to the support room.
+
+Backend (`routers/support.py`): new `POST /api/support/upload` (multipart `file`) → `_upload_sync` uploads the raw bytes to the homeserver media repo (`/_matrix/media/v3/upload`, same auth/retry pattern as `_call`), then posts an `m.image` (images) or `m.file` (everything else) room message whose `url` is the returned `mxc://` — exactly the shape `_messages_sync` already returns and `_supportBody` already renders inline. 25 MB cap (`MVE_SUPPORT_MAX_UPLOAD_MB`, default 25). `python-multipart` already shipped (used by the weights/config uploads).
+
+UI (`static/status.html` + `static/js/support.js`): hidden file input + 📎 button + `uploadSupportFile()` (FormData POST, progress/err line, disables buttons during upload, refreshes the thread on success). Inbound image/file rendering was already in place, so the sent attachment appears inline on your side immediately.
+
+## [4.0.402] - 2026-10-04 - FIX: WebSocket busy-loop that wedged the whole web server ("unhealthy" every few hours)
+
+Root cause, confirmed live with py-spy on kiancord: the timeline WebSocket handler `_listen_client` (`routers/websocket.py`) had a single `except Exception: pass` wrapping its entire `while True` body. When `websocket.receive_text()` raised anything other than `WebSocketDisconnect`/`RuntimeError` — e.g. a `ConnectionClosedError` from an **unclean** socket drop (which a flaky reverse-SSH/RustDesk tunnel produces constantly) — the exception was swallowed and the loop span again **immediately**, busy-looping the uvicorn event loop at ~100% CPU on its single thread.
+
+That one spinner starved **every** HTTP request, including the `/api/health/watchdog` healthcheck → the container flipped to `unhealthy` and the dashboard hung, while detection kept running on its own worker threads (so CPU looked low-ish, memory/FDs/DB all normal). It accumulated per unclean dashboard disconnect, so sites with heavy dashboard use over a flaky tunnel wedged every few hours; quiet sites never did. No config/data/version change was involved.
+
+Fix: split receive from message-processing into two `try` blocks. A failed `receive_text()` (any exception) now **breaks** the loop so the connection cleans up (and `asyncio.wait(FIRST_COMPLETED)` cancels the paired Redis task via the existing finally), instead of spinning. A malformed *message* is still ignored (keep listening). `_listen_redis` and `/ws/camera` were already safe (their `except` is outside the loop + they `await asyncio.sleep`). Diagnosed via a temporary in-container py-spy dump.
+
+## [4.0.401] - 2026-10-03 - Shorter sticky header (compact Save row + trimmed padding)
+
+The sticky header was tall because the right column stacked 3 lines (language select → Save button → "Last saved" timestamp). Now the **"Last:" timestamp sits on the same row as a shrunk Save button** (padding 8/12 → 5/10), so the right column is 2 rows instead of 3. Also trimmed the header's vertical padding (12 → 8 top/bottom), margin-bottom (16 → 10), and switched `align-items: start → center` so columns center vertically. Net: the header is noticeably shorter, leaving more room for the dashboard. The brand lockup (logo + "Monitait Vision Engine") is now the height-limiting element.
+
+## [4.0.400] - 2026-10-03 - Header brand lockup: MVE logo + "Monitait Vision Engine" text side by side
+
+Refines 4.0.399. Instead of the logo *replacing* the wordmark, the header now shows both: the `logo.png` image on the left (in its white chip) with the "Monitait Vision Engine" gradient text beside it — a standard icon+wordmark lockup. Logo sized to 40px and the text stacked to 3 short lines so the brand column stays narrow and doesn't push the 10-tab strip into scrolling (the 4.0.386 constraint). Version line (`#app-version`) moves under the text.
+
+## [4.0.399] - 2026-10-03 - Header brand is now the MVE logo image (logo.png)
+
+The top-left brand was a CSS gradient text wordmark ("Monitait / Vision / Engine"). Swapped it for the actual MVE logo asset: `logo.png` is now copied into `vision_engine/static/` and rendered as an `<img>` in the header brand slot, cache-busted with `?v=`.
+
+`logo.png` is a navy mark on a solid white background (RGBA but fully opaque, 564×283). On the dark sticky header a bare white rectangle would look unintentional, so the image sits in a white "chip" — small padding + rounded corners, `max-width: 92px` to fit the narrow brand column introduced in 4.0.386. The version line (`#app-version`) underneath is unchanged.
+
+Browser tab icon (`favicon.svg`) left as-is — a 2:1 wordmark makes a poor square favicon; swap it separately if wanted.
+
+## [4.0.398] - 2026-10-03 - Custom camera order is now a WHITELIST (removing a camera from the order actually hides it)
+
+Operator: *"I changed those numbers in the app, but again extra cameras are shown."* They trimmed `custom_camera_order` to the 8 cameras they wanted, but the dashboard timeline still showed cameras 1/3/6/12.
+
+Root cause: the custom camera order was a **sort key, not a filter**. In all three render paths (`timeline.py` `get_timeline_composite` + the page render, and `websocket.py`), cameras not in the list got `len(order_list) + cid` — sorted to the bottom but **still rendered** for every camera that had frames in the Redis timeline buffer. So removing a camera from the order didn't hide it; its **stale buffered frames** kept showing (e.g. after switching to a state that captures fewer cameras — "Up-Shrink" captures 8, but "Up"/"default" had captured 12–13, leaving frames behind).
+
+Fix: a non-empty `custom_camera_order` is now a **whitelist** — only the listed cameras are rendered, in that order, in all three paths. Capture (the state's phase camera list) and display (camera order) stay independent, but the order now controls exactly which cameras appear.
+
 ## [4.0.397] - 2026-10-01 - Perf: marginal (yellow) pass only runs when a marginal band is actually configured
 
 4.0.395 added a second eject evaluation per timeline column (the marginal/yellow pass). On sites that don't use a marginal band — i.e. everyone until they opt in — that doubled the eject eval in the hot dashboard-render path for zero benefit. Observed on behnoor: `timeline_image` for a 44-column × 6-camera board (an 11.5 MB composite) ran ~16 s.
