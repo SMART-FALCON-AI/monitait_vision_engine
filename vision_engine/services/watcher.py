@@ -1226,6 +1226,41 @@ class ArduinoSocket:
             self.persist_length_state(force=True)
         except Exception as _pe:
             logger.warning(f"cutoff: persist failed: {_pe}")
+        # 4.0.405 — ALSO persist current_shipment to the config blob, exactly like
+        # the barcode (_persist_barcode_shipment) and API (_persist_shipment) paths.
+        # Without this, auto/rule cutoff only updated runtime + Redis + length_state;
+        # the DB `current_shipment` stayed frozen at the last MANUALLY-set shipment,
+        # so a full restart (which clears Redis) restored that stale id on boot and
+        # funnelled every post-reset frame back into it (behnoor: ~88k frames piled
+        # into one Sep-28 shipment over 13 days while real shipments rotated fine).
+        # Offloaded to a daemon thread so the encoder-tick loop that calls us never
+        # blocks on the DB write.
+        _snap_sid = new_id
+        _snap_sse = int(getattr(self, "shipment_start_encoder", 0) or 0)
+
+        def _persist_cutoff_shipment(sid, sse):
+            try:
+                from config import load_service_config, save_service_config
+                _svc = load_service_config() or {}
+                _svc["current_shipment"] = sid
+                _svc["shipment_start_encoder"] = sse
+                save_service_config(_svc)
+            except Exception as _pe2:
+                logger.warning(f"cutoff: persist current_shipment failed: {_pe2}")
+            try:
+                os.makedirs(f"raw_images/{sid}", exist_ok=True)
+            except Exception as _me:
+                logger.warning(f"cutoff: mkdir shipment dir failed: {_me}")
+
+        try:
+            threading.Thread(
+                target=_persist_cutoff_shipment,
+                args=(_snap_sid, _snap_sse),
+                daemon=True,
+                name=f"cutoff-persist-{_snap_sid}",
+            ).start()
+        except Exception as _te:
+            logger.warning(f"cutoff: persist thread spawn failed: {_te}")
         return new_id
 
     def _maybe_auto_cutoff(self):

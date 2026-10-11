@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.405] - 2026-10-11 - FIX: auto-cutoff never persisted current_shipment → restart reverted to a stale shipment
+
+Root cause, confirmed on behnoor: the active shipment is restored on boot from the config blob's `current_shipment` (`main.py:275`, the `[SHIPMENT-RESTORE]` path), which is written ONLY by the manual API path (`_persist_shipment`, `config_routes.py:542`) and barcode scans (`_persist_barcode_shipment`, `watcher.py:1715`). The auto/rule-based cutoff `close_and_open_new_shipment` (`services/watcher.py`) minted a fresh timestamped id and updated runtime + Redis + the length-state file — but **never wrote `current_shipment` back to the config blob**.
+
+Consequence: after shipments auto-rotated normally, a **full restart** (which also clears Redis) reloaded the frozen `current_shipment` — the last MANUALLY-set id — reset the encoder to ~0, and funnelled every post-reset frame back into that one stale shipment. On behnoor this piled **~88,589 frames (~25 GB)** into a single Sep-28 shipment (`Batch2609281151464`) over ~13 days of restarts, even though the real shipments (`Batch261011…` chain, 100 Glass each) rotated correctly — and it made that shipment's image export enormous while its displayed length stayed tiny (~6.4 Glass).
+
+Fix: `close_and_open_new_shipment` now persists `current_shipment` + `shipment_start_encoder` to the config blob via a daemon thread, mirroring the barcode/API paths exactly (same `load_service_config` → set → `save_service_config`, off the encoder-tick thread so it never blocks). Now auto-cut shipments survive a full restart instead of reverting.
+
 ## [4.0.404] - 2026-10-04 - Header: "Last saved" timestamp back below the Save button
 
 Reverted the 4.0.401 tweak that moved the "Last saved" line onto the same row as a shrunk Save button — operator wanted it back as a line BELOW the Save button, like before 4.0.401. Save button restored to its original padding; right column is the original 3-row stack (language / Save / Last).
