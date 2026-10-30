@@ -480,6 +480,8 @@ def main():
                     help="first N s MVE is 'unreachable': reports buffer in SQLite, then replay")
     ap.add_argument("--idle-last", type=int, default=0, help="last N s produce nothing (exercises the heartbeat)")
     ap.add_argument("--register", action="store_true", help="also set name/line/ideal_rate via /api/watchers/register")
+    ap.add_argument("--name", default="Dummy watcher (test)", help="display name sent with --register")
+    ap.add_argument("--line", default="TEST", help="line/group sent with --register")
     ap.add_argument("--workdir", default="./dummy_watcher_run", help="SQLite buffer + images + ledger")
     ap.add_argument("--verify-only", action="store_true", help="skip sending; re-check the last run's ledger")
     args = ap.parse_args()
@@ -503,7 +505,7 @@ def main():
 
     if args.register:
         r = requests.post(base + "/api/watchers/register", timeout=30, json={
-            "register_id": args.register_id, "name": "Dummy watcher (test)", "line": "TEST",
+            "register_id": args.register_id, "name": args.name, "line": args.line,
             "sensor": "simulated", "type": "dummy", "ideal_rate": args.ppm * 60})
         print(f"register -> HTTP {r.status_code} {r.text[:120]}")
 

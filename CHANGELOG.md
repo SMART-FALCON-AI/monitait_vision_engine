@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.415] - 2026-10-30 - IP camera freeze watchdog: a frozen stream reconnects in ~20 s instead of never
+
+**Shoga cams 21/22/23 stayed frozen while the cameras were fine** (`services/camera.py`)
+- 21:34 local: the three cameras behind one switch (`.2/.3/.6`) stopped sending within 51 ms of each other — a network blip on that group only (no camera reboot: clocks intact, nothing in their logs; the other 23 cameras and the box's NIC were fine). The cameras dropped their RTSP sessions but the close never reached MVE: the sockets stayed ESTABLISHED at 0 kbit/s (`ss`: last receive 27 min ago, Recv-Q 0), while a fresh connection to the same cameras streamed normally. Only the 4.0.414 restart brought them back.
+- Why MVE never noticed: each read waited OpenCV's 30 s default, and on a read timeout OpenCV flushes the FFMPEG decoder, which returns one delayed picture as a "successful" read. The buffer counted it as a live frame, so `failure_count` reset every 30 s and the 100-failure reconnect could never fire — the camera even showed as connected part of the time.
+- Fix:
+  - IP streams open through `open_ip_capture()` with explicit 10 s open / 10 s read timeouts. They only take effect when passed at open: the old `cap.set(...TIMEOUT...)` after open in `test_camera_stream()` and `/api/cameras/test` did nothing (now use the helper too).
+  - A read that runs into the read timeout is a failed read, whatever it returns (a healthy read takes ~0.1 s).
+  - Freeze watchdog: an IP camera with no usable frame for 20 s logs `WARNING IP camera <ip>: no frame for 20s - stream frozen, reconnecting (freeze #N)` and reconnects at once (4.0.412 backoff still applies to cameras that stay dead).
+  - `/api/cameras` adds `last_frame_age_s` and `frozen_reconnects` per camera.
+- Verified on shoga against real camera `.2`, old and new code side by side in throwaway containers, each with its live RTSP connection frozen by an iptables DROP on its own local port (camera still reachable — the 21:34 failure):
+
+  | | 4.0.414 code | 4.0.415 code |
+  |---|---|---|
+  | frozen at | 22:22:05 | 22:22:05 |
+  | marked not connected | never (stale picture every 30 s) | 22:22:15 |
+  | reconnect | never (90 s observed) | 22:22:25, "stream frozen" warning |
+  | frames flowing again | no | 22:22:28 (~23 s) |
+
+- vteam12 canary: healthy on 4.0.415 after 48 s, shipment kept (no cameras attached there; the Basler "serial 24613703 not found" boot error is pre-existing — same at the 4.0.414 boot).
+- shoga production (2026-10-31 01:32 local): healthy after 48 s, shipment `2610111624574` kept, 27/28 cameras streaming. Production freeze test on cam 21 (`.2`), its live RTSP connection dropped at 22:06:26 UTC: not connected at +10 s, `stream frozen, reconnecting (freeze #1)` at +20 s, fresh frames at +25 s; old socket closed (FIN-WAIT-1), no extra sockets. During the test cam 29 (`.232`) fell off the network for real (ARP FAILED) — the watchdog caught it too, then the normal backoff took over (dead camera: no frozen warnings, 5 s → 10 s → 20 s …).
+
+**Dummy watcher**: `--name` / `--line` options for `--register` (several simulated machines on different lines).
+
 ## [4.0.414] - 2026-10-30 - Watcher OEE counted wrong; last camera-password leak; dummy Watcher Jet
 
 **Watcher (Watcher Jet) OEE counted the wrong totals** (`services/watcher_metrics.py`)

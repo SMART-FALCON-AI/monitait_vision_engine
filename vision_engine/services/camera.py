@@ -24,6 +24,27 @@ CAM_2_PATH = os.environ.get("CAM_2_PATH", "")
 CAM_3_PATH = os.environ.get("CAM_3_PATH", "")
 CAM_4_PATH = os.environ.get("CAM_4_PATH", "")
 
+# 4.0.415 — frozen-stream watchdog for IP cameras. OpenCV's FFMPEG defaults wait 30 s
+# per read, and the buffer only reconnected after 100 failed reads, so a stream that
+# went silent while its TCP connection stayed open (the camera dropped the session
+# during a network blip and the goodbye never arrived) stayed frozen ~50 min — shoga
+# cams .2/.3/.6 on 2026-10-30. Now: reads give up after IP_READ_TIMEOUT_MS, and no
+# accepted frame for IP_STALL_SECONDS means "frozen" → log it and reconnect.
+IP_OPEN_TIMEOUT_MS = 10000
+IP_READ_TIMEOUT_MS = 10000
+IP_STALL_SECONDS = 20
+
+
+def open_ip_capture(url, open_timeout_ms=IP_OPEN_TIMEOUT_MS, read_timeout_ms=IP_READ_TIMEOUT_MS):
+    """Open an RTSP/HTTP stream on FFMPEG with explicit open/read timeouts.
+
+    Pinned to FFMPEG: with no backend, a failed open falls through to OpenCV's
+    CAP_IMAGES reader, whose error message prints the full URL (password)."""
+    return cv2.VideoCapture(url, cv2.CAP_FFMPEG, [
+        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(open_timeout_ms),
+        cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(read_timeout_ms),
+    ])
+
 
 # ---------------------------------------------------------------------------
 # 4.0.54 — Self-healing V4L2 path recovery.
@@ -800,10 +821,8 @@ def test_camera_stream(url: str, timeout: float = 2.0) -> bool:
         True if camera is accessible and returns video frames
     """
     try:
-        # Try to open the camera stream
-        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(timeout * 1000))
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(timeout * 1000))
+        # Try to open the camera stream (timeouts only take effect when passed at open)
+        cap = open_ip_capture(url, timeout * 1000, timeout * 1000)
 
         # Try to read a frame
         ret, frame = cap.read()
@@ -1194,9 +1213,7 @@ class CameraBuffer:
 
         # Initialize camera with appropriate backend
         if self.is_ip_camera:
-            # Pin FFMPEG: with no backend, a failed open falls through to OpenCV's
-            # CAP_IMAGES reader, whose error message prints the full URL (password).
-            self.camera = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
+            self.camera = open_ip_capture(source)
             logger.info(f"Initializing IP camera: {safe_source(source)}")
         else:
             self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
@@ -1248,6 +1265,10 @@ class CameraBuffer:
         self.success = success
         self.frame = frame
         self.stop = False
+        # 4.0.415 — freeze visibility (/api/cameras): wall time of the last accepted
+        # frame and how many times the watchdog found this stream frozen.
+        self.last_frame_time = None
+        self.frozen_reconnects = 0
 
         # ROI (Region of Interest) settings
         if roi_config:
@@ -1352,6 +1373,7 @@ class CameraBuffer:
         stale_reconnect_cycles = 0
         STALE_CYCLES_BEFORE_HEAL = 3
         _bypath_ctr = 0   # 4.0.368 — throttle for the proactive by-path drift check
+        _last_live = time.monotonic()   # 4.0.415 — last accepted frame (or (re)open), for the freeze watchdog
 
         while True:
             try:
@@ -1387,8 +1409,17 @@ class CameraBuffer:
                         self._apply_saved_props()
                         failure_count = 0
                         stale_reconnect_cycles = 0
-                self.camera.grab()
-                success, frame = self.camera.retrieve(0)
+                # 4.0.415 — a read that ran into the read timeout is a failed read even
+                # when grab() "succeeds": on timeout OpenCV flushes FFMPEG's decoder, which
+                # hands back one delayed picture. Counting it as live reset failure_count
+                # every timeout, so a frozen stream never reached max_failures and never
+                # reconnected (shoga cams 21-23, 2026-10-30). A healthy read takes ~0.1 s.
+                _t_grab = time.monotonic()
+                grabbed = self.camera.grab()
+                if self.is_ip_camera and (time.monotonic() - _t_grab) * 1000 >= IP_READ_TIMEOUT_MS * 0.9:
+                    grabbed = False
+                success, frame = self.camera.retrieve(0) if grabbed else (False, None)
+                grey = False
                 if success:
                     # Reject half-grey frames (incomplete decode)
                     # Check bottom 25% of frame for uniform grey (128) pixels
@@ -1396,10 +1427,13 @@ class CameraBuffer:
                     bottom = frame[h * 3 // 4:, :]
                     if np.mean(bottom == 128) > 0.9:
                         success = False
+                        grey = True
                         logger.debug("Rejected grey frame (incomplete decode)")
                     else:
                         self.frame = frame
                         self.success = success
+                        self.last_frame_time = time.time()
+                        _last_live = time.monotonic()
                         failure_count = 0  # Reset counter on successful read
                         consecutive_reconnects = 0  # 4.0.412 - live frame clears reconnect backoff
                         # 4.0.54 — a run of successful reads means the current
@@ -1407,9 +1441,25 @@ class CameraBuffer:
                         # a future drift episode gets the full 3-cycle grace
                         # before the resolver kicks in.
                         stale_reconnect_cycles = 0
-                else:
-                    self.success = success
-                    failure_count += 1
+                if not success:
+                    # Grey frames keep the previous state, as before; they only
+                    # count toward the freeze watchdog below.
+                    if not grey:
+                        self.success = success
+                        failure_count += 1
+
+                    # 4.0.415 — freeze watchdog: an IP stream that delivered no usable
+                    # frame for IP_STALL_SECONDS is frozen, however its reads fail
+                    # (each blocking up to IP_READ_TIMEOUT_MS, or grey) — reconnect now
+                    # instead of after max_failures reads.
+                    _silent = time.monotonic() - _last_live
+                    if (self.is_ip_camera and failure_count < max_failures
+                            and _silent > IP_STALL_SECONDS):
+                        self.success = False
+                        self.frozen_reconnects += 1
+                        logger.warning(f"IP camera {safe_source(self.source)}: no frame for {_silent:.0f}s "
+                                       f"- stream frozen, reconnecting (freeze #{self.frozen_reconnects})")
+                        failure_count = max_failures
 
                     # Auto-reconnect after consecutive failures
                     if failure_count >= max_failures:
@@ -1481,7 +1531,7 @@ class CameraBuffer:
 
                             # Reinitialize camera
                             if self.is_ip_camera:
-                                self.camera = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+                                self.camera = open_ip_capture(self.source)
                                 logger.info(f"Reconnecting IP camera: {safe_source(self.source)}")
                             else:
                                 self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
@@ -1496,6 +1546,7 @@ class CameraBuffer:
 
                             # Reset failure counter after reconnect attempt
                             failure_count = 0
+                            _last_live = time.monotonic()   # 4.0.415 — the new session gets a full freeze window
                             logger.info("Camera reconnection attempted")
                         except Exception as e:
                             logger.error(f"Camera reconnection failed: {e}")
@@ -1520,7 +1571,7 @@ class CameraBuffer:
         self.camera.release()
         # Reinitialize with appropriate backend
         if self.is_ip_camera:
-            self.camera = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+            self.camera = open_ip_capture(self.source)
         else:
             self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
         # Re-apply saved camera properties

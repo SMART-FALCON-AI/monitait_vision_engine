@@ -8,7 +8,7 @@ from routers.config_routes import build_current_service_config
 from services.camera import (CameraBuffer, safe_source, scan_network_for_cameras, scan_network_for_camera_devices,
                              test_camera_stream, get_camera_config_for_save, apply_camera_config_from_saved,
                              format_relative_time, IP_CAMERA_USER, IP_CAMERA_PASS,
-                             detect_pro_cameras)
+                             detect_pro_cameras, open_ip_capture)
 from services.state_machine import State
 from services.render import draw_detection_on
 import asyncio
@@ -212,6 +212,11 @@ def get_cameras_status(request: Request):
             "connected": is_connected,
             "running": cam is not None and not getattr(cam, 'stop', True),
             "device_exists": device_exists,
+            # 4.0.415 — freeze watchdog visibility: seconds since the last good frame
+            # (None = no frame yet) and how often this stream was found frozen.
+            "last_frame_age_s": (round(time.time() - cam.last_frame_time, 1)
+                                 if getattr(cam, 'last_frame_time', None) else None),
+            "frozen_reconnects": getattr(cam, 'frozen_reconnects', 0),
         }
 
         # Add IP camera specific info
@@ -989,10 +994,8 @@ async def test_camera(request: Request):
         else:
             test_url = url
 
-        # Test the camera
-        cap = cv2.VideoCapture(test_url, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
+        # Test the camera (timeouts only take effect when passed at open)
+        cap = open_ip_capture(test_url, 3000, 3000)
 
         ret, frame = cap.read()
         cap.release()
