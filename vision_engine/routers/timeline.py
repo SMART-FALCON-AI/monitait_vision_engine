@@ -14,6 +14,12 @@ from services.render import draw_detection_on
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# 4.0.413 — the ONE window-preset → SQL interval table. The same literal was copy-pasted
+# into 8 endpoints, and the copies that drifted are exactly where "Last 30 days" broke:
+# 4.0.392 fixed some, but /api/export_images and /api/shipment_spans still had no "30d"
+# and silently served 24 h / 1 h. New endpoints: use this, don't paste a new dict.
+_WINDOWS_STD = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+
 # v4.0.75 — in-memory TTL cache for the expensive chart endpoints.
 # /api/detection_charts, /api/quality/heatmap, /api/area_stats,
 # /api/detection_stats each scan inference_results via
@@ -976,7 +982,7 @@ def get_color_drift(window: str = "7d"):
     tab. The annotator then extracts `lab_color` for that class only,
     so this endpoint only sees samples for classes color_e was on for.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "7 days")
     out: dict = {}
     conn = None
@@ -1138,7 +1144,7 @@ def get_area_stats(window: str = "7d"):
     Operators use it to tune: "TB normally covers 12k–35k px²; the ones
     coming in at 2k px² are probably false positives, raise min_conf".
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "7 days")
     out: dict = {}
     conn = None
@@ -1766,7 +1772,7 @@ def calibrate_score_scale(payload: dict = None):
     min_n      = int(payload.get("min_shipments") or 5)
     apply      = bool(payload.get("apply") or False)
 
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "7 days")
 
     try:
@@ -2266,7 +2272,7 @@ def shipment_quality_score_trend(
     Slope label: "improving" / "stable" / "degrading" based on
     `slope_pct = (last_third_avg - first_third_avg) / max(first_third_avg, eps)`.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "24 hours")
     # Bucket width: aim for `buckets` slots across the window.
     _bucket_for = {
@@ -2274,6 +2280,7 @@ def shipment_quality_score_trend(
         "6h":  "30 minutes",
         "24h": "2 hours",
         "7d":  "14 hours",
+        "30d": "60 hours",   # 4.0.413 — was missing (fell back to 2 h = 360 buckets)
     }
     bucket = _bucket_for.get(window, "2 hours")
     # 4.0.196 — same override as the other shipment-aware endpoints. A
@@ -2785,7 +2792,7 @@ def quality_ejection_axis(
         "encoder_min": int, "encoder_max": int, "width_per_bucket": int,
     }
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "24 hours")
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
     if shipment:
@@ -3024,7 +3031,7 @@ def quality_heatmap(
     target is "1 detection of severity 50 at confidence 0.5 per bucket
     counts as ~10 points off". Tunable later.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "24 hours")
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
     if shipment:
@@ -5451,13 +5458,7 @@ def shipment_spans_endpoint(request: Request, window: str = "1h", shipment: str 
     the standalone refresher matches what the operator asked for
     instead of continuing to render every shipment in the window.
     """
-    _windows_map = {
-        "1h":  "1 hour",
-        "6h":  "6 hours",
-        "24h": "24 hours",
-        "7d":  "7 days",
-    }
-    interval = _windows_map.get(window, "1 hour")
+    interval = _WINDOWS_STD.get(window, "1 hour")   # 4.0.413 — had no "30d" → served 1 h
     if shipment:
         interval = "90 days"
     empty = {"shipment_spans": [], "window": window}
@@ -5904,7 +5905,8 @@ def production_stats(request: Request, window: str = "24h", shipment: str = ""):
     # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
     if shipment:
         interval = "90 days"
-    bucket_seconds = {"1h": 60, "6h": 300, "24h": 1800, "7d": 21600}.get(window, 1800)
+    # 4.0.413 — "30d" (1-day buckets above) was missing → 1800 s, speed 48× too high
+    bucket_seconds = {"1h": 60, "6h": 300, "24h": 1800, "7d": 21600, "30d": 86400}.get(window, 1800)
     empty = {"timeline": [], "total_ok": 0, "total_ng": 0, "total_units": 0,
              "reject_rate_overall": 0.0, "eject_over_total": 0.0,
              "availability": 0.0, "performance": 0.0, "quality": 0.0, "oee": 0.0,
@@ -6323,7 +6325,7 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
     rows from inference_results that contain at least one detection of `cls`, with
     the annotated image path so the UI can show a thumbnail grid. Capped at `limit`.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "24 hours")
     limit = max(1, min(100, int(limit or 24)))
     empty = {"items": [], "class": cls, "shipment": shipment, "window": window}
@@ -6508,7 +6510,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     shipment-start, `unwind_length` = shipment-end − encoder (meters left to
     unwind, end = 0). No mode toggle.
     """
-    _windows = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
+    _windows = _WINDOWS_STD
     interval = _windows.get(window, "24 hours")
     # 4.0.345 — a PICKED shipment is exported by SHIPMENT ID ALONE — NO time filter whatsoever. The
     # whole point of picking a shipment is "give me THIS shipment's rows", regardless of when it ran.
@@ -6727,7 +6729,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
 # cache); default is the original raw JPEGs (copied byte-for-byte, no re-encode).
 # =============================================================================
 _IMG_PART_TARGET_BYTES = 1024 * 1024 * 1024   # ~1 GiB per part
-_IMG_WINDOWS = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days"}
+_IMG_WINDOWS = _WINDOWS_STD   # 4.0.413 — had no "30d": a 30-day image export exported 24 h
 
 
 def _img_where(shipment, window):

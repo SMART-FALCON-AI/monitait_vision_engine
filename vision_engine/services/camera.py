@@ -93,6 +93,15 @@ _CONFIG_BYPATH_FOR_SOURCE: Dict[str, str] = {}
 _PERSISTED_CFG_ID_FOR_SOURCE: Dict[str, str] = {}
 
 
+def safe_source(source) -> str:
+    """4.0.413 — a camera source that is safe to LOG: `rtsp://user:pass@host/path`
+    → `host/path`; USB paths / basler:// URIs pass through unchanged. Was inlined
+    as `src.split('@')[-1]` at four log sites while five others printed the full
+    URL — camera passwords landed in the container log on every open/reconnect."""
+    s = str(source or "")
+    return s.rsplit("@", 1)[-1] if "@" in s else s
+
+
 def persisted_cfg_id_for_source(source: str):
     """Config ID the given boot-resolved source was persisted under, or None.
 
@@ -746,7 +755,7 @@ def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
                                 # Test if camera responds
                                 if test_camera_stream(camera_url):
                                     discovered_cameras.append(camera_url)
-                                    logger.info(f"✓ Verified RTSP camera: {camera_url.split('@')[-1]} (path: /{path})")
+                                    logger.info(f"✓ Verified RTSP camera: {safe_source(camera_url)} (path: /{path})")
                                     break  # Found working path, move to next IP
                                 else:
                                     # Log the attempted path for user reference
@@ -764,11 +773,11 @@ def scan_network_for_cameras(timeout: float = 2.0) -> List[str]:
                                 # Test if camera responds
                                 if test_camera_stream(camera_url):
                                     discovered_cameras.append(camera_url)
-                                    logger.info(f"✓ Verified HTTP camera: {camera_url}")
+                                    logger.info(f"✓ Verified HTTP camera: {safe_source(camera_url)}")
                                     break  # Found working path, move to next IP
                                 else:
                                     # Log the attempted path for user reference
-                                    logger.info(f"  → Potential path: {camera_url} (may need credentials)")
+                                    logger.info(f"  → Potential path: {safe_source(camera_url)} (may need credentials)")
 
                 except Exception:
                     continue
@@ -1186,7 +1195,7 @@ class CameraBuffer:
         # Initialize camera with appropriate backend
         if self.is_ip_camera:
             self.camera = cv2.VideoCapture(source)
-            logger.info(f"Initializing IP camera: {source.split('@')[-1] if '@' in source else source}")
+            logger.info(f"Initializing IP camera: {safe_source(source)}")
         else:
             self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
             logger.info(f"Initializing USB camera: {source}")
@@ -1216,7 +1225,7 @@ class CameraBuffer:
                 # call too — writing a value would re-enable manual mode on some
                 # firmwares and override the AE we just asked for.
                 self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
-                logger.info(f"Camera {source}: auto_exposure=True — manual exposure override skipped")
+                logger.info(f"Camera {safe_source(source)}: auto_exposure=True — manual exposure override skipped")
             else:
                 self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
                 self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
@@ -1262,7 +1271,7 @@ class CameraBuffer:
             cv2.CAP_PROP_SATURATION: saturation,
             cv2.CAP_PROP_FPS: fps,
         }
-        logger.info(f"Camera {source}: exposure={exposure}, gain={gain}, brightness={brightness}, contrast={contrast}, saturation={saturation}, fps={fps}")
+        logger.info(f"Camera {safe_source(source)}: exposure={exposure}, gain={gain}, brightness={brightness}, contrast={contrast}, saturation={saturation}, fps={fps}")
         threading.Thread(target=self.buffer).start()
 
     def _apply_saved_props(self):
@@ -1306,7 +1315,7 @@ class CameraBuffer:
             except Exception:
                 pass
         logger.info(
-            f"Re-applied saved camera config after reconnect: {self.source} | "
+            f"Re-applied saved camera config after reconnect: {safe_source(self.source)} | "
             f"props={ {p: v for p, v in self._saved_props.items() if p not in skip_props} }"
             + (" | auto_exposure=ON (manual exposure skipped)" if cv2.CAP_PROP_EXPOSURE in skip_props else "")
         )
@@ -1414,7 +1423,7 @@ class CameraBuffer:
                                     RECONNECT_BACKOFF_BASE * (2 ** min(consecutive_reconnects - 2, 20)),
                                     RECONNECT_BACKOFF_MAX,
                                 )
-                                _lbl = self.source.split('@')[-1] if '@' in self.source else self.source
+                                _lbl = safe_source(self.source)
                                 logger.info(f"Reconnect backoff: waiting {_backoff}s before re-opening {_lbl} (attempt {consecutive_reconnects})")
                             _slept = 0.0
                             while (_slept < _backoff and not self.stop
@@ -1471,7 +1480,7 @@ class CameraBuffer:
                             # Reinitialize camera
                             if self.is_ip_camera:
                                 self.camera = cv2.VideoCapture(self.source)
-                                logger.info(f"Reconnecting IP camera: {self.source.split('@')[-1] if '@' in self.source else self.source}")
+                                logger.info(f"Reconnecting IP camera: {safe_source(self.source)}")
                             else:
                                 self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
                                 logger.info(f"Reconnecting USB camera: {self.source}")

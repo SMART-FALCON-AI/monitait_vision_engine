@@ -26,7 +26,7 @@ from typing import Dict, Any, List
 
 import config as cfg
 from services.camera import (
-    CameraBuffer, DETECTED_CAMERAS, detect_video_devices, persisted_cfg_id_for_source,
+    CameraBuffer, DETECTED_CAMERAS, detect_video_devices, persisted_cfg_id_for_source, safe_source,
     CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
     apply_camera_config_from_saved,
 )
@@ -810,7 +810,7 @@ class ArduinoSocket:
         self.camera_metadata: Dict[int, Dict[str, Any]] = {}  # Metadata for each camera
 
         if camera_paths:
-            logger.info(f"Initializing {len(camera_paths)} camera(s) from paths: {camera_paths}")
+            logger.info(f"Initializing {len(camera_paths)} camera(s) from paths: {[safe_source(p) for p in camera_paths]}")
         else:
             logger.info("No USB cameras configured. Use IP Camera Discovery to add IP cameras.")
 
@@ -855,7 +855,7 @@ class ArduinoSocket:
                 except (TypeError, ValueError):
                     cam.px_per_mm = None
                 self.cameras[idx] = cam
-                logger.info(f"Camera {idx} initialized: {cam_path} (success={cam.success})")
+                logger.info(f"Camera {idx} initialized: {safe_source(cam_path)} (success={cam.success})")
 
                 # 4.0.50 — infer type + a smart default name from the source
                 # URI. UVC = /dev/video*, IP = rtsp/http, pro = basler://.
@@ -880,7 +880,7 @@ class ArduinoSocket:
 
                 time.sleep(1)
             except Exception as e:
-                logger.warning(f"Failed to initialize camera {idx} at {cam_path}: {e}")
+                logger.warning(f"Failed to initialize camera {idx} at {safe_source(cam_path)}: {e}")
                 # Create a dummy camera object with success=False
                 class DummyCamera:
                     success = False
@@ -1234,30 +1234,14 @@ class ArduinoSocket:
         # funnelled every post-reset frame back into it (behnoor: ~88k frames piled
         # into one Sep-28 shipment over 13 days while real shipments rotated fine).
         # Offloaded to a daemon thread so the encoder-tick loop that calls us never
-        # blocks on the DB write.
-        _snap_sid = new_id
-        _snap_sse = int(getattr(self, "shipment_start_encoder", 0) or 0)
-
-        def _persist_cutoff_shipment(sid, sse):
-            try:
-                from config import load_service_config, save_service_config
-                _svc = load_service_config() or {}
-                _svc["current_shipment"] = sid
-                _svc["shipment_start_encoder"] = sse
-                save_service_config(_svc)
-            except Exception as _pe2:
-                logger.warning(f"cutoff: persist current_shipment failed: {_pe2}")
-            try:
-                os.makedirs(f"raw_images/{sid}", exist_ok=True)
-            except Exception as _me:
-                logger.warning(f"cutoff: mkdir shipment dir failed: {_me}")
-
+        # blocks on the DB write. 4.0.413 — one shared writer (config.persist_current_shipment).
         try:
+            from config import persist_current_shipment
             threading.Thread(
-                target=_persist_cutoff_shipment,
-                args=(_snap_sid, _snap_sse),
+                target=persist_current_shipment,
+                args=(new_id, int(getattr(self, "shipment_start_encoder", 0) or 0)),
                 daemon=True,
-                name=f"cutoff-persist-{_snap_sid}",
+                name=f"cutoff-persist-{new_id}",
             ).start()
         except Exception as _te:
             logger.warning(f"cutoff: persist thread spawn failed: {_te}")
@@ -1363,49 +1347,13 @@ class ArduinoSocket:
         if current_value < threshold:
             return
 
-        # Cooldown guard
-        try:
-            cooldown = float(svc.get("auto_cutoff_cooldown_sec") or 5)
-        except (TypeError, ValueError):
-            cooldown = 5.0
-        now_ts = _t.time()
-        if (now_ts - self._auto_cutoff_last_ts) < cooldown:
-            return
-        self._auto_cutoff_last_ts = now_ts
-
-        # Build the new shipment id — same format as the frontend 🎲 button
-        # (js/audio.js:generateShipmentCode): yy mm dd hh mm ss d.
-        prefix = str(svc.get("auto_shipment_id_prefix") or "MR").strip()
-        prefix = "".join(c for c in prefix if c.isalnum() or c in "-_.")[:16]
-        from datetime import datetime as _dt
-        _n = _dt.now()
-        yy = f"{_n.year % 100:02d}"; mm = f"{_n.month:02d}"; dd = f"{_n.day:02d}"
-        hh = f"{_n.hour:02d}"; mi = f"{_n.minute:02d}"; ss = f"{_n.second:02d}"
-        ds = f"{_n.microsecond // 100_000:d}"
-        new_id = f"{prefix}{yy}{mm}{dd}{hh}{mi}{ss}{ds}"
-
-        # Rebase shipment (mirrors the barcode-scan path at line ~1391)
-        old_id = ship
-        old_start = int(getattr(self, "shipment_start_encoder", 0) or 0)
-        self.shipment_start_encoder = int(self.encoder_value or 0)
-        self.shipment_start_ts = now_ts     # v4.0.154 — reset elapsed time too
-        self.shipment = new_id
-        logger.info(
-            f"auto-cutoff [metric={metric}]: current={current_value:.2f} hit threshold={threshold} → "
-            f"new shipment {new_id} (was {old_id}, start_enc {old_start} → {self.shipment_start_encoder})"
+        # 4.0.413 — rotate through the ONE shared path (cooldown, id format, rebase,
+        # Redis, length_state AND the current_shipment persist). This used to be a
+        # second copy of close_and_open_new_shipment that never received the 4.0.405
+        # persist, so a threshold cutoff came back as the OLD shipment after a restart.
+        self.close_and_open_new_shipment(
+            reason=f"auto-cutoff metric={metric} current={current_value:.2f} threshold={threshold:g}"
         )
-        # Propagate to redis (detection loop reads shipment from redis)
-        try:
-            if self.redis_connection:
-                self.redis_connection.redis_connection.set("shipment", new_id)
-        except Exception as _re:
-            logger.warning(f"auto-cutoff: redis set failed: {_re}")
-        # Snapshot to disk immediately so a crash between here and the next
-        # periodic persist doesn't lose the new shipment.
-        try:
-            self.persist_length_state(force=True)
-        except Exception as _pe:
-            logger.warning(f"auto-cutoff: persist failed: {_pe}")
 
     def persist_length_state(self, force=False):
         """v4.0.98 — Save (shipment, shipment_start_encoder, last_seen_length)
@@ -1747,22 +1695,9 @@ class ArduinoSocket:
                             # even if a follow-up scan mutates them.
                             _snap_ship = new_shipment
                             _snap_sse = self.shipment_start_encoder if is_new_shipment else None
-                            def _persist_barcode_shipment(sid, sse):
-                                try:
-                                    from config import load_service_config, save_service_config
-                                    _svc = load_service_config() or {}
-                                    _svc["current_shipment"] = sid
-                                    if sse is not None:
-                                        _svc["shipment_start_encoder"] = sse
-                                    save_service_config(_svc)
-                                except Exception as _pe:
-                                    logger.warning(f"Failed to persist barcode-scanned shipment: {_pe}")
-                                try:
-                                    os.makedirs(f"raw_images/{sid}", exist_ok=True)
-                                except Exception as _me:
-                                    logger.warning(f"Failed to create shipment directory: {_me}")
+                            from config import persist_current_shipment  # 4.0.413 — shared writer
                             threading.Thread(
-                                target=_persist_barcode_shipment,
+                                target=persist_current_shipment,
                                 args=(_snap_ship, _snap_sse),
                                 daemon=True,
                                 name=f"barcode-persist-{_snap_ship}",

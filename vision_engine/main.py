@@ -29,7 +29,7 @@ from services.db import (
     write_inference_to_db, write_production_metrics_to_db, write_ejection_event_to_db
 )
 from services.camera import (
-    CameraBuffer, detect_video_devices, scan_network_for_cameras,
+    CameraBuffer, detect_video_devices, scan_network_for_cameras, safe_source,
     scan_network_for_camera_devices, test_camera_stream, get_all_cameras,
     get_camera_config_for_save, apply_camera_config_from_saved,
     format_relative_time, DETECTED_CAMERAS,
@@ -536,7 +536,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
                     watcher_inst._expected_pro_cams = {}
                 watcher_inst._expected_pro_cams[cam_id] = dict(cam_config)
                 try:
-                    logger.info(f"  Initializing pro camera {cam_id}: {cam_name} @ {cam_url}")
+                    logger.info(f"  Initializing pro camera {cam_id}: {cam_name} @ {safe_source(cam_url)}")
                     cam = CameraBuffer(
                         cam_url,
                         exposure=cam_config.get("exposure", 5000),

@@ -507,6 +507,40 @@ def save_service_config(config):
     config["saved_at"] = datetime.now().isoformat()
     return save_config_key("service_config", config)
 
+
+def update_service_config(changes):
+    """4.0.413 — atomic read-modify-write of a few `service_config` sub-keys.
+
+    load_service_config() → edit → save_service_config() lets two writers that touch
+    DIFFERENT sub-keys at the same moment lose one update (both read the old blob, the
+    second save wins). Holding _CONFIG_WRITE_LOCK (re-entrant) across the read AND the
+    write makes this atomic against every persist, which all take the same lock."""
+    with _CONFIG_WRITE_LOCK:
+        svc = dict(load_service_config() or {})
+        svc.update(changes)
+        return save_service_config(svc)
+
+
+def persist_current_shipment(sid, start_encoder=None):
+    """4.0.413 — the ONE writer that makes the active shipment survive a restart.
+
+    Boot restores the shipment from service_config["current_shipment"] (main.py
+    [SHIPMENT-RESTORE]); a shipment change that skips this write comes back as the OLD
+    shipment after a full restart. It was copy-pasted as three closures (API set, barcode
+    scan, rule cutoff) and missing from the threshold auto-cutoff. Also creates
+    raw_images/<sid>. Blocking (DB write) — callers run it off their hot loop."""
+    changes = {"current_shipment": sid}
+    if start_encoder is not None:
+        changes["shipment_start_encoder"] = start_encoder
+    try:
+        update_service_config(changes)
+    except Exception as e:
+        logger.warning(f"persist current_shipment={sid} failed: {e}")
+    try:
+        os.makedirs(f"raw_images/{sid}", exist_ok=True)
+    except Exception as e:
+        logger.warning(f"create shipment dir raw_images/{sid} failed: {e}")
+
 # Aliases for backwards compatibility
 load_camera_config = load_service_config
 save_camera_config = save_service_config

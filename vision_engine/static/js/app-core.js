@@ -3484,7 +3484,8 @@ async function deletePipeline() {
     if (!pipelineName || !confirm(`Delete pipeline '${pipelineName}'?`)) return;
 
     try {
-        const response = await fetch(`/api/pipelines/${pipelineName}`, { method: 'DELETE' });
+        // 4.0.413 — encodeURIComponent like activatePipeline (v4.0.146); names with `/`, `#`, `?` broke delete
+        const response = await fetch(`/api/pipelines/${encodeURIComponent(pipelineName)}`, { method: 'DELETE' });
         const result = await response.json();
 
         if (response.ok) {

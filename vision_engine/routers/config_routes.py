@@ -539,27 +539,13 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             # watcher + Redis, so the persistence still restores across
             # `docker compose down` / restart — it just doesn't block the
             # request thread anymore.
-            def _persist_shipment(sid: str, sse: "int | None"):
-                try:
-                    from config import load_service_config, save_service_config
-                    _svc = load_service_config() or {}
-                    _svc["current_shipment"] = sid
-                    if sse is not None:
-                        _svc["shipment_start_encoder"] = sse
-                    save_service_config(_svc)
-                except Exception as _pe:
-                    logger.warning(f"Failed to persist current_shipment to DB: {_pe}")
-                try:
-                    import os as _os
-                    _os.makedirs(f"raw_images/{sid}", exist_ok=True)
-                except Exception as _me:
-                    logger.warning(f"Failed to create shipment directory: {_me}")
+            from config import persist_current_shipment  # 4.0.413 — shared writer
             if background_tasks is not None:
-                background_tasks.add_task(_persist_shipment, shipment_id, new_start_encoder)
+                background_tasks.add_task(persist_current_shipment, shipment_id, new_start_encoder)
             else:
                 # BackgroundTasks unavailable (should not happen in normal
                 # FastAPI request context; kept as defensive fallback).
-                _persist_shipment(shipment_id, new_start_encoder)
+                persist_current_shipment(shipment_id, new_start_encoder)
             updated["shipment"] = shipment_id
             logger.info(f"Updated shipment ID to {shipment_id}")
 

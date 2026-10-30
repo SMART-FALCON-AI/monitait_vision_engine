@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any, List
 from config import (load_data_file, save_data_file, load_service_config, save_service_config,
                     REDIS_HOST, REDIS_PORT, DATA_FILE)
 from routers.config_routes import build_current_service_config
-from services.camera import (CameraBuffer, scan_network_for_cameras, scan_network_for_camera_devices,
+from services.camera import (CameraBuffer, safe_source, scan_network_for_cameras, scan_network_for_camera_devices,
                              test_camera_stream, get_camera_config_for_save, apply_camera_config_from_saved,
                              format_relative_time, IP_CAMERA_USER, IP_CAMERA_PASS,
                              detect_pro_cameras)
@@ -1039,7 +1039,7 @@ async def save_camera(request: Request):
         if not camera_url:
             return JSONResponse(content={"success": False, "error": "Camera URL is required"}, status_code=400)
 
-        logger.info(f"Saving camera: {camera_name} ({camera_ip}) - {camera_url}")
+        logger.info(f"Saving camera: {camera_name} ({camera_ip}) - {safe_source(camera_url)}")
 
         # Build current service config from runtime state (preserves unsaved changes)
         config = build_current_service_config(request.app.state)
@@ -1116,7 +1116,7 @@ async def save_camera(request: Request):
                         watcher.camera_paths[cam_id_int - 1] = camera_url
                     else:
                         watcher.camera_paths.append(camera_url)
-                    logger.info(f"Hot-added camera {cam_id_int} to running watcher: {camera_url}")
+                    logger.info(f"Hot-added camera {cam_id_int} to running watcher: {safe_source(camera_url)}")
                 except Exception as e:
                     logger.warning(f"Camera saved but failed to hot-add to watcher: {e}. Restart to apply.")
 

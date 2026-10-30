@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.413] - 2026-10-30 - Fixes from the duplicate-code audit: shipment persist, 30-day windows, passwords in logs
+
+Each bug below lived in one copy of copy-pasted code that drifted from the others, so each fix also removes the duplication (net −33 lines).
+
+**Threshold auto-cutoff never persisted the new shipment** (`services/watcher.py`, `config.py`, `routers/config_routes.py`)
+- `_maybe_auto_cutoff` (encoder / time / length threshold) was a second copy of `close_and_open_new_shipment` and never got the 4.0.405 `current_shipment` persist → after a full restart, boot restored the OLD shipment and new frames were funnelled into it. It now calls `close_and_open_new_shipment()` (one rotation path: cooldown, id format incl. the `MR` prefix fallback, rebase, Redis, length_state, persist).
+- The three identical "save current shipment" closures (API set, barcode scan, rule cutoff) → one `config.persist_current_shipment(sid, start_encoder=None)`.
+- New `config.update_service_config(changes)`: read-modify-write of `service_config` sub-keys under `_CONFIG_WRITE_LOCK`, so two writers touching different sub-keys can no longer lose one update.
+
+**"Last 30 days" silently served a shorter window** (`routers/timeline.py`)
+- `/api/export_images` (+ `/plan`): no `30d` → exported 24 h. `/api/shipment_spans`: no `30d` → 1 h. Productivity `bucket_seconds`: no `30d` → speed 48× too high. Trend `_bucket_for`: no `30d` → 2 h buckets.
+- One `_WINDOWS_STD` table replaces 8 identical literal copies + the 2 drifted ones (`_IMG_WINDOWS`, shipment_spans).
+
+**Camera passwords written to the container log** (`services/camera.py`, `routers/cameras.py`, `services/watcher.py`, `main.py`)
+- Every camera open (`Camera rtsp://user:pass@…: exposure=…`) and every reconnect (`Re-applied saved camera config after reconnect: rtsp://user:pass@…`) logged the full URL — on shoga, on every backoff cycle. Plus camera save / hot-add / env-path / pro-camera init lines.
+- New `safe_source()` (`rtsp://user:pass@host/path` → `host/path`, same output as the old inline masks) replaces the 4 inline `split('@')[-1]` copies and covers every camera-URL log line.
+
+**Pipeline delete** (`static/js/app-core.js`): `deletePipeline` now `encodeURIComponent`s the name like `activatePipeline` (names with `/ # ?` failed). Cache-busters `?v=4.0.413`.
+
+Verified on vteam12 (canary, brought from a stale mixed tree to canonical): in-container test of the real code — threshold cutoff rotates AND persists `current_shipment` + start encoder, unrelated keys kept, cooldown enforced, concurrent sub-key writes both survive, masking correct (10/11; the 11th was a test timing race — the shipment dir IS created); 4.0.412 backoff regression 10/10; API shipment set persisted to DB; healthy in 48 s. Note: vteam12's restart came back on a 2½-month-old shipment because it had been running a pre-4.0.405 `watcher.py` — restored via the API.
+
 ## [4.0.412] - 2026-10-30 - Camera reconnect: exponential backoff (dead cameras no longer thrash)
 
 A camera that stays dead (IP cam off the network, fiber cut, powered off) used to be re-opened in a tight loop — 100 blank reads, release, 1s pause, re-open, forever. On shoga two dead IP cameras produced ~85 reconnect log lines/min, and the reconnect storm is the documented trigger of the capture-spin wedge that drags the healthy cameras down too.
