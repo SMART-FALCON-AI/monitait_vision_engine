@@ -9,8 +9,8 @@ Charts tab next to the vision data.
 Payload (per Watcher Jet firmware, POST JSON):
 
     { "register_id",              # unique per device — the machine key
-      "quantity",                 # OK count
-      "defect_quantity",          # NG count
+      "quantity",                 # OK count SINCE THE PREVIOUS REPORT (not cumulative)
+      "defect_quantity",          # NG count since the previous report
       "extra_info": {..},         # arbitrary analog metrics (temp_a/temp_b/C/…)
       "product_id", "lot_info",
       "timestamp": ISO8601,
@@ -285,9 +285,11 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
       Availability = 1 − downtime_fraction         — from extra_info.downtime_percent
                                                       if the device sends it; else 1.0
 
-    Counter totals are summed over POSITIVE deltas so a cumulative counter that
-    resets each shift is handled correctly. Every factor is returned so the UI can
-    show the breakdown and the operator sees which inputs are still missing."""
+    Each report is an INCREMENT (4.0.414): every Watcher Jet firmware zeroes its
+    counters after a successful send (main.py minus(), main_v2.py temp_a = 0), and
+    offline-buffered reports are replayed one by one — so totals are plain sums.
+    Every factor is returned so the UI can show the breakdown and the operator sees
+    which inputs are still missing."""
     _ensure_schema()
     reg = str(register_id or "").strip()
     conds = ["register_id=%s"]
@@ -312,17 +314,12 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
 
     good_total = 0.0
     defect_total = 0.0
-    prev_q = prev_d = None
     downtime_fracs: List[float] = []
     for ts, q, d, ex in rows:
-        if q is not None:
-            if prev_q is not None and q >= prev_q:
-                good_total += (q - prev_q)
-            prev_q = q
-        if d is not None:
-            if prev_d is not None and d >= prev_d:
-                defect_total += (d - prev_d)
-            prev_d = d
+        if q is not None and q > 0:
+            good_total += q
+        if d is not None and d > 0:
+            defect_total += d
         dp = _as_dict(ex).get("downtime_percent")
         if isinstance(dp, (int, float)) and not isinstance(dp, bool):
             downtime_fracs.append(dp / 100.0 if dp > 1 else float(dp))

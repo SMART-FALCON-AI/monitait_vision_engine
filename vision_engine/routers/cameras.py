@@ -990,7 +990,7 @@ async def test_camera(request: Request):
             test_url = url
 
         # Test the camera
-        cap = cv2.VideoCapture(test_url)
+        cap = cv2.VideoCapture(test_url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
 

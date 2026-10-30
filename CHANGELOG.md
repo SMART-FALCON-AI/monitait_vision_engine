@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.414] - 2026-10-30 - Watcher OEE counted wrong; last camera-password leak; dummy Watcher Jet
+
+**Watcher (Watcher Jet) OEE counted the wrong totals** (`services/watcher_metrics.py`)
+- `compute_oee` treated `quantity` / `defect_quantity` as running totals and summed only positive differences between reports. Every Watcher Jet firmware (main.py `minus()`, main_v2.py `temp_a = 0`) zeroes its counters after a successful send, so each report is an INCREMENT. Proven on shoga with the dummy below: 294 OK / 17 NG sent → OEE showed good=18, defect=7, quality 72 % (true 94.5 %), OEE 3.6 %. Totals are now plain sums → good=201/defect=17 exactly as sent, quality 92.2 %.
+- Ingestion itself was already correct (rows, totals, UTC timestamps, offline-buffer replay, 2-step image upload, analog channels — all verified).
+
+**Camera passwords still reached the log via OpenCV** (`services/camera.py`, `routers/cameras.py`)
+- IP cameras were opened with no backend, so when FFMPEG failed (dead camera) OpenCV fell through to its CAP_IMAGES reader, whose error message prints the full `rtsp://user:pass@…` URL — 11 lines in shoga's first 4 min on 4.0.413 (MVE's own log lines were already masked). All 5 IP open sites now pin `cv2.CAP_FFMPEG` (live cameras were already on FFMPEG, so nothing changes for them). In shoga's container: dead cam default → 1 leaked line, pinned → 0; live cam pinned → 704×576 frame via FFMPEG.
+
+**New: `watcher/dummy_watcher.py`** — a Watcher Jet without the hardware, to prove an MVE install accepts watcher data before a real device is connected. Firmware logic kept from `monitait_watcher_jet/main.py` (8113aa0): `watcher_update()`, the SQLite offline buffer, `Counter.run()` / `db_checker()` (send rule, subtract-on-success, store-and-replay). Simulated: Arduino pulses/analog/battery/serial channels and the camera. Scenarios: `--offline-first` (link down → buffer → replay), `--image-every`, `--idle-last` (heartbeat-only), `--register`. Ends with 12 checks against `/api/watchers*` (exit 0 = all pass).
+
+Cache-busters `?v=4.0.414`.
+
+Verified on vteam12 (canary): healthy in 48 s, rule-cutoff shipment `TB2610301645157` survived the restart (4.0.413 persist fix in real use); dummy watcher 12/12 (was 9/12 on 4.0.413); backoff regression 10/10 + new checks "every IP (re)open uses CAP_FFMPEG" (35 opens) and "USB stays CAP_V4L2" (14 opens).
+
 ## [4.0.413] - 2026-10-30 - Fixes from the duplicate-code audit: shipment persist, 30-day windows, passwords in logs
 
 Each bug below lived in one copy of copy-pasted code that drifted from the others, so each fix also removes the duplication (net −33 lines).

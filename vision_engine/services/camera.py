@@ -801,7 +801,7 @@ def test_camera_stream(url: str, timeout: float = 2.0) -> bool:
     """
     try:
         # Try to open the camera stream
-        cap = cv2.VideoCapture(url)
+        cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, int(timeout * 1000))
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, int(timeout * 1000))
 
@@ -1194,7 +1194,9 @@ class CameraBuffer:
 
         # Initialize camera with appropriate backend
         if self.is_ip_camera:
-            self.camera = cv2.VideoCapture(source)
+            # Pin FFMPEG: with no backend, a failed open falls through to OpenCV's
+            # CAP_IMAGES reader, whose error message prints the full URL (password).
+            self.camera = cv2.VideoCapture(source, cv2.CAP_FFMPEG)
             logger.info(f"Initializing IP camera: {safe_source(source)}")
         else:
             self.camera = cv2.VideoCapture(source, cv2.CAP_V4L2)
@@ -1479,7 +1481,7 @@ class CameraBuffer:
 
                             # Reinitialize camera
                             if self.is_ip_camera:
-                                self.camera = cv2.VideoCapture(self.source)
+                                self.camera = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
                                 logger.info(f"Reconnecting IP camera: {safe_source(self.source)}")
                             else:
                                 self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
@@ -1518,7 +1520,7 @@ class CameraBuffer:
         self.camera.release()
         # Reinitialize with appropriate backend
         if self.is_ip_camera:
-            self.camera = cv2.VideoCapture(self.source)
+            self.camera = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
         else:
             self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
         # Re-apply saved camera properties
