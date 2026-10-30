@@ -7780,3 +7780,99 @@ def detection_stream():
         generate_detection_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
+
+# ============================================================================
+# MVE_DETBYCAM_BLOCK  4.0.409 - Per-camera detection counts over time (Charts).
+# v2: the FAST per-camera TOTAL uses detection_count (precomputed, no jsonb) so
+# 24h windows never time out; the per-object class split is added only for
+# windows <= 4h (jsonb expand). Camera id = trailing token of image_path.
+# ============================================================================
+@router.get("/api/detections_by_camera")
+def detections_by_camera(window: str = "3h", shipment: str = "", bucket_min: int = 2):
+    import re as _re
+    import psycopg2 as _pg
+    empty = {"window": window, "buckets": [], "cameras": [], "classes": [], "series": {}, "total": 0}
+    try:
+        from config import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+    except Exception as _e:
+        return JSONResponse(content={**empty, "error": "config: %s" % _e})
+    _m = _re.match(r"^(\d+)([hd])$", str(window or "3h"))
+    if _m:
+        _n = int(_m.group(1))
+        hours = _n if _m.group(2) == "h" else _n * 24
+    else:
+        hours = 3
+    hours = max(1, min(hours, 168))
+    interval = "%d hours" % hours
+    bmin = max(1, min(int(bucket_min or 2), 60))
+    ship_sql = ""
+    ptail = []
+    if shipment:
+        ship_sql = " AND split_part(image_path, '/', 2) = %s"
+        ptail = [shipment]
+    conn = None
+    try:
+        conn = _pg.connect(host=POSTGRES_HOST, port=POSTGRES_PORT, dbname=POSTGRES_DB,
+                           user=POSTGRES_USER, password=POSTGRES_PASSWORD, connect_timeout=6)
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = 20000")
+        q_all = ("SELECT extract(epoch from time_bucket(%s::interval, time))::bigint*1000 AS tb, "
+                 "(substring(image_path from '_([0-9]+)(?:\\.jpg)?$'))::int AS cam, "
+                 "coalesce(sum(detection_count),0)::bigint AS n "
+                 "FROM inference_results "
+                 "WHERE time > now() - %s::interval AND image_path ~ '_[0-9]+(\\.jpg)?$'" + ship_sql + " "
+                 "GROUP BY tb, cam ORDER BY tb")
+        cur.execute(q_all, ["%d minutes" % bmin, interval] + ptail)
+        all_rows = cur.fetchall()
+        cls_rows = []
+        if hours <= 4:
+            q_cls = ("SELECT extract(epoch from time_bucket(%s::interval, time))::bigint*1000 AS tb, "
+                     "(substring(image_path from '_([0-9]+)(?:\\.jpg)?$'))::int AS cam, "
+                     "d->>'name' AS cls, count(*) AS n "
+                     "FROM ( SELECT time, image_path, detections FROM inference_results "
+                     "       WHERE time > now() - %s::interval AND jsonb_typeof(detections)='array'" + ship_sql + " ) ir, "
+                     "LATERAL jsonb_array_elements(ir.detections) d "
+                     "WHERE image_path ~ '_[0-9]+(\\.jpg)?$' "
+                     "GROUP BY tb, cam, cls ORDER BY tb")
+            try:
+                cur.execute(q_cls, ["%d minutes" % bmin, interval] + ptail)
+                cls_rows = cur.fetchall()
+            except Exception:
+                cls_rows = []
+        cur.close()
+    except Exception as _e:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+        return JSONResponse(content={**empty, "error": str(_e)})
+    try:
+        conn.close()
+    except Exception:
+        pass
+    bset = sorted({r[0] for r in all_rows})
+    bidx = {b: i for i, b in enumerate(bset)}
+    cams = sorted({r[1] for r in all_rows if r[1] is not None})
+    series = {}
+    total = 0
+    for tb, cam, n in all_rows:
+        if cam is None:
+            continue
+        total += int(n)
+        series.setdefault("all", {}).setdefault(str(cam), [0] * len(bset))
+        series["all"][str(cam)][bidx[tb]] = int(n)
+    classes = ["all"]
+    if cls_rows:
+        for tb, cam, cls, n in cls_rows:
+            if cam is None or not cls or tb not in bidx:
+                continue
+            series.setdefault(cls, {}).setdefault(str(cam), [0] * len(bset))
+            series[cls][str(cam)][bidx[tb]] = int(n)
+        for c in sorted({r[2] for r in cls_rows if r[2]}):
+            if c not in classes:
+                classes.append(c)
+    return JSONResponse(content={"window": window, "hours": hours, "bucket_min": bmin, "buckets": bset,
+                                 "cameras": cams, "classes": classes, "series": series,
+                                 "per_class": bool(cls_rows), "total": total})

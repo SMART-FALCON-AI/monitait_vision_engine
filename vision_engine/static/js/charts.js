@@ -6856,3 +6856,121 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }, 1400);
 });
+
+/* ==========================================================================
+ * 4.0.410 — Detections per CAMERA over time (Charts tab), rich controls:
+ * object selector (all + per-class), per-camera checklist with averages,
+ * Select all / Clear / High-only presets, and 5-point smoothing. Loads the
+ * last 3h so the per-object split is available. Self-contained; wraps the
+ * core refresh so it repaints with the other charts. _renderDetByCamera kept.
+ * ========================================================================== */
+(function () {
+  var CAM = {1:{ip:".10"},2:{ip:".11"},3:{ip:".12"},4:{ip:".13"},6:{ip:".128"},
+    7:{ip:".132",name:"22-Lehr-S"},8:{ip:".134",name:"22-Lehr-N"},9:{ip:".136",name:"22-Parking-S"},10:{ip:".138",name:"22-Parking-N"},
+    11:{ip:".17"},12:{ip:".18"},13:{ip:".19"},14:{ip:".21"},15:{ip:".8"},16:{ip:".9"},17:{ip:".14"},18:{ip:".15"},
+    19:{ip:".112"},20:{ip:".108"},21:{ip:".2"},22:{ip:".3"},23:{ip:".6"},24:{ip:".20"},25:{ip:".22"},26:{ip:".32"},27:{ip:".56"}};
+  var S = { data: null, obj: null, sel: null, smooth: false, chart: null };
+  function col(i, n) { return "hsl(" + Math.round(360 * i / Math.max(n, 1)) + ",70%,55%)"; }
+  function avg(obj, cam) {
+    var a = ((S.data.series[obj] || {})[String(cam)]) || [];
+    if (!a.length) return 0;
+    var s = 0; for (var i = 0; i < a.length; i++) s += a[i];
+    return s / a.length;
+  }
+  function smoothArr(a) {
+    if (!S.smooth || !a) return a || [];
+    var k = 5, o = [];
+    for (var i = 0; i < a.length; i++) { var s = 0, c = 0; for (var j = Math.max(0, i - k + 1); j <= i; j++) { s += a[j]; c++; } o.push(s / c); }
+    return o;
+  }
+  function camName(id) { var m = CAM[id]; return m ? (m.name ? m.name + " " + m.ip : m.ip) : ("cam " + id); }
+  function fillObj(classes) {
+    var sel = document.getElementById("detcam-class-sel"); if (!sel) return;
+    var sig = classes.join(",");
+    if (sel.dataset.filled !== sig) {
+      sel.innerHTML = classes.map(function (c) { return "<option value=\"" + c + "\">" + c + "</option>"; }).join("");
+      sel.dataset.filled = sig;
+    }
+    if (S.obj) sel.value = S.obj;
+  }
+  function renderList() {
+    var host = document.getElementById("detcam-camlist"); if (!host) return;
+    var cams = S.data.cameras || [];
+    var order = cams.slice().sort(function (a, b) { return avg(S.obj, b) - avg(S.obj, a); });
+    var n = cams.length;
+    host.innerHTML = "";
+    for (var i = 0; i < order.length; i++) {
+      (function (id) {
+        var idx = cams.indexOf(id), on = S.sel.has(id);
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:6px;padding:3px 4px;cursor:pointer;border-radius:4px;" + (on ? "" : "opacity:.42;");
+        row.innerHTML = "<span style=\"width:10px;height:10px;border-radius:2px;flex:0 0 auto;background:" + (on ? col(idx, n) : "transparent") +
+          ";border:1px solid rgba(128,128,128,.45);\"></span><span style=\"font-family:monospace;color:var(--text-secondary);min-width:20px;\">" + id +
+          "</span><span style=\"flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + camName(id) +
+          "</span><span style=\"font-family:monospace;color:var(--text-secondary);\">" + avg(S.obj, id).toFixed(0) + "</span>";
+        row.onclick = function () { if (S.sel.has(id)) S.sel.delete(id); else S.sel.add(id); renderList(); draw(); };
+        host.appendChild(row);
+      })(order[i]);
+    }
+  }
+  function draw() {
+    var ctx = document.getElementById("insight-detcount-camera-chart"); if (!ctx || typeof Chart === "undefined") return;
+    var cams = S.data.cameras || [], n = cams.length;
+    var buckets = S.data.buckets || [];
+    var labels = buckets.map(function (ms) { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); });
+    var pc = S.data.series[S.obj] || {};
+    var datasets = [];
+    for (var i = 0; i < cams.length; i++) {
+      var id = cams[i]; if (!S.sel.has(id)) continue;
+      var c = col(i, n);
+      var raw = pc[String(id)] || [];
+      datasets.push({
+        label: "cam " + id, data: smoothArr(raw), _raw: raw,
+        borderColor: c, backgroundColor: c, borderWidth: 1.4, pointRadius: 0, tension: 0.25, spanGaps: true,
+        // dotted where the camera had 0 detections in that bucket (disconnected),
+        // decided on the RAW counts so smoothing can't mask a gap.
+        segment: {
+          borderDash: function (ctx) {
+            try {
+              var r = ctx.chart.data.datasets[ctx.datasetIndex]._raw || [];
+              return (r[ctx.p0DataIndex] === 0 || r[ctx.p1DataIndex] === 0) ? [2, 3] : undefined;
+            } catch (e) { return undefined; }
+          }
+        }
+      });
+    }
+    if (S.chart) { try { S.chart.destroy(); } catch (e) {} }
+    var opts;
+    try { opts = (typeof _commonScaleOpts === "function") ? _commonScaleOpts("Detections per camera over time (last 3h) — " + (S.obj || "")) : { responsive: true, maintainAspectRatio: false }; }
+    catch (e) { opts = { responsive: true, maintainAspectRatio: false }; }
+    try { opts.plugins = opts.plugins || {}; opts.plugins.legend = { display: false }; } catch (e) {}
+    S.chart = new Chart(ctx, { type: "line", data: { labels: labels, datasets: datasets }, options: opts });
+  }
+  async function load() {
+    var ctx = document.getElementById("insight-detcount-camera-chart"); if (!ctx || typeof Chart === "undefined") return;
+    try { var r = await fetch("/api/detections_by_camera?window=3h"); S.data = await r.json(); }
+    catch (e) { return; }
+    var classes = S.data.classes || [];
+    if (!S.obj || classes.indexOf(S.obj) < 0) S.obj = (classes.indexOf("mouth") >= 0) ? "mouth" : (classes[0] || "all");
+    var cams = S.data.cameras || [];
+    if (!S.sel) S.sel = new Set(cams);
+    fillObj(classes); renderList(); draw();
+  }
+  document.addEventListener("change", function (e) {
+    if (e.target && e.target.id === "detcam-class-sel") { S.obj = e.target.value; renderList(); draw(); }
+  });
+  document.addEventListener("click", function (e) {
+    if (!e.target || !S.data) return;
+    var id = e.target.id, cams = S.data.cameras || [];
+    if (id === "detcam-all") { S.sel = new Set(cams); renderList(); draw(); }
+    else if (id === "detcam-none") { S.sel = new Set(); renderList(); draw(); }
+    else if (id === "detcam-hi") { S.sel = new Set(cams.filter(function (c) { return avg(S.obj, c) >= 40; })); renderList(); draw(); }
+    else if (id === "detcam-smooth") { S.smooth = !S.smooth; e.target.style.opacity = S.smooth ? "1" : "0.6"; draw(); }
+  });
+  window._renderDetByCamera = load;
+  if (typeof _refreshAdvancedChartsCore === "function" && !window._detByCamWrapped) {
+    window._detByCamWrapped = true;
+    var _o = _refreshAdvancedChartsCore;
+    _refreshAdvancedChartsCore = async function () { var r = await _o.apply(this, arguments); try { await load(); } catch (e) {} return r; };
+  }
+})();

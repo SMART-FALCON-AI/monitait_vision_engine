@@ -1319,6 +1319,20 @@ class CameraBuffer:
     def buffer(self):
         failure_count = 0
         max_failures = 100  # Reconnect after 100 consecutive failures
+        # 4.0.412 - exponential reconnect backoff. A camera that stays dead (IP cam
+        # off the network, fiber cut, powered off) must NOT be re-opened in a tight
+        # loop: the reconnect storm from dead cameras drags the healthy ones down
+        # too (shoga: ~2,200 reconnect log lines / 30 min from 2 dead cams). The
+        # first loss keeps the original 1s pause (fast recovery from a blip); each
+        # further failed cycle waits longer BEFORE re-opening - 5s,10s,20s,... -
+        # capped at 1h for IP cams (60s for USB: a re-open is cheap there and a
+        # replugged camera should come back quickly). The first real frame resets it.
+        consecutive_reconnects = 0
+        RECONNECT_BACKOFF_BASE = 5      # seconds; wait before the 2nd re-open
+        RECONNECT_BACKOFF_MAX = 3600 if self.is_ip_camera else 60
+        # restart_camera() bumps _buffer_gen and starts a fresh buffer thread; this
+        # thread then exits even if it is parked mid-backoff (no duplicate readers).
+        _my_gen = getattr(self, "_buffer_gen", 0)
         # 4.0.54 — after this many blind reconnect cycles (each = max_failures
         # blank reads + one release/reopen on the same path) we assume the
         # source path itself is stale (e.g. UVC re-enumeration renumbered the
@@ -1330,7 +1344,7 @@ class CameraBuffer:
 
         while True:
             try:
-                if self.stop:
+                if self.stop or getattr(self, "_buffer_gen", 0) != _my_gen:
                     break
                 # 4.0.368 — PROACTIVE by-path tracking. The reactive reconnect below
                 # only fires after max_failures(=100) blank reads (~10s) AND only if
@@ -1376,6 +1390,7 @@ class CameraBuffer:
                         self.frame = frame
                         self.success = success
                         failure_count = 0  # Reset counter on successful read
+                        consecutive_reconnects = 0  # 4.0.412 - live frame clears reconnect backoff
                         # 4.0.54 — a run of successful reads means the current
                         # source is delivering; clear the stale-cycle budget so
                         # a future drift episode gets the full 3-cycle grace
@@ -1390,7 +1405,25 @@ class CameraBuffer:
                         logger.warning(f"Camera connection lost after {failure_count} failures. Attempting reconnect...")
                         try:
                             self.camera.release()
-                            time.sleep(1)  # Brief pause before reconnecting
+                            # 4.0.412 - back off BEFORE re-opening (see buffer() top).
+                            consecutive_reconnects += 1
+                            if consecutive_reconnects == 1:
+                                _backoff = 1  # first loss: original brief pause
+                            else:
+                                _backoff = min(
+                                    RECONNECT_BACKOFF_BASE * (2 ** min(consecutive_reconnects - 2, 20)),
+                                    RECONNECT_BACKOFF_MAX,
+                                )
+                                _lbl = self.source.split('@')[-1] if '@' in self.source else self.source
+                                logger.info(f"Reconnect backoff: waiting {_backoff}s before re-opening {_lbl} (attempt {consecutive_reconnects})")
+                            _slept = 0.0
+                            while (_slept < _backoff and not self.stop
+                                   and getattr(self, "_buffer_gen", 0) == _my_gen):
+                                _nap = min(0.5, _backoff - _slept)
+                                time.sleep(_nap)
+                                _slept += _nap
+                            if self.stop or getattr(self, "_buffer_gen", 0) != _my_gen:
+                                break
 
                             # 4.0.54 — self-heal stale /dev/videoN. If reopening
                             # the same USB path hasn't helped after
@@ -1469,6 +1502,9 @@ class CameraBuffer:
         return frame
 
     def restart_camera(self):
+        # 4.0.412 - retire the current buffer thread for sure: it may be parked in
+        # a long reconnect backoff and miss the brief stop=True window below.
+        self._buffer_gen = getattr(self, "_buffer_gen", 0) + 1
         self.stop = True
         self.camera.release()
         # Reinitialize with appropriate backend

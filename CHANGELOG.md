@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.412] - 2026-10-30 - Camera reconnect: exponential backoff (dead cameras no longer thrash)
+
+A camera that stays dead (IP cam off the network, fiber cut, powered off) used to be re-opened in a tight loop — 100 blank reads, release, 1s pause, re-open, forever. On shoga two dead IP cameras produced ~85 reconnect log lines/min, and the reconnect storm is the documented trigger of the capture-spin wedge that drags the healthy cameras down too.
+
+`services/camera.py` (`CameraBuffer.buffer()` / `restart_camera()`):
+- First loss keeps the original 1s pause (fast recovery from a blip). Each further failed cycle waits longer **before** re-opening — 5s, 10s, 20s, … capped at **1 hour for IP cameras** and **60s for USB** (a USB re-open is cheap and a replugged camera should come back quickly). Retries never stop.
+- The first real frame resets the backoff, so healthy-but-glitchy cameras are never penalised.
+- The wait happens before the re-open, never after: an opened-but-unread RTSP session would time out during the wait and the camera could never recover.
+- Waits are sliced (0.5s) and end immediately on `stop`.
+- `restart_camera()` now bumps a `_buffer_gen` token; the old buffer thread exits even if it is parked mid-backoff (previously it could miss the brief `stop=True` window and leave two readers on one camera — `watcher.py` calls `restart_camera()` on every camera after any capture exception).
+- Log line per backed-off attempt: `Reconnect backoff: waiting Ns before re-opening <ip/path> (attempt N)`.
+
+Verified: simulated-camera test of the real `buffer()` loop inside the MVE container (schedule, caps, reset-on-frame, generation exit, `restart_camera()` path — 10/10 pass); vteam12 canary; shoga live: reconnect log rate ~85/min → 5/min within 4 minutes, dead cams `.13`/`.232` backing off 5→10→20→40→80s, 26/28 cameras unchanged, shipment preserved, detections still landing.
+
+**Git note:** 4.0.409–4.0.411 were shipped straight to vteam12/shoga and never committed. This commit records production exactly: 4.0.405 + the 409–411 files as running on the boxes (`routers/timeline.py` and `static/status.html` from shoga, `static/js/charts.js` from vteam12 — the only copy with the 4.0.411 dotted-gap refinement) + this camera.py. Local 4.0.406–408 work (USB hot-add, `attach_camera()` dedup, watchers/stations OEE) never reached production and is parked on branch `wip/406-408-local`.
+
+## [4.0.411] - 2026-10-28 - Per-camera chart: dotted line where a camera had 0 detections (disconnected)
+
+`static/js/charts.js`: in the "Detections per camera" chart a camera's line is drawn dotted across any bucket where its RAW count is 0 (decided before smoothing, so smoothing can't hide a gap) — a disconnected camera is visible at a glance. Cache-busters bumped to `?v=4.0.411`.
+
+## [4.0.410] - 2026-10-28 - Detections per CAMERA over time (Charts tab) — rich controls
+
+Charts tab → full-width "Detections per camera" chart: object-class selector, select all / none / "high" (cameras averaging ≥ 40), a clickable per-camera list sorted by average count with name + IP, smoothed lines, refreshed with the other advanced charts.
+
+## [4.0.409] - 2026-10-28 - `GET /api/detections_by_camera` — per-camera detection counts over time
+
+`routers/timeline.py` (appended block `MVE_DETBYCAM_BLOCK`): `window` (default 3h), `shipment`, `bucket_min` (default 2). The per-camera TOTAL uses the precomputed `detection_count` (no jsonb) so 24h windows never time out; the per-object-class split is added only for windows ≤ 4h. Camera id = trailing token of `image_path`.
+
 ## [4.0.405] - 2026-10-11 - FIX: auto-cutoff never persisted current_shipment → restart reverted to a stale shipment
 
 Root cause, confirmed on behnoor: the active shipment is restored on boot from the config blob's `current_shipment` (`main.py:275`, the `[SHIPMENT-RESTORE]` path), which is written ONLY by the manual API path (`_persist_shipment`, `config_routes.py:542`) and barcode scans (`_persist_barcode_shipment`, `watcher.py:1715`). The auto/rule-based cutoff `close_and_open_new_shipment` (`services/watcher.py`) minted a fresh timestamped id and updated runtime + Redis + the length-state file — but **never wrote `current_shipment` back to the config blob**.
