@@ -182,11 +182,15 @@ _cfg_cache_lock = _threading.Lock()
 _CONFIG_WRITE_LOCK = _threading.RLock()
 
 
+_cfg_cache_gen = 0   # 4.0.426 — bumped on every invalidation (see load_data_file)
+
+
 def invalidate_config_cache():
     """Drop the cached config so the next load_data_file() re-reads the source. Called on save."""
-    global _cfg_cache_str
+    global _cfg_cache_str, _cfg_cache_gen
     with _cfg_cache_lock:
         _cfg_cache_str = None
+        _cfg_cache_gen += 1
 
 
 # 4.0.352 TIMELINE-PERSIST — provenance of the most recent *fresh* (uncached) config
@@ -278,18 +282,43 @@ def load_data_file():
     with _cfg_cache_lock:
         if _cfg_cache_str is not None and (now - _cfg_cache_ts) < _CFG_CACHE_TTL:
             try:
-                return json.loads(_cfg_cache_str)
+                return _Loaded(json.loads(_cfg_cache_str), _cfg_cache_str)
             except Exception:
                 pass  # corrupt cache entry → fall through to a fresh load
+        gen0 = _cfg_cache_gen
     fresh = _load_data_file_uncached()
     try:
         _s = json.dumps(fresh)
         with _cfg_cache_lock:
-            _cfg_cache_str = _s
-            _cfg_cache_ts = _time.time()
+            # 4.0.426 — only cache this result if no save happened while we were loading.
+            # Otherwise a load that STARTED before a save stored its pre-save copy AFTER
+            # the save had cleared the cache, and that stale copy was served (and used
+            # by read-modify-write callers, reverting the save) for the next 2 s.
+            if _cfg_cache_gen == gen0:
+                _cfg_cache_str = _s
+                _cfg_cache_ts = _time.time()
+        if isinstance(fresh, dict):
+            return _Loaded(fresh, _s)
     except Exception:
         pass  # non-JSON-serializable (shouldn't happen for config) → just don't cache
     return fresh
+
+
+class _Loaded(dict):
+    """4.0.426 — a config dict that remembers the JSON it was loaded from (`_src`, a
+    reference to the string the loader already had — no extra cost on the read path).
+
+    ~30 writers do load → change one thing → save, some with an HTTP call or a 120 s
+    worker run in between; saving their whole stale copy reverted whatever another
+    writer saved meanwhile (current_shipment from an auto-cutoff, another per-class
+    toggle, the active pipeline …). save_service_config / save_data_file now diff a
+    `_Loaded` against its `_src` and write back ONLY the keys this caller changed, onto
+    a FRESH copy under _CONFIG_WRITE_LOCK. A plain dict (built from scratch, a restore,
+    `dict(x)`) carries no source and is saved whole, exactly as before."""
+
+    def __init__(self, data, src):
+        super().__init__(data)
+        self._src = src
 
 def _read_disk_dict():
     """Read the on-disk config snapshot as a dict (empty dict if missing/corrupt).
@@ -489,13 +518,59 @@ def save_data_file(data):
     merging a full blob equals replacing it. For single-key writes prefer
     save_config_key(), which additionally sidesteps the lost-update race.
 
-    Returns True if at least one store was written."""
+    Returns True if at least one store was written.
+
+    4.0.426 — a dict that came from load_data_file() writes back only the top-level
+    keys it changed, and inside a changed dict-valued key (service_config,
+    timeline_config, …) only the sub-keys it changed, applied onto a fresh copy under
+    the lock — see _Loaded."""
+    if isinstance(data, _Loaded):
+        try:
+            orig = json.loads(data._src) or {}
+        except Exception:
+            orig = None
+        if isinstance(orig, dict):
+            changed = [k for k in data if k not in orig or orig[k] != data[k]]
+            if not changed:
+                return True
+            with _CONFIG_WRITE_LOCK:
+                base = _load_data_file_uncached() or {}
+                out = {}
+                for k in changed:
+                    nv, ov, bv = data[k], orig.get(k), base.get(k) if isinstance(base, dict) else None
+                    out[k] = _apply_changes(bv, ov, nv) if (isinstance(nv, dict) and isinstance(ov, dict)
+                                                           and isinstance(bv, dict)) else nv
+                return _merge_and_persist(out)
     return _merge_and_persist(data if isinstance(data, dict) else {})
+
+
+def _apply_changes(fresh, orig, new, depth=4):
+    """`fresh` + what `new` changed relative to `orig` (incl. removals). Recurses into
+    nested dicts (e.g. audio_settings → class → field), so two writers that changed
+    DIFFERENT entries of the same dict both survive; lists are replaced whole."""
+    out = dict(fresh)
+    for k, v in new.items():
+        if k in orig and orig[k] == v:
+            continue
+        o, f = orig.get(k), out.get(k)
+        if depth > 0 and isinstance(v, dict) and isinstance(o, dict) and isinstance(f, dict):
+            out[k] = _apply_changes(f, o, v, depth - 1)
+        else:
+            out[k] = v
+    for k in orig:
+        if k not in new:
+            out.pop(k, None)
+    return out
+
 
 def load_service_config():
     """Load service configuration from data file (under 'service_config' key)."""
     data = load_data_file()
-    return data.get("service_config", {})
+    svc = data.get("service_config", {})
+    src = getattr(data, "_src", None)
+    # 4.0.426 — remember where it came from, so save_service_config writes back only
+    # what the caller changed (see _Loaded).
+    return _Loaded(svc, src) if (src is not None and isinstance(svc, dict)) else svc
 
 def save_service_config(config):
     """Save service configuration (under 'service_config').
@@ -503,7 +578,21 @@ def save_service_config(config):
     4.0.355 — writes ONLY the service_config key (save_config_key) instead of
     load-whole-blob → set one key → save-whole-blob. This is what stops the ~40
     service_config writers (pipeline activate, camera tweaks, scheduler, watcher,
-    anomaly…) from clobbering timeline_config/rules a concurrent writer just changed."""
+    anomaly…) from clobbering timeline_config/rules a concurrent writer just changed.
+
+    4.0.426 — and a service_config that came from load_service_config() writes back
+    only the sub-keys this caller changed, onto a FRESH copy under the lock (two
+    writers of different sub-keys no longer undo each other; see _Loaded)."""
+    if isinstance(config, _Loaded):
+        try:
+            orig = (json.loads(config._src) or {}).get("service_config", {})
+        except Exception:
+            orig = None
+        if isinstance(orig, dict):
+            config["saved_at"] = datetime.now().isoformat()
+            with _CONFIG_WRITE_LOCK:
+                merged = _apply_changes(_fresh_service_config(), orig, config)
+                return save_config_key("service_config", merged)
     config["saved_at"] = datetime.now().isoformat()
     return save_config_key("service_config", config)
 
@@ -516,8 +605,29 @@ def update_service_config(changes):
     second save wins). Holding _CONFIG_WRITE_LOCK (re-entrant) across the read AND the
     write makes this atomic against every persist, which all take the same lock."""
     with _CONFIG_WRITE_LOCK:
-        svc = dict(load_service_config() or {})
+        svc = _fresh_service_config()
         svc.update(changes)
+        return save_service_config(svc)
+
+
+def _fresh_service_config():
+    """service_config read straight from the store (never the 2 s cache) — for use under
+    _CONFIG_WRITE_LOCK, where a cached copy could predate the last save."""
+    return dict((_load_data_file_uncached() or {}).get("service_config", {}) or {})
+
+
+def mutate_service_config(fn):
+    """4.0.426 — atomic read-modify-write for NESTED changes: under _CONFIG_WRITE_LOCK,
+    read a fresh service_config, let `fn(svc)` edit it in place, save it.
+
+    The ~30 writers that did load_service_config() → edit → save_service_config()
+    (some with an HTTP call or a 120 s worker run in between) wrote back their whole
+    stale copy — reverting anything saved meanwhile (e.g. current_shipment from an
+    auto-cutoff, another per-class toggle). Returns save_service_config's result; an
+    exception raised by fn propagates and nothing is saved."""
+    with _CONFIG_WRITE_LOCK:
+        svc = _fresh_service_config()
+        fn(svc)
         return save_service_config(svc)
 
 

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.426] - 2026-11-01 - Audit batch 6: config saves no longer undo each other
+
+**Why** — ~30 places do load the config → change one thing → save it, some with an HTTP call, a report run or a 120 s anomaly-worker run in between. Each saved its WHOLE stale copy, silently reverting whatever another writer had saved meanwhile — e.g. an anomaly-baseline build during an auto-cutoff reverted `current_shipment` (the old shipment came back after the next restart), two quick per-class toggles lost one, a pipeline activation could undo a camera tweak. The 4.0.413 `update_service_config` helper existed but most writers never used it.
+
+**Fixed (centrally — no call site changed)**
+- `load_data_file()` / `load_service_config()` now return a dict that remembers the JSON it was loaded from (a reference to the string the loader already had — no extra cost on the hot read paths). `save_service_config()` / `save_data_file()` diff such a dict against its source and write back ONLY the keys the caller changed (inside a changed `service_config` / `timeline_config`, only the changed sub-keys, incl. removals), applied onto a FRESH copy under `_CONFIG_WRITE_LOCK`. A dict built from scratch (full rebuild, restore, `dict(x)`) is saved whole, exactly as before.
+- **The 2 s config cache could be refilled with pre-save data**: a load that started before a save stored its old copy after the save had cleared the cache, and served it for 2 s — reverting the save through any read-modify-write in that window, `update_service_config` included. A generation counter now discards such a load; `update_service_config` reads uncached under the lock.
+- New `mutate_service_config(fn)` for atomic nested edits.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.425] - 2026-11-01 - Audit batch 5: blocking work off the web server's event loop
 
 MVE serves every HTTP request, the dashboard WebSockets and `/health` from ONE asyncio event loop. Any `async def` endpoint that does blocking work freezes all of them for as long as it runs — the "API stops answering while capture keeps running" symptom (and a failing container health check). The audit found ~45 such places.
