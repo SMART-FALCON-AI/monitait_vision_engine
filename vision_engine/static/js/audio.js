@@ -1726,11 +1726,6 @@ function switchTab(tabName) {
         });
     }
 
-    // Lazy-load/unload any remaining iframe tabs (gallery removed in 4.0.225)
-    if (typeof loadIframeForTab === 'function') {
-        loadIframeForTab(tabName);
-    }
-
     // 4.0.53 — force-hide the "Loading charts…" badge when leaving the
     // Charts tab so a mid-fetch spinner from refreshDetectionInsights /
     // refreshAdvancedCharts cannot bleed into Dashboard / Cameras / etc.
@@ -2937,7 +2932,9 @@ function _escKb(s) {
 // model output cannot inject markup.
 function _mdToHtml(src) {
     if (!src) return '';
-    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // 4.0.421 — also escape quotes: the image / link rules below put the URL into src="…" /
+    // href="…", so a quote in an AI answer could otherwise inject an attribute.
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const inline = (t) => esc(t)
         .replace(/`([^`]+)`/g, '<code style="background:rgba(0,0,0,0.25);padding:1px 4px;border-radius:4px;">$1</code>')
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -2951,15 +2948,15 @@ function _mdToHtml(src) {
     const blocks = [];
     src = String(src).replace(/```[\w-]*\n?([\s\S]*?)```/g, (_m, code) => {
         blocks.push('<pre style="background:rgba(0,0,0,0.3);padding:8px 10px;border-radius:6px;overflow-x:auto;margin:6px 0;"><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>');
-        return ' CODE' + (blocks.length - 1) + ' ';
+        return '\u0000CODE' + (blocks.length - 1) + '\u0000';
     });
     const lines = src.split('\n');
     const out = [];
     let i = 0;
-    const isSpecial = (s) => /^\s*(#{1,6})\s|^\s*[-*•]\s|^\s*\d+\.\s/.test(s) || /^ CODE\d+ $/.test(s.trim()) || /\|/.test(s) || s.trim() === '';
+    const isSpecial = (s) => /^\s*(#{1,6})\s|^\s*[-*•]\s|^\s*\d+\.\s/.test(s) || /^\u0000CODE\d+\u0000$/.test(s.trim()) || /\|/.test(s) || s.trim() === '';
     while (i < lines.length) {
         const ln = lines[i];
-        if (/^ CODE\d+ $/.test(ln.trim())) { out.push(ln.trim()); i++; continue; }
+        if (/^\u0000CODE\d+\u0000$/.test(ln.trim())) { out.push(ln.trim()); i++; continue; }
         const h = ln.match(/^\s*(#{1,6})\s+(.*)$/);
         if (h) { const lvl = Math.min(6, h[1].length + 1); out.push('<h' + lvl + ' style="margin:10px 0 4px;font-size:' + (16 - h[1].length) + 'px;">' + inline(h[2]) + '</h' + lvl + '>'); i++; continue; }
         // table: a row with pipes followed by a |---|---| separator
@@ -2988,7 +2985,7 @@ function _mdToHtml(src) {
         while (i < lines.length && !isSpecial(lines[i])) { para.push(lines[i]); i++; }
         out.push('<p style="margin:4px 0;">' + inline(para.join('\n')).replace(/\n/g, '<br>') + '</p>');
     }
-    return out.join('\n').replace(/ CODE(\d+) /g, (_m, n) => blocks[+n] || '');
+    return out.join('\n').replace(/\u0000CODE(\d+)\u0000/g, (_m, n) => blocks[+n] || '');
 }
 
 async function sendAIMessage() {

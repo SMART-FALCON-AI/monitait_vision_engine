@@ -20,6 +20,14 @@ def send_command(command: str, request: Request, value: Optional[int] = None):
         POST /SET_VERBOSE?value=1 - Enable verbose mode
         POST /OK_OFFSET_DELAY?value=100 - Set OK offset delay to 100ms
     """
+    # 4.0.421 — only KNOWN commands reach the serial board (it drives the ejectors and
+    # lights). This route catches every one-segment POST, so before this any typo, any
+    # call to a since-removed endpoint from an old browser tab, or a network scanner's
+    # POST was written to the board as a raw command. Accepted: a USER_COMMANDS name,
+    # or one of their raw firmware codes (kept for integrations that post e.g. /1).
+    if command not in USER_COMMANDS and command not in USER_COMMANDS.values():
+        raise HTTPException(status_code=404, detail="Not Found")
+
     watcher = request.app.state.watcher_instance
     if watcher is None:
         raise HTTPException(status_code=503, detail="Watcher device not initialized")

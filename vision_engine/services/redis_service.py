@@ -1,6 +1,5 @@
 import json
 import logging
-import time
 
 from redis import Redis
 from config import REDIS_DB
@@ -18,27 +17,8 @@ class RedisConnection:
     def connect_to_redis(self):
         return Redis(self.redis_hostname, self.redis_port, db=REDIS_DB)
 
-    def set_flag(self, list_lenght):
-        with self.redis_connection.pipeline() as pipe:
-            pipe.delete("camera_list")
-            for i in range(list_lenght):
-                pipe.rpush("camera_list", 0)
-            pipe.execute()
-
     def update_encoder_redis(self, encoder):
         self.redis_connection.set("encoder_values", json.dumps(encoder))
-
-    def set_captuting_flag(self, key):
-        self.redis_connection.set(key, 1)
-
-    def set_redis(self, key, value):
-        self.redis_connection.set(key, value)
-
-    def get_redis(self, key):
-        return self.redis_connection.get(key)
-
-    def set_light_mode(self, mode):
-        self.redis_connection.set("light_mode", mode)
 
     def update_queue_messages_redis(self, queue_messages , stream_name="dms"):
         with self.redis_connection.pipeline() as pipe2:

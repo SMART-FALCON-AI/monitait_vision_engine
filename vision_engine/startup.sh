@@ -40,9 +40,15 @@ if [ -d /wheels ]; then
         # --no-index refuses pypi (we can't reach it anyway); --no-deps
         # skips dependency resolution (the wheel is self-contained).
         # Failure here is non-fatal — MVE boots without Basler support.
-        pip install --no-index --no-deps "$wheel" 2>&1 | tail -3 || {
+        # 4.0.421 — test pip's OWN exit status: `pip … | tail -3 || …` only saw
+        # tail's (always 0, plain sh has no pipefail), so a failed install was
+        # never reported.
+        if pip install --no-index --no-deps "$wheel" > /tmp/pypylon_install.log 2>&1; then
+            log "pypylon installed"
+        else
             log "pypylon install FAILED — MVE will boot without Basler support"
-        }
+        fi
+        tail -3 /tmp/pypylon_install.log
         break  # first pypylon-*.whl wins
     done
 else

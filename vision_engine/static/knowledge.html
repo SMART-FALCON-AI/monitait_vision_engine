@@ -633,8 +633,8 @@ async function loadMcp() {
         <td>${(s.tools || []).map(t => `<span class="chip">${esc(t.name)}</span>`).join('') || '<span class="muted">none discovered</span>'}</td>
         <td>${s.write_enabled ? '<span style="color:var(--warn)">enabled</span>' : 'off'}</td>
         <td style="white-space:nowrap">
-          <button class="ghost" onclick="rediscover('${esc(s.name)}')">Re-discover</button>
-          <button class="ghost" onclick="delMcp('${esc(s.name)}')">Remove</button></td>
+          <button class="ghost" onclick="rediscover(${esc(JSON.stringify(s.name))})">Re-discover</button>
+          <button class="ghost" onclick="delMcp(${esc(JSON.stringify(s.name))})">Remove</button></td>
       </tr>`).join('') || '<tr><td colspan="6" class="muted">No external servers connected.</td></tr>';
   } catch (e) { $('mcps').innerHTML = `<tr><td colspan="6">${esc(e.message)}</td></tr>`; }
 }
@@ -661,10 +661,10 @@ async function addMcp() {
   } catch (e) { alert(e.message); }
 }
 
-const rediscover = n => api(`/mcp/servers/${n}/discover`, {method:'POST'})
+const rediscover = n => api(`/mcp/servers/${encodeURIComponent(n)}/discover`, {method:'POST'})
   .then(loadMcp).catch(e => alert(e.message));
 const delMcp = n => confirm(`Remove ${n}?`) &&
-  api('/mcp/servers/' + n, {method:'DELETE'}).then(loadMcp);
+  api('/mcp/servers/' + encodeURIComponent(n), {method:'DELETE'}).then(loadMcp);
 
 // --- factory databases -> RAG ----------------------------------------------
 function _dbForm() {

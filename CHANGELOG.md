@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.421] - 2026-11-01 - Audit batch 1: unknown POSTs no longer reach the serial board; AI-answer attribute injection; dead code
+
+Overnight whole-codebase audit (operator: "check the whole code base … find duplications, bugs, unnecessary codes … and version those on vteam12"). Batch 1 = findings confirmed by reading the code and, where possible, reproducing them.
+
+**Fixed**
+- **Any one-segment POST went to the serial board** (`routers/commands.py`, the catch-all `POST /{command}`): an unknown name was written to the board — which drives the ejectors and lights — as a raw command, and the request answered 200. A typo, an old browser tab calling an endpoint that no longer exists, or a network scanner could send garbage to the board. Now only a known command name (`USER_COMMANDS`) or one of its raw firmware codes (kept for integrations that post e.g. `/1`) is sent; anything else → 404. The UI only ever sends known names.
+- **AI Assistant answers could inject HTML attributes** (`static/js/audio.js`, `_mdToHtml`): its escape didn't escape quotes, and the image / link rules put the URL into `src="…"` / `href="…"`, so `![x](http://a"onerror="…)` produced a live `onerror` (reproduced with the old code; browsers accept the attribute even without a space). Quotes are now escaped; normal markdown renders exactly as before (headings, lists, code, tables, links, images, Persian — compared old vs new).
+- **`audio.js` was a "binary" file to git / grep**: 8 raw NUL bytes used as code-block placeholders in `_mdToHtml`, so its diffs never showed in reviews. Written as `\u0000` escapes — identical at runtime.
+- **Knowledge tab, MCP server buttons** (`static/knowledge.html`): the server name went into `onclick="rediscover('…')"`; HTML-escaping is undone by the browser before the handler runs, so a quote in a name broke (or injected into) the handler. Now passed as a JSON string literal; the name is also URL-encoded in the API path.
+- **`startup.sh` never reported a failed pypylon install**: `pip … | tail -3 || …` tested tail's exit status (plain sh has no pipefail). Now tests pip's own; boot still continues without Basler on failure. (Simulated: failing pip, working pip, no wheel.)
+
+**Removed (unused)**
+- `static/status.html.backup` (4,796-line stale copy of the page, tracked in git, never served or linked).
+- `static/js/iframes.js` + its `<script>` tag + its call in `switchTab`: its tab table was empty since 4.0.225, so `loadIframeForTab()` did nothing. Also the empty, unreferenced `grafana-future-embed` div.
+- `RedisConnection.set_flag`, `set_captuting_flag`, `set_redis`, `get_redis`, `set_light_mode` (no callers anywhere) and an unused `import time`.
+
+Deployed to **vteam12 only** (canary).
+
 ## [4.0.420] - 2026-11-01 - Line names defined by the operator, several lines per site, line reports in the Charts tab; station names free text everywhere
 
 **Why** — the operator: "the station names are text and not fixed, be careful, also the line name, these should be able to define by the users", "there might be more than one line", "you define a list of sequence of watchers as a line and let the user name them", "also put the reports in the chart tab". Station names were already typed in, but the line name was generated from them ("IS → QC machine → QC operator") and could not be changed, a camera station's ID was built from the first name typed (looked fixed; a Persian name became a meaningless ID), with several lines the Next-station dropdown could not tell two stations of the same name apart, the line report lived only in the Hardware tab, and two older Charts-tab spots put names into the page unescaped.
