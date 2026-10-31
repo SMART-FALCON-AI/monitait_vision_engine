@@ -503,13 +503,24 @@ async def ws_camera(websocket: WebSocket, camera_id: int):
             # Read frame in executor to avoid blocking asyncio
             frame = await loop.run_in_executor(None, cam.read)
             if frame is not None:
-                # Encode JPEG
-                _, jpeg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                await manager.send_binary(websocket, jpeg.tobytes())
+                # 4.0.422 — encode in the executor too (a full-size JPEG encode on the event
+                # loop stalls every request), and send DIRECTLY: manager.send_binary swallows
+                # the error from a socket the browser already closed, so this loop never
+                # ended — every Cameras-tab visit left one immortal 3-fps encode loop per
+                # camera behind (28 per visit on a 28-camera site), on the event loop.
+                jpeg = await loop.run_in_executor(None, _jpeg_q70, frame)
+                if jpeg is not None:
+                    await websocket.send_bytes(jpeg)
             await asyncio.sleep(0.33)  # ~3 FPS
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.error(f"WS camera {camera_id} error: {e}")
+        # a send on a socket the browser already closed ends up here — a normal end
+        logger.debug(f"WS camera {camera_id} closed: {type(e).__name__}: {e}")
     finally:
         manager.disconnect(channel, websocket)
+
+
+def _jpeg_q70(frame):
+    ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return buf.tobytes() if ok else None

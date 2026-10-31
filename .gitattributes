@@ -1,0 +1,3 @@
+# 4.0.422 - shell scripts must keep LF line endings on every checkout (also on Windows):
+# a CRLF startup.sh stops the MVE container from booting (sh reads 'set -e<CR>').
+*.sh text eol=lf

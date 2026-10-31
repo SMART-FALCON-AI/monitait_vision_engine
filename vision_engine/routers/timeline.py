@@ -56,6 +56,13 @@ def _endpoint_cache_get(key: str):
 
 def _endpoint_cache_put(key: str, payload) -> None:
     global _endpoint_cache
+    # 4.0.422 — drop EXPIRED entries on every put. Before, entries were only evicted once
+    # 256 had piled up, and a get never removed a stale one: each progressive-ladder
+    # bucket (distinct since/until keys) parked up to 2×6000 scatter dicts here, so a few
+    # chart loads held hundreds of MB indefinitely. Now at most the last TTL's worth stays.
+    _now = time.time()
+    for _k in [k for k, (ts, _p) in _endpoint_cache.items() if _now - ts >= _ENDPOINT_CACHE_TTL_SEC]:
+        _endpoint_cache.pop(_k, None)
     if len(_endpoint_cache) >= _ENDPOINT_CACHE_MAX:
         # Drop oldest half — cheaper than a strict LRU and avoids unbounded growth.
         items = sorted(_endpoint_cache.items(), key=lambda kv: kv[1][0])
@@ -1855,9 +1862,10 @@ def calibrate_score_scale(payload: dict = None):
             )
         except Exception:
             classes_with_sev, procs_with_sev = [], []
+        recent_classes = []
+        conn2 = None
         try:
             conn2 = get_db_connection()
-            recent_classes = []
             if conn2 is not None:
                 cur3 = conn2.cursor()
                 cur3.execute(
@@ -1874,9 +1882,13 @@ def calibrate_score_scale(payload: dict = None):
                 )
                 recent_classes = [{"class": r[0], "count": int(r[1] or 0)} for r in cur3.fetchall() if r[0]]
                 cur3.close()
-                release_db_connection(conn2)
         except Exception:
             recent_classes = []
+        finally:
+            # 4.0.422 — released on the error path too: a statement timeout here (a 7-day
+            # jsonb scan on a busy line) used to leak one pool connection per Calibrate click.
+            if conn2 is not None:
+                release_db_connection(conn2)
         if not classes_with_sev and not procs_with_sev:
             headline = ("No class or ejection procedure has a severity > 0 configured — the "
                         "quality score has nothing to weight. Set severities in Process tab "
@@ -5562,6 +5574,9 @@ def shipment_spans_endpoint(request: Request, window: str = "1h", shipment: str 
             except Exception:
                 _sp["verdict"] = None
                 _sp["score"]   = None
+        if len(_cache) > 500:   # 4.0.422 — one entry per shipment ever shown; keep it bounded
+            for _k in [k for k, e in _cache.items() if _now - e[0] >= 60.0]:
+                _cache.pop(_k, None)
         return JSONResponse(content={"shipment_spans": spans, "window": window})
     except Exception as e:
         logger.warning(f"shipment_spans standalone endpoint failed: {e}")

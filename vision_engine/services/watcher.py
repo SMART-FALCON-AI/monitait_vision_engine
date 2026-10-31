@@ -2086,7 +2086,10 @@ class ArduinoSocket:
 
             except Exception as e:
                 logger.error(f"Run ejector failed: {e}")
-    
+                # 4.0.422 — pacing came only from BLPOP's timeout, so while Redis is down /
+                # restarting BLPOP failed instantly and this spun + flooded the log.
+                time.sleep(0.5)
+
     def capture_frames(self):
         """Capture frames when a signal is detected."""
 
@@ -2235,16 +2238,28 @@ class ArduinoSocket:
                         "capture_t": capture_timestamp,
                     }
                     _inference_queue.put(frames_data)  # Hot → cold spill. Never drops.
+                else:
+                    # 4.0.422 — nothing to capture yet (line stopped / encoder hasn't moved the
+                    # step distance): wait 2 ms instead of spinning. The bare `while True` used
+                    # to re-check thousands of times a second, pinning a core and starving the
+                    # web server + inference threads of the GIL. 2 ms is far below one encoder
+                    # step at line speed, so trigger timing is unchanged in practice.
+                    time.sleep(0.002)
             except Exception as e:
-                logger.error(f"Capture error: {e}")
-                # Restart all cameras dynamically
-                for cam_id, cam in self.cameras.items():
-                    if cam and hasattr(cam, 'restart_camera'):
-                        try:
-                            cam.restart_camera()
-                        except Exception as restart_err:
-                            logger.warning(f"Failed to restart camera {cam_id}: {restart_err}")
-                time.sleep(0.01)
+                _now = time.time()
+                self._capture_err_count = getattr(self, "_capture_err_count", 0) + 1
+                if _now - getattr(self, "_capture_err_logged", 0) >= 30:
+                    logger.error(f"Capture error: {e} ({self._capture_err_count} in the last 30 s)")
+                    self._capture_err_logged, self._capture_err_count = _now, 0
+                # 4.0.422 — no longer restarts EVERY camera on any capture error. A serial
+                # hiccup (light-mode write) or an empty ROI crop restarted all cameras: each
+                # restart released the cv2 capture from this thread while its buffer thread
+                # could still be inside grab() (use-after-free → the exit-139 crash seen on a
+                # 12-USB-camera site), IP cameras reopened one by one (≈10 s each), and
+                # iterating self.cameras while another thread changed it raised inside this
+                # except and silently killed the capture thread. Each camera already
+                # reconnects itself (freeze watchdog + backoff), so just log and carry on.
+                time.sleep(0.1)
 
 
                 
@@ -2276,6 +2291,8 @@ class ArduinoSocket:
         _, _green_img, _red_img = create_dynamic_images(TARGET_STREAM_HEIGHT)
 
         while not self.stop_thread:
+            self.raw_stream_queue = None
+            self.raw_mismatch_queue = None
             try:
                 # Fetch all frames from Redis queue
                 self.raw_stream_queue = self.get_queue_messages(stream_name="stream_queue")
@@ -2530,6 +2547,13 @@ class ArduinoSocket:
 
             except Exception as e:
                 logger.error(f"Error streaming frame: {e}")
+                time.sleep(0.5)        # 4.0.422 — e.g. Redis restarting: don't flood the log
+            # 4.0.422 — idle back-off. With both queues empty this loop used to go straight
+            # back to two LPOPs: ~60,000 Redis calls/s around the clock (measured on vteam12:
+            # MVE 80 % CPU + Redis 30 % CPU doing nothing), competing for the GIL with the web
+            # server and inference. With work queued there is still no wait at all.
+            if not self.raw_stream_queue and not self.raw_mismatch_queue:
+                time.sleep(0.05)
 
     def write_production_metrics_loop(self):
         """Background thread that periodically writes production metrics to TimescaleDB."""

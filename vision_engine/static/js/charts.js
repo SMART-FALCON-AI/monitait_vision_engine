@@ -1291,7 +1291,7 @@ async function refreshDetectionInsights() {
     if (_showedLoader && typeof mveLoaderBegin === 'function') mveLoaderBegin('Loading charts…');
     try {
     const windowSel = document.getElementById('insight-window');
-    const window = windowSel ? windowSel.value : '24h';
+    const win = windowSel ? windowSel.value : '24h';   // 4.0.422 — was `window` (shadowed the global)
     const emptyEl = document.getElementById('insight-empty');
     const chartsEl = document.getElementById('insight-charts');
     const totalEl = document.getElementById('insight-total');
@@ -1304,7 +1304,7 @@ async function refreshDetectionInsights() {
     // at 5000 rows). Show an operator-visible hint so the empty panels
     // aren't confusing.
     const _LONG_WINDOWS = { '90d': 1, '120d': 1, '1y': 1 };
-    const _isLongWindow = !!_LONG_WINDOWS[window];
+    const _isLongWindow = !!_LONG_WINDOWS[win];
     const _longNote = document.getElementById('insight-long-window-note');
     if (_longNote) _longNote.style.display = _isLongWindow ? '' : 'none';
 
@@ -1351,7 +1351,7 @@ async function refreshDetectionInsights() {
         // 4.0.308 — a picked shipment is independent of the timeframe: pass it so the stats panel
         // (which gates the whole Detection Insights view) filters by shipment, not the window.
         const _shipSel = document.getElementById('insight-shipment')?.value || '';
-        const r = await fetch('/api/detection_stats?window=' + encodeURIComponent(window) + '&min_conf=' + minConf
+        const r = await fetch('/api/detection_stats?window=' + encodeURIComponent(win) + '&min_conf=' + minConf
                               + (_shipSel ? '&shipment=' + encodeURIComponent(_shipSel) : ''));
         data = await r.json();
     } catch (e) {
@@ -3592,7 +3592,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
     // "no dots" (they moved on). With preload the scatter builds from
     // 1h data in ~200 ms; the progressive bucket loop then extends it
     // backwards. Callers with no preload keep prior behaviour.
-    const window = document.getElementById('insight-window')?.value || '24h';
+    // 4.0.422 — was `const window = …`: it shadowed the browser global for this whole function, so
+    // every `window._mveUnifiedX = …` / `window._mveScatterRange` below wrote to / read from the
+    // STRING '24h' and was lost (stale Length axis left behind after switching to Time / Encoder).
+    const win = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
     let data = preloadedData;
@@ -3625,7 +3628,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             const parentClass = localStorage.getItem('mve_heatmap_parent_class') || '';
             // 4.0.35 — single bucket count drives heatmap + quality + ejection strips.
             const bins = parseInt(localStorage.getItem('mve_bucket_count') || '48', 10) || 48;
-            const r = await fetch('/api/detection_charts?window=' + encodeURIComponent(window) +
+            const r = await fetch('/api/detection_charts?window=' + encodeURIComponent(win) +
                                   '&shipment=' + encodeURIComponent(shipment) +
                                   '&min_conf=' + minConf +
                                   '&baseline=' + encodeURIComponent(baseline) +
@@ -4929,11 +4932,11 @@ window._alignStripToScatter = _alignStripToScatter;
 // with Store=ON (Process tab → Ejection Procedures). Scoped by window + shipment.
 // ---------------------------------------------------------------------------
 async function refreshEjectionCharts() {
-    const window = document.getElementById('insight-window')?.value || '24h';
+    const win = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     let data;
     try {
-        const r = await fetch('/api/ejection_stats?window=' + encodeURIComponent(window) +
+        const r = await fetch('/api/ejection_stats?window=' + encodeURIComponent(win) +
                               '&shipment=' + encodeURIComponent(shipment));
         data = await r.json();
     } catch (e) { console.error('ejection_stats fetch failed:', e); return; }
@@ -5027,11 +5030,11 @@ async function refreshEjectionCharts() {
 // Reads /api/production_stats (PLC OK/NG counters diffed per bucket).
 // ---------------------------------------------------------------------------
 async function refreshProductionCharts() {
-    const window = document.getElementById('insight-window')?.value || '24h';
+    const win = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
     let data;
     try {
-        const r = await fetch('/api/production_stats?window=' + encodeURIComponent(window) +
+        const r = await fetch('/api/production_stats?window=' + encodeURIComponent(win) +
                               '&shipment=' + encodeURIComponent(shipment));
         data = await r.json();
     } catch (e) { console.error('production_stats fetch failed:', e); return; }

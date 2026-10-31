@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.422] - 2026-11-01 - Audit batch 2: busy loops, leaked loops, DB pool slot leak, cache growth, chart axis
+
+Measured on vteam12 before this version (no cameras, idle): **61,865 Redis ops/s** — MVE 80 % CPU + Redis 30 % CPU doing nothing — and Redis holding 82,776 `dms` + 82,880 `speaker` messages nobody reads (730 MB).
+
+**Fixed**
+- **Results streamer spun on empty queues** (`watcher.stream_results`): two LPOPs back-to-back forever with no wait — ~60k Redis calls/s on every idle site / stopped line, competing for the GIL with the web server and inference. Now waits 50 ms only when both queues were empty (no added latency while work is queued); 0.5 s after an error (Redis restarting) instead of flooding the log.
+- **Capture loop spun while there was nothing to capture** (`watcher.capture_frames`): line stopped / encoder short of the step → re-checked thousands of times a second. Now 2 ms between checks (far below one encoder step at line speed).
+- **Any capture error restarted EVERY camera** (`capture_frames` except): a serial hiccup or an empty ROI crop released every camera from the capture thread while its buffer thread could still be inside `grab()` (use-after-free — the likely cause of the exit-139 crash on a 12-USB-camera site), reopened IP cameras one by one (~10 s each), and iterating the camera dict while another thread changed it could kill the capture thread silently. Cameras already reconnect themselves (freeze watchdog + backoff); the loop now just logs (rate-limited, once per 30 s with a count) and continues.
+- **Ejector loop spun on Redis errors** (`run_ejector`): pacing came only from BLPOP's timeout; while Redis was down it failed instantly in a tight loop. 0.5 s pause on error.
+- **`dms` / `speaker` Redis lists grew forever**: only an external stack (fabriqc / speaker service) may read them; where none does they filled Redis until LRU evicted live keys (e.g. `shipment`). Now capped to the newest 2000 / 200 (a live consumer never reaches the cap). MVE's own queues are never trimmed.
+- **Camera live-feed WebSockets never ended** (`/ws/camera/{id}`): `send_binary` swallowed the error from a closed socket, so every Cameras-tab visit left one immortal loop per camera JPEG-encoding a full frame 3×/s ON THE EVENT LOOP (28 loops per visit on a 28-camera site) — a direct cause of `/health` stalls. Now a closed socket ends the loop and the encode runs in the executor.
+- **DB pool lost a slot for every dead connection** (`db.release_db_connection`): closed connections returned early without `putconn()`, which is what frees the slot — after enough of them (e.g. connections open during TimescaleDB restarts) the whole app got "pool exhausted". And `minconn=1` meant every returned connection beyond the first was closed, so most DB calls opened a new TCP connection + login; now 4 are kept warm (`POSTGRES_POOL_MIN`).
+- **Calibrate diagnostic leaked a DB connection on error** (`timeline` score-scale calibrate): released in `finally` now.
+- **Chart endpoint cache never dropped expired entries** (`timeline._endpoint_cache`): eviction only at 256 entries, each progressive-ladder bucket holding up to 2×6000 scatter dicts → hundreds of MB held indefinitely. Expired entries are dropped on every put; the shipment-verdict cache is bounded too.
+- **Charts: a local `const window = '24h'` hid the browser's `window`** in the main chart refresh (and 3 other functions): every `window._mveUnifiedX = …` / `window._mveScatterRange` there went to the string and was lost — after the default Length view, switching to Time / Encoder left the dots on the stale Length axis (empty Time view) until a page reload. Renamed to `win`.
+
+**Repo** — `.gitattributes`: `*.sh text eol=lf`, so a Windows checkout can never produce a CRLF `startup.sh` (which would stop the container booting); the 4 working-copy scripts that had CRLF converted (no content change).
+
+Deployed to **vteam12 only**.
+
 ## [4.0.421] - 2026-11-01 - Audit batch 1: unknown POSTs no longer reach the serial board; AI-answer attribute injection; dead code
 
 Overnight whole-codebase audit (operator: "check the whole code base … find duplications, bugs, unnecessary codes … and version those on vteam12"). Batch 1 = findings confirmed by reading the code and, where possible, reproducing them.

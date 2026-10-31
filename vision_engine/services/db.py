@@ -16,6 +16,7 @@ db_connection_pool = None
 # Defaults preserve prior v4.0.79 behaviour on any site where the env is
 # unset — nothing changes for existing deployments unless the operator opts in.
 POSTGRES_POOL_MAX   = int(os.environ.get("POSTGRES_POOL_MAX", "40"))
+POSTGRES_POOL_MIN   = int(os.environ.get("POSTGRES_POOL_MIN", "4"))   # 4.0.422 — idle conns kept warm
 MVE_DB_WRITERS_MAX  = int(os.environ.get("MVE_DB_WRITERS_MAX", "12"))
 
 # 4.0.102 — pool-wide statement_timeout is env-driven and DEFAULT RAISED
@@ -95,8 +96,11 @@ def _init_db_pool():
     """Build the connection pool. Called ONCE, under _pool_lock, from get_db_connection()."""
     global db_connection_pool
     from psycopg2 import pool
+    # 4.0.422 — minconn is also how many IDLE connections putconn() keeps; with 1, every
+    # returned connection beyond the first was closed and the next getconn() opened a new
+    # one (TCP + auth per DB call under any concurrency). Keep a few warm.
     db_connection_pool = pool.ThreadedConnectionPool(
-        1, POSTGRES_POOL_MAX,
+        min(POSTGRES_POOL_MIN, POSTGRES_POOL_MAX), POSTGRES_POOL_MAX,
         host=POSTGRES_HOST,
         port=POSTGRES_PORT,
         database=POSTGRES_DB,
@@ -142,8 +146,12 @@ def release_db_connection(conn):
     if not (db_connection_pool and conn):
         return
     try:
-        if getattr(conn, "closed", 0):
-            return  # already closed — nothing to return to the pool
+        # 4.0.422 — a CLOSED connection must still go through putconn(): that is what frees
+        # its slot in the pool (psycopg2 discards the closed connection and deletes it from
+        # `_used`). The early `return` here leaked one of the POSTGRES_POOL_MAX slots for
+        # every connection that died (e.g. each one open during a TimescaleDB restart) until
+        # getconn() answered "pool exhausted" for the whole app. An unkeyed connection still
+        # lands in the except below.
         db_connection_pool.putconn(conn)
     except Exception as e:
         logger.debug(f"release_db_connection: putconn rejected, closing directly ({e})")

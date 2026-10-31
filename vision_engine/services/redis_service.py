@@ -20,11 +20,19 @@ class RedisConnection:
     def update_encoder_redis(self, encoder):
         self.redis_connection.set("encoder_values", json.dumps(encoder))
 
+    # 4.0.422 — lists that only an EXTERNAL consumer may read (fabriqc / the speaker
+    # service). Where nothing reads them they grew forever (vteam12: 82,776 `dms` +
+    # 82,880 `speaker` items, Redis at 730 MB) until allkeys-lru evicted live keys such
+    # as `shipment`. Keep the newest N — a consumer that keeps up never sees the cap.
+    # MVE's own queues (stream_queue, ejector_queue) are never trimmed.
+    _LIST_CAPS = {"dms": 2000, "speaker": 200}
+
     def update_queue_messages_redis(self, queue_messages , stream_name="dms"):
         with self.redis_connection.pipeline() as pipe2:
-            # pipe2.delete("queue_messages")
-            # for i in range(queue_messages):
             pipe2.rpush(stream_name, queue_messages)
+            cap = self._LIST_CAPS.get(stream_name)
+            if cap:
+                pipe2.ltrim(stream_name, -cap, -1)
             pipe2.execute()
         # self.redis_connection.set('dms', queue_messages)
 
