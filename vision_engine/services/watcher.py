@@ -37,6 +37,32 @@ from services.detection import create_dynamic_images
 
 logger = logging.getLogger(__name__)
 
+
+# 4.0.423 — ejection queue helpers. The queue is consumed head-first ("fire when the
+# encoder reaches queue[0].target"), so it must stay ordered by TARGET. Inference
+# workers finish frames out of order (several workers, a LIFO hot queue under backlog),
+# so a plain append left a smaller target waiting behind a larger one → that item was
+# ejected late (i.e. the wrong item) or logged "Discarded stale entry".
+_EJ_RESET_DROP = 10000   # encoder counts — same "it was reset" rule as the length tracker
+
+
+def _insert_by_target(queue, entry):
+    """Insert `entry` into `queue` (a list ordered by "target"), after equal targets."""
+    t = entry["target"]
+    i = len(queue)
+    while i > 0 and queue[i - 1]["target"] > t:
+        i -= 1
+    queue.insert(i, entry)
+
+
+def _drop_before_reset(queue, encoder):
+    """Remove (and return) entries captured before an encoder reset: the encoder is now
+    far below where they were captured, so their target can never be reached again."""
+    stale = [e for e in queue if encoder < e.get("queued_at", encoder) - _EJ_RESET_DROP]
+    if stale:
+        queue[:] = [e for e in queue if e not in stale]
+    return stale
+
 # Module-level runtime references (set from main.py after initialization)
 _state_manager = None
 _app = None
@@ -2041,7 +2067,7 @@ class ArduinoSocket:
                         capture_encoder = ejector_data.get("encoder", self.encoder_value)
                         dm = ejector_data.get("dm", None)
                         target_encoder = capture_encoder + cfg.EJECTOR_OFFSET
-                        self.ejection_queue.append({
+                        _insert_by_target(self.ejection_queue, {
                             "target": target_encoder,
                             "dm": dm,
                             "queued_at": capture_encoder
@@ -2052,6 +2078,12 @@ class ArduinoSocket:
 
                 # Process ejection queue based on encoder position
                 # Move entries whose target the encoder has reached into "waiting" state
+                # 4.0.423 — entries captured BEFORE an encoder reset (PLC reboot / roll
+                # change) can never be reached again; at the head they blocked every
+                # later ejection until the encoder climbed back past their target.
+                for _st in _drop_before_reset(self.ejection_queue, self.encoder_value):
+                    logger.warning(f"[EJ_QUEUE] Dropped (encoder reset): target={_st['target']}, "
+                                   f"captured_at={_st['queued_at']}, current_enc={self.encoder_value}")
                 now = time.time()
                 while self.ejection_queue and self.encoder_value >= self.ejection_queue[0]["target"]:
                     entry = self.ejection_queue.pop(0)

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.423] - 2026-11-01 - Audit batch 3: saves no longer delete cameras, ejection order, shift reports, side effects from renders
+
+**Fixed**
+- **Every config save deleted the cameras that weren't running** (`config_routes.build_current_service_config`): the camera list was rebuilt only from the cameras open at that moment, so any camera tweak / Save All / auto-save permanently deleted the config of a USB camera that didn't enumerate at boot, an unplugged Basler, or a camera just added via "add detected" and waiting for a restart (nafis-pardis lost its new camera 12 this way). Runtime ids are positional, so a running camera's settings could also land on another camera's entry. Now the SAVED entries are kept and each running camera is written onto its own entry — matched by source (by-path / URL / basler serial), else its runtime id only if free or the same source, else a fresh id — so a save can never overwrite another camera's entry. (9 scenarios unit-tested: unplugged camera, camera awaiting restart, an already-duplicated config, id collisions, USB/IP position swap.)
+- **Ejection queue assumed targets arrive in order** (`watcher.run_ejector`): entries were appended in arrival order and only the head was compared with the encoder. Inference finishes frames out of order, so a smaller target waited behind a larger one and fired late — i.e. ejected the wrong item (simulated: target 540 fired at encoder 600). Now kept sorted by target. Entries captured before an encoder reset (drop > 10,000 counts, e.g. PLC reboot) are dropped with a warning instead of blocking every later ejection until the encoder climbs back.
+- **Scheduled / "Send now" shift reports had all failed since 4.0.72** (`services/scheduler.py`): it `await`-ed the report handler, which became a plain `def` in 4.0.72 → TypeError → logged as "PDF generation failed". The PDF build, the Telegram send (up to 60 s per chat) and the notification-log write now run in worker threads — this coroutine lives on the web server's event loop.
+- **Dashboard renders ran rule side effects** (`detection.evaluate_eject_from_detections`): the timeline image / meta / WebSocket composite evaluate the same columns over and over just to colour them, but also (a) closed the shipment again for a `shipment_close` rule matching a frame still on screen, once per cooldown — a stopped line kept rotating shipments — and (b) re-wrote `ejection_events` for old columns after the 60 s dedupe, stamped with the CURRENT shipment. New `side_effects` flag: only the two live inference paths set it; the eject decision itself is unchanged.
+- **"Load configuration" switched ejection off** (`POST /api/cameras/config/load`): applied the config without the full data file, so `timeline_config` fell to defaults with `procedures=[]` until the self-heal re-read it. Now passes the full data file (the upload path already did).
+- **`/api/why` never got its colour / bbox-area context** (`routers/ai.py`): `await`-ed two plain `def` handlers (TypeError swallowed at debug) after running their 7-day scans on the event loop. Now run in a worker thread.
+- **Telegram bot token in error messages** (`services/messaging.py`): a connection error's text contains the URL `…/bot<TOKEN>/sendMessage` (the usual case where api.telegram.org is blocked); it was shown by the Test button and stored in the notification log. Scrubbed to `bot***`. Note: rows logged before this version may still contain it.
+- **Image export logged "stream aborted" after every successful export** (`export_images`): its final log line referenced the removed `annotated` parameter (NameError after the ZIP was complete).
+- **raw-image path guard accepted sibling directories** (`timeline`): `startswith("/code/raw_images")` also matched `/code/raw_images_old/…`; now a real containment check.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.422] - 2026-11-01 - Audit batch 2: busy loops, leaked loops, DB pool slot leak, cache growth, chart axis
 
 Measured on vteam12 before this version (no cameras, idle): **61,865 Redis ops/s** — MVE 80 % CPU + Redis 30 % CPU doing nothing — and Redis holding 82,776 `dms` + 82,880 `speaker` messages nobody reads (730 MB).

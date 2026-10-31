@@ -49,6 +49,49 @@ def _get_ai_models_from_redis():
     return {"models": {}, "active": None}
 
 
+def _merge_running_cameras(saved: dict, running: list) -> dict:
+    """4.0.423 — the cameras to persist = the SAVED entries, with each running camera's
+    current settings written onto ITS OWN entry.
+
+    Before, the cameras were rebuilt only from the cameras running at that moment, so
+    every save (any camera tweak, Save All, any auto-save) permanently deleted the config
+    of each camera that wasn't open right then — a USB camera that didn't enumerate at
+    boot, an unplugged Basler, a camera just added via "add detected" and waiting for a
+    restart (nafis-pardis lost its new camera 12 this way). And because runtime ids are
+    positional, a running camera's settings could land on another camera's entry.
+
+    Which entry is a running camera's: (1) the saved entry with the SAME source
+    (by-path / URL / basler serial — the physical camera); else (2) its runtime id, if
+    that key is free or already holds this same source; else (3) a fresh id — so a save
+    can never overwrite another camera's saved entry. Saved entries of cameras that are
+    not running are kept untouched (they show as "down", like a dead IP camera)."""
+    merged = {str(k): v for k, v in (saved or {}).items()}
+    by_source = {}
+    for k, v in merged.items():
+        src = str((v or {}).get("source") or "")
+        if src and src not in by_source:
+            by_source[src] = k
+    claimed, pending = set(), []
+    for cam_id, cfg in running:
+        if not cfg:
+            continue
+        key = by_source.get(str(cfg.get("source") or ""))
+        if key is not None and key not in claimed:
+            merged[key] = cfg
+            claimed.add(key)
+        else:
+            pending.append((cam_id, cfg))
+    for cam_id, cfg in pending:
+        key = str(cam_id)
+        held = str((merged.get(key) or {}).get("source") or "")
+        if key in claimed or (key in merged and held and held != str(cfg.get("source") or "")):
+            nums = [int(k) for k in merged if k.isdigit()]
+            key = str((max(nums) + 1) if nums else 1)
+        merged[key] = cfg
+        claimed.add(key)
+    return merged
+
+
 def build_current_service_config(app_state):
     """Build current service configuration from runtime state.
 
@@ -146,10 +189,10 @@ def build_current_service_config(app_state):
 
     # Add camera configs dynamically
     camera_metadata = getattr(watcher, 'camera_metadata', {})
-    for cam_id, cam in watcher.cameras.items():
-        cam_config = get_camera_config_for_save(cam, cam_id, camera_metadata)
-        if cam_config:
-            svc_config["cameras"][str(cam_id)] = cam_config
+    svc_config["cameras"] = _merge_running_cameras(
+        (load_service_config() or {}).get("cameras") or {},
+        [(cam_id, get_camera_config_for_save(cam, cam_id, camera_metadata))
+         for cam_id, cam in list(watcher.cameras.items())])
 
     # Add states configuration
     if sm:

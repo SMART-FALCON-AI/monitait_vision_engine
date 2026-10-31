@@ -619,8 +619,12 @@ def load_all_config(request: Request):
         if not config:
             return JSONResponse(content={"error": "No saved configuration found"}, status_code=404)
 
-        # Use the helper function to apply all settings
-        settings_applied, cameras_loaded = request.app.state.apply_config_settings(config, watcher)
+        # Use the helper function to apply all settings.
+        # 4.0.423 — pass the full data file: without `full_data`, apply_config_settings takes
+        # its "no timeline_config" branch and resets timeline_config to DEFAULTS with
+        # procedures=[] — i.e. this "load" switched ejection OFF until the self-heal re-read.
+        settings_applied, cameras_loaded = request.app.state.apply_config_settings(
+            config, watcher, full_data=load_data_file())
 
         # Apply states configuration
         states_loaded = 0

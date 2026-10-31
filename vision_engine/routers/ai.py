@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 from config import (
@@ -1296,7 +1297,10 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                 # FastAPI handlers directly to avoid the HTTP round trip.
                 from routers.timeline import get_color_drift, get_area_stats
                 try:
-                    _cd_resp = await get_color_drift(window="7d")
+                    # 4.0.423 — these are plain `def` handlers (since 4.0.72): `await`-ing their
+                    # return value raised TypeError (swallowed at debug), so this context was
+                    # always missing — and the 7-day scan ran on the event loop first.
+                    _cd_resp = await asyncio.to_thread(get_color_drift, window="7d")
                     cd = _json.loads(_cd_resp.body.decode()).get("classes", {}).get(metric)
                     if cd:
                         line = f"🎨 CIELAB color for '{metric}' (last 7d): n={cd.get('n')}"
@@ -1317,7 +1321,7 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                 except Exception as _e:
                     logger.debug(f"why mode=class color fetch failed: {_e}")
                 try:
-                    _ar_resp = await get_area_stats(window="7d")
+                    _ar_resp = await asyncio.to_thread(get_area_stats, window="7d")
                     ar = _json.loads(_ar_resp.body.decode()).get("classes", {}).get(metric)
                     if ar:
                         line = (

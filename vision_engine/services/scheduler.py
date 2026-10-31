@@ -110,7 +110,12 @@ async def _fetch_shipment_report_pdf(app, shipment: str) -> Optional[bytes]:
             def __init__(self, _app):
                 self.app = _app
                 self.headers = {}
-        resp = await shipment_quality_score_report(_FakeReq(app), shipment=shipment, window="24h")
+        # 4.0.423 — the handler has been a plain `def` since 4.0.72; `await`-ing its Response
+        # raised TypeError (caught below as "PDF generation failed"), so no scheduled or
+        # "Send now" shift report had been sent since. Run it in a worker thread (it builds
+        # the whole PDF synchronously — keep that off the event loop).
+        resp = await asyncio.to_thread(shipment_quality_score_report, _FakeReq(app),
+                                       shipment=shipment, window="24h")
         # The handler returns a StreamingResponse for the PDF — iterate the body.
         if hasattr(resp, "body_iterator"):
             chunks = []
@@ -169,7 +174,8 @@ async def run_one_schedule(schedule: Dict[str, Any], cfg: Dict[str, Any],
     if not pdf_bytes:
         info = {"error": "PDF generation failed"}
         for ch in channels:
-            log_notification(
+            await asyncio.to_thread(
+                log_notification,
                 channel=ch, chat_id=(chat_ids[0] if chat_ids else None),
                 kind="shift_report", caption=name, status="error",
                 error="PDF generation failed",
@@ -198,7 +204,8 @@ async def run_one_schedule(schedule: Dict[str, Any], cfg: Dict[str, Any],
     target_chat_ids = chat_ids or [ch_cfg.get("default_chat_id") or ""]
     for chat_id in target_chat_ids:
         if not (token and chat_id):
-            log_notification(
+            await asyncio.to_thread(
+                log_notification,
                 channel=ch, chat_id=chat_id or None,
                 kind="shift_report", caption=name, status="error",
                 error="missing token or chat_id",
@@ -207,7 +214,10 @@ async def run_one_schedule(schedule: Dict[str, Any], cfg: Dict[str, Any],
             continue
         import time as _t
         t0 = _t.time()
-        ok, info = send_document(
+        # 4.0.423 — the send (up to 60 s per chat) and the DB log run in a worker thread:
+        # this coroutine runs on the web server's event loop.
+        ok, info = await asyncio.to_thread(
+            send_document,
             token=token, chat_id=chat_id, base_url=base_url,
             file_bytes=pdf_bytes,
             filename=f"shift_{name.replace(' ','_')}_{datetime.now().strftime('%Y-%m-%d_%H%M')}.pdf",
@@ -215,7 +225,8 @@ async def run_one_schedule(schedule: Dict[str, Any], cfg: Dict[str, Any],
         )
         overall_ok = overall_ok or ok
         sends.append({"channel": ch, "chat_id": chat_id, "ok": ok, "info": info})
-        log_notification(
+        await asyncio.to_thread(
+            log_notification,
             channel=ch, chat_id=chat_id, kind="shift_report",
             caption=caption, status=("ok" if ok else "error"),
             error=(None if ok else str(info.get("error"))),

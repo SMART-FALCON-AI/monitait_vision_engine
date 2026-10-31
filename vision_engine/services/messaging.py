@@ -43,6 +43,14 @@ def _base(token: str, base_url: Optional[str] = None) -> str:
     return template.format(token=token)
 
 
+def _scrub(err: Exception, token: str) -> str:
+    """4.0.423 — a requests connection error's text contains the URL, i.e.
+    `…/bot<TOKEN>/sendMessage`; that text went to the browser (Test button) and into
+    the notification log. Never let the bot token out."""
+    msg = str(err)
+    return msg.replace(token, "***") if token else msg
+
+
 def send_document(
     *,
     token: str,
@@ -73,7 +81,7 @@ def send_document(
     try:
         r = requests.post(url, data=data, files=files, timeout=timeout)
     except requests.RequestException as e:
-        return False, {"error": f"network error: {e}"}
+        return False, {"error": f"network error: {_scrub(e, token)}"}
     try:
         body = r.json()
     except Exception:
@@ -114,7 +122,7 @@ def send_text(
     try:
         r = requests.post(url, data={"chat_id": str(chat_id), "text": text}, timeout=timeout)
     except requests.RequestException as e:
-        return False, {"error": f"network error: {e}"}
+        return False, {"error": f"network error: {_scrub(e, token)}"}
     try:
         body = r.json()
     except Exception:

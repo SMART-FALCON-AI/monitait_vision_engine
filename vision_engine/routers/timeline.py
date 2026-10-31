@@ -72,6 +72,16 @@ def _endpoint_cache_put(key: str, payload) -> None:
 # Absolute path to raw_images for path traversal protection
 _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
 
+
+def _under_raw_root(p) -> bool:
+    """4.0.423 — real containment check. `str(p).startswith(str(root))` also accepted
+    SIBLING directories such as /code/raw_images_old/… or /code/raw_images2/…"""
+    try:
+        p = pathlib.Path(p).resolve()
+        return p == _RAW_IMAGES_ROOT or _RAW_IMAGES_ROOT in p.parents
+    except Exception:
+        return False
+
 # Header strip height in pixels
 _HEADER_HEIGHT = 28
 
@@ -6779,7 +6789,7 @@ def _img_resolve(img):
     rel = (s.split("raw_images/")[-1] if "raw_images/" in s else s).lstrip("/\\")
     try:
         rp = (pathlib.Path("raw_images") / rel).resolve()
-        if not str(rp).startswith(str(_RAW_IMAGES_ROOT)) or not rp.exists():
+        if not _under_raw_root(rp) or not rp.exists():
             return None, None
     except Exception:
         return None, None
@@ -7130,7 +7140,7 @@ def export_images(request: Request, window: str = "24h", shipment: str = "",
             zf.close()
             yield sink.drain()
             logger.info(f"export_images: ship={shipment or '(win '+window+')'} "
-                        f"annotated={annotated} offset={offset} limit={limit} "
+                        f"offset={offset} limit={limit} "
                         f"wrote={written} missing={missing}")
         except Exception as e:
             logger.warning(f"export_images stream aborted: {e}")
@@ -7157,7 +7167,7 @@ def serve_raw_image(path: str):
     safe_path = pathlib.Path("raw_images") / path
     try:
         resolved = safe_path.resolve()
-        if not str(resolved).startswith(str(_RAW_IMAGES_ROOT)):
+        if not _under_raw_root(resolved):
             raise HTTPException(status_code=403, detail="Access denied")
     except HTTPException:
         raise
@@ -7199,7 +7209,7 @@ def render_detected(path: str, show: str = "", download: int = 0):
     safe_path = pathlib.Path("raw_images") / path
     try:
         resolved = safe_path.resolve()
-        if not str(resolved).startswith(str(_RAW_IMAGES_ROOT)):
+        if not _under_raw_root(resolved):
             raise HTTPException(status_code=403, detail="Access denied")
     except HTTPException:
         raise

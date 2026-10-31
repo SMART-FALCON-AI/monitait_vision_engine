@@ -1259,7 +1259,8 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
                 if isinstance(det_list, list):
                     all_detections.extend(d for d in det_list if isinstance(d, dict))
 
-            should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _enabled_procs)
+            should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _enabled_procs,
+                                                                         side_effects=True)
             det_names = [d.get('name', '?') for d in all_detections]
             logger.info(f"[EJECT_EVAL] {len(_enabled_procs)} procs, {len(all_detections)} dets ({','.join(det_names)}), result={'EJECT' if should_eject else 'OK'} path={'hot' if allow_eject else 'cold'}")
 

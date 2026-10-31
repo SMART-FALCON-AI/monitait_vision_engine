@@ -396,8 +396,16 @@ def _has_color_delta_procedure():
 
 
 def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out=None,
-                                   conf_mode='critical'):
+                                   conf_mode='critical', side_effects=False):
     """Evaluate eject rules from stored detections and procedures config.
+
+    4.0.423 SIDE-EFFECTS — only the live inference path passes side_effects=True. The
+    dashboard renderers (timeline image / meta / WebSocket composite) evaluate the same
+    columns again and again just to colour them; they used to run the side effects too:
+    a `shipment_close` rule matching a frame still on screen closed the shipment again
+    on every render once the cooldown passed (a stopped line kept rotating shipments),
+    and an `ejection_events` row was re-written for an old column after the 60 s dedupe
+    — stamped with the CURRENT shipment. The decision returned is unchanged.
 
     4.0.395 MARGINAL/CRITICAL — `conf_mode` selects which per-rule confidence
     threshold gates the detections:
@@ -685,7 +693,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             if action == 'shipment_close':
                 # shipment_close is a CRITICAL-only shipment operation, not an
                 # eject-severity warning — the marginal (yellow) pass ignores it.
-                if conf_mode != 'critical':
+                if conf_mode != 'critical' or not side_effects:
                     continue
                 try:
                     if _watcher is not None:
@@ -732,7 +740,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             # Dedupe per (encoder, procedure_name, shipment) using a Redis
             # set with a short TTL — avoids inserting the same eject twice
             # when the dashboard re-evaluates the same column on refresh.
-            if conf_mode == 'critical' and proc.get('store'):
+            if conf_mode == 'critical' and side_effects and proc.get('store'):
                 try:
                     from services.db import write_ejection_event_to_db
                     rc = _get_timeline_redis()
@@ -1788,7 +1796,7 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                         _procs = [p for p in (_tl_cfg.get("procedures") or [])
                                   if p.get("enabled", True)]
                         if _procs:
-                            evaluate_eject_from_detections(yolo_res, _procs)
+                            evaluate_eject_from_detections(yolo_res, _procs, side_effects=True)
                 except Exception as _e:
                     logger.debug(f"Inference-path eject eval skipped: {_e}")
             except Exception as e:
