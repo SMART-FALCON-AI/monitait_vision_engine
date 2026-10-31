@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.417] - 2026-10-31 - Hardware tab: Watcher Jets / Stations — auto-listed, station name, next station, OK / NG factors
+
+**Why** — the operator wants to set up the line's Watcher Jets the way cameras are set up: a watcher that sends data to MVE should simply show up (like a newly plugged camera in the Cameras tab), and then be given a station name, the station it feeds, and how many units one OK pulse and one NG pulse count for — separately (e.g. OK counts cases of 12, NG counts single bottles). Until now a watcher could only be named from the Charts tab, with no station order and no factors.
+
+**New: Hardware tab → "🛰️ Watcher Jets / Stations"** (top of the tab)
+- Every watcher that has reported to `/api/factory/update-watcher/` is listed with online/offline, its ID and its last report. One that hasn't been set up yet is marked **NEW — not assigned** and listed first.
+- Per watcher: **Station name**, **Next station** (dropdown of the other watchers; "none" = end of line), **OK ×** and **NG ×** multiplication factors (default 1), **Save**, and **✕ Remove** (history kept; a removed watcher comes back as NEW if it reports again).
+- A **Station flow** line shows each chain, e.g. `IS machine → Lehr → QC → EOL`.
+- Next-station checks on save: must be another known watcher, not itself, and must not make the line a loop (A → B → A). Factors must be numbers above 0; empty = 1.
+- Loads when the Hardware tab opens and on ⟳ Refresh — no polling.
+
+**Factors applied** — `/api/watchers/oee` now counts good = OK pulses × OK factor and defect = NG pulses × NG factor (raw pulse totals still returned as `good_raw` / `defect_raw`), so Quality and the actual rate are in units. `/api/watchers/metrics` points carry `ok` / `ng` (× factor) next to the raw `quantity` / `defect_quantity`; the Charts-tab Machines graph plots `ok`.
+
+**API** — `POST /api/watchers/register` also accepts `next_watcher`, `ok_factor`, `ng_factor`, `assigned`; new `POST /api/watchers/delete {register_id}`; `GET /api/watchers` returns `station`, `next_watcher`, `ok_factor`, `ng_factor`, `assigned`. DB: `watcher_registry` gains `next_watcher`, `ok_factor`, `ng_factor`, `assigned` (added in place, idempotent). A watcher already named from the Charts tab counts as set up.
+
+Cache-busters `?v=4.0.417`.
+
 ## [4.0.416] - 2026-10-31 - Per-camera "Auto": the camera sets its own exposure, white balance and gain
 
 **Why** — nafis-pardis cam 10 is an RGB "Global Shutter Camera" (32e4:0144). MVE forces every USB camera into manual mode with fixed values; this camera outputs pure BLACK in manual exposure at ANY value (tested 250 / 500 / 1000 → brightness 2/255). With MVE's gain 1000 (capped to 255) and brightness 100 (capped to 64) on top, that black became the flat grey, colourless frame the operator saw — while Cheese, which leaves the camera alone, showed a good colour picture. Switching the camera to its own auto exposure gave brightness 130, colour saturation 95, nothing clipped.

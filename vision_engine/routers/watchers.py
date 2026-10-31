@@ -99,7 +99,9 @@ async def watcher_name(request: Request):
 @router.post("/api/watchers/register")
 async def watcher_register(request: Request):
     """Register / update a machine: name, line (group), sensor, type, ideal_rate
-    (units/hr, used for the OEE Performance factor). Only provided fields change."""
+    (units/hr, used for the OEE Performance factor); 4.0.417 Hardware-tab station
+    setup: next_watcher (the station this one feeds), ok_factor / ng_factor (units
+    per counted OK / NG pulse), assigned. Only provided fields change."""
     try:
         b = await request.json()
         ir = b.get("ideal_rate")
@@ -108,7 +110,22 @@ async def watcher_register(request: Request):
             name=b.get("name"), line=b.get("line"),
             sensor=b.get("sensor"), wtype=b.get("type") or b.get("wtype"),
             ideal_rate=(float(ir) if ir not in (None, "") else None),
+            next_watcher=b.get("next_watcher"),
+            ok_factor=b.get("ok_factor"), ng_factor=b.get("ng_factor"),
+            assigned=b.get("assigned"),
         )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/api/watchers/delete")
+async def watcher_delete(request: Request):
+    """4.0.417 — remove a watcher from the station list (history kept)."""
+    try:
+        b = await request.json()
+        return wm.delete_watcher(str(b.get("register_id", "")))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:

@@ -15,11 +15,11 @@
         <meta name="supported-color-schemes" content="dark">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
         <title>Monitait Vision Engine</title>
-        <link rel="stylesheet" href="/static/css/main.css?v=4.0.416">
+        <link rel="stylesheet" href="/static/css/main.css?v=4.0.417">
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.416"></script>
+        <script src="/static/js/i18n.js?v=4.0.417"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 8px;">
@@ -35,7 +35,7 @@
                          to read on the dark sticky header. Logo kept at 40px and the text stacked to 3
                          short lines so the brand column stays narrow — preserves the 4.0.386 fix that
                          stopped the 10-tab strip from scrolling / Support falling off the right edge. -->
-                    <img src="/static/logo.png?v=4.0.416" alt="MVE — Monitait Vision Engine" title="Monitait Vision Engine" style="height: 40px; width: auto; background: #fff; padding: 4px 6px; border-radius: 6px; box-sizing: border-box; flex: 0 0 auto;">
+                    <img src="/static/logo.png?v=4.0.417" alt="MVE — Monitait Vision Engine" title="Monitait Vision Engine" style="height: 40px; width: auto; background: #fff; padding: 4px 6px; border-radius: 6px; box-sizing: border-box; flex: 0 0 auto;">
                     <div style="min-width: 0;">
                         <div style="font-size: 14px; font-weight: 700; line-height: 1.15; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                             Monitait<br>Vision<br>Engine
@@ -623,6 +623,143 @@
             <div id="tab-hardware" class="tab-content">
                 <h2 style="margin: 0 0 20px 0; color: var(--text-primary); font-weight: 600;" data-i18n="hardware_config">Hardware Configuration</h2>
 
+                <!-- 4.0.417 — Watcher Jets / Stations. Every watcher that has sent data to this
+                     MVE shows up here by itself (like a newly plugged camera in the Cameras
+                     tab); the operator gives it a station name, the station it feeds (next
+                     station) and separate OK / NG multiplication factors (units per pulse). -->
+                <div class="control-section" id="ws-section">
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                        <h3 style="margin:0;">🛰️ Watcher Jets / Stations</h3>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span id="ws-count" style="font-size:12px; color:var(--text-secondary);"></span>
+                            <button id="ws-refresh" class="control-button" style="width:auto; margin:0; padding:5px 14px;">⟳ Refresh</button>
+                        </div>
+                    </div>
+                    <div style="font-size:12px; color:var(--text-secondary); margin:6px 0 10px;">
+                        A watcher appears here as soon as it sends data to
+                        <code id="ws-url" style="color:#86efac;">http://&lt;this-host&gt;/api/factory/update-watcher/</code>.
+                        Give it a station name, pick the station it feeds (next station), and set how many units one OK pulse and one NG pulse count for.
+                    </div>
+                    <div id="ws-flow" style="font-size:12px; margin-bottom:8px;"></div>
+                    <div style="overflow-x:auto;">
+                        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+                            <thead>
+                                <tr style="text-align:left; color:var(--text-secondary); border-bottom:1px solid rgba(51,65,85,0.6);">
+                                    <th style="padding:6px;">●</th><th style="padding:6px;">Watcher ID</th><th style="padding:6px;">Last report</th>
+                                    <th style="padding:6px;">Station name</th><th style="padding:6px;">Next station</th>
+                                    <th style="padding:6px;" title="units per OK pulse">OK ×</th><th style="padding:6px;" title="units per NG pulse">NG ×</th><th style="padding:6px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="ws-body"></tbody>
+                        </table>
+                    </div>
+                    <div id="ws-status" style="font-size:12px; margin-top:6px; color:var(--text-secondary);"></div>
+                </div>
+                <script>
+                (function(){
+                  let _ws = [], _rows = [];
+                  const g = id => document.getElementById(id);
+                  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+                  const ago = s => s == null ? 'never' : s < 60 ? s + ' s ago' : s < 3600 ? Math.round(s / 60) + ' min ago'
+                                 : s < 86400 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago';
+                  const label = w => (w.station || w.register_id);
+                  const num = v => (v == null ? '—' : (Math.round(v * 100) / 100));
+                  const inputCss = 'margin:0; padding:4px 6px;';
+
+                  async function loadStations(){
+                    try { _ws = ((await (await fetch('/api/watchers')).json()).watchers) || []; }
+                    catch(e){ g('ws-status').textContent = '✗ Could not load watchers: ' + e.message; return; }
+                    render();
+                  }
+
+                  function render(){
+                    const tb = g('ws-body'); if(!tb) return;
+                    const fresh = _ws.filter(w => !w.assigned).length;
+                    g('ws-count').textContent = _ws.length + ' watcher(s)' + (fresh ? ' · ' + fresh + ' new' : '');
+                    if(!_ws.length){
+                      tb.innerHTML = '<tr><td colspan="8" style="padding:12px; color:var(--text-secondary);">No watcher has sent data yet.</td></tr>';
+                      g('ws-flow').innerHTML = ''; return;
+                    }
+                    // new (not yet set up) watchers first, then by station name
+                    _rows = _ws.slice().sort((a, b) => (a.assigned - b.assigned) || label(a).localeCompare(label(b)));
+                    tb.innerHTML = _rows.map((w, i) => {
+                      const opts = '<option value="">— none (end of line)</option>' + _ws.filter(x => x.register_id !== w.register_id)
+                        .map(x => `<option value="${esc(x.register_id)}"${x.register_id === w.next_watcher ? ' selected' : ''}>${esc(label(x))}</option>`).join('');
+                      const badge = w.assigned ? '' :
+                        '<div style="display:inline-block; margin-top:3px; padding:1px 6px; border-radius:4px; font-size:10px; font-weight:700; background:rgba(234,179,8,0.18); color:#facc15; border:1px solid rgba(234,179,8,0.5);">NEW — not assigned</div>';
+                      return `<tr style="border-bottom:1px solid rgba(51,65,85,0.35);${w.assigned ? '' : ' background:rgba(234,179,8,0.06);'}">
+                        <td style="padding:5px;" title="${w.online ? 'online' : 'offline'} — last data ${esc(ago(w.age_sec))}">${w.online ? '🟢' : '⚪'}</td>
+                        <td style="padding:5px;"><code>${esc(w.register_id)}</code><br>${badge}</td>
+                        <td style="padding:5px; white-space:nowrap; color:var(--text-secondary);">OK ${num(w.last_quantity)} / NG ${num(w.last_defect)}<br><span style="font-size:11px;">${esc(ago(w.age_sec))}</span></td>
+                        <td style="padding:5px;"><input id="ws-name-${i}" class="control-input" style="${inputCss} min-width:140px;" placeholder="e.g. IS machine 1" value="${esc(w.station || '')}"></td>
+                        <td style="padding:5px;"><select id="ws-next-${i}" class="control-input" style="${inputCss} min-width:150px;">${opts}</select></td>
+                        <td style="padding:5px;"><input id="ws-okf-${i}" type="number" min="0" step="any" class="control-input" style="${inputCss} width:80px;" value="${esc(w.ok_factor)}"></td>
+                        <td style="padding:5px;"><input id="ws-ngf-${i}" type="number" min="0" step="any" class="control-input" style="${inputCss} width:80px;" value="${esc(w.ng_factor)}"></td>
+                        <td style="padding:5px; white-space:nowrap;">
+                          <button class="control-button" style="width:auto; margin:0; padding:4px 12px;" data-ws-save="${i}">Save</button>
+                          <button class="control-button" style="width:auto; margin:0 0 0 4px; padding:4px 10px; background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.4);" data-ws-del="${i}" title="Remove from the list (history is kept; it comes back as NEW if it sends data again)">✕</button>
+                          <div id="ws-msg-${i}" style="font-size:11px; margin-top:3px;"></div>
+                        </td></tr>`;
+                    }).join('');
+                    tb.querySelectorAll('[data-ws-save]').forEach(b => b.addEventListener('click', () => save(+b.getAttribute('data-ws-save'))));
+                    tb.querySelectorAll('[data-ws-del]').forEach(b => b.addEventListener('click', () => remove(+b.getAttribute('data-ws-del'))));
+                    renderFlow();
+                  }
+
+                  // station flow: follow next-station links from each line's first station
+                  function renderFlow(){
+                    const box = g('ws-flow'); if(!box) return;
+                    const byId = {}; _ws.forEach(w => byId[w.register_id] = w);
+                    const fed = new Set(_ws.map(w => w.next_watcher).filter(Boolean));
+                    const heads = _ws.filter(w => w.next_watcher && !fed.has(w.register_id));
+                    if(!heads.length){
+                      box.innerHTML = '<span style="color:var(--text-secondary);">Station flow: not set yet — pick a next station for each station.</span>';
+                      return;
+                    }
+                    box.innerHTML = heads.map(h => {
+                      const names = [], seen = new Set();
+                      for(let c = h; c && !seen.has(c.register_id); c = byId[c.next_watcher]){ seen.add(c.register_id); names.push(esc(label(c))); }
+                      return '<div><span style="color:var(--text-secondary);">Station flow:</span> <strong style="color:var(--text-primary);">' + names.join(' → ') + '</strong></div>';
+                    }).join('');
+                  }
+
+                  async function save(i){
+                    const w = _rows[i], msg = g('ws-msg-' + i); if(!w) return;
+                    const body = { register_id: w.register_id, name: g('ws-name-' + i).value.trim(),
+                      next_watcher: g('ws-next-' + i).value, ok_factor: g('ws-okf-' + i).value.trim(),
+                      ng_factor: g('ws-ngf-' + i).value.trim(), assigned: true };
+                    msg.style.color = 'var(--text-secondary)'; msg.textContent = 'Saving…';
+                    try {
+                      const r = await fetch('/api/watchers/register', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+                      const d = await r.json().catch(() => ({}));
+                      if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                      await loadStations();
+                      g('ws-status').style.color = '#34d399'; g('ws-status').textContent = '✓ Saved ' + (body.name || w.register_id) + '.';
+                    } catch(e){ msg.style.color = '#f87171'; msg.textContent = '✗ ' + e.message; }
+                  }
+
+                  async function remove(i){
+                    const w = _rows[i]; if(!w) return;
+                    if(!confirm('Remove ' + label(w) + ' from the list? Its history is kept, and it comes back as NEW if it sends data again.')) return;
+                    try {
+                      const r = await fetch('/api/watchers/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({register_id: w.register_id})});
+                      if(!r.ok) throw new Error('HTTP ' + r.status);
+                      await loadStations();
+                    } catch(e){ g('ws-status').style.color = '#f87171'; g('ws-status').textContent = '✗ ' + e.message; }
+                  }
+
+                  function _wire(){
+                    const rf = g('ws-refresh'); if(rf) rf.addEventListener('click', loadStations);
+                    document.querySelectorAll('.tab-button').forEach(b => {
+                      if((b.getAttribute('onclick') || '').indexOf("'hardware'") >= 0) b.addEventListener('click', () => setTimeout(loadStations, 60));
+                    });
+                    setTimeout(loadStations, 1200);
+                  }
+                  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _wire); else _wire();
+                  window.loadWatcherStations = loadStations;
+                })();
+                </script>
+
                 <!-- Status Indicators -->
                 <div class="control-section">
                     <h3 data-i18n="status_indicators">Status Indicators</h3>
@@ -1048,7 +1185,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.416"
+                <iframe src="/static/knowledge.html?v=4.0.417"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -1508,9 +1645,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.416"></script>
+            <script src="/static/js/iframes.js?v=4.0.417"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.416"></script>
+            <script src="/static/js/charts.js?v=4.0.417"></script>
             <script>
             /* 4.0.360 — Machines (Watcher Jet) chart. Self-contained; uses global Chart
                (chart.umd, loaded just above). On-demand only (load + tab-open + manual
@@ -1550,7 +1687,8 @@
                     availability:(oee&&oee.availability!=null)?oee.availability*100:null,
                     performance:(oee&&oee.performance!=null)?oee.performance*100:null,
                     quality:(oee&&oee.quality!=null)?oee.quality*100:null,
-                    points:((mt&&mt.points)||[]).map(p=>({x:Date.parse(p.ts), y:p.quantity})).filter(p=>p.x!=null) });
+                    // 4.0.417 — p.ok = OK pulses × the station's OK factor (Hardware tab)
+                    points:((mt&&mt.points)||[]).map(p=>({x:Date.parse(p.ts), y:(p.ok!=null?p.ok:p.quantity)})).filter(p=>p.x!=null) });
                 }
                 _sources = srcs;
                 if(g('watcher-empty')) g('watcher-empty').style.display = list.length ? 'none' : 'block';
@@ -2730,7 +2868,7 @@ MVE_SUPPORT_SITE=&lt;site&gt;</pre>
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.416">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.417">
         <div id="annotate-modal" dir="ltr" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center; direction:ltr;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2771,11 +2909,11 @@ MVE_SUPPORT_SITE=&lt;site&gt;</pre>
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.416"></script>
-        <script src="/static/js/app-core.js?v=4.0.416"></script>
-        <script src="/static/js/support.js?v=4.0.416"></script>
+        <script src="/static/js/audio.js?v=4.0.417"></script>
+        <script src="/static/js/app-core.js?v=4.0.417"></script>
+        <script src="/static/js/support.js?v=4.0.417"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.416"></script>
-        <script src="/static/js/annotate.js?v=4.0.416"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.417"></script>
+        <script src="/static/js/annotate.js?v=4.0.417"></script>
     </body>
 </html>

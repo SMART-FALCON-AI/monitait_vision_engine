@@ -89,6 +89,13 @@ def _ensure_schema() -> None:
         ("sensor",     "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS sensor TEXT"),
         ("wtype",      "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS wtype TEXT"),
         ("ideal_rate", "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS ideal_rate DOUBLE PRECISION"),
+        # 4.0.417 — Hardware-tab station setup: the station this one feeds (line order),
+        # separate OK / NG multiplication factors (units per counted pulse), and whether
+        # the operator has set the watcher up yet (a new device shows as "NEW").
+        ("next_watcher", "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS next_watcher TEXT"),
+        ("ok_factor",    "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS ok_factor DOUBLE PRECISION"),
+        ("ng_factor",    "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS ng_factor DOUBLE PRECISION"),
+        ("assigned",     "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS assigned BOOLEAN DEFAULT FALSE"),
     ):
         try:
             _exec(ddl)
@@ -181,6 +188,18 @@ def ingest(payload: Dict[str, Any]) -> Dict[str, Any]:
 ONLINE_THRESHOLD_SEC = 600   # a machine is "online" if it reported within 10 min
 
 
+def _factor(v: Any) -> float:
+    """A stored OK/NG multiplication factor; unset (or invalid) means 1."""
+    f = _num(v)
+    return f if f is not None and f > 0 else 1.0
+
+
+def _factors(reg: str) -> tuple:
+    r = _exec("SELECT ok_factor, ng_factor FROM watcher_registry WHERE register_id=%s",
+              (reg,), fetch="one")
+    return (_factor(r[0]), _factor(r[1])) if r else (1.0, 1.0)
+
+
 def list_watchers() -> List[Dict[str, Any]]:
     _ensure_schema()
     rows = _exec("""
@@ -188,7 +207,8 @@ def list_watchers() -> List[Dict[str, Any]]:
                (SELECT quantity        FROM watcher_metrics m WHERE m.register_id=r.register_id ORDER BY ts DESC LIMIT 1),
                (SELECT defect_quantity FROM watcher_metrics m WHERE m.register_id=r.register_id ORDER BY ts DESC LIMIT 1),
                (SELECT COUNT(*)        FROM watcher_metrics m WHERE m.register_id=r.register_id),
-               EXTRACT(EPOCH FROM (NOW() - r.last_seen))
+               EXTRACT(EPOCH FROM (NOW() - r.last_seen)),
+               r.next_watcher, r.ok_factor, r.ng_factor, r.assigned
         FROM watcher_registry r
         ORDER BY r.line NULLS LAST, r.last_seen DESC NULLS LAST, r.register_id
     """, fetch="all") or []
@@ -202,22 +222,64 @@ def list_watchers() -> List[Dict[str, Any]]:
             "last_quantity": x[7], "last_defect": x[8], "samples": int(x[9] or 0),
             "online": (age is not None and float(age) <= ONLINE_THRESHOLD_SEC),
             "age_sec": (int(float(age)) if age is not None else None),
+            # 4.0.417 — station setup (Hardware tab). A watcher named before 4.0.417
+            # (Charts-tab registration) counts as already set up.
+            "station": x[1], "next_watcher": x[11],
+            "ok_factor": _factor(x[12]), "ng_factor": _factor(x[13]),
+            "assigned": bool(x[14]) or bool(x[1]),
         })
     return out
+
+
+def _validate_next(reg: str, nxt: str) -> None:
+    """The next station must be another known watcher, and following the chain from
+    it must never come back to this one (A → B → A would make the line a loop)."""
+    if nxt == reg:
+        raise ValueError("a station cannot be its own next station")
+    links = dict(_exec("SELECT register_id, next_watcher FROM watcher_registry",
+                       fetch="all") or [])
+    if nxt not in links:
+        raise ValueError(f"unknown next station '{nxt}'")
+    links[reg] = nxt
+    cur, seen = nxt, set()
+    while cur and cur not in seen:
+        if cur == reg:
+            raise ValueError("this next station would make the line a loop")
+        seen.add(cur)
+        cur = links.get(cur)
 
 
 def register_watcher(register_id: str, name: Optional[str] = None,
                      line: Optional[str] = None, sensor: Optional[str] = None,
                      wtype: Optional[str] = None,
-                     ideal_rate: Optional[float] = None) -> Dict[str, Any]:
+                     ideal_rate: Optional[float] = None,
+                     next_watcher: Optional[str] = None,
+                     ok_factor: Optional[Any] = None,
+                     ng_factor: Optional[Any] = None,
+                     assigned: Optional[bool] = None) -> Dict[str, Any]:
     """Create/update a machine's registration (name, line/group, sensor, type,
-    ideal production rate for OEE). Only provided fields are changed."""
+    ideal production rate for OEE; 4.0.417: next station + OK/NG multiplication
+    factors). Only provided fields are changed; "" clears a text field / resets a
+    factor to 1."""
     _ensure_schema()
     reg = str(register_id or "").strip()
     if not reg:
         raise ValueError("register_id required")
-    _exec("INSERT INTO watcher_registry (register_id) VALUES (%s) ON CONFLICT DO NOTHING", (reg,))
     sets, params = [], []
+    if next_watcher is not None:
+        nxt = str(next_watcher).strip()
+        if nxt:
+            _validate_next(reg, nxt)
+        sets.append("next_watcher=%s")
+        params.append(nxt or None)
+    for col, val in (("ok_factor", ok_factor), ("ng_factor", ng_factor)):
+        if val is not None:
+            f = _num(val)
+            if val != "" and (f is None or f <= 0):
+                raise ValueError(f"{col.replace('_', ' ')} must be a number above 0")
+            sets.append(f"{col}=%s")
+            params.append(f)
+    _exec("INSERT INTO watcher_registry (register_id) VALUES (%s) ON CONFLICT DO NOTHING", (reg,))
     for col, val in (("name", name), ("line", line), ("sensor", sensor), ("wtype", wtype)):
         if val is not None:
             sets.append(f"{col}=%s")
@@ -225,8 +287,23 @@ def register_watcher(register_id: str, name: Optional[str] = None,
     if ideal_rate is not None:
         sets.append("ideal_rate=%s")
         params.append(_num(ideal_rate))
+    if assigned is not None:
+        sets.append("assigned=%s")
+        params.append(bool(assigned))
     if sets:
         _exec(f"UPDATE watcher_registry SET {', '.join(sets)} WHERE register_id=%s", tuple(params) + (reg,))
+    return {"ok": True, "register_id": reg}
+
+
+def delete_watcher(register_id: str) -> Dict[str, Any]:
+    """Remove a watcher from the station list (its history rows are kept). If the
+    device reports again it shows up as NEW."""
+    _ensure_schema()
+    reg = str(register_id or "").strip()
+    if not reg:
+        raise ValueError("register_id required")
+    _exec("UPDATE watcher_registry SET next_watcher=NULL WHERE next_watcher=%s", (reg,))
+    _exec("DELETE FROM watcher_registry WHERE register_id=%s", (reg,))
     return {"ok": True, "register_id": reg}
 
 
@@ -249,6 +326,7 @@ def metrics(register_id: str, since_ms: Optional[int] = None,
         f"WHERE {where} ORDER BY ts ASC LIMIT %s",
         tuple(params) + (int(limit),), fetch="all") or []
 
+    okf, ngf = _factors(register_id)
     points: List[Dict[str, Any]] = []
     keys: set = set()
     for ts, q, d, ex in rows:
@@ -259,8 +337,11 @@ def metrics(register_id: str, since_ms: Optional[int] = None,
         points.append({
             "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
             "quantity": q, "defect_quantity": d, "extra": exd,
+            # 4.0.417 — units after the station's OK / NG multiplication factors
+            "ok": (q * okf if q is not None else None),
+            "ng": (d * ngf if d is not None else None),
         })
-    return {"register_id": register_id, "points": points,
+    return {"register_id": register_id, "points": points, "ok_factor": okf, "ng_factor": ngf,
             "metric_keys": sorted(keys), "count": len(points)}
 
 
@@ -289,7 +370,11 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
     counters after a successful send (main.py minus(), main_v2.py temp_a = 0), and
     offline-buffered reports are replayed one by one — so totals are plain sums.
     Every factor is returned so the UI can show the breakdown and the operator sees
-    which inputs are still missing."""
+    which inputs are still missing.
+
+    4.0.417 — good/defect are in UNITS: OK pulses × ok_factor, NG pulses × ng_factor
+    (e.g. one OK pulse per 12-bottle case, one NG pulse per bottle). The raw pulse
+    totals are returned too."""
     _ensure_schema()
     reg = str(register_id or "").strip()
     conds = ["register_id=%s"]
@@ -324,6 +409,10 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
         if isinstance(dp, (int, float)) and not isinstance(dp, bool):
             downtime_fracs.append(dp / 100.0 if dp > 1 else float(dp))
 
+    okf, ngf = _factors(reg)
+    good_raw, defect_raw = good_total, defect_total
+    good_total *= okf
+    defect_total *= ngf
     total = good_total + defect_total
     quality = (good_total / total) if total > 0 else None
     availability = (1.0 - (sum(downtime_fracs) / len(downtime_fracs))) if downtime_fracs else 1.0
@@ -346,6 +435,8 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
     return {
         "register_id": reg, "samples": len(rows),
         "good": round(good_total, 2), "defect": round(defect_total, 2),
+        "good_raw": round(good_raw, 2), "defect_raw": round(defect_raw, 2),
+        "ok_factor": okf, "ng_factor": ngf,
         "hours": round(hours, 3),
         "quality": round(quality, 4) if quality is not None else None,
         "availability": round(availability, 4),
