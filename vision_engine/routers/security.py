@@ -8,6 +8,8 @@ import logging
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, Request
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 
 from services import security as sec
@@ -32,8 +34,8 @@ def _require(request: Request, min_role: str):
 
 
 @router.post("/api/auth/login")
-async def login(request: Request):
-    body = await request.json()
+def login(request: Request, _mve_body=Depends(_json_body_dep)):
+    body = _req_body(_mve_body)
     try:
         res = sec.login(str(body.get("username", "")), str(body.get("password", "")))
     except ValueError as e:
@@ -45,7 +47,7 @@ async def login(request: Request):
 
 
 @router.post("/api/auth/logout")
-async def logout(request: Request):
+def logout(request: Request):
     sec.logout(sec.token_from_request(request) or "")
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("mve_token")
@@ -65,12 +67,12 @@ def auth_config(request: Request) -> Dict[str, Any]:
 
 
 @router.post("/api/auth/config")
-async def set_auth_config(request: Request):
+def set_auth_config(request: Request, _mve_body=Depends(_json_body_dep)):
     try:
         _require(request, "admin")
     except PermissionError:
         return JSONResponse({"error": "admin role required"}, status_code=403)
-    body = await request.json()
+    body = _req_body(_mve_body)
     try:
         sec.set_rbac_enabled(bool(body.get("rbac_enabled")))
     except Exception as e:
@@ -88,12 +90,12 @@ def users(request: Request):
 
 
 @router.post("/api/auth/users")
-async def add_user(request: Request):
+def add_user(request: Request, _mve_body=Depends(_json_body_dep)):
     try:
         _require(request, "admin")
     except PermissionError:
         return JSONResponse({"error": "admin role required"}, status_code=403)
-    body = await request.json()
+    body = _req_body(_mve_body)
     try:
         return sec.create_user(str(body.get("username", "")), str(body.get("password", "")),
                                str(body.get("role", "operator")))

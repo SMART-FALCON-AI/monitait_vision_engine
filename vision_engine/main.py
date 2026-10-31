@@ -716,28 +716,40 @@ async def _audit_rbac_mw(request, call_next):
     except Exception:
         gated = False
     actor, role = None, "viewer"
+    # 4.0.425 — resolve() (DB lookup of the token), rbac_enabled() (config read) and
+    # audit_record() (INSERT + COMMIT) are blocking; they ran on the event loop for EVERY
+    # mutating /api request, each up to the 9 s statement timeout when the DB is slow.
+    # Now in a worker thread; the audit row after the response is written in the
+    # background so it adds no latency.
+    import asyncio as _aio
     if gated:
         try:
-            actor, role = _sec.resolve(_sec.token_from_request(request))
+            actor, role = await _aio.to_thread(_sec.resolve, _sec.token_from_request(request))
         except Exception:
             pass
-        if _sec.rbac_enabled():
+        if await _aio.to_thread(_sec.rbac_enabled):
             try:
                 need = _sec.required_role_for(method, path)
                 if need and _sec.ROLE_RANK.get(role, 0) < _sec.ROLE_RANK.get(need, 0):
                     from fastapi.responses import JSONResponse as _JR
-                    _sec.audit_record(actor, role, method, path, 403, "denied")
+                    await _aio.to_thread(_sec.audit_record, actor, role, method, path, 403, "denied")
                     return _JR({"error": "forbidden", "required_role": need,
                                 "detail": "Log in with a sufficient role."}, status_code=403)
             except Exception as _e:
                 logger.warning("rbac check failed open: %s", _e)
     response = await call_next(request)
     if gated:
-        try:
-            _sec.audit_record(actor, role, method, path, getattr(response, "status_code", None))
-        except Exception:
-            pass
+        _aio.get_running_loop().run_in_executor(
+            None, _audit_record_quietly, _sec, actor, role, method, path,
+            getattr(response, "status_code", None))
     return response
+
+
+def _audit_record_quietly(_sec, *args):
+    try:
+        _sec.audit_record(*args)
+    except Exception:
+        pass
 
 app.include_router(health_router)
 app.include_router(cameras_router)

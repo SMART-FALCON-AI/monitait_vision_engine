@@ -1,6 +1,8 @@
 """Ejection procedures routes."""
 
 from fastapi import APIRouter, Request
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 from config import load_data_file, save_data_file, save_config_key
 import logging
@@ -18,10 +20,10 @@ def get_procedures(request: Request):
 
 
 @router.post("/api/procedures")
-async def update_procedures(request: Request):
+def update_procedures(request: Request, _mve_body=Depends(_json_body_dep)):
     """Update ejection procedures configuration."""
     try:
-        data = await request.json()
+        data = _req_body(_mve_body)
         procedures = data.get('procedures', [])
 
         # Update in app.state
@@ -41,14 +43,14 @@ async def update_procedures(request: Request):
 
 
 @router.post("/api/color-reference/{class_name}")
-async def set_color_reference(class_name: str, request: Request):
+def set_color_reference(class_name: str, request: Request, _mve_body=Depends(_json_body_dep)):
     """Set a fixed L*a*b* color reference for a class.
 
     Body: {"capture": true} to use latest detection, or {"lab": [L, a, b]}.
     """
     try:
         from services.detection import get_color_reference, set_fixed_color_reference
-        data = await request.json()
+        data = _req_body(_mve_body)
 
         if data.get('capture', False):
             lab = get_color_reference(class_name, "previous")

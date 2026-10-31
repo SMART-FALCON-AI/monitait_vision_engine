@@ -15,7 +15,12 @@ class RedisConnection:
 
     # Connecting to Radis database
     def connect_to_redis(self):
-        return Redis(self.redis_hostname, self.redis_port, db=REDIS_DB)
+        # 4.0.425 — socket timeouts: this client is shared by the capture loop, the ejector
+        # and /health (which pings it ON the event loop). With none, a hung Redis connection
+        # blocked forever — the web server included. 10 s is far above the longest blocking
+        # call made on it (BLPOP with ≤ 1 s timeout).
+        return Redis(self.redis_hostname, self.redis_port, db=REDIS_DB,
+                     socket_timeout=10, socket_connect_timeout=5)
 
     def update_encoder_redis(self, encoder):
         self.redis_connection.set("encoder_values", json.dumps(encoder))

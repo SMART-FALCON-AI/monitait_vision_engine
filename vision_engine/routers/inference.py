@@ -1,6 +1,8 @@
 """Inference, pipeline, and model management routes."""
 
 from fastapi import APIRouter, Request, HTTPException, UploadFile, File
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 import os
 import pathlib
@@ -239,14 +241,14 @@ def activate_pipeline(pipeline_name: str, request: Request):
 
 
 @router.post("/api/pipelines")
-async def create_or_update_pipeline(request: Request):
+def create_or_update_pipeline(request: Request, _mve_body=Depends(_json_body_dep)):
     """Create or update a pipeline."""
     pm = request.app.state.pipeline_manager
     if pm is None:
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
 
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
         pipeline = Pipeline.from_dict(body)
 
         if pm.add_pipeline(pipeline):
@@ -304,14 +306,14 @@ def get_models(request: Request):
 
 
 @router.post("/api/models")
-async def create_or_update_model(request: Request):
+def create_or_update_model(request: Request, _mve_body=Depends(_json_body_dep)):
     """Create or update an inference model."""
     pm = request.app.state.pipeline_manager
     if pm is None:
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
 
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
         model_id = body.get("model_id")
         if not model_id:
             return JSONResponse(content={"error": "model_id is required"}, status_code=400)
@@ -551,7 +553,7 @@ def list_weights(request: Request):
 
 
 @router.post("/api/models/upload-weights")
-async def upload_weights(request: Request, file: UploadFile = File(...), activate: int = 1):
+def upload_weights(request: Request, file: UploadFile = File(...), activate: int = 1):
     """Upload a .pt weight file. activate=1 (default) also pushes it to all YOLO
     replicas + mirrors best.pt. activate=0 (pipeline card) ONLY saves + names it, so
     uploading a weight for a NON-active pipeline never disturbs the live YOLO model —
@@ -570,7 +572,7 @@ async def upload_weights(request: Request, file: UploadFile = File(...), activat
     # Stream to disk with size check
     total = 0
     with open(dest, "wb") as f:
-        while chunk := await file.read(1024 * 1024):
+        while chunk := file.file.read(1024 * 1024):
             total += len(chunk)
             if total > MAX_UPLOAD_SIZE:
                 f.close()
@@ -629,9 +631,9 @@ async def upload_weights(request: Request, file: UploadFile = File(...), activat
 
 
 @router.post("/api/models/activate-weights")
-async def activate_weights(request: Request):
+def activate_weights(request: Request, _mve_body=Depends(_json_body_dep)):
     """Activate an existing .pt weight file on all YOLO replicas."""
-    body = await request.json()
+    body = _req_body(_mve_body)
     filename = body.get("filename", "").strip()
     if not filename or not filename.endswith(".pt"):
         return JSONResponse(content={"error": "Invalid filename"}, status_code=400)

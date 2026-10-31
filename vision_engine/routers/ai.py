@@ -1167,7 +1167,8 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
                     "model": "llama2",
                     "prompt": f"{system_prompt}\n\nUser: {user_query}\n\nAssistant:",
                     "stream": False
-                }
+                },
+                timeout=180,   # 4.0.425 — a hung local model used to block forever
             )
             return response.json().get("response", "No response from local model")
         else:
@@ -1181,7 +1182,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
 
 
 @router.post("/api/why")
-async def why_for_dot(request: Request, payload: Dict[str, Any]):
+def why_for_dot(request: Request, payload: Dict[str, Any]):
     """3.23.0 — Explain a single chart dot.
 
     Operator clicks a dot on the Charts tab → drawer opens → 🤔 Why? button
@@ -1326,7 +1327,7 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                     # 4.0.423 — these are plain `def` handlers (since 4.0.72): `await`-ing their
                     # return value raised TypeError (swallowed at debug), so this context was
                     # always missing — and the 7-day scan ran on the event loop first.
-                    _cd_resp = await asyncio.to_thread(get_color_drift, window="7d")
+                    _cd_resp = get_color_drift(window="7d")
                     cd = _json.loads(_cd_resp.body.decode()).get("classes", {}).get(metric)
                     if cd:
                         line = f"🎨 CIELAB color for '{metric}' (last 7d): n={cd.get('n')}"
@@ -1347,7 +1348,7 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
                 except Exception as _e:
                     logger.debug(f"why mode=class color fetch failed: {_e}")
                 try:
-                    _ar_resp = await asyncio.to_thread(get_area_stats, window="7d")
+                    _ar_resp = get_area_stats(window="7d")
                     ar = _json.loads(_ar_resp.body.decode()).get("classes", {}).get(metric)
                     if ar:
                         line = (
@@ -1507,11 +1508,11 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
             # round-trips that blocked the event loop via the sync execute_tool()
             # chain, which is what made other endpoints feel frozen during a
             # Why? call.
-            answer = await call_ai_model(
+            answer = asyncio.run(call_ai_model(
                 provider, api_key, system_prompt, user_query, watcher_instance,
                 base_url=base_url, model_id=model_id,
                 tools_enabled=False,
-            )
+            ))
         except Exception as _e:
             _status = "error"
             _err = str(_e)
@@ -1553,7 +1554,7 @@ async def why_for_dot(request: Request, payload: Dict[str, Any]):
 
 
 @router.post("/api/suggest_severities")
-async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
+def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     """3.25.2 — Ask the active AI model to suggest a 0-100 Severity value for
     every detected class on the Process tab.
 
@@ -1846,11 +1847,11 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     import time as _t
     _t0 = _t.time()
     try:
-        raw = await call_ai_model(
+        raw = asyncio.run(call_ai_model(
             provider, api_key, system_prompt, user_query, watcher_instance,
             base_url=base_url, model_id=model_id, tools_enabled=False,
             max_tokens=16384,   # 3.25.2 — JSON array of ~50-200 classes can be long
-        )
+        ))
     except Exception as e:
         return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
 
@@ -1977,7 +1978,7 @@ async def suggest_severities(request: Request, payload: Dict[str, Any] = None):
 
 
 @router.post("/api/states/ai_recommend")
-async def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
+def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
     """3.25.3 — Ask the active AI to pick the best capture state for the
     current line + product.
 
@@ -2156,10 +2157,10 @@ async def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
     import time as _t
     _t0 = _t.time()
     try:
-        raw = await call_ai_model(
+        raw = asyncio.run(call_ai_model(
             provider, api_key, system_prompt, user_query, watcher_instance,
             base_url=base_url, model_id=model_id, tools_enabled=False, max_tokens=2048,
-        )
+        ))
     except Exception as e:
         return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
 
@@ -2295,7 +2296,7 @@ def apply_procedure_severities(payload: Dict[str, Any]):
 
 
 @router.post("/api/ai_query")
-async def query_ai(request: Request, payload: Dict[str, Any]):
+def query_ai(request: Request, payload: Dict[str, Any]):
     """Query AI with production data from TimescaleDB and real-time metrics."""
     try:
         user_query = payload.get("query", "")
@@ -2416,7 +2417,7 @@ encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds, inferenc
         # Call AI API based on model. citations_out/proposals_out collect anything
         # the KB tools surface during the agentic loop (empty when KB is down).
         _citations, _proposals = [], []
-        ai_response = await call_ai_model(model, api_key, system_prompt, user_query, watcher_instance=watcher, base_url=base_url, model_id=model_id, citations_out=_citations, proposals_out=_proposals)
+        ai_response = asyncio.run(call_ai_model(model, api_key, system_prompt, user_query, watcher_instance=watcher, base_url=base_url, model_id=model_id, citations_out=_citations, proposals_out=_proposals))
 
         return JSONResponse(content={"response": ai_response, "model": model,
                                      "citations": _citations, "proposed_actions": _proposals,

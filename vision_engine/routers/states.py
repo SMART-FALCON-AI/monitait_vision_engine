@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 from config import save_service_config, load_service_config, DATA_FILE
 from services.state_machine import State, CapturePhase
@@ -31,7 +33,7 @@ def get_state(request: Request, state_name: str):
 
 
 @router.post("/api/states")
-async def create_or_update_state(request: Request):
+def create_or_update_state(request: Request, _mve_body=Depends(_json_body_dep)):
     """Create or update a state configuration.
 
     Request body example:
@@ -50,7 +52,7 @@ async def create_or_update_state(request: Request):
         return JSONResponse(content={"error": "State manager not initialized"}, status_code=503)
 
     try:
-        data = await request.json()
+        data = _req_body(_mve_body)
 
         if "name" not in data:
             return JSONResponse(content={"error": "State name is required"}, status_code=400)

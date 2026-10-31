@@ -993,7 +993,7 @@ async def support_upload(file: UploadFile = File(...)):
 
 
 @router.get("/api/support/diagnostics")
-async def support_diagnostics(request: Request):
+def support_diagnostics(request: Request):
     """Preview exactly what `include_diagnostics` would attach."""
     try:
         d = collect_diagnostics(request.app.state)

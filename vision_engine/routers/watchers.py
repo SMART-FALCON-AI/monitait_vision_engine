@@ -14,6 +14,8 @@ Registered in main.py BEFORE commands_router (the catch-all).
 import logging
 
 from fastapi import APIRouter, Request
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 
 from services import watcher_metrics as wm
@@ -26,10 +28,10 @@ router = APIRouter()
 # ingestion — Watcher-Jet compatible
 # --------------------------------------------------------------------------- #
 @router.post("/api/factory/update-watcher/")
-async def update_watcher(request: Request):
+def update_watcher(request: Request, _mve_body=Depends(_json_body_dep)):
     """No-image path: the device POSTs its JSON report and expects HTTP 200."""
     try:
-        payload = await request.json()
+        payload = _req_body(_mve_body)
         r = wm.ingest(payload)
         return {"status": "ok", **r}
     except ValueError as e:
@@ -40,11 +42,11 @@ async def update_watcher(request: Request):
 
 
 @router.post("/api/factory/image-update-watcher-data/")
-async def image_update_watcher_data(request: Request):
+def image_update_watcher_data(request: Request, _mve_body=Depends(_json_body_dep)):
     """Image path, step 1: store the metrics and hand back an id the device then
     references when it uploads the image."""
     try:
-        payload = await request.json()
+        payload = _req_body(_mve_body)
         r = wm.ingest(payload)
         return {"status": "ok", "_id": r.get("id"), "register_id": r.get("register_id")}
     except ValueError as e:
@@ -55,7 +57,7 @@ async def image_update_watcher_data(request: Request):
 
 
 @router.post("/api/factory/image-update-watcher/")
-async def image_update_watcher(request: Request):
+def image_update_watcher(request: Request):
     """Image path, step 2: metrics-only build — accept and ack, discard the image."""
     return {"status": "ok"}
 
@@ -86,10 +88,10 @@ def watcher_metrics_ep(register_id: str, since_ms: int = 0, until_ms: int = 0,
 
 
 @router.post("/api/watchers/name")
-async def watcher_name(request: Request):
+def watcher_name(request: Request, _mve_body=Depends(_json_body_dep)):
     """Give a machine a friendly display name."""
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         wm.set_name(str(b.get("register_id", "")), str(b.get("name", "")))
         return {"ok": True}
     except ValueError as e:
@@ -97,13 +99,13 @@ async def watcher_name(request: Request):
 
 
 @router.post("/api/watchers/register")
-async def watcher_register(request: Request):
+def watcher_register(request: Request, _mve_body=Depends(_json_body_dep)):
     """Register / update a machine: name, line (group), sensor, type, ideal_rate
     (units/hr, used for the OEE Performance factor); 4.0.417 Hardware-tab station
     setup: next_watcher (the station this one feeds), ok_factor / ng_factor (units
     per counted OK / NG pulse), assigned. Only provided fields change."""
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         ir = b.get("ideal_rate")
         return wm.register_watcher(
             str(b.get("register_id", "")),
@@ -121,10 +123,10 @@ async def watcher_register(request: Request):
 
 
 @router.post("/api/watchers/delete")
-async def watcher_delete(request: Request):
+def watcher_delete(request: Request, _mve_body=Depends(_json_body_dep)):
     """4.0.417 — remove a watcher from the station list (history kept)."""
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         return wm.delete_watcher(str(b.get("register_id", "")))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -143,11 +145,11 @@ def watcher_oee(register_id: str, since_ms: int = 0, until_ms: int = 0):
 
 
 @router.post("/api/watchers/line_name")
-async def watcher_line_name(request: Request):
+def watcher_line_name(request: Request, _mve_body=Depends(_json_body_dep)):
     """4.0.420 — name a line (free text, any language; "" = show the station chain).
     `station` = any station of that line."""
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         return wm.set_line_name(b.get("station"), b.get("name"))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -166,11 +168,11 @@ def watcher_camera_options():
 
 
 @router.post("/api/watchers/camera_station")
-async def watcher_camera_station(request: Request):
+def watcher_camera_station(request: Request, _mve_body=Depends(_json_body_dep)):
     """4.0.419 — create (no register_id) or update a camera station: name, cameras
     (ids; empty = all), ok_classes, ng_classes."""
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         return wm.save_camera_station(b.get("register_id"), b.get("name"), b.get("cameras"),
                                       b.get("ok_classes"), b.get("ng_classes"))
     except ValueError as e:

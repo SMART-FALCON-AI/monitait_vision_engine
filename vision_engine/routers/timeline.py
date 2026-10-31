@@ -1,5 +1,7 @@
 import pathlib
 from fastapi import APIRouter, Request, HTTPException
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response, FileResponse
 from config import (load_data_file, save_data_file, save_config_key, TIMELINE_REDIS_PREFIX,
                     TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT,
@@ -1702,14 +1704,14 @@ def get_quality_thresholds():
 
 
 @router.post("/api/quality/thresholds")
-async def set_quality_thresholds(request: Request):
+def set_quality_thresholds(request: Request, _mve_body=Depends(_json_body_dep)):
     """Persist new release/reinspect/min_rows/min_span values.
 
     Body: JSON with any subset of {release, reinspect, min_rows, min_span}.
     Missing keys keep their current value. Invalid values are rejected.
     """
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
     except Exception:
         return JSONResponse(content={"error": "invalid JSON body"}, status_code=400)
 
@@ -6216,10 +6218,10 @@ def get_timeline_config(request: Request):
 
 
 @router.post("/api/timeline_config")
-async def update_timeline_config(request: Request):
+def update_timeline_config(request: Request, _mve_body=Depends(_json_body_dep)):
     """Update timeline configuration (bounding boxes, camera order, quality, rows, buffer size)."""
     try:
-        data = await request.json()
+        data = _req_body(_mve_body)
 
         # Extract configuration values
         show_bounding_boxes = data.get('show_bounding_boxes', True)  # Global bbox toggle
@@ -6306,14 +6308,14 @@ async def update_timeline_config(request: Request):
 
 
 @router.post("/api/timeline/mark_config")
-async def update_mark_config(request: Request):
+def update_mark_config(request: Request, _mve_body=Depends(_json_body_dep)):
     """4.0.378 — persist the 'mark ejected frames' box setting (enabled + thickness) into
     timeline_config so BOTH renderers draw the box SERVER-SIDE, in the same pass as the
     red/green header strip. Instant (per-key save), survives WS reconnects, and is shared
     by every viewer of this machine — replaces the fragile per-client WS/URL flag that made
     the box 'appear after a while'."""
     try:
-        data = await request.json()
+        data = _req_body(_mve_body)
         tc = getattr(request.app.state, 'timeline_config', {}) or {}
         if 'enabled' in data:
             tc['mark_ejects_enabled'] = bool(data.get('enabled'))

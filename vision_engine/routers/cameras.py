@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Request, HTTPException, File, UploadFile
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -342,11 +344,11 @@ def get_cameras_status(request: Request):
 
 
 @router.post("/api/cameras/add-detected")
-async def add_detected_camera(request: Request):
+def add_detected_camera(request: Request, _mve_body=Depends(_json_body_dep)):
     """4.0.370 — add a DETECTED-but-unconfigured USB camera (by its stable by-path)
     to the config as a new camera. Persists; the camera opens on the next restart."""
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
         by_path = str(body.get("by_path") or "").strip()
         if not by_path.startswith("/dev/v4l/by-path/"):
             return JSONResponse({"error": "by_path (a /dev/v4l/by-path/… source) required"}, status_code=400)
@@ -415,7 +417,7 @@ def restart_camera(camera_id: int, request: Request):
 
 
 @router.post("/api/camera/{camera_id}/config")
-async def update_camera_config(camera_id: int, request: Request):
+def update_camera_config(camera_id: int, request: Request, _mve_body=Depends(_json_body_dep)):
     """Update camera configuration."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -427,7 +429,7 @@ async def update_camera_config(camera_id: int, request: Request):
         return JSONResponse(content={"error": f"Camera {camera_id} not available"}, status_code=404)
 
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
 
         # Apply configuration via update_prop (persists across reconnects)
         prop_map = {
@@ -695,7 +697,7 @@ def get_saved_config(request: Request):
 # =============================================================================
 
 @router.post("/api/cameras/config/upload")
-async def upload_config(request: Request):
+def upload_config(request: Request, _mve_body=Depends(_json_body_dep)):
     """Upload and apply a service configuration (for restoring from backup)."""
     watcher = request.app.state.watcher_instance
     if watcher is None:
@@ -703,7 +705,7 @@ async def upload_config(request: Request):
 
     try:
         from config import save_data_file, load_data_file
-        body = await request.json()
+        body = _req_body(_mve_body)
         config = body.get("config")
 
         if not config:
@@ -869,7 +871,7 @@ def discover_pro_cameras(request: Request):
 
 
 @router.post("/api/cameras/save-pro")
-async def save_pro_camera(request: Request):
+def save_pro_camera(request: Request, _mve_body=Depends(_json_body_dep)):
     """Persist a discovered pro camera into service_config.cameras.
 
     Body:
@@ -888,7 +890,7 @@ async def save_pro_camera(request: Request):
     """
     from services.basler_camera import BASLER_SOURCE_PREFIX, is_basler_source
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
         source = str(body.get("source") or "").strip()
         if not source:
             return JSONResponse(content={"success": False, "error": "source is required"}, status_code=400)
@@ -1005,10 +1007,10 @@ async def save_pro_camera(request: Request):
 
 
 @router.post("/api/cameras/test")
-async def test_camera(request: Request):
+def test_camera(request: Request, _mve_body=Depends(_json_body_dep)):
     """Test a camera URL with credentials and return a snapshot."""
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
         url = body.get("url")
         username = body.get("username", "admin")
         password = body.get("password", "")
@@ -1067,10 +1069,10 @@ async def test_camera(request: Request):
 
 
 @router.post("/api/cameras/save")
-async def save_camera(request: Request):
+def save_camera(request: Request, _mve_body=Depends(_json_body_dep)):
     """Save a discovered camera to the configuration."""
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
         camera_name = body.get("name", "Unnamed Camera")
         camera_url = body.get("url")
         camera_ip = body.get("ip")

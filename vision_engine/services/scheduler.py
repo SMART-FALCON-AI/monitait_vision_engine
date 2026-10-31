@@ -143,7 +143,8 @@ async def _fetch_why_for_score(app, shipment: str, language: str = "en") -> str:
                 self.headers = {}
         fake_req = _FakeReq(app)
         # Pass minimal payload — handler fills in surrounding context itself.
-        resp = await why_for_dot(fake_req, {
+        # 4.0.425 — why_for_dot is a plain `def` now (runs in a worker thread)
+        resp = await asyncio.to_thread(why_for_dot, fake_req, {
             "mode": "score",
             "metric": "shipment_quality_score",
             "shipment": shipment,

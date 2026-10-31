@@ -29,6 +29,8 @@ from typing import Optional
 
 import requests
 from fastapi import APIRouter, Request
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 
 from config import load_service_config, save_service_config
@@ -303,7 +305,7 @@ def _resolve_raw_image_path(image_path: str) -> Optional[pathlib.Path]:
 
 
 @router.post("/api/ai_trainer/upload")
-async def upload_to_ai_trainer(request: Request):
+def upload_to_ai_trainer(request: Request, _mve_body=Depends(_json_body_dep)):
     """POST one raw frame to the configured AI Trainer URL.
 
     Request JSON body:
@@ -315,7 +317,7 @@ async def upload_to_ai_trainer(request: Request):
       - camera (optional): camera id metadata.
     """
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
     except Exception:
         return JSONResponse(content={"success": False, "error": "expected json body"}, status_code=400)
 
@@ -637,11 +639,11 @@ def get_class_map():
 
 
 @router.post("/api/ai_trainer/class_map")
-async def save_class_map(request: Request):
+def save_class_map(request: Request, _mve_body=Depends(_json_body_dep)):
     """Save the mapping. Body: {class_map: {mve_class_name: trainer_category_id}}.
     Returns the merged map (overwrite-with-payload semantics)."""
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
     except Exception:
         body = {}
     new_map = (body or {}).get("class_map") if isinstance(body, dict) else None
@@ -663,7 +665,7 @@ async def save_class_map(request: Request):
 
 
 @router.post("/api/ai_trainer/annotate")
-async def create_annotations(request: Request):
+def create_annotations(request: Request, _mve_body=Depends(_json_body_dep)):
     """Forward a Label Studio Frontend submit/update to the trainer.
 
     Body (one entry per box, matching the trainer's AnnotationCreateUpdate
@@ -682,7 +684,7 @@ async def create_annotations(request: Request):
     server-assigned ids).
     """
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
     except Exception:
         body = {}
     anns = (body or {}).get("annotations") if isinstance(body, dict) else None
@@ -697,10 +699,10 @@ async def create_annotations(request: Request):
 
 
 @router.put("/api/ai_trainer/annotate/{ann_id}")
-async def update_annotation(ann_id: int, request: Request):
+def update_annotation(ann_id: int, request: Request, _mve_body=Depends(_json_body_dep)):
     """Update an existing annotation (single, by id)."""
     try:
-        body = await request.json()
+        body = _req_body(_mve_body)
     except Exception:
         body = {}
     if not isinstance(body, dict) or not body:

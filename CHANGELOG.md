@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.425] - 2026-11-01 - Audit batch 5: blocking work off the web server's event loop
+
+MVE serves every HTTP request, the dashboard WebSockets and `/health` from ONE asyncio event loop. Any `async def` endpoint that does blocking work freezes all of them for as long as it runs — the "API stops answering while capture keeps running" symptom (and a failing container health check). The audit found ~45 such places.
+
+**Fixed**
+- **40 endpoints that were `async def` only to `await request.json()`** and then ran all their blocking work on the loop — config saves (DB + fsync'd disk write), DB queries, Redis, V4L2 ioctls, RTSP opens (`/api/cameras/test`, `/api/cameras/save`, `/save-pro`), HTTP to YOLO (weight activation: up to ~43 s), the AI trainer (an upload: up to ~2 min with retries) and payment gateways, PBKDF2 at login — are now plain `def` endpoints, run in FastAPI's worker threadpool. Covered: AI trainer, billing, cameras, inference, procedures, security, states, timeline (thresholds / timeline config / mark config), watchers (incl. the Watcher Jet ingestion POSTs), support diagnostics. The body is read by an async dependency (`routers/_body.py`) and a parse error is re-raised exactly where `await request.json()` was, so each endpoint's own error handling is unchanged.
+- **The AI endpoints** (`/api/why`, `/api/suggest_severities`, `/api/states/ai_recommend`, `/api/ai_query`) gathered their context on the loop (7-day percentile scans, up to 30 quality-payload computations, usage logging — tens of seconds for one "Suggest severities" click). Now run entirely in a worker thread; the model call gets a private event loop there. The local-model (Ollama) HTTP call had no timeout — a hung model blocked forever — now 180 s.
+- **Audit / RBAC middleware**: for every mutating `/api` request it resolved the token (DB), read the RBAC flag and wrote the audit row (INSERT + COMMIT) on the loop. Now in a worker thread; the audit row is written in the background after the response (no added latency).
+- **Shared Redis client had no socket timeout**: used by the capture loop, the ejector and `/health` (on the loop) — a hung Redis connection blocked forever. Now 10 s read / 5 s connect (longest call on it is a ≤ 1 s BLPOP).
+
+Deployed to **vteam12 only**.
+
 ## [4.0.424] - 2026-11-01 - Audit batch 4 (security): secrets out of the browser, free text escaped, AI tools fenced
 
 **Fixed**

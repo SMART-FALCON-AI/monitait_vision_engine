@@ -9,6 +9,8 @@ the PAYMENT_PROVIDER env var; with none set the 'manual' (invoice) flow is used.
 import logging
 
 from fastapi import APIRouter, Request
+from fastapi import Depends as Depends
+from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from services import billing
@@ -37,9 +39,9 @@ def gateway():
 
 
 @router.post("/api/billing/subscribe")
-async def subscribe(request: Request):
+def subscribe(request: Request, _mve_body=Depends(_json_body_dep)):
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         return billing.subscribe(str(b.get("plan_code", "")), str(b.get("return_url", "")))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -49,10 +51,10 @@ async def subscribe(request: Request):
 
 
 @router.post("/api/billing/confirm")
-async def confirm(request: Request):
+def confirm(request: Request, _mve_body=Depends(_json_body_dep)):
     """Verify a gateway payment, or (manual=true) mark an offline invoice paid."""
     try:
-        b = await request.json()
+        b = _req_body(_mve_body)
         return billing.confirm_payment(str(b.get("ref", "")), b.get("params") or {},
                                        manual=bool(b.get("manual")))
     except ValueError as e:
@@ -62,7 +64,7 @@ async def confirm(request: Request):
 
 
 @router.get("/api/billing/callback")
-async def callback(request: Request):
+def callback(request: Request):
     """Public gateway return URL — the user's browser is redirected here after
     paying. Verifies, then bounces to the dashboard. Never gated (a GET)."""
     params = dict(request.query_params)
@@ -90,8 +92,8 @@ def api_keys():
 
 
 @router.post("/api/billing/api-keys")
-async def add_api_key(request: Request):
-    b = await request.json()
+def add_api_key(request: Request, _mve_body=Depends(_json_body_dep)):
+    b = _req_body(_mve_body)
     return billing.create_api_key(str(b.get("label", "")))
 
 
@@ -110,15 +112,15 @@ def service_requests():
 
 
 @router.post("/api/billing/service-requests")
-async def add_service_request(request: Request):
-    b = await request.json()
+def add_service_request(request: Request, _mve_body=Depends(_json_body_dep)):
+    b = _req_body(_mve_body)
     return billing.create_service_request(str(b.get("kind", "periodic_service")),
                                           str(b.get("note", "")), str(b.get("contact", "")))
 
 
 @router.post("/api/billing/service-requests/{req_id}/status")
-async def set_service_status(req_id: int, request: Request):
-    b = await request.json()
+def set_service_status(req_id: int, request: Request, _mve_body=Depends(_json_body_dep)):
+    b = _req_body(_mve_body)
     billing.set_service_request_status(req_id, str(b.get("status", "open")))
     return {"ok": True}
 
