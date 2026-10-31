@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.429] - 2026-11-01 - Audit batch 9: Charts tab (background load, stale answers, wrong labels)
+
+**Fixed — load**
+- **The whole Charts pipeline ran in the background on every page load.** On whichever tab the page opened, 3–4 triggers each ran `detection_stats` plus the progressive `detection_charts` ladder: trainer colours loaded, the saved window restored, the colour-check flag applied. The Machines chart also loaded (2 requests per watcher plus the line's production stats). Every panel involved is on the Charts tab, and opening that tab loads them, so nothing runs while another tab is open.
+- **On the Charts tab itself those triggers still ran the pipeline 4 times.** Calls within 250 ms now collapse into one run. The colour-check flag reloads the charts only when it differs from the setting they were loaded with.
+- **The 30 s shipment-lane timer** re-fetched the shipment list (`/api/quality/shipments`) for as long as the page was open, on any tab. It now runs only while the Charts tab is open and visible.
+- **The shipment-quality score card** has been hidden since 4.0.24x (its PDF and Calibrate buttons were moved out), but its score and 12-bucket trend were still fetched and drawn on every refresh. They are skipped while it is hidden.
+
+**Fixed — correctness**
+- **Length axis: the strips were overwritten every minute with mis-binned cells.** The periodic strip refresher sent the cumulative-length bounds to the server as an encoder bin range for the whole window. On the Length axis the strips are now left to the per-shipment ladder that builds them.
+- **Newest answer wins.** Changing the window or shipment while a slower, wider request was still out let the older answer land last, so a 24 h result could be drawn over a 1 h pick. Applies to the detection stats, ejection, production, score and trend panels.
+- **Detections per camera** labelled cameras from a **hard-coded map of shoga's camera IPs / names** on every site. It now uses this site's camera names (`/api/cameras`), escaped.
+- **Scatter hover / click details**:
+  - the caption showed the camera's row position instead of its id;
+  - on the Length axis it printed the cumulative length as a date in January 1970;
+  - "open in annotator" passed the dot's drawn radius (3–12 px) as its confidence and the length as an encoder reading;
+  - on the Time axis it passed no camera to the trainer upload.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.428] - 2026-11-01 - Audit batch 8: camera Refresh no longer touches running cameras, live feeds, alert dedupe, zero values
 
 **Fixed — backend**

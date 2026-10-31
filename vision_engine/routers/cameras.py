@@ -380,9 +380,10 @@ def add_detected_camera(request: Request, _mve_body=Depends(_json_body_dep)):
 
 @router.post("/api/cameras/rescan")
 def rescan_cameras(request: Request):
-    """Re-scan /dev/video* for USB cameras (hot-plug support).
+    """Hot-plug check for the Cameras tab's Refresh — REPORT ONLY since 4.0.428.
 
-    Detects newly plugged cameras and removes disconnected ones.
+    Lists configured cameras whose device is gone (`missing`) and unbound by-path
+    devices (`detected_new`); never removes, restarts or adds a camera at runtime.
     """
     watcher = request.app.state.watcher_instance
     if watcher is None:

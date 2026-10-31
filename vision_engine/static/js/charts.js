@@ -266,17 +266,29 @@ function _fmtDuration(sec) {
     return `${sec}s`;
 }
 
+// 4.0.429 — newest-request-wins for the Charts-tab panels. Changing the window /
+// shipment fires a new fetch while the previous (slower, wider) one is still out;
+// whichever answered LAST was drawn, so a 24h answer could land on top of a 1h pick.
+const _mveReqSeq = {};
+function _mveSeqNext(k) { return (_mveReqSeq[k] = (_mveReqSeq[k] || 0) + 1); }
+function _mveSeqStale(k, n) { return _mveReqSeq[k] !== n; }
+
 async function refreshShipmentQualityScore() {
     const win  = document.getElementById('insight-window')?.value   || '24h';
     const ship = document.getElementById('insight-shipment')?.value || '';
     const card = document.getElementById('shipment-quality-card');
     if (!card) return;
+    // 4.0.429 — the card is hidden for good since 4.0.24x (_reorderChartsTab; its PDF and
+    // Calibrate buttons were moved out). It was still fetched + filled on every refresh.
+    if (card.style.display === 'none') return;
+    const _seq = _mveSeqNext('sqs');
     let data;
     try {
         const r = await fetch('/api/shipment_quality_score?window=' + encodeURIComponent(win) +
                               '&shipment=' + encodeURIComponent(ship));
         data = await r.json();
     } catch (e) { console.error('shipment_quality_score fetch failed:', e); return; }
+    if (_mveSeqStale('sqs', _seq)) return;
 
     const scoreEl   = document.getElementById('sqs-score');       // Relative
     const scoreAbsEl = document.getElementById('sqs-score-abs');    // 4.0.61 Absolute
@@ -1150,6 +1162,10 @@ async function refreshShipmentQualityTrend() {
     const noteEl = document.getElementById('sqs-trend-note');
     const canvas = document.getElementById('sqs-trend-chart');
     if (!canvas) return;
+    // 4.0.429 — the trend chart sits inside the always-hidden score card (see above)
+    const _card = document.getElementById('shipment-quality-card');
+    if (_card && _card.style.display === 'none') return;
+    const _seq = _mveSeqNext('trend');
     let data;
     try {
         const params = new URLSearchParams({ window: win, buckets: '12' });
@@ -1157,6 +1173,7 @@ async function refreshShipmentQualityTrend() {
         const resp = await fetch(`/api/shipment_quality_score/trend?${params}`);
         data = await resp.json();
     } catch (e) { console.warn('trend fetch failed', e); return; }
+    if (_mveSeqStale('trend', _seq)) return;
 
     const buckets = data.buckets || [];
     if (!buckets.length) {
@@ -1285,7 +1302,18 @@ function _clearShipment() {
 window._clearShipment = _clearShipment;
 
 
-async function refreshDetectionInsights() {
+// 4.0.429 — ONE reload per burst. Opening the Charts tab fires several triggers within
+// a second (tab click, trainer colours, restored window, colour-check flag) and each
+// ran the whole pipeline — detection_stats + the detection_charts ladder — 4× over.
+// Calls within 250 ms of each other now collapse into one run.
+let _insightsTimer = null;
+function refreshDetectionInsights() {
+    if (!_chartsTabActive()) return;
+    if (_insightsTimer) clearTimeout(_insightsTimer);
+    _insightsTimer = setTimeout(() => { _insightsTimer = null; _refreshDetectionInsightsNow(); }, 250);
+}
+
+async function _refreshDetectionInsightsNow() {
     // 4.0.53 — Two bugs fixed:
     //  (a) The umbrella function called mveLoaderBegin but never a matching
     //      mveLoaderEnd on the success path (falls off at line 1040), so
@@ -1295,6 +1323,12 @@ async function refreshDetectionInsights() {
     //      operator was on Charts persisted visually after they switched to
     //      Dashboard. Gate the loader with _chartsTabActive() so it only
     //      appears/hides in the Charts tab context (id="tab-grafana").
+    // 4.0.429 — every panel this fills lives in the Charts tab, and opening that tab
+    // runs this anyway. On page load 3-4 triggers (trainer colours, restored window,
+    // colour-check flag) each ran the WHOLE charts pipeline — detection_stats + the
+    // progressive detection_charts ladder — while the operator was on the Dashboard.
+    if (!_chartsTabActive()) return;
+    window._mveChartsLoadedColor = (window._mveColorCheckEnabled === true);   // 4.0.429 — see _mveApplyColorCheckVisibility
     const _showedLoader = _chartsTabActive();
     if (_showedLoader && typeof mveLoaderBegin === 'function') mveLoaderBegin('Loading charts…');
     try {
@@ -1354,6 +1388,7 @@ async function refreshDetectionInsights() {
     } catch (_spe) { /* non-fatal */ }
 
     let data;
+    const _seq = _mveSeqNext('insights');
     try {
         const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
         // 4.0.308 — a picked shipment is independent of the timeframe: pass it so the stats panel
@@ -1366,6 +1401,7 @@ async function refreshDetectionInsights() {
         console.error('detection_stats fetch failed:', e);
         return;  // finally-block hides the loader
     }
+    if (_mveSeqStale('insights', _seq)) return;   // 4.0.429 — a newer Apply superseded this one
 
     const byClass = data.by_class || {};
     const timeline = data.timeline || [];
@@ -4605,10 +4641,16 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     // 4.0.2 — clicking a chart dot goes STRAIGHT to the LSF editor
                     // instead of the read-only image drawer. Operator can correct boxes
                     // and ship to the trainer in two clicks, no intermediate viewer.
+                    // 4.0.429 — confidence is dp.conf (dp.r is the drawn RADIUS, 3-12 px);
+                    // the camera id goes with every click (the trainer upload tags it); on the
+                    // Length axis x is the cumulative length, not an encoder reading.
+                    const _conf = (dp.conf != null) ? dp.conf : 0;
+                    const _camId = (dp.cam_id != null ? dp.cam_id : dp.y);
                     if (axisMode === 'time') {
                         openFrameInAnnotator({
                             image_path: dp.img, shipment: dp.ship, t: dp.x,
-                            cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
+                            cls: cls, classes: cls ? [cls] : [], best_confidence: _conf,
+                            camera_index: _camId,
                             pipeline_task_id: _pipeTaskById(dp.pid),   // 4.0.296 — the dot's OWN pipeline task
                         });
                     } else {
@@ -4623,8 +4665,8 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         // `dp.cam_id` for the real camera ID we carry alongside.
                         openFrameInAnnotator({
                             image_path: dp.img, shipment: dp.ship, t: t,
-                            cls: cls, classes: cls ? [cls] : [], best_confidence: dp.r || 0,
-                            encoder: dp.x, camera_index: (dp.cam_id != null ? dp.cam_id : dp.y),
+                            cls: cls, classes: cls ? [cls] : [], best_confidence: _conf,
+                            encoder: (axisMode === 'encoder' ? dp.x : null), camera_index: _camId,
                             pipeline_task_id: _pipeTaskById(dp.pid),   // 4.0.296 — the dot's OWN pipeline task
                         });
                     }
@@ -4816,7 +4858,12 @@ window._refreshShipmentStripStandalone = _refreshShipmentStripStandalone;
     const start = () => {
         _refreshShipmentStripStandalone();
         if (_shipmentStripTimer) clearInterval(_shipmentStripTimer);
-        _shipmentStripTimer = setInterval(_refreshShipmentStripStandalone, 30000);
+        // 4.0.429 — only while the Charts tab is open: each repaint also re-fetches the
+        // shipment list (/api/quality/shipments), every 30 s for as long as ANY tab of the
+        // page was open — on a dashboard left up all shift, for nothing.
+        _shipmentStripTimer = setInterval(() => {
+            if (_chartsTabActive() && !document.hidden) _refreshShipmentStripStandalone();
+        }, 30000);
     };
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', start, { once: true });
@@ -4942,12 +4989,14 @@ window._alignStripToScatter = _alignStripToScatter;
 async function refreshEjectionCharts() {
     const win = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
+    const _seq = _mveSeqNext('ejection');
     let data;
     try {
         const r = await fetch('/api/ejection_stats?window=' + encodeURIComponent(win) +
                               '&shipment=' + encodeURIComponent(shipment));
         data = await r.json();
     } catch (e) { console.error('ejection_stats fetch failed:', e); return; }
+    if (_mveSeqStale('ejection', _seq)) return;
 
     const byProc = data.by_procedure || {};
     const timeline = data.timeline || [];
@@ -5040,12 +5089,14 @@ async function refreshEjectionCharts() {
 async function refreshProductionCharts() {
     const win = document.getElementById('insight-window')?.value || '24h';
     const shipment = document.getElementById('insight-shipment')?.value || '';
+    const _seq = _mveSeqNext('production');
     let data;
     try {
         const r = await fetch('/api/production_stats?window=' + encodeURIComponent(win) +
                               '&shipment=' + encodeURIComponent(shipment));
         data = await r.json();
     } catch (e) { console.error('production_stats fetch failed:', e); return; }
+    if (_mveSeqStale('production', _seq)) return;
 
     const tl = data.timeline || [];
     const hasData = tl.length > 0 && ((data.total_units || 0) > 0 || (data.speed_max || 0) > 0 || (data.downtime_total_s || 0) > 0);
@@ -5399,10 +5450,14 @@ function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
     // is encoder; on the time axis it isn't stored client-side so we omit.
     let tsTxt = '', encTxt = '';
     try {
-        const axisMode = (_insightAxis === 'encoder') ? 'encoder' : 'time';
+        // 4.0.429 — three axes, not two: the Length axis was treated as time, so its
+        // x (cumulative length) was printed as a date in January 1970.
+        const axisMode = (_insightAxis === 'encoder' || _insightAxis === 'length') ? _insightAxis : 'time';
         // Encoder value: on the encoder axis, x IS the encoder value.
         if (axisMode === 'encoder' && typeof pt.x === 'number') {
             encTxt = ' • enc ' + Math.round(pt.x).toLocaleString();
+        } else if (axisMode === 'length' && typeof pt.x === 'number') {
+            encTxt = ' • at ' + Math.round(pt.x).toLocaleString();
         }
         // Timestamp: on the time axis, x IS ms-since-epoch. On the encoder
         // axis we parse it out of the image filename stem.
@@ -5422,7 +5477,9 @@ function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
                     + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
         }
     } catch (e) { /* never let caption formatting crash the preview */ }
-    const metaTxt = `${cls} • cam ${pt.y != null ? pt.y : '?'} • conf ${conf}%${encTxt}${tsTxt}`;
+    // 4.0.429 — the camera ID (pt.y is the row's display index since 4.0.24)
+    const camTxt = pt.cam_id != null ? pt.cam_id : (pt.y != null ? pt.y : '?');
+    const metaTxt = `${cls} • cam ${camTxt} • conf ${conf}%${encTxt}${tsTxt}`;
     if (img && target) {
         if (img.dataset.src !== target) {
             // 4.0.10 — surface a loading state during the network round-trip so
@@ -5474,7 +5531,7 @@ function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
         }
     } else if (img && !target) {
         img.removeAttribute('src'); img.dataset.src = ''; img.style.opacity = '1';
-        if (cap) cap.textContent = `${cls} • cam ${pt.y != null ? pt.y : '?'}   (no image_path on this point)`;
+        if (cap) cap.textContent = `${cls} • cam ${camTxt}   (no image_path on this point)`;
     }
     // 4.0.8 — viewport-clamped positioning.
     const pw = el.offsetWidth  || 432;
@@ -5681,7 +5738,7 @@ function _scatterImageTooltip(ctx) {
         }
     }
     if (cap) {
-        const meta = cls + ' • cam ' + (pt.y != null ? pt.y : '?') + ' • conf ' + conf + '%';
+        const meta = cls + ' • cam ' + (pt.cam_id != null ? pt.cam_id : (pt.y != null ? pt.y : '?')) + ' • conf ' + conf + '%';   // 4.0.429 — camera ID, not row index
         cap.textContent = target
             ? meta + '   (click to edit in ai-trainer)'
             : meta + '   (no image_path on this point)';
@@ -5957,6 +6014,11 @@ async function refreshQualityCharts() {
     // that exact [lo,hi]/N_BINS domain and repaint. No-op before the first render.
     const rng = _progressiveColorRange;
     if (!rng || !(rng.hi > rng.lo)) return;
+    // 4.0.429 — not on the Length axis. There the domain is cumulative LENGTH [0, Σ spans]
+    // and the strips are filled per shipment (encoder range + length projection) by the
+    // ladder. This refresher sent the length bounds as an ENCODER bin range for the whole
+    // window → every minute the strips were overwritten with mis-binned cells.
+    if (rng.axis === 'length') return;
     // v4.0.230 — NEVER wipe + re-stream the strip accumulators while the ladder is
     // mid-load: that clears the quality/ejection/shipment cells the ladder is still
     // filling and BLANKS the strips (the 60s timer landing on a ~60s heavy-machine
@@ -6851,6 +6913,12 @@ function _mveApplyColorCheckVisibility(enabled) {
     // reveals it if the payload carries cells.
     const ccs = document.getElementById('color-change-strip-wrap');
     if (ccs && !enabled) ccs.style.display = 'none';
+    // 4.0.429 — reload only when the charts on screen were loaded with the OTHER setting.
+    // This runs at page load (the event + the 1.4 s re-apply below) with an unchanged
+    // value, and each time re-ran the whole charts pipeline. Not loaded yet → the
+    // coming load reads the current flag itself.
+    const _loadedWith = window._mveChartsLoadedColor;
+    if (_loadedWith === undefined || _loadedWith === (enabled === true)) return;
     if (typeof refreshDetectionInsights === 'function') {
         try { refreshDetectionInsights(); } catch (_) {}
     }
@@ -6876,10 +6944,9 @@ document.addEventListener('DOMContentLoaded', function () {
  * core refresh so it repaints with the other charts. _renderDetByCamera kept.
  * ========================================================================== */
 (function () {
-  var CAM = {1:{ip:".10"},2:{ip:".11"},3:{ip:".12"},4:{ip:".13"},6:{ip:".128"},
-    7:{ip:".132",name:"22-Lehr-S"},8:{ip:".134",name:"22-Lehr-N"},9:{ip:".136",name:"22-Parking-S"},10:{ip:".138",name:"22-Parking-N"},
-    11:{ip:".17"},12:{ip:".18"},13:{ip:".19"},14:{ip:".21"},15:{ip:".8"},16:{ip:".9"},17:{ip:".14"},18:{ip:".15"},
-    19:{ip:".112"},20:{ip:".108"},21:{ip:".2"},22:{ip:".3"},23:{ip:".6"},24:{ip:".20"},25:{ip:".22"},26:{ip:".32"},27:{ip:".56"}};
+  // 4.0.429 — camera names come from THIS site's cameras (/api/cameras). This was a
+  // hard-coded map of shoga's camera IPs / names, shown on every site.
+  var NAMES = null;
   var S = { data: null, obj: null, sel: null, smooth: false, chart: null };
   function col(i, n) { return "hsl(" + Math.round(360 * i / Math.max(n, 1)) + ",70%,55%)"; }
   function avg(obj, cam) {
@@ -6894,7 +6961,15 @@ document.addEventListener('DOMContentLoaded', function () {
     for (var i = 0; i < a.length; i++) { var s = 0, c = 0; for (var j = Math.max(0, i - k + 1); j <= i; j++) { s += a[j]; c++; } o.push(s / c); }
     return o;
   }
-  function camName(id) { var m = CAM[id]; return m ? (m.name ? m.name + " " + m.ip : m.ip) : ("cam " + id); }
+  function camName(id) { var n = NAMES && NAMES[id]; return _mveEsc(n ? n : ("cam " + id)); }
+  async function loadNames() {
+    try {
+      var r = await fetch("/api/cameras"); var list = await r.json();
+      var m = {};
+      (Array.isArray(list) ? list : []).forEach(function (c) { if (c && c.id != null && c.name) m[c.id] = String(c.name); });
+      NAMES = m;
+    } catch (e) { /* keep "cam N" labels; retried on the next load */ }
+  }
   function fillObj(classes) {
     var sel = document.getElementById("detcam-class-sel"); if (!sel) return;
     var sig = classes.join(",");
@@ -6961,6 +7036,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var ctx = document.getElementById("insight-detcount-camera-chart"); if (!ctx || typeof Chart === "undefined") return;
     try { var r = await fetch("/api/detections_by_camera?window=3h"); S.data = await r.json(); }
     catch (e) { return; }
+    if (!NAMES) await loadNames();
     var classes = S.data.classes || [];
     if (!S.obj || classes.indexOf(S.obj) < 0) S.obj = (classes.indexOf("mouth") >= 0) ? "mouth" : (classes[0] || "all");
     var cams = S.data.cameras || [];
