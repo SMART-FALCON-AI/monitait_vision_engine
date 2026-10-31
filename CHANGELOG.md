@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.420] - 2026-11-01 - Line names defined by the operator, several lines per site, line reports in the Charts tab; station names free text everywhere
+
+**Why** — the operator: "the station names are text and not fixed, be careful, also the line name, these should be able to define by the users", "there might be more than one line", "you define a list of sequence of watchers as a line and let the user name them", "also put the reports in the chart tab". Station names were already typed in, but the line name was generated from them ("IS → QC machine → QC operator") and could not be changed, a camera station's ID was built from the first name typed (looked fixed; a Persian name became a meaningless ID), with several lines the Next-station dropdown could not tell two stations of the same name apart, the line report lived only in the Hardware tab, and two older Charts-tab spots put names into the page unescaped.
+
+**Several lines per site** — a line = a sequence of stations chained by Next station; every separate chain is its own line with its own name, card and OEE (as before, now explicit in the UI): each station row shows **which line it is in**; the Next-station dropdown shows "station · line", so two stations with the same name on different lines are told apart; the Station flow shows one row per line, headed by its name.
+
+**Charts tab → "🔗 Line reports"** (below Machines & OEE) — the same per-line report, read-only: line name, OEE (A · P · Q), In → rejected (NG) → lost between stations → Out, and the station table (In, OK, NG, gap from previous, quality, OEE); window 1 h / 8 h / 24 h / 7 days, ⟳ refresh, loads when the tab opens. Lines are built and named in the Hardware tab.
+
+**Line name — user-defined** (Hardware tab → Line OEE card → **✎ name**)
+- Any text, any language (max 120 characters). Empty = show the station chain as before. When a name is set, the station chain is shown under it.
+- Stored in every station's existing **Line / group** field (the same field the Charts-tab registration form edits), so one name, one place. Rule when stations disagree (e.g. a station re-chained from another line keeps its old text): the last station's line text, else the one most of its stations carry. The Station flow line shows the line name too.
+- `POST /api/watchers/line_name {station, name}` (any station of the line); `/api/watchers/lines` returns `line_name` and `chain` next to `name`.
+
+**Names are free text everywhere**
+- New camera stations get a neutral ID (`CAM-1`, `CAM-2`, …) — not derived from the name, which stays freely editable (existing IDs unchanged).
+- Station and line names: any language; inputs are `dir="auto"` and every name is shown inside `<bdi>`, so Persian / mixed-direction names don't scramble the → arrows. Max 120 characters (clear message).
+- Fixed: the Charts-tab Machines & OEE legend and machine dropdown inserted names into the page without escaping — a name with `<` or `&` broke the page; now escaped.
+
+Cache-busters `?v=4.0.420`.
+
 ## [4.0.419] - 2026-11-01 - Camera stations: a station counted by MVE's cameras (objects as OK, other objects as NG)
 
 **Why** — the operator: "be able to add camera count of object(s) as the OK and the count of another object(s) as NG", so a camera can be a station in a line next to the Watcher Jets (IS, QC machine, QC operator, …).

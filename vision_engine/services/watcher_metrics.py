@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -290,6 +289,9 @@ def register_watcher(register_id: str, name: Optional[str] = None,
                 raise ValueError(f"{col.replace('_', ' ')} must be a number above 0")
             sets.append(f"{col}=%s")
             params.append(f)
+    for col, val in (("name", name), ("line", line)):
+        if val is not None and len(str(val).strip()) > 120:
+            raise ValueError(f"{'station' if col == 'name' else 'line'} name too long (max 120 characters)")
     _exec("INSERT INTO watcher_registry (register_id) VALUES (%s) ON CONFLICT DO NOTHING", (reg,))
     for col, val in (("name", name), ("line", line), ("sensor", sensor), ("wtype", wtype)):
         if val is not None:
@@ -463,6 +465,61 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
     }
 
 
+def _line_graph():
+    """The station graph: display names, next-station links, who feeds whom, the
+    lines (terminal station → its members) and each station's `line` text."""
+    reg_rows = _exec("SELECT register_id, name, next_watcher, line FROM watcher_registry",
+                     fetch="all") or []
+    name = {r: (n or r) for r, n, _, _ in reg_rows}
+    line_txt = {r: (l or "").strip() for r, _, _, l in reg_rows}
+    nxt = {r: x for r, _, x, _ in reg_rows if x and x in name and x != r}
+    feeders: Dict[str, List[str]] = {}
+    for a, b in nxt.items():
+        feeders.setdefault(b, []).append(a)
+
+    def _terminal(r: str) -> str:
+        seen = set()
+        while r in nxt and r not in seen:
+            seen.add(r)
+            r = nxt[r]
+        return r
+
+    groups: Dict[str, List[str]] = {}
+    for r in name:
+        if r in nxt or r in feeders:
+            groups.setdefault(_terminal(r), []).append(r)
+    return name, nxt, feeders, groups, line_txt
+
+
+def _line_name_of(term: str, members: List[str], line_txt: Dict[str, str]) -> Optional[str]:
+    """The operator's name for a line: the last station's `line` text, else the one
+    most of its stations carry (a station may keep an old name after being re-chained)."""
+    if line_txt.get(term):
+        return line_txt[term]
+    seen = [line_txt[r] for r in members if line_txt.get(r)]
+    return max(seen, key=seen.count) if seen else None
+
+
+def set_line_name(station: str, line_name: str) -> Dict[str, Any]:
+    """4.0.420 — name the line `station` belongs to (any of its stations will do).
+    Free text, any language; "" clears it (the line then shows its station chain).
+    Stored in every member's `line` field — the same "Line / group" the Charts tab shows."""
+    _ensure_schema()
+    reg = str(station or "").strip()
+    if not reg:
+        raise ValueError("station required")
+    text = str(line_name or "").strip()
+    if len(text) > 120:
+        raise ValueError("line name too long (max 120 characters)")
+    _, _, _, groups, _ = _line_graph()
+    members = next((m for m in groups.values() if reg in m), None)
+    if members is None:
+        raise ValueError("this station is not in a line yet — set a Next station first")
+    for r in members:
+        _exec("UPDATE watcher_registry SET line=%s WHERE register_id=%s", (text or None, r))
+    return {"ok": True, "line_name": text or None, "stations": members}
+
+
 def compute_lines(since_ms: Optional[int] = None,
                   until_ms: Optional[int] = None) -> Dict[str, Any]:
     """4.0.418 — OEE of every LINE: a chain of stations linked by next_watcher (set in
@@ -483,27 +540,12 @@ def compute_lines(since_ms: Optional[int] = None,
                   Performance  = the first station(s) — they set the line's pace
                   OEE          = A × P × Q
     Units still travelling between stations (e.g. inside a Lehr) look like a gap in a
-    short window — use a window much longer than the line's transit time."""
+    short window — use a window much longer than the line's transit time.
+
+    4.0.420 — a line's NAME is whatever the operator typed (stored in the stations'
+    `line` field, see set_line_name); without one it is the chain of station names."""
     _ensure_schema()
-    reg_rows = _exec("SELECT register_id, name, next_watcher FROM watcher_registry",
-                     fetch="all") or []
-    name = {r: (n or r) for r, n, _ in reg_rows}
-    nxt = {r: x for r, _, x in reg_rows if x and x in name and x != r}
-    feeders: Dict[str, List[str]] = {}
-    for a, b in nxt.items():
-        feeders.setdefault(b, []).append(a)
-
-    def _terminal(r: str) -> str:
-        seen = set()
-        while r in nxt and r not in seen:
-            seen.add(r)
-            r = nxt[r]
-        return r
-
-    groups: Dict[str, List[str]] = {}
-    for r in name:
-        if r in nxt or r in feeders:
-            groups.setdefault(_terminal(r), []).append(r)
+    name, nxt, feeders, groups, line_txt = _line_graph()
 
     lines = []
     for term, members in groups.items():
@@ -558,8 +600,10 @@ def compute_lines(since_ms: Optional[int] = None,
         levels: Dict[int, List[str]] = {}
         for r in order:
             levels.setdefault(depth[r], []).append(name[r])
+        chain = " → ".join(" + ".join(v) for _, v in sorted(levels.items()))
+        line_name = _line_name_of(term, order, line_txt)
         lines.append({
-            "name": " → ".join(" + ".join(v) for _, v in sorted(levels.items())),
+            "name": line_name or chain, "line_name": line_name, "chain": chain,
             "terminal": term, "stations": stations,
             "input": round(line_in, 2), "output": round(line_out, 2),
             "ng": round(sum(bad.values()), 2),
@@ -631,6 +675,8 @@ def save_camera_station(register_id: Optional[str], name: str, cameras: Any,
     name = str(name or "").strip()
     if not name:
         raise ValueError("station name required")
+    if len(name) > 120:
+        raise ValueError("station name too long (max 120 characters)")
     ok, ng = _clean_list(ok_classes), _clean_list(ng_classes)
     if not ok and not ng:
         raise ValueError("choose at least one OK or NG object")
@@ -648,10 +694,14 @@ def save_camera_station(register_id: Optional[str], name: str, cameras: Any,
         if not row or row[0] is None:
             raise ValueError(f"'{reg}' is not a camera station")
     else:
-        base = "CAM-" + (re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").upper() or "STATION")[:40]
-        reg, n = base, 2
-        while _exec("SELECT 1 FROM watcher_registry WHERE register_id=%s", (reg,), fetch="one"):
-            reg, n = f"{base}-{n}", n + 1
+        # 4.0.420 — a neutral id (CAM-1, CAM-2, …), NOT derived from the name: the
+        # name is free text the operator may change any time, in any language.
+        used = {r[0] for r in (_exec("SELECT register_id FROM watcher_registry "
+                                     "WHERE register_id LIKE %s", ("CAM-%",), fetch="all") or [])}
+        n = 1
+        while f"CAM-{n}" in used:
+            n += 1
+        reg = f"CAM-{n}"
         _exec("INSERT INTO watcher_registry (register_id) VALUES (%s)", (reg,))
     _exec("UPDATE watcher_registry SET name=%s, cam_config=%s, wtype='camera', assigned=TRUE "
           "WHERE register_id=%s", (name, json.dumps(conf), reg))

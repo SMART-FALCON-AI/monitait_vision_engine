@@ -142,6 +142,19 @@ def watcher_oee(register_id: str, since_ms: int = 0, until_ms: int = 0):
         return JSONResponse({"error": str(e), "oee": None}, status_code=500)
 
 
+@router.post("/api/watchers/line_name")
+async def watcher_line_name(request: Request):
+    """4.0.420 — name a line (free text, any language; "" = show the station chain).
+    `station` = any station of that line."""
+    try:
+        b = await request.json()
+        return wm.set_line_name(b.get("station"), b.get("name"))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @router.get("/api/watchers/camera_options")
 def watcher_camera_options():
     """4.0.419 — cameras + object classes (with their Store flag) for a camera station."""
