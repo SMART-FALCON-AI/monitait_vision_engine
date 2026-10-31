@@ -1,3 +1,11 @@
+// 4.0.424 — ONE escape helper for every server / operator text this file puts into
+// innerHTML (shipment ids from barcodes / PLC / API, class + procedure names, AI answers,
+// server error text). Before, these went in raw — a shipment id containing markup ran as
+// script for every operator viewing the shipment lane.
+function _mveEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
 // Embedded detection-insight charts for the Charts tab.
 // Data source: GET /api/detection_stats?window=... (reads inference_results in TimescaleDB).
 // Two charts: per-class distribution (bar) + detections-over-time (line).
@@ -355,7 +363,7 @@ async function refreshShipmentQualityScore() {
             const unitLbl = (data.impact_per_unit_label || '/unit').replace(/^\//, '');
             topListEl.innerHTML = tops.map(t =>
                 `<div style="display:flex; justify-content:space-between; gap:8px;">` +
-                `<span style="color:var(--text-primary);">${t.class}</span>` +
+                `<span style="color:var(--text-primary);">${_mveEsc(t.class)}</span>` +
                 `<span><span style="color:#86efac;">impact ${t.impact.toFixed(1)}</span> · ` +
                 `<span style="color:#fcd34d;">${(t.impact_per_unit ?? 0).toFixed(3)}/${unitLbl}</span> · ` +
                 `${t.count.toLocaleString()} det · sev ${t.severity}</span></div>`
@@ -471,7 +479,7 @@ async function calibrateShipmentScore() {
             const d = await r.json();
             if (!r.ok) {
                 resultEl.style.display = 'block';
-                resultEl.innerHTML = '<b>✗ ' + (d.error || ('HTTP ' + r.status)) + '</b>';
+                resultEl.innerHTML = '<b>✗ ' + _mveEsc(d.error || ('HTTP ' + r.status)) + '</b>';
                 return;
             }
             resultEl.style.display = 'block';
@@ -495,7 +503,7 @@ async function calibrateShipmentScore() {
             const d = await r.json();
             if (!r.ok || !d.applied) {
                 resultEl.style.display = 'block';
-                resultEl.innerHTML = '<b>✗ Apply failed: ' + (d.error || d.apply_error || ('HTTP ' + r.status)) + '</b>';
+                resultEl.innerHTML = '<b>✗ Apply failed: ' + _mveEsc(d.error || d.apply_error || ('HTTP ' + r.status)) + '</b>';
                 return;
             }
             resultEl.innerHTML =
@@ -1822,7 +1830,7 @@ function _paintEjectionStrip(cells, nbins, axis, lo, hi) {
     if (legend) {
         legend.innerHTML = Object.entries(totals)
             .sort((a, b) => b[1] - a[1])
-            .map(([n, k]) => `<span style="display:inline-flex; align-items:center; gap:3px;"><span style="display:inline-block; width:10px; height:10px; background:${_procColor(n)}; border-radius:2px;"></span>${n} (${k})</span>`)
+            .map(([n, k]) => `<span style="display:inline-flex; align-items:center; gap:3px;"><span style="display:inline-block; width:10px; height:10px; background:${_procColor(n)}; border-radius:2px;"></span>${_mveEsc(n)} (${k})</span>`)
             .join('');
     }
 }
@@ -2090,12 +2098,12 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
             const leftPct = (b / nbins) * 100, widthPct = ((e - b) / nbins) * 100;
             labelHtml.push('<div class="mve-ship-bar" data-w-pct="' + widthPct + '" '
                 + 'data-label-full="' + sh.replace(/"/g, '&quot;') + '" '
-                + 'data-label-med="' + (sh.length > 8 ? sh.slice(-8) : sh) + '" '
-                + 'data-label-tail="' + (sh.length > 4 ? sh.slice(-4) : sh) + '" '
+                + 'data-label-med="' + _mveEsc(sh.length > 8 ? sh.slice(-8) : sh) + '" '
+                + 'data-label-tail="' + _mveEsc(sh.length > 4 ? sh.slice(-4) : sh) + '" '
                 + 'style="position:absolute; top:0; height:100%; left:' + leftPct + '%; width:' + widthPct + '%; '
                 + 'display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:700; color:#fff; '
                 + 'text-shadow:0 1px 2px rgba(0,0,0,0.75); pointer-events:none; overflow:hidden; white-space:nowrap;">'
-                + '<span class="mve-ship-label" style="padding:0 3px; overflow:hidden; text-overflow:ellipsis;">' + sh + '</span></div>');
+                + '<span class="mve-ship-label" style="padding:0 3px; overflow:hidden; text-overflow:ellipsis;">' + _mveEsc(sh) + '</span></div>');
         }
         b = e;
     }
@@ -3659,7 +3667,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
     if (_shipList && Array.isArray(data.shipments)) {
         // Newest first is friendlier when there are hundreds of shipments.
         const _sorted = data.shipments.slice().sort().reverse();
-        _shipList.innerHTML = _sorted.map(s => `<option value="${s}"></option>`).join('');
+        _shipList.innerHTML = _sorted.map(s => `<option value="${_mveEsc(s)}"></option>`).join('');
     }
 
     // v4.0.119 — RENDER THE SHIPMENT STRIP IMMEDIATELY as soon as data
@@ -5843,7 +5851,7 @@ function openDefectDrawerForFrame(item) {
             camIdx = '  •  cam ' + Math.round(item.camera_index);
         }
         const classes = (item.classes && item.classes.length) ? item.classes.join(', ') : headerCls;
-        meta.innerHTML = '<b>Defects in this frame:</b> ' + classes + conf + enc + camIdx
+        meta.innerHTML = '<b>Defects in this frame:</b> ' + _mveEsc(classes) + conf + enc + camIdx
             + '  &nbsp;|&nbsp;  <span style="color:#94a3b8;">scroll to zoom · drag to pan · double-click to reset</span>';
     }
 }
@@ -5890,12 +5898,12 @@ async function askWhyForCurrentDefect() {
         }
         const ans = (data.answer || '').trim();
         const model = data.model || '';
-        const usage = data.usage ? '<span style="opacity:0.5; font-size:11px;"> · ' + data.usage + '</span>' : '';
+        const usage = data.usage ? '<span style="opacity:0.5; font-size:11px;"> · ' + _mveEsc(data.usage) + '</span>' : '';
         panel.innerHTML = '<div style="color:#a7f3d0; font-size:11px; margin-bottom:4px;">🤔 Why? — via <b>' +
-            (model || 'AI') + '</b>' + usage + '</div>' +
-            '<div>' + ans.replace(/\n/g, '<br>') + '</div>';
+            _mveEsc(model || 'AI') + '</b>' + usage + '</div>' +
+            '<div>' + _mveEsc(ans).replace(/\n/g, '<br>') + '</div>';
     } catch (e) {
-        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + (e.message || e) + '</span>';
+        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + _mveEsc(e.message || e) + '</span>';
     } finally {
         btn.disabled = false; btn.style.opacity = '1';
     }
@@ -6571,15 +6579,15 @@ async function askWhyForScore(btn) {
         });
         const d = await r.json();
         if (!r.ok) {
-            panel.innerHTML = '<span style="color:#fca5a5;">' + (d.error || ('Request failed (' + r.status + ')')) + '</span>';
+            panel.innerHTML = '<span style="color:#fca5a5;">' + _mveEsc(d.error || ('Request failed (' + r.status + ')')) + '</span>';
             return;
         }
         const ans = (d.answer || '').trim();
         panel.innerHTML =
-            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + (d.model || 'AI') + '</b></div>' +
-            '<div>' + ans.replace(/\n/g, '<br>') + '</div>';
+            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + _mveEsc(d.model || 'AI') + '</b></div>' +
+            '<div>' + _mveEsc(ans).replace(/\n/g, '<br>') + '</div>';
     } catch (e) {
-        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + (e.message || e) + '</span>';
+        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + _mveEsc(e.message || e) + '</span>';
     } finally {
         if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
     }
@@ -6623,7 +6631,7 @@ async function uploadCurrentDefectToAiTrainer() {
         } else {
             if (btn) btn.textContent = '⚠️ Failed';
             const errMsg = (d && d.error) ? d.error : `HTTP ${r.status}`;
-            if (meta) meta.innerHTML = `<span style="color:#f87171;">📤 Upload failed: ${errMsg}</span>`;
+            if (meta) meta.innerHTML = `<span style="color:#f87171;">📤 Upload failed: ${_mveEsc(errMsg)}</span>`;
         }
     } catch (e) {
         if (btn) btn.textContent = '⚠️ Failed';
@@ -6891,7 +6899,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var sel = document.getElementById("detcam-class-sel"); if (!sel) return;
     var sig = classes.join(",");
     if (sel.dataset.filled !== sig) {
-      sel.innerHTML = classes.map(function (c) { return "<option value=\"" + c + "\">" + c + "</option>"; }).join("");
+      sel.innerHTML = classes.map(function (c) { return "<option value=\"" + _mveEsc(c) + "\">" + _mveEsc(c) + "</option>"; }).join("");
       sel.dataset.filled = sig;
     }
     if (S.obj) sel.value = S.obj;

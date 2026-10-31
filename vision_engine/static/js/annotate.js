@@ -269,7 +269,7 @@ function _buildLSConfig() {
     // (Konva captures the wheel events on the Image stage and the page no longer
     // scrolls when the cursor is over the editor).
     const labelTags = _annotateLabels.map(c =>
-        `<Label alias="${c.id}" value="${c.category_name} - ${c.id}" background="${c.color || '#94a3b8'}"/>`
+        `<Label alias="${_mveEsc(c.id)}" value="${_mveEsc(c.category_name)} - ${_mveEsc(c.id)}" background="${_mveEsc(c.color || '#94a3b8')}"/>`
     ).join('');
     // 4.0.297 — labels FIRST (above the image) so the category list is visible the
     // moment the modal opens, with no scrolling. `showInline` keeps the chips wrapping
@@ -527,13 +527,13 @@ function _renderClassMapPanel(mveClasses, unmapped) {
     }
     el.style.display = 'block';
     const opts = _annotateLabels.map(c =>
-        `<option value="${c.id}">${c.category_name} - ${c.id}</option>`
+        `<option value="${_mveEsc(c.id)}">${_mveEsc(c.category_name)} - ${_mveEsc(c.id)}</option>`
     ).join('');
     const rows = unmapped.map(cls => `
         <span style="display:inline-flex; align-items:center; gap:6px; margin-right:14px;">
-            <span style="font-weight:700; min-width:90px;">${cls}</span>
+            <span style="font-weight:700; min-width:90px;">${_mveEsc(cls)}</span>
             <span>→</span>
-            <select data-mve-class="${cls}" class="annotate-classmap-pick"
+            <select data-mve-class="${_mveEsc(cls)}" class="annotate-classmap-pick"
                 style="background:rgba(15,23,42,0.6); color:#fff; border:1px solid rgba(245,158,11,0.4); padding:3px 6px; border-radius:3px; font-size:11px;">
                 <option value="">— pick category —</option>
                 ${opts}

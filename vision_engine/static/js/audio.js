@@ -405,7 +405,7 @@ function updateObjectsList() {
         const drift    = audioSettings.colorDrift?.[objectName];             // 3.22.2 — read-only ΔE drift {p5_de, p50_de, p95_de, by_camera}
         const areaSt   = audioSettings.areaStats?.[objectName];              // 3.22.3 — read-only bbox area stats {p5, p50, p95, by_camera}
         const beepSound = audioSettings.objectBeepSounds?.[objectName] || 'sine';
-        const safeName = objectName.replace(/'/g, "\\'");
+        const safeName = _mveEsc(JSON.stringify(objectName));   // 4.0.424 — a JS string literal, HTML-escaped for the attribute
 
         const card = document.createElement('div');
         card.style.cssText = `padding: 10px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; border: 1px solid ${isShown ? 'rgba(34,197,94,0.4)' : 'rgba(51, 65, 85, 0.6)'};`;
@@ -413,40 +413,40 @@ function updateObjectsList() {
         const infoHtml = getObjectInfo(objectName);
         card.innerHTML = `
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px;">
-                <div style="font-weight: 600; color: var(--text-primary); font-size: 14px; flex: 1;">${objectName}</div>
-                <button onclick="askWhyForClass('${safeName}', this)" title="Ask the AI why this class is behaving this way right now" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:1px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🤔</button>
+                <div style="font-weight: 600; color: var(--text-primary); font-size: 14px; flex: 1;">${_mveEsc(objectName)}</div>
+                <button onclick="askWhyForClass(${safeName}, this)" title="Ask the AI why this class is behaving this way right now" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:1px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🤔</button>
                 <span class="info-tooltip-sm" style="cursor: help;">i<span class="info-tooltip-text" style="text-align: left; min-width: 280px;">${infoHtml}</span></span>
             </div>
             <div class="per-class-why-${safeName.replace(/[^a-zA-Z0-9]/g,'_')}" style="display:none; font-size:11px; color:#d1fae5; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:4px; padding:6px 8px; margin-bottom:6px; line-height:1.45;"></div>
             <div style="display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px;">
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Show bounding box">
-                    <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
                     Show
                 </label>
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Voice narration">
-                    <input type="checkbox" ${isNarrate ? 'checked' : ''} onchange="toggleObjectNarrate('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    <input type="checkbox" ${isNarrate ? 'checked' : ''} onchange="toggleObjectNarrate(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
                     Narrate
                 </label>
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Beep alert">
-                    <input type="checkbox" ${isBeep ? 'checked' : ''} onchange="toggleObjectBeep('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    <input type="checkbox" ${isBeep ? 'checked' : ''} onchange="toggleObjectBeep(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
                     Beep
                 </label>
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Persist this class's detections to the database (off = drop, on = write to inference_results)">
-                    <input type="checkbox" ${isStore ? 'checked' : ''} onchange="toggleObjectStore('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    <input type="checkbox" ${isStore ? 'checked' : ''} onchange="toggleObjectStore(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
                     Store
                 </label>
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="ColorE — extract CIELAB color from this class's bbox on every detection. Drives the 🎨 line below.">
-                    <input type="checkbox" ${isColorE ? 'checked' : ''} onchange="toggleObjectColorE('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    <input type="checkbox" ${isColorE ? 'checked' : ''} onchange="toggleObjectColorE(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
                     ColorE
                 </label>
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Area — store bbox area on detection + show p5/p50/p95 below.">
-                    <input type="checkbox" ${isArea ? 'checked' : ''} onchange="toggleObjectArea('${safeName}')" style="width: 14px; height: 14px; cursor: pointer;">
+                    <input type="checkbox" ${isArea ? 'checked' : ''} onchange="toggleObjectArea(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
                     Area
                 </label>
             </div>
             <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;">
                 <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap;" title="Semantic role of this class.&#10;&#10;Context — informational only, no special wiring.&#10;Defect — counted in OK/NG and weighted into the quality score by Severity.&#10;Parent — marks the inspection region (the physical product). When at least one class has role=Parent, frames are only scored if a parent is detected; if none of the configured classes are Parent, the whole frame (_root) is the parent.&#10;Marker — landmark on the encoder axis (e.g. a stitch marks roll boundaries). Surfaces on the encoder strip for spatial reference, doesn't affect scoring.">Role:</span>
-                <select onchange="updateObjectRole('${safeName}', this.value)"
+                <select onchange="updateObjectRole(${safeName}, this.value)"
                     style="padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; cursor: pointer;"
                     title="Role of this class in the system.">
                     <option value="context"           ${role==='context'           ?'selected':''}>📋 Context</option>
@@ -463,12 +463,12 @@ function updateObjectsList() {
                 </select>
                 <span style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; margin-left: 6px;">Min conf:</span>
                 <input type="number" value="${confidence}" min="0" max="100" step="1"
-                    onchange="updateObjectConfidence('${safeName}', this.value)"
+                    onchange="updateObjectConfidence(${safeName}, this.value)"
                     style="width: 55px; padding: 3px 5px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center;">
                 <span style="font-size: 12px; color: var(--text-secondary);">%</span>
                 <span style="font-size: 12px; color: ${sevDisabled?'rgba(148,163,184,0.4)':'var(--text-secondary)'}; white-space: nowrap; margin-left: 6px;" title="Severity weight 0–100. Used to compute defect impact score (severity × confidence × area). Higher = this class hurts shipment quality more. Disabled when role=Parent because parents define the inspection area, not a defect impact.">Severity:</span>
                 <input type="number" value="${severity}" min="0" max="100" step="1" ${sevDisabled?'disabled':''}
-                    onchange="updateObjectSeverity('${safeName}', this.value)"
+                    onchange="updateObjectSeverity(${safeName}, this.value)"
                     style="width: 55px; padding: 3px 5px; background: ${sevDisabled?'rgba(30,41,59,0.25)':'rgba(30,41,59,0.6)'}; color: ${sevDisabled?'rgba(148,163,184,0.4)':'var(--text-primary)'}; border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 12px; text-align: center; cursor: ${sevDisabled?'not-allowed':'auto'};"
                     title="${sevDisabled?'Disabled: role=Parent defines inspection area, not impact':'Per-class defect impact weight (0=cosmetic, 100=critical)'}">
             </div>
@@ -500,13 +500,13 @@ function updateObjectsList() {
             </div>` : ''}
             ` : (isArea ? `<div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; padding: 3px 6px; background: rgba(15,23,42,0.25); border-radius: 3px; font-style: italic;">📐 Area on — gathering samples (5+ detections needed). Stats appear here once data flows.</div>` : '')}
             <div style="display: flex; gap: 6px; align-items: center;">
-                <select onchange="updateObjectBeepSound('${safeName}', this.value)" style="flex: 1; padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
+                <select onchange="updateObjectBeepSound(${safeName}, this.value)" style="flex: 1; padding: 3px 6px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 11px;">
                     <option value="sine" ${beepSound === 'sine' ? 'selected' : ''}>🔔 Sine</option>
                     <option value="square" ${beepSound === 'square' ? 'selected' : ''}>📢 Square</option>
                     <option value="sawtooth" ${beepSound === 'sawtooth' ? 'selected' : ''}>🎺 Sawtooth</option>
                     <option value="triangle" ${beepSound === 'triangle' ? 'selected' : ''}>🎵 Triangle</option>
                 </select>
-                <button onclick="testObjectBeep('${safeName}')" style="padding: 3px 8px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">▶</button>
+                <button onclick="testObjectBeep(${safeName})" style="padding: 3px 8px; background: var(--secondary-color); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px;">▶</button>
             </div>
         `;
 
@@ -1028,15 +1028,15 @@ async function askWhyForClass(className, btn) {
         });
         const d = await r.json();
         if (!r.ok) {
-            panel.innerHTML = '<span style="color:#fca5a5;">' + (d.error || ('Request failed (' + r.status + ')')) + '</span>';
+            panel.innerHTML = '<span style="color:#fca5a5;">' + _mveEsc(d.error || ('Request failed (' + r.status + ')')) + '</span>';
             return;
         }
         const ans = (d.answer || '').trim();
         panel.innerHTML =
-            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + (d.model || 'AI') + '</b></div>' +
-            '<div>' + ans.replace(/\n/g, '<br>') + '</div>';
+            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + _mveEsc(d.model || 'AI') + '</b></div>' +
+            '<div>' + _mveEsc(ans).replace(/\n/g, '<br>') + '</div>';
     } catch (e) {
-        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + (e.message || e) + '</span>';
+        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + _mveEsc(e.message || e) + '</span>';
     } finally {
         if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
     }
@@ -1314,7 +1314,7 @@ function renderProcedures() {
                     <option value="fixed" ${rule.reference_mode === 'fixed' ? 'selected' : ''}>vs Fixed</option>
                 </select>
                 ${rule.reference_mode === 'fixed' ? `
-                    <button onclick="captureColorReference('${rule.object}')"
+                    <button onclick="captureColorReference(${_mveEsc(JSON.stringify(rule.object))})"
                         style="padding: 2px 6px; background: rgba(34,197,94,0.3); color: #22c55e; border: 1px solid rgba(34,197,94,0.4); border-radius: 4px; cursor: pointer; font-size: 10px;"
                         title="Capture current color as fixed reference">Capture</button>
                 ` : ''}`;
@@ -1335,7 +1335,7 @@ function renderProcedures() {
                         const names = new Set(detectedObjectClasses);
                         if (rule.object && rule.object !== 'shipment') names.add(rule.object);
                         return Array.from(names).sort().map(name =>
-                            '<option value="' + name + '" ' + (rule.object === name ? 'selected' : '') + '>' + name + '</option>'
+                            '<option value="' + _mveEsc(name) + '" ' + (rule.object === name ? 'selected' : '') + '>' + _mveEsc(name) + '</option>'
                         ).join('');
                     })()}
                 </select>
@@ -1384,7 +1384,7 @@ function renderProcedures() {
         return `
             <div style="padding: 12px; background: rgba(51, 65, 85, 0.4); border-radius: 6px; margin-bottom: 8px; border: 1px solid ${proc.enabled ? 'rgba(239,68,68,0.4)' : 'rgba(51,65,85,0.6)'};">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; flex-wrap: wrap;">
-                    <input type="text" value="${proc.name}"
+                    <input type="text" value="${_mveEsc(proc.name)}"
                         onchange="updateProcedureField('${proc.id}', 'name', this.value)"
                         title="Procedure name — a descriptive label for this ejection rule set"
                         style="flex: 1; min-width: 120px; padding: 4px 8px; background: rgba(30,41,59,0.6); color: var(--text-primary); border: 1px solid rgba(51,65,85,0.6); border-radius: 4px; font-size: 13px; font-weight: 600;">
@@ -2567,9 +2567,9 @@ function renderAIModelsList(data) {
         btn.className = 'camera-btn ' + (isActive ? 'camera-btn-success' : 'camera-btn-secondary');
         btn.style.cssText = 'display: flex; flex-direction: column; align-items: center; padding: 8px 12px; min-width: 140px; cursor: pointer; position: relative;';
         btn.innerHTML = `
-            <span style="font-weight: bold;">${name}</span>
-            <span style="font-size: 10px; opacity: 0.8;">${providerLabels[model.provider] || model.provider}</span>
-            <span style="font-size: 9px; opacity: 0.7;">${model.api_key_masked || '***'}</span>
+            <span style="font-weight: bold;">${_mveEsc(name)}</span>
+            <span style="font-size: 10px; opacity: 0.8;">${_mveEsc(providerLabels[model.provider] || model.provider)}</span>
+            <span style="font-size: 9px; opacity: 0.7;">${_mveEsc(model.api_key_masked || '***')}</span>
             ${isActive ? '<span style="font-size: 9px; color: #90ee90;">ACTIVE</span>' : ''}
         `;
         btn.onclick = () => activateAIModel(name);
@@ -2691,9 +2691,9 @@ function renderDBProfilesList(data) {
         btn.className = 'camera-btn ' + (isActive ? 'camera-btn-success' : 'camera-btn-secondary');
         btn.style.cssText = 'display: flex; flex-direction: column; align-items: center; padding: 8px 12px; min-width: 140px; cursor: pointer; position: relative;';
         btn.innerHTML = `
-            <span style="font-weight: bold;">${name}</span>
-            <span style="font-size: 10px; opacity: 0.8;">${p.host}:${p.port}</span>
-            <span style="font-size: 9px; opacity: 0.7;">${p.database} (${p.user})</span>
+            <span style="font-weight: bold;">${_mveEsc(name)}</span>
+            <span style="font-size: 10px; opacity: 0.8;">${_mveEsc(p.host)}:${_mveEsc(p.port)}</span>
+            <span style="font-size: 9px; opacity: 0.7;">${_mveEsc(p.database)} (${_mveEsc(p.user)})</span>
             ${isActive ? '<span style="font-size: 9px; color: #90ee90;">ACTIVE</span>' : ''}
         `;
         btn.onclick = () => activateDBProfile(name);
@@ -2921,9 +2921,9 @@ function clearChatHistory() {
 // v4.0.224 — HTML-escape helper (none existed in static/js). Used to escape
 // untrusted citation text/labels before injecting them as chips.
 function _escKb(s) {
-    const d = document.createElement('div');
-    d.textContent = (s == null ? '' : String(s));
-    return d.innerHTML;
+    // 4.0.424 — also escape quotes: this is used inside title="…" attributes, and the
+    // textContent→innerHTML trick leaves " and ' as they are (a KB snippet could inject one).
+    return _mveEsc(s);
 }
 
 // v4.0.227 — compact GitHub-flavoured-markdown → HTML renderer for the AI
@@ -3001,7 +3001,7 @@ async function sendAIMessage() {
     // Add user message
     const userMsg = document.createElement('div');
     userMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(59, 130, 246, 0.2); border: 1px solid rgba(59, 130, 246, 0.4); border-radius: 8px; text-align: right; color: var(--text-primary);';
-    userMsg.innerHTML = `<strong>You:</strong> ${message}`;
+    userMsg.innerHTML = `<strong>You:</strong> ${_mveEsc(message)}`;
     chatMessages.appendChild(userMsg);
 
     // Save to history

@@ -530,7 +530,7 @@ def get_ai_tools():
         },
         {
             "name": "call_api_endpoint",
-            "description": "Call any internal MonitaQC API endpoint. GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/gradio/models, /api/conf_baselines, /api/color_drift, /api/area_stats, /api/active_classes, /api/config/db_status, /api/shipment_quality_score, /api/audio_settings, /api/timeline_config. POST endpoints: /api/cameras/discover, /api/timeline_clear, /api/why (payload: {mode, metric, value, timestamp, camera, encoder, shipment, window_seconds, language, extra}).",
+            "description": "Call an internal MVE API endpoint (read-only, except POST /api/why). GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/gradio/models, /api/conf_baselines, /api/color_drift, /api/area_stats, /api/active_classes, /api/config/db_status, /api/shipment_quality_score, /api/audio_settings, /api/timeline_config. POST endpoint: /api/why (payload: {mode, metric, value, timestamp, camera, encoder, shipment, window_seconds, language, extra}).",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -694,6 +694,10 @@ def get_ai_tools():
     return tools
 
 
+# 4.0.424 — the only endpoint the assistant may POST to (see call_api_endpoint).
+_AI_POST_ALLOWED = {"/api/why"}
+
+
 def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str:
     """Execute a tool and return results."""
     try:
@@ -707,25 +711,36 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
                 db_name, db_user = p.get("database", "monitaqc"), p.get("user", "monitaqc")
                 db_pass = p.get("password", "monitaqc2024")
             else:
-                db_host, db_port, db_name, db_user, db_pass = "timescaledb", 5432, "monitaqc", "monitaqc", "monitaqc2024"
+                # 4.0.424 — the real credentials, not a hard-coded copy that drifts from POSTGRES_*
+                from config import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+                db_host, db_port, db_name, db_user, db_pass = (POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB,
+                                                               POSTGRES_USER, POSTGRES_PASSWORD)
 
-            conn = psycopg2.connect(host=db_host, port=db_port, database=db_name, user=db_user, password=db_pass)
-            cursor = conn.cursor()
-            query = tool_input["query"]
-            # Safety: limit results to prevent massive responses
-            if "LIMIT" not in query.upper():
-                query = query.rstrip(";") + " LIMIT 100"
-            cursor.execute(query)
+            # 4.0.424 — the SQL is written by the LLM (and so reachable by prompt injection
+            # from detections / KB text): READ-ONLY session, 15 s statement timeout, 5 s
+            # connect timeout, connection always closed. It used to run as the DB owner
+            # with no limits — a runaway scan or a DELETE on the production database.
+            conn = psycopg2.connect(host=db_host, port=db_port, database=db_name, user=db_user,
+                                    password=db_pass, connect_timeout=5,
+                                    options="-c statement_timeout=15000 -c default_transaction_read_only=on")
+            try:
+                cursor = conn.cursor()
+                query = tool_input["query"]
+                # Safety: limit results to prevent massive responses
+                if "LIMIT" not in query.upper():
+                    query = query.rstrip(";") + " LIMIT 100"
+                cursor.execute(query)
 
-            if cursor.description:
-                results = cursor.fetchall()
-                column_names = [desc[0] for desc in cursor.description]
-                formatted_results = [dict(zip(column_names, row)) for row in results]
-                output = json.dumps(formatted_results, default=str)
-            else:
-                output = json.dumps({"message": "Query executed successfully", "rowcount": cursor.rowcount})
-            cursor.close()
-            conn.close()
+                if cursor.description:
+                    results = cursor.fetchall()
+                    column_names = [desc[0] for desc in cursor.description]
+                    formatted_results = [dict(zip(column_names, row)) for row in results]
+                    output = json.dumps(formatted_results, default=str)
+                else:
+                    output = json.dumps({"message": "Query executed successfully", "rowcount": cursor.rowcount})
+                cursor.close()
+            finally:
+                conn.close()
             return output
 
         elif tool_name == "get_redis_data":
@@ -801,8 +816,19 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
             # Call internal API endpoint via HTTP
             import requests as req
             method = tool_input.get("method", "GET").upper()
-            endpoint = tool_input.get("endpoint", "")
+            endpoint = str(tool_input.get("endpoint", "") or "")
             body = tool_input.get("body")
+            # 4.0.424 — the assistant may READ any /api/ endpoint but may only POST to
+            # /api/why. It could POST anywhere: the camera network scan that crashes IP
+            # cameras (/api/cameras/discover — advertised in this tool's description),
+            # camera restarts, config load/upload, raw serial-board commands (any
+            # one-segment path). And an endpoint like "@host/x" made the URL point at
+            # another host.
+            if not endpoint.startswith("/api/") or ".." in endpoint:
+                return json.dumps({"error": "endpoint must be an /api/ path"})
+            if method == "POST" and endpoint.split("?")[0] not in _AI_POST_ALLOWED:
+                return json.dumps({"error": f"POST {endpoint} is not allowed for the assistant",
+                                   "allowed_post": sorted(_AI_POST_ALLOWED)})
             url = f"http://127.0.0.1:5050{endpoint}"
 
             if method == "POST":

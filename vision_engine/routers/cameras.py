@@ -652,14 +652,39 @@ def load_all_config(request: Request):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+import re as _re
+# 4.0.424 — secret-named fields + the password inside stream URLs (rtsp://user:PASS@…)
+_SECRET_KEY = _re.compile(r"(api_?key|password|passwd|secret|access_token|refresh_token|bot_token|^token)$", _re.I)
+_URL_PASSWORD = _re.compile(r"(://[^:/@\s]+:)[^@/\s]+@")
+
+
+def _mask_secrets(obj):
+    """Copy of `obj` with every secret value replaced by '***'."""
+    if isinstance(obj, dict):
+        return {k: ("***" if isinstance(v, str) and v and _SECRET_KEY.search(str(k))
+                    else _mask_secrets(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mask_secrets(v) for v in obj]
+    if isinstance(obj, str) and "://" in obj and "@" in obj:
+        return _URL_PASSWORD.sub(r"\1***@", obj)
+    return obj
+
+
 @router.get("/api/cameras/config")
 def get_saved_config(request: Request):
-    """Get the saved service configuration from data file."""
+    """Get the saved service configuration from data file.
+
+    4.0.424 — secrets are masked. This answered every browser (and the AI assistant's
+    tools, which list this path) with the raw config: AI-provider API keys, the AI
+    Trainer password + tokens, the Telegram bot token and camera passwords — while the
+    dedicated AI / trainer / notification config endpoints carefully masked the same
+    values. The UI only reads `saved_at` from here; the full backup is
+    /api/export_service_config (an explicit operator download)."""
     try:
         config = load_service_config()
         if not config:
             return JSONResponse(content={"exists": False, "config": None})
-        return JSONResponse(content={"exists": True, "config": config})
+        return JSONResponse(content={"exists": True, "config": _mask_secrets(config)})
     except Exception as e:
         logger.error(f"Error reading config: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)

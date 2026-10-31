@@ -1121,7 +1121,7 @@ function _renderPickerOptions(sel, names, cur) {
         return;
     }
     sel.innerHTML = names.map(n =>
-        `<option value="${n}" ${n === cur ? 'selected' : ''} style="${_PICKER_OPT_STYLE}">${n}</option>`
+        `<option value="${_mveEsc(n)}" ${n === cur ? 'selected' : ''} style="${_PICKER_OPT_STYLE}">${_mveEsc(n)}</option>`
     ).join('');
 }
 
@@ -1335,7 +1335,7 @@ async function askAiRecommendState() {
         const d = await r.json();
         if (!r.ok) {
             content.innerHTML = '<span style="color:#fca5a5;">✗ ' +
-                (d.upstream_error ? d.upstream_error.slice(0, 200) : (d.error || ('HTTP ' + r.status))) +
+                _mveEsc(d.upstream_error ? d.upstream_error.slice(0, 200) : (d.error || ('HTTP ' + r.status))) +
                 '</span>';
             return;
         }
@@ -1343,14 +1343,14 @@ async function askAiRecommendState() {
         const conf = (d.confidence || 'medium').toUpperCase();
         const altsHtml = (d.alternatives || []).length
             ? '<div style="font-size:10px; color:#94a3b8; margin-top:3px;">Alternatives: '
-              + d.alternatives.map(a => `<b>${a.name}</b> — ${(a.reason || '').slice(0, 70)}`).join(' · ')
+              + d.alternatives.map(a => `<b>${_mveEsc(a.name)}</b> — ${_mveEsc((a.reason || '').slice(0, 70))}`).join(' · ')
               + '</div>'
             : '';
         content.innerHTML =
-            `<div><b style="color:#a7f3d0;">${d.recommended_state}</b> ` +
+            `<div><b style="color:#a7f3d0;">${_mveEsc(d.recommended_state)}</b> ` +
             `<span style="opacity:0.7; font-size:10px;">[${conf}]</span> ` +
-            `<span style="opacity:0.6; font-size:10px;">via ${d.model || 'AI'}</span></div>` +
-            `<div style="margin-top:2px;">${d.reason || ''}</div>` +
+            `<span style="opacity:0.6; font-size:10px;">via ${_mveEsc(d.model || 'AI')}</span></div>` +
+            `<div style="margin-top:2px;">${_mveEsc(d.reason || '')}</div>` +
             altsHtml;
         actions.style.display = (d.recommended_state && d.recommended_state !== d.current_state) ? 'flex' : 'none';
     } catch (e) {
@@ -2029,7 +2029,7 @@ function createCameraCard(cameraId, camera) {
         const bp = (camera.by_path || '').replace('/dev/v4l/by-path/', '');
         div.innerHTML = `
             <div class="camera-card-header">
-                <span class="camera-card-title">🔌 ${cameraName}</span>
+                <span class="camera-card-title">🔌 ${_mveEsc(cameraName)}</span>
                 <span class="camera-status-badge" style="background:rgba(245,158,11,0.2); color:#fbbf24; border:1px solid rgba(245,158,11,0.5);">DETECTED — NOT IN USE</span>
             </div>
             <div class="camera-card-content" style="padding:14px;">
@@ -2048,7 +2048,7 @@ function createCameraCard(cameraId, camera) {
 
     div.innerHTML = `
         <div class="camera-card-header">
-            <span class="camera-card-title">Camera ${cameraId}: ${cameraName}</span>
+            <span class="camera-card-title">Camera ${cameraId}: ${_mveEsc(cameraName)}</span>
             <span class="camera-status-badge ${isConnected ? 'running' : 'stopped'}">
                 ${isConnected ? 'CONNECTED' : 'DISCONNECTED'}
             </span>
@@ -2063,7 +2063,7 @@ function createCameraCard(cameraId, camera) {
                           src="/api/camera/${cameraId}/snapshot?t=${Date.now()}"
                           class="camera-image camera-live-feed"
                           data-camera-id="${cameraId}"
-                          alt="${cameraName}"
+                          alt="${_mveEsc(cameraName)}"
                           onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
                      <div class="camera-no-image" style="display:none;">📷 Camera feed unavailable</div>` :
                     `<div class="camera-no-image">Camera not connected</div>`
@@ -2689,7 +2689,7 @@ function renderStatesList(states) {
         btn.className = 'camera-btn ' + (isActive ? 'camera-btn-success' : 'camera-btn-secondary');
         btn.style.cssText = 'display: flex; flex-direction: column; align-items: center; padding: 8px 12px; min-width: 140px; cursor: pointer;';
         btn.innerHTML = `
-            <span style="font-weight: bold;">${name}</span>
+            <span style="font-weight: bold;">${_mveEsc(name)}</span>
             <span style="font-size: 10px; opacity: 0.8;">${phaseCount} phase${phaseCount !== 1 ? 's' : ''} | Cams: ${allCameras.join(',')}</span>
             <span style="font-size: 10px; opacity: 0.8;">Steps: ${stepsDisplay} | Analog: ${analogDisplay}${state.light_status_check ? ' | Light Check' : ''}</span>
             <span style="font-size: 9px; opacity: 0.7;">${phasesInfo || 'No phases'}</span>
@@ -3185,15 +3185,15 @@ function renderPipelinesList(pipelines, currentPipeline) {
         const phaseModels = pipeline.phases.map(p => p.model_id).join(' -> ') || 'No models';
         pipelineDiv.innerHTML = `
             <div>
-                <strong style="font-size: 14px; color: var(--text-primary);">${pipeline.name}</strong>
+                <strong style="font-size: 14px; color: var(--text-primary);">${_mveEsc(pipeline.name)}</strong>
                 ${isActive ? '<span style="margin-left: 8px; padding: 2px 6px; background: var(--primary-color); color: white; border-radius: 3px; font-size: 10px;">ACTIVE</span>' : ''}
-                <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary);">${pipeline.description || 'No description'}</div>
+                <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary);">${_mveEsc(pipeline.description || 'No description')}</div>
                 <div style="margin-top: 4px; font-size: 10px; color: var(--text-secondary);">Phases: ${phaseModels}</div>
                 ${pipeline.weight_file ? `<div style="margin-top: 4px; font-size: 10px; color: var(--text-secondary);">⚖ ${pipeline.weight_file}${pipeline.task_id ? ' · task ' + pipeline.task_id : ''}${pipeline.weight_serial_number ? ' · ' + pipeline.weight_serial_number : ''}</div>` : ''}
-                ${pipeline.confusion_matrix ? `<img src="${pipeline.confusion_matrix}" alt="confusion matrix" title="confusion matrix" style="margin-top: 6px; max-width: 100%; max-height: 130px; border: 1px solid var(--border-color); border-radius: 4px; background:#fff; display:block;">` : ''}
+                ${pipeline.confusion_matrix ? `<img src="${_mveEsc(pipeline.confusion_matrix)}" alt="confusion matrix" title="confusion matrix" style="margin-top: 6px; max-width: 100%; max-height: 130px; border: 1px solid var(--border-color); border-radius: 4px; background:#fff; display:block;">` : ''}
                 <div style="margin-top: 8px; display: flex; gap: 4px;">
-                    ${!isActive ? `<button onclick="activatePipeline('${name}')" style="padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Activate</button>` : ''}
-                    <button onclick="loadPipelineForEdit('${name}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
+                    ${!isActive ? `<button onclick="activatePipeline(${_mveEsc(JSON.stringify(name))})" style="padding: 4px 8px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Activate</button>` : ''}
+                    <button onclick="loadPipelineForEdit(${_mveEsc(JSON.stringify(name))})" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
                 </div>
             </div>
         `;
@@ -3226,7 +3226,7 @@ function renderModelsList(models) {
                     <div style="margin-top: 2px; font-size: 10px; color: var(--text-secondary); word-break: break-all;">${model.inference_url}</div>
                 </div>
                 <div style="display: flex; gap: 4px; margin-left: 10px;">
-                    <button onclick="loadModelForEdit('${id}')" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
+                    <button onclick="loadModelForEdit(${_mveEsc(JSON.stringify(id))})" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
                 </div>
             </div>
         `;

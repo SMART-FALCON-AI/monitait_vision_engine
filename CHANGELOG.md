@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.424] - 2026-11-01 - Audit batch 4 (security): secrets out of the browser, free text escaped, AI tools fenced
+
+**Fixed**
+- **`GET /api/cameras/config` sent every stored secret to any browser**: AI-provider API keys, the AI Trainer password + access/refresh tokens, the Telegram bot token and the camera passwords inside RTSP URLs — while the dedicated AI / trainer / notification config endpoints carefully masked the same values. Fetched on every page load, and listed in the AI assistant's tools (so it could forward them to the external LLM). Secret-named fields and URL passwords are now `***`; non-secret values untouched. The UI only reads `saved_at` there; the explicit full backup (`/api/export_service_config`, an operator download) is unchanged.
+- **Free text went into the page as HTML** (Charts, AI Assistant, Cameras, Process, Inference, annotation): shipment ids (from barcodes / PLC / API — one containing markup ran as script for every operator viewing the shipment lane), class / procedure / state / pipeline / model / camera names, AI answers, server error text, the operator's own chat message, trainer category names (also invalid Label Studio XML on `&`). One shared escaper (`_mveEsc`, charts.js) now covers ~55 sites. Inline handlers (`onclick="activatePipeline('…')"`, the per-class toggles, …) now pass names as JSON string literals — a pipeline called `Ali's line` broke Activate / Edit, and a class name with `"` broke its toggles. Tested in the real page with the name `Ali's "line" <b>&co</b>`: shown as text, every handler receives the exact name.
+- **KB citation / conversation tooltips** (`_escKb`): escaped `&<>` but not quotes, inside `title="…"` — a KB snippet could inject an attribute.
+- **AI assistant tools** (`routers/ai.py`):
+  - `query_database` ran LLM-written SQL (reachable by prompt injection via detections / KB text) as the DB owner with a hard-coded password, no statement / connect timeout and no read-only mode, leaking the connection on error. Now: real `POSTGRES_*` credentials, READ-ONLY session, 15 s statement timeout, 5 s connect timeout, always closed.
+  - `call_api_endpoint` could POST anywhere — its description even advertised `POST /api/cameras/discover` (the network scan that crashes IP cameras) and `/api/timeline_clear`; also camera restarts, config load/upload and raw serial-board commands. Now: GET any `/api/` path, POST only `/api/why`; an endpoint like `@host/x` (which pointed the URL at another host) is refused.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.423] - 2026-11-01 - Audit batch 3: saves no longer delete cameras, ejection order, shift reports, side effects from renders
 
 **Fixed**
