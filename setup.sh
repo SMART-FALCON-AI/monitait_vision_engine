@@ -225,11 +225,25 @@ ensure_prereqs() {
         if ! grep -q "\"$REGISTRY\"" "$daemon" 2>/dev/null; then
             log "Adding $REGISTRY to insecure-registries"
             [ -f "$daemon" ] && cp "$daemon" "$daemon.bak.$(date +%s)"
-            cat >"$daemon" <<EOF
+            # MERGE into the existing file — overwriting it dropped the nvidia runtime
+            # and a moved data-root (docker then came up on an empty / wrong store).
+            if [ -s "$daemon" ] && command -v python3 >/dev/null 2>&1; then
+                python3 - "$daemon" "$REGISTRY" <<'PY' || die "could not update $daemon"
+import json, sys
+p, reg = sys.argv[1], sys.argv[2]
+d = json.load(open(p))
+regs = d.setdefault("insecure-registries", [])
+if reg not in regs:
+    regs.append(reg)
+json.dump(d, open(p, "w"), indent=2)
+PY
+            else
+                cat >"$daemon" <<EOF
 {
   "insecure-registries": ["$REGISTRY"]
 }
 EOF
+            fi
             systemctl restart docker
         fi
     fi

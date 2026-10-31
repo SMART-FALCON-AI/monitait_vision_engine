@@ -26,7 +26,7 @@ from typing import Dict, Any, List
 
 import config as cfg
 from services.camera import (
-    CameraBuffer, DETECTED_CAMERAS, detect_video_devices, persisted_cfg_id_for_source, safe_source,
+    CameraBuffer, DETECTED_CAMERAS, persisted_cfg_id_for_source, safe_source,
     CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
     apply_camera_config_from_saved,
 )
@@ -1034,99 +1034,40 @@ class ArduinoSocket:
         self.cam_4 = self.cameras.get(4)
 
     def rescan_cameras(self):
-        """Re-detect USB cameras and update the cameras dict.
+        """4.0.428 — SAFE, report-only hot-plug check (runs on every click of the Cameras
+        tab's Refresh button).
 
-        - New devices that appeared get a CameraBuffer created
-        - Existing cameras whose device node disappeared get stopped and removed
-        - Returns summary of changes: {added: [...], removed: [...], unchanged: [...]}
-        """
-        current_devices = detect_video_devices()  # e.g. ['/dev/video0', '/dev/video2', '/dev/video4']
-        # Filter to devices that actually exist right now
-        current_devices = [d for d in current_devices if os.path.exists(d)]
+        The old version (see git history before 4.0.428) compared each
+        USB camera's BOOT-time /dev/videoN against the EVEN-numbered nodes only, so a live
+        camera on an odd node (nafis-pardis has them) or one whose node moved after a
+        reconnect was "removed": its capture was released from this web thread while its
+        buffer thread could be inside grab() (use-after-free → the exit-139 crash) and it
+        came back under a new id with exposure/gain 100. It also restarted failing cameras
+        from here (same crash risk) and hot-added new nodes under raw /dev/videoN paths,
+        bypassing the config.
 
-        # Build reverse map: device_path → cam_id for existing cameras
-        existing_paths = {}
+        Now: nothing is removed, restarted or added at runtime. A configured camera whose
+        device is gone is reported as `missing` (its own reconnect logic re-attaches it by
+        by-path when it comes back); a by-path capture device no camera is bound to is
+        reported as `detected_new` — it shows in the Cameras tab as "DETECTED — NOT IN
+        USE" with an Add button (persisted, by-path)."""
+        import glob as _glob
+        bound, unchanged, missing = set(), [], []
         for cam_id, cam in list(self.cameras.items()):
-            path = self.camera_paths[cam_id - 1] if cam_id <= len(self.camera_paths) else None
-            if path:
-                existing_paths[path] = cam_id
-
-        added = []
-        removed = []
-        unchanged = []
-
-        # Check for removed cameras (device node gone)
-        # 4.0.50 — rescan is a UVC (V4L2) hot-plug helper. It MUST NOT touch
-        # cameras that live outside /dev/video* — that includes IP cameras
-        # (rtsp://, http(s)://) and "pro" industrial cameras (basler://).
-        # Before 4.0.50 this loop happily deleted the Basler entry on every
-        # UI refresh because "basler://…" isn't in the V4L2 device list, and
-        # then the persisted config re-loaded it minutes later — cycling
-        # forever.
-        NON_UVC_PREFIXES = ("basler://", "rtsp://", "http://", "https://")
-        for path, cam_id in list(existing_paths.items()):
-            # Skip anything that isn't a /dev/video* path. IP / pro cameras
-            # have their own reconnect logic inside CameraBuffer /
-            # BaslerBuffer.
-            if isinstance(path, str) and path.startswith(NON_UVC_PREFIXES):
-                unchanged.append({"id": cam_id, "path": path})
-                continue
-            if path not in current_devices:
-                # Device disappeared — stop and remove
-                cam = self.cameras.get(cam_id)
-                if cam and hasattr(cam, 'stop'):
-                    cam.stop = True
-                    if hasattr(cam, 'camera'):
-                        try:
-                            cam.camera.release()
-                        except Exception:
-                            pass
-                del self.cameras[cam_id]
-                if cam_id in self.camera_metadata:
-                    del self.camera_metadata[cam_id]
-                removed.append({"id": cam_id, "path": path})
-                logger.info(f"Camera {cam_id} removed (device gone): {path}")
+            boot = self.camera_paths[cam_id - 1] if 0 < cam_id <= len(self.camera_paths) else None
+            src = getattr(cam, "source", None) or boot
+            for p in (src, boot):
+                if isinstance(p, str) and p.startswith("/dev/"):
+                    bound.add(os.path.realpath(p))
+            entry = {"id": cam_id, "path": src}
+            if isinstance(src, str) and src.startswith("/dev/") and not os.path.exists(src):
+                missing.append(entry)
             else:
-                # Device still exists — check if cam.success is valid
-                cam = self.cameras.get(cam_id)
-                if cam and not getattr(cam, 'success', False):
-                    # Camera object exists but failing — try restart
-                    try:
-                        cam.restart_camera()
-                        logger.info(f"Camera {cam_id} restarted at {path}")
-                    except Exception as e:
-                        logger.warning(f"Camera {cam_id} restart failed: {e}")
-                unchanged.append({"id": cam_id, "path": path})
-
-        # Check for new cameras (device node appeared but not tracked)
-        existing_device_set = set(existing_paths.keys())
-        for dev_path in current_devices:
-            if dev_path not in existing_device_set:
-                # New device — assign next available cam_id
-                next_id = max(self.cameras.keys()) + 1 if self.cameras else 1
-                try:
-                    cam = CameraBuffer(dev_path, exposure=100, gain=100)
-                    self.cameras[next_id] = cam
-                    # Extend camera_paths list if needed
-                    while len(self.camera_paths) < next_id:
-                        self.camera_paths.append(None)
-                    self.camera_paths[next_id - 1] = dev_path
-                    self.camera_metadata[next_id] = {
-                        "name": f"USB Camera {next_id}",
-                        "type": "usb",
-                        "path": dev_path,
-                        "source": dev_path,
-                    }
-                    added.append({"id": next_id, "path": dev_path})
-                    logger.info(f"Camera {next_id} added (hot-plug): {dev_path}")
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(f"Failed to init new camera at {dev_path}: {e}")
-
-        # Sync legacy attributes
-        self._sync_legacy_cam_attrs()
-
-        return {"added": added, "removed": removed, "unchanged": unchanged}
+                unchanged.append(entry)
+        detected_new = [link for link in sorted(_glob.glob("/dev/v4l/by-path/*-video-index0"))
+                        if os.path.realpath(link) not in bound]
+        return {"added": [], "removed": [], "unchanged": unchanged,
+                "missing": missing, "detected_new": detected_new}
 
     def on_up_down_off(self):
         self._send_message('1\n')

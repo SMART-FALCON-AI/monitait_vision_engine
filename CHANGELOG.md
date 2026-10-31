@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.428] - 2026-11-01 - Audit batch 8: camera Refresh no longer touches running cameras, live feeds, alert dedupe, zero values
+
+**Fixed — backend**
+- **Cameras tab Refresh (`POST /api/cameras/rescan`) could crash MVE or re-number cameras.** It compared each USB camera's boot-time `/dev/videoN` against the even-numbered nodes only, so a live camera on an odd node, or one whose node moved after a reconnect, was treated as "removed": its capture was released from the web thread while its own thread could be inside `grab()` (the exit-139 crash), and it came back under a new id with exposure / gain 100. It also restarted failing cameras from the web thread (same crash risk) and hot-added new nodes under raw `/dev/videoN` paths, bypassing the config. Rescan is now **report-only**: nothing is removed, restarted or added at runtime. A configured camera whose device is gone is listed as `missing` (its own reconnect re-attaches it by by-path), and an unbound by-path device as `detected_new` (shown as "DETECTED — NOT IN USE" with an Add button, as before).
+- **Weight activation reported success when YOLO failed to load the weight.** yolo_inference answers a failed load with HTTP 200 + `{"error": …}`, which counted as a success, so Activate showed OK while YOLO kept the old weight. A 200 whose JSON body is an error now counts as a failure, with YOLO's message as the error. Non-JSON 200 replies (other inference services) still count as success.
+- `setup.sh` **overwrote** `/etc/docker/daemon.json` when it added the insecure registry, dropping the nvidia runtime and a moved `data-root`. It now merges the registry into the existing file.
+
+**Fixed — UI**
+- **Camera live feeds**: the sockets opened only if the page *loaded* on the Cameras tab, never on switching to it, and never closed, so every camera kept streaming JPEGs to a hidden tab. After Refresh / Apply re-rendered the cards, frames went to the old, detached image and the visible feed froze. Feeds now open on entering the tab and close on leaving it, frames go to the image currently on the page, and a late close of an old socket no longer opens a second stream per camera.
+- **One defect gave ~5 beeps and ~3 narrations**: the server re-sends the newest detection event on every 100 ms tick while it is less than 5 s old. Each event is now handled once.
+- **Duplicate timeline sockets**: a tab becoming visible during the 2 s reconnect gap opened a second dashboard socket, and both kept reconnecting for good. Now there is one socket and one reconnect at a time.
+- **0 is a valid value**: camera gain / brightness / saturation 0 was shown and re-saved as the default (100 / 100 / 50), and a per-class audio confidence of 0 became 1.
+- **New procedures start disabled.** Any field change saves the whole list, so a half-built procedure (its first rule is `count_equals 1` on the first class) went live on the ejector before the operator finished it. Tick "Enabled" once its rules are set.
+- Tab highlight: clicking a tab's label text left no tab highlighted, and calling `switchTab()` from code threw.
+- Support tab: the upload messages showed raw keys (`support_uploading`, …); they are now added in all 9 languages.
+- Page title and config export file name say MVE.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.427] - 2026-11-01 - Audit batch 7: /health no longer waits behind the camera streams
 
 **Why** — an overnight read-only latency watch on shoga (28 IP cameras, 4.0.420) found `/health` slow in 46 of 131 samples (up to the 20 s probe cap) while `/api/status` stayed under 0.8 s throughout — so the event loop was NOT blocked: `/health` itself was waiting. Its YOLO + DB probes ran through `asyncio.to_thread`, i.e. the event loop's default executor (12 threads on an 8-core box), which the camera live-feed WebSockets (cam.read + encode, 3 fps per camera), every dashboard's timeline WebSocket (a blocking Redis wait held back-to-back + composite builds) and other offloads share. Saturated → the probes queued.

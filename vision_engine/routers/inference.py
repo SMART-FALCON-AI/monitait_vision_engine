@@ -507,8 +507,21 @@ def _call_set_model_all_replicas(model_path: str, request=None, base=None):
         try:
             resp = requests.post(f"{base}/set-model", data={"model_path": model_path}, timeout=_per_timeout)
             logger.info(f"set-model attempt {i+1}/{attempts}: status={resp.status_code} body={resp.text[:200]!r}")
+            # 4.0.428 — yolo_inference answers a FAILED load with HTTP 200 + {"error": ...};
+            # that was counted as a success, so Activate reported OK while yolo kept the
+            # old weight. A 200 whose JSON body is an error is a failure.
+            _err_body = None
             if resp.status_code == 200:
+                try:
+                    _j = resp.json()
+                    if isinstance(_j, dict) and _j.get("error") and not _j.get("message"):
+                        _err_body = str(_j.get("error"))[:200]
+                except Exception:
+                    pass  # non-JSON 200 (other inference services) = success
+            if resp.status_code == 200 and _err_body is None:
                 successes += 1
+            elif _err_body is not None:
+                last_error = _err_body
             else:
                 # Capture the non-200 as last_error too so the caller's error
                 # message is informative (was always "unknown error" because

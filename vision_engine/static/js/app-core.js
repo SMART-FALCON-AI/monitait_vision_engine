@@ -322,7 +322,12 @@ function startStatusStream() {
             }
 
             // Process detection events for audio alerts
-            if (data.detection_event && data.detection_event.details && data.detection_event.details.detections) {
+            // 4.0.428 — the server re-sends the newest event on every 100 ms tick while it
+            // is < 5 s old; handle each event ONCE (by its timestamp). Without this, one
+            // defect gave ~5 beeps and ~3 narrations (only the cooldowns capped it).
+            if (data.detection_event && data.detection_event.details && data.detection_event.details.detections
+                    && data.detection_event.timestamp !== window._mveLastDetEventTs) {
+                window._mveLastDetEventTs = data.detection_event.timestamp;
                 processDetectionForAudio(data.detection_event.details);
             }
 
@@ -352,7 +357,10 @@ document.addEventListener('visibilitychange', function() {
     if (!document.hidden) {
         console.log('[Dashboard] Tab visible again, reconnecting...');
         startStatusStream();
-        if (typeof connectTimelineWs === 'function' && !timelineWs) {
+        // 4.0.428 — not while a reconnect is already scheduled (timelineWs is null for the
+        // whole 2 s gap): that opened a second socket, and both kept their own reconnect
+        // loops — duplicate timeline sockets for days.
+        if (typeof connectTimelineWs === 'function' && !timelineWs && !window._mveTlReconnectTimer) {
             connectTimelineWs();
         }
         // Auto-resume timeline if it was paused
@@ -367,6 +375,8 @@ document.addEventListener('visibilitychange', function() {
 let timelineWs = null;
 let timelineWsPage = 0;
 function connectTimelineWs() {
+    // 4.0.428 — never a second socket next to a live / connecting one
+    if (timelineWs && (timelineWs.readyState === WebSocket.OPEN || timelineWs.readyState === WebSocket.CONNECTING)) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     // 4.0.377 — pass mark/thickness on the connect URL so the very first frame after a
     // (re)connect already carries the red box (no no-box flash while the server waits
@@ -408,7 +418,11 @@ function connectTimelineWs() {
     };
     timelineWs.onclose = () => {
         timelineWs = null;
-        setTimeout(connectTimelineWs, 2000);
+        if (window._mveTlReconnectTimer) return;          // 4.0.428 — one reconnect at a time
+        window._mveTlReconnectTimer = setTimeout(() => {
+            window._mveTlReconnectTimer = null;
+            if (!timelineWs) connectTimelineWs();
+        }, 2000);
     };
     timelineWs.onerror = () => {}; // onclose will handle reconnect
 }
@@ -434,7 +448,7 @@ function fetchHealth() {
             const versionEl = document.getElementById('app-version');
             if (versionEl && data.version) {
                 versionEl.textContent = 'v' + data.version;
-                document.title = 'MonitaQC v' + data.version;
+                document.title = 'MVE v' + data.version;   // 4.0.428 — product name is MVE
             }
             const restartWarning = document.getElementById('gradio-restart-warning');
             if (restartWarning) {
@@ -1983,6 +1997,9 @@ function renderCameraCards() {
         const card = createCameraCard(cameraId, camera);
         grid.appendChild(card);
     });
+    // 4.0.428 — feeds for cameras that appeared / reconnected since the last render
+    // (no-op unless the Cameras tab is open; existing sockets are kept).
+    try { openCameraWebSockets(); } catch (e) {}
 }
 
 function tip(text) {
@@ -2178,12 +2195,12 @@ function createCameraCard(cameraId, camera) {
                 </div>
                 <div class="camera-config-item">
                     <label>Gain ${tip('Sensor amplification. Higher = brighter but more noise.')}</label>
-                    <input type="number" id="cam-cfg-gain-${cameraId}" value="${config.gain || 100}" min="0" max="255"
+                    <input type="number" id="cam-cfg-gain-${cameraId}" value="${config.gain ?? 100}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
                     <label>Brightness ${tip('Overall image brightness offset (0-255).')}</label>
-                    <input type="number" id="cam-cfg-brightness-${cameraId}" value="${config.brightness || 100}" min="0" max="255"
+                    <input type="number" id="cam-cfg-brightness-${cameraId}" value="${config.brightness ?? 100}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
@@ -2193,7 +2210,7 @@ function createCameraCard(cameraId, camera) {
                 </div>
                 <div class="camera-config-item">
                     <label>Saturation ${tip('Color intensity. 0 = grayscale, 255 = vivid colors.')}</label>
-                    <input type="number" id="cam-cfg-saturation-${cameraId}" value="${config.saturation || 50}" min="0" max="255"
+                    <input type="number" id="cam-cfg-saturation-${cameraId}" value="${config.saturation ?? 50}" min="0" max="255"
                            onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
@@ -2321,6 +2338,10 @@ async function restartCamera(cameraId) {
     }
 }
 
+// 4.0.428 — 0 is a valid gain / brightness / saturation; `parseInt(v) || 100` turned it into
+// the default (a camera saved with brightness 0 was re-saved as 100 from this form).
+function _intOr(v, d) { const n = parseInt(v, 10); return Number.isFinite(n) ? n : d; }
+
 async function applyCameraConfig(cameraId) {
     pauseCameraRefresh();
     showCameraMessage(cameraId, 'Applying configuration...', 'info');
@@ -2345,10 +2366,10 @@ async function applyCameraConfig(cameraId) {
 
         if (fpsEl) config.fps = parseInt(fpsEl.value) || 30;
         if (exposureEl) config.exposure = parseInt(exposureEl.value) || 100;
-        if (gainEl) config.gain = parseInt(gainEl.value) || 100;
-        if (brightnessEl) config.brightness = parseInt(brightnessEl.value) || 100;
+        if (gainEl) config.gain = _intOr(gainEl.value, 100);
+        if (brightnessEl) config.brightness = _intOr(brightnessEl.value, 100);
         if (contrastEl) config.contrast = parseInt(contrastEl.value) || 0;
-        if (saturationEl) config.saturation = parseInt(saturationEl.value) || 50;
+        if (saturationEl) config.saturation = _intOr(saturationEl.value, 50);
 
         // Per-camera Auto-Exposure opt-in (USB only). When true, the camera firmware
         // runs its own AE algorithm; MVE skips both the manual exposure write at
@@ -2462,18 +2483,27 @@ function openCameraWebSockets() {
         ws.binaryType = 'arraybuffer';
         ws.onmessage = (e) => {
             if (typeof e.data === 'string') return;
+            // 4.0.428 — the image CURRENTLY on the page for this camera: Refresh / Apply
+            // re-render the cards, and writing into the old (detached) <img> froze the feed.
+            const el = document.querySelector(`.camera-live-feed[data-camera-id="${cameraId}"]`);
+            if (!el) return;
             const blob = new Blob([e.data], {type: 'image/jpeg'});
             const url = URL.createObjectURL(blob);
-            if (img._blobUrl) URL.revokeObjectURL(img._blobUrl);
-            img._blobUrl = url;
-            img.src = url;
+            if (el._blobUrl) URL.revokeObjectURL(el._blobUrl);
+            el._blobUrl = url;
+            el.src = url;
         };
         ws.onclose = () => {
-            delete cameraWsConnections[cameraId];
-            // Auto-reconnect if tab is still active
+            // 4.0.428 — only forget THIS socket: after a quick leave/return the entry is
+            // already the new one, and deleting it opened a second stream per camera.
+            if (cameraWsConnections[cameraId] === ws) delete cameraWsConnections[cameraId];
+            // Auto-reconnect if tab is still active (one timer for all cameras)
             const tab = document.getElementById('tab-cameras');
-            if (tab && tab.classList.contains('active')) {
-                setTimeout(() => openCameraWebSockets(), 2000);
+            if (tab && tab.classList.contains('active') && !window._mveCamWsReconnect) {
+                window._mveCamWsReconnect = setTimeout(() => {
+                    window._mveCamWsReconnect = null;
+                    openCameraWebSockets();
+                }, 2000);
             }
         };
         ws.onerror = () => {};
@@ -2482,6 +2512,7 @@ function openCameraWebSockets() {
 }
 
 function stopLiveFeedUpdates() {
+    if (window._mveCamWsReconnect) { clearTimeout(window._mveCamWsReconnect); window._mveCamWsReconnect = null; }
     Object.keys(cameraWsConnections).forEach(id => {
         const ws = cameraWsConnections[id];
         if (ws && ws.readyState <= WebSocket.OPEN) ws.close();

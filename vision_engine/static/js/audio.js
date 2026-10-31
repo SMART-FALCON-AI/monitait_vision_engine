@@ -608,7 +608,8 @@ function toggleObjectNarrate(objectName) {
 
 // Update confidence threshold for object
 function updateObjectConfidence(objectName, value) {
-    audioSettings.objectConfidence[objectName] = Math.max(0, Math.min(100, parseFloat(value) || 1));
+    const _v = parseFloat(value);   // 4.0.428 — 0 is valid (was turned into 1)
+    audioSettings.objectConfidence[objectName] = Math.max(0, Math.min(100, Number.isFinite(_v) ? _v : 1));
     saveAudioSettings();
     syncObjectAudioToServer(objectName);
 }
@@ -1150,7 +1151,11 @@ function addProcedure() {
     procedures.push({
         id: 'proc_' + Date.now(),
         name: 'New Procedure',
-        enabled: true,
+        // 4.0.428 — starts DISABLED. Any field change on any procedure saves the whole
+        // list, so an enabled half-built procedure (its first rule is `count_equals 1`
+        // on the first class) went live on the ejector before the operator finished it.
+        // Tick "Enabled" once its rules are set.
+        enabled: false,
         logic: 'any',
         rules: [],
         // 3.25.8 — Severity (0–100) for ejection events. Each stored ejection
@@ -1693,10 +1698,27 @@ function switchTab(tabName) {
     }
 
     // Add active class to clicked button
-    event.target.classList.add('active');
+    // 4.0.428 — the BUTTON, also when the click landed on its label <span> (event.target
+    // was the span → nothing highlighted), and when switchTab() is called from code
+    // (no event → this line threw).
+    const _tabBtn = (typeof event !== 'undefined' && event && event.target && event.target.closest)
+        ? event.target.closest('.tab-button') : null;
+    const _btnEl = _tabBtn || document.querySelector(`.tab-button[onclick*="'${tabName}'"]`);
+    if (_btnEl) _btnEl.classList.add('active');
 
     // Save selected tab to localStorage
     localStorage.setItem('selectedTab', tabName);
+
+    // 4.0.428 — camera live feeds: open the sockets when the Cameras tab is entered
+    // (they used to open only if the page LOADED on that tab) and close them when it
+    // is left (otherwise every camera kept streaming JPEGs to a hidden tab).
+    try {
+        if (tabName === 'cameras') {
+            setTimeout(function () { if (typeof openCameraWebSockets === 'function') openCameraWebSockets(); }, 300);
+        } else if (typeof stopLiveFeedUpdates === 'function') {
+            stopLiveFeedUpdates();
+        }
+    } catch (e) { /* never block a tab switch */ }
 
     // Load chat history when switching to AI tab
     if (tabName === 'ai') {
@@ -2459,7 +2481,7 @@ async function exportServiceConfig() {
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `monitaqc_config_${new Date().toISOString().split('T')[0]}.json`;
+            a.download = `mve_config_${new Date().toISOString().split('T')[0]}.json`;
             document.body.appendChild(a);
             a.click();
             window.URL.revokeObjectURL(url);
