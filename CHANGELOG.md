@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.418] - 2026-10-31 - Line OEE: a chain of watcher stations is a line; OEE from OK, NG and the gap between stations
+
+**Why** — the operator: OEE should come from each station's OK and NG *and the difference between one station and the next*, and a chain of watchers is a production line whose OEE matters too. 4.0.417 let stations be chained (next station) but computed OEE per machine only.
+
+**New: Hardware tab → Watcher Jets / Stations → "📈 Line OEE"** (window: last 1 h / 8 h / 24 h / 7 days; default 8 h)
+- A **line** = stations chained by Next station, ending at a station with no next station. Several stations may feed one (two IS machines → one Lehr).
+- Per station (units = pulses × factor): **In** = OK + NG, OK, NG, **Gap from previous** = good units the station(s) before it sent − units it handled (red "N lost" = broken / removed on the way; blue "+N extra" = it counted more than it was sent), Quality = OK / In, its own OEE.
+- Per line: **In → rejected (NG) → lost between stations → Out (good)**, and **line OEE = A × P × Q** with Quality = good out of the last station ÷ units into the first station(s) (so every NG and every gap counts), Availability = the least available station (min — one stop idles the stations around it too, so a product would double-count), Performance = the first station(s) (they set the pace; input-weighted if several).
+- Notes under each line say what is still assumed (no ideal rate → Performance 100 %; no downtime sent → Availability 100 %; a station with no data in the window). Units still travelling between stations (e.g. inside the Lehr) look like a gap in a short window — use a window longer than the line's transit time.
+- **Charts tab → Machines & OEE**: each line also appears in the legend (🔗 Line: …) with its OEE; its graph = the good output of its last station.
+
+**API** — new `GET /api/watchers/lines?since_ms=&until_ms=` (per line: name, stations with input/ok/ng/gap/quality/oee, input, output, ng, lost_between, extra_between, A/P/Q/OEE, missing). `/api/watchers/oee` with fewer than 2 samples now still returns the unit totals (`good`, `defect`, …).
+
+Cache-busters `?v=4.0.418`.
+
 ## [4.0.417] - 2026-10-31 - Hardware tab: Watcher Jets / Stations — auto-listed, station name, next station, OK / NG factors
 
 **Why** — the operator wants to set up the line's Watcher Jets the way cameras are set up: a watcher that sends data to MVE should simply show up (like a newly plugged camera in the Cameras tab), and then be given a station name, the station it feeds, and how many units one OK pulse and one NG pulse count for — separately (e.g. OK counts cases of 12, NG counts single bottles). Until now a watcher could only be named from the Charts tab, with no station order and no factors.

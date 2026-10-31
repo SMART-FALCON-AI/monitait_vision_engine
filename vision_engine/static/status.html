@@ -15,11 +15,11 @@
         <meta name="supported-color-schemes" content="dark">
         <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
         <title>Monitait Vision Engine</title>
-        <link rel="stylesheet" href="/static/css/main.css?v=4.0.417">
+        <link rel="stylesheet" href="/static/css/main.css?v=4.0.418">
     </head>
     <body>
         <!-- 3.25.9 — `?v=X.Y.Z` cache-buster on every custom JS so a deploy + page reload picks up new code without forcing operators to Ctrl+Shift+R. Bump on every version. -->
-        <script src="/static/js/i18n.js?v=4.0.417"></script>
+        <script src="/static/js/i18n.js?v=4.0.418"></script>
         <div class="container">
             <!-- Compact Header: 3-column layout (sticky so tabs are always reachable) -->
             <div style="display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid var(--border-color); position: sticky; top: 0; z-index: 100; background: var(--bg-color, #0f172a); padding-top: 8px;">
@@ -35,7 +35,7 @@
                          to read on the dark sticky header. Logo kept at 40px and the text stacked to 3
                          short lines so the brand column stays narrow — preserves the 4.0.386 fix that
                          stopped the 10-tab strip from scrolling / Support falling off the right edge. -->
-                    <img src="/static/logo.png?v=4.0.417" alt="MVE — Monitait Vision Engine" title="Monitait Vision Engine" style="height: 40px; width: auto; background: #fff; padding: 4px 6px; border-radius: 6px; box-sizing: border-box; flex: 0 0 auto;">
+                    <img src="/static/logo.png?v=4.0.418" alt="MVE — Monitait Vision Engine" title="Monitait Vision Engine" style="height: 40px; width: auto; background: #fff; padding: 4px 6px; border-radius: 6px; box-sizing: border-box; flex: 0 0 auto;">
                     <div style="min-width: 0;">
                         <div style="font-size: 14px; font-weight: 700; line-height: 1.15; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
                             Monitait<br>Vision<br>Engine
@@ -654,6 +654,28 @@
                         </table>
                     </div>
                     <div id="ws-status" style="font-size:12px; margin-top:6px; color:var(--text-secondary);"></div>
+
+                    <!-- 4.0.418 — Line OEE: a chain of stations (by next station) is a line -->
+                    <div style="border-top:1px solid rgba(51,65,85,0.5); margin:16px 0 10px;"></div>
+                    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+                        <h4 style="margin:0; color:var(--text-primary);">📈 Line OEE</h4>
+                        <div style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text-secondary);">
+                            Window
+                            <select id="wl-window" class="control-input" style="margin:0; padding:4px 6px; width:auto;">
+                                <option value="1">last 1 h</option>
+                                <option value="8" selected>last 8 h</option>
+                                <option value="24">last 24 h</option>
+                                <option value="168">last 7 days</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div style="font-size:12px; color:var(--text-secondary); margin:6px 0 10px;">
+                        Stations chained by <strong>Next station</strong> form a line. Counts are units (pulses × factor).
+                        <strong>Gap</strong> = good units the previous station sent − units this station handled (lost on the way).
+                        Line Quality = good units out of the last station ÷ units into the first; Availability = worst station; Performance = first station.
+                        Units still travelling between stations look like a gap in a short window — pick a window longer than the line's transit time.
+                    </div>
+                    <div id="wl-body"></div>
                 </div>
                 <script>
                 (function(){
@@ -670,6 +692,62 @@
                     try { _ws = ((await (await fetch('/api/watchers')).json()).watchers) || []; }
                     catch(e){ g('ws-status').textContent = '✗ Could not load watchers: ' + e.message; return; }
                     render();
+                    loadLines();
+                  }
+
+                  // 4.0.418 — Line OEE cards
+                  const pct = v => (v == null ? '—' : (Math.round(v * 1000) / 10) + '%');
+                  const oeeCol = v => (v == null ? 'var(--text-secondary)' : v >= 0.85 ? '#34d399' : v >= 0.6 ? '#fbbf24' : '#f87171');
+                  const MISSING = {
+                    ideal_rate: 'no ideal rate set → Performance counted as 100% (set it in Charts → Machines & OEE)',
+                    downtime_percent: 'the watchers send no downtime → Availability counted as 100%'
+                  };
+                  async function loadLines(){
+                    const box = g('wl-body'); if(!box) return;
+                    const hours = +((g('wl-window') || {}).value || 8);
+                    let d;
+                    try { d = await (await fetch('/api/watchers/lines?since_ms=' + (Date.now() - hours * 3600e3))).json(); }
+                    catch(e){ box.innerHTML = '<div style="color:#f87171; font-size:12px;">✗ Could not load line OEE: ' + esc(e.message) + '</div>'; return; }
+                    const lines = (d && d.lines) || [];
+                    if(!lines.length){
+                      box.innerHTML = '<div style="font-size:12px; color:var(--text-secondary);">No line yet — set a <strong>Next station</strong> on your stations to chain them into a line.</div>';
+                      return;
+                    }
+                    const th = 'padding:5px 6px; text-align:right;';
+                    box.innerHTML = lines.map(l => {
+                      const rows = l.stations.map(s => {
+                        const gap = s.gap == null ? '<span style="color:var(--text-secondary);">first</span>'
+                          : s.gap > 0 ? '<span style="color:#f87171;">' + num(s.gap) + ' lost</span>'
+                          : s.gap < 0 ? '<span style="color:#60a5fa;">+' + num(-s.gap) + ' extra</span>' : '0';
+                        return `<tr style="border-bottom:1px solid rgba(51,65,85,0.3);">
+                          <td style="padding:5px 6px;">${esc(s.name)}</td>
+                          <td style="${th}">${num(s.input)}</td><td style="${th}">${num(s.ok)}</td><td style="${th}">${num(s.ng)}</td>
+                          <td style="${th}">${gap}</td><td style="${th}">${pct(s.quality)}</td>
+                          <td style="${th} color:${oeeCol(s.oee)};">${pct(s.oee)}</td></tr>`;
+                      }).join('');
+                      const extra = l.extra_between > 0 ? ` · <span style="color:#60a5fa;">+${num(l.extra_between)} extra counted</span>` : '';
+                      const miss = (l.missing || []).map(m => MISSING[m] || m);
+                      return `<div style="border:1px solid rgba(51,65,85,0.6); border-radius:8px; padding:10px 12px; margin-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px;">
+                          <strong style="color:var(--text-primary);">${esc(l.name)}</strong>
+                          <div><span style="font-size:22px; font-weight:700; color:${oeeCol(l.oee)};">${pct(l.oee)}</span>
+                            <span style="font-size:12px; color:var(--text-secondary);"> line OEE · A ${pct(l.availability)} · P ${pct(l.performance)} · Q ${pct(l.quality)}</span></div>
+                        </div>
+                        <div style="font-size:12px; color:var(--text-secondary); margin:4px 0 8px;">
+                          In <strong style="color:var(--text-primary);">${num(l.input)}</strong>
+                          → rejected (NG) <span style="color:#fbbf24;">${num(l.ng)}</span>
+                          → lost between stations <span style="color:#f87171;">${num(l.lost_between)}</span>
+                          → Out <strong style="color:var(--text-primary);">${num(l.output)}</strong> good${extra}
+                        </div>
+                        <div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:12px;">
+                          <thead><tr style="color:var(--text-secondary); border-bottom:1px solid rgba(51,65,85,0.6);">
+                            <th style="padding:5px 6px; text-align:left;">Station</th><th style="${th}">In</th><th style="${th}">OK</th><th style="${th}">NG</th>
+                            <th style="${th}" title="good units the previous station sent − units this station handled">Gap from previous</th>
+                            <th style="${th}">Quality</th><th style="${th}">OEE</th></tr></thead>
+                          <tbody>${rows}</tbody></table></div>
+                        ${miss.length ? '<div style="font-size:11px; color:var(--text-secondary); margin-top:6px;">ℹ ' + miss.map(esc).join(' · ') + '</div>' : ''}
+                      </div>`;
+                    }).join('');
                   }
 
                   function render(){
@@ -750,6 +828,7 @@
 
                   function _wire(){
                     const rf = g('ws-refresh'); if(rf) rf.addEventListener('click', loadStations);
+                    const wn = g('wl-window'); if(wn) wn.addEventListener('change', loadLines);
                     document.querySelectorAll('.tab-button').forEach(b => {
                       if((b.getAttribute('onclick') || '').indexOf("'hardware'") >= 0) b.addEventListener('click', () => setTimeout(loadStations, 60));
                     });
@@ -1185,7 +1264,7 @@
                  proxy with no CORS; a JS error inside it can't take down the
                  dashboard the operator runs the line from. -->
             <div id="tab-knowledge" class="tab-content">
-                <iframe src="/static/knowledge.html?v=4.0.417"
+                <iframe src="/static/knowledge.html?v=4.0.418"
                         style="width:100%; height:calc(100vh - 120px); min-height:400px; border:0;"
                         title="Knowledge"></iframe>
             </div>
@@ -1645,9 +1724,9 @@
                      Invisible until used — drop an iframe into this container when needed. -->
                 <div id="grafana-future-embed" style="display:none;"></div>
             </div>
-            <script src="/static/js/iframes.js?v=4.0.417"></script>
+            <script src="/static/js/iframes.js?v=4.0.418"></script>
             <script src="/static/js/chart.umd.min.js"></script>
-            <script src="/static/js/charts.js?v=4.0.417"></script>
+            <script src="/static/js/charts.js?v=4.0.418"></script>
             <script>
             /* 4.0.360 — Machines (Watcher Jet) chart. Self-contained; uses global Chart
                (chart.umd, loaded just above). On-demand only (load + tab-open + manual
@@ -1690,6 +1769,18 @@
                     // 4.0.417 — p.ok = OK pulses × the station's OK factor (Hardware tab)
                     points:((mt&&mt.points)||[]).map(p=>({x:Date.parse(p.ts), y:(p.ok!=null?p.ok:p.quantity)})).filter(p=>p.x!=null) });
                 }
+                // 4.0.418 — each line (stations chained in the Hardware tab) with its OEE;
+                // its graph line = the good output of its last station
+                try {
+                  const ld = await (await fetch('/api/watchers/lines')).json();
+                  for(const l of (ld.lines||[])){
+                    const last = srcs.find(s=>s.id===l.terminal);
+                    srcs.push({ id:'line:'+l.terminal, name:'Line: '+l.name, kind:'line',
+                      oee:(l.oee!=null)?l.oee*100:null, availability:l.availability*100,
+                      performance:l.performance*100, quality:(l.quality!=null)?l.quality*100:null,
+                      points:(last&&last.points)||[] });
+                  }
+                } catch(e){}
                 _sources = srcs;
                 if(g('watcher-empty')) g('watcher-empty').style.display = list.length ? 'none' : 'block';
                 if(g('watcher-body'))  g('watcher-body').style.display  = 'block';
@@ -1703,7 +1794,7 @@
                   const oee = (s.oee!=null)? _pct(s.oee) : '—';
                   const apq = (s.availability!=null||s.performance!=null||s.quality!=null)
                     ? `A ${_pct(s.availability)} · P ${_pct(s.performance)} · Q ${_pct(s.quality)}` : 'no OEE data yet';
-                  const dot = s.kind==='watcher' ? (s.online?'🟢':'⚪') : '🏭';
+                  const dot = s.kind==='watcher' ? (s.online?'🟢':'⚪') : s.kind==='line' ? '🔗' : '🏭';
                   return `<div data-src="${encodeURIComponent(s.id)}" title="click to hide/show this line" style="cursor:pointer; padding:9px 11px; border-radius:8px; border:1px solid ${off?'rgba(51,65,85,0.5)':col}; background:${off?'rgba(15,23,42,0.3)':'rgba(15,23,42,0.55)'}; opacity:${off?0.5:1};">
                       <div style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-primary);"><span style="width:10px;height:10px;border-radius:50%;background:${col};display:inline-block;"></span>${dot} ${s.name}</div>
                       <div style="font-size:20px; font-weight:700; color:${col}; margin-top:2px;">${oee}<span style="font-size:11px; color:var(--text-secondary); font-weight:400;"> OEE</span></div>
@@ -2868,7 +2959,7 @@ MVE_SUPPORT_SITE=&lt;site&gt;</pre>
              /static/vendor/label-studio-1.4.0/) so the operator gets the IDENTICAL editor
              as ai-trainer.monitait.com, can correct YOLO boxes, and submit them back to
              the trainer via /api/ai_trainer/annotate. Pre-fills from inference_results.detections. -->
-        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.417">
+        <link rel="stylesheet" href="/static/vendor/label-studio-1.4.0/css/main.css?v=4.0.418">
         <div id="annotate-modal" dir="ltr" style="display:none; position:fixed; inset:0; z-index:999998; background:rgba(0,0,0,0.92); align-items:center; justify-content:center; direction:ltr;" onclick="if(event.target===this) closeAnnotateModal();">
             <div style="background:#0f172a; border:1px solid rgba(71,85,105,0.6); border-radius:10px; width:96vw; max-width:1600px; height:92vh; display:flex; flex-direction:column;">
                 <div style="display:flex; gap:10px; padding:10px 16px; border-bottom:1px solid rgba(51,65,85,0.6); color:#fff; align-items:center;">
@@ -2909,11 +3000,11 @@ MVE_SUPPORT_SITE=&lt;site&gt;</pre>
                 </div>
             </div>
         </div>
-        <script src="/static/js/audio.js?v=4.0.417"></script>
-        <script src="/static/js/app-core.js?v=4.0.417"></script>
-        <script src="/static/js/support.js?v=4.0.417"></script>
+        <script src="/static/js/audio.js?v=4.0.418"></script>
+        <script src="/static/js/app-core.js?v=4.0.418"></script>
+        <script src="/static/js/support.js?v=4.0.418"></script>
         <!-- LSF must load before annotate.js (which references the global `LabelStudio`). -->
-        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.417"></script>
-        <script src="/static/js/annotate.js?v=4.0.417"></script>
+        <script src="/static/vendor/label-studio-1.4.0/js/main.js?v=4.0.418"></script>
+        <script src="/static/js/annotate.js?v=4.0.418"></script>
     </body>
 </html>

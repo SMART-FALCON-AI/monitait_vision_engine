@@ -140,3 +140,14 @@ def watcher_oee(register_id: str, since_ms: int = 0, until_ms: int = 0):
     except Exception as e:
         logger.warning("oee failed: %s", e)
         return JSONResponse({"error": str(e), "oee": None}, status_code=500)
+
+
+@router.get("/api/watchers/lines")
+def watcher_lines(since_ms: int = 0, until_ms: int = 0):
+    """4.0.418 — OEE per line (stations chained by next station) with each station's
+    input / OK / NG and the gap to the station before it."""
+    try:
+        return wm.compute_lines(since_ms or None, until_ms or None)
+    except Exception as e:
+        logger.warning("line oee failed: %s", e)
+        return JSONResponse({"error": str(e), "lines": []}, status_code=500)

@@ -393,10 +393,6 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
                       (reg,), fetch="one")
     ideal_rate = float(ideal_row[0]) if ideal_row and ideal_row[0] else None
 
-    if len(rows) < 2:
-        return {"register_id": reg, "samples": len(rows), "oee": None,
-                "reason": "need at least 2 samples in the window"}
-
     good_total = 0.0
     defect_total = 0.0
     downtime_fracs: List[float] = []
@@ -413,6 +409,13 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
     good_raw, defect_raw = good_total, defect_total
     good_total *= okf
     defect_total *= ngf
+    if len(rows) < 2:
+        # 4.0.418 — the unit totals are still returned (the line OEE needs them)
+        return {"register_id": reg, "samples": len(rows), "oee": None,
+                "good": round(good_total, 2), "defect": round(defect_total, 2),
+                "good_raw": round(good_raw, 2), "defect_raw": round(defect_raw, 2),
+                "ok_factor": okf, "ng_factor": ngf,
+                "reason": "need at least 2 samples in the window"}
     total = good_total + defect_total
     quality = (good_total / total) if total > 0 else None
     availability = (1.0 - (sum(downtime_fracs) / len(downtime_fracs))) if downtime_fracs else 1.0
@@ -447,3 +450,114 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
         "missing": [k for k, v in (("ideal_rate", ideal_rate),
                                    ("downtime_percent", downtime_fracs or None)) if not v],
     }
+
+
+def compute_lines(since_ms: Optional[int] = None,
+                  until_ms: Optional[int] = None) -> Dict[str, Any]:
+    """4.0.418 — OEE of every LINE: a chain of stations linked by next_watcher (set in
+    the Hardware tab), ending at a station with no next station. Several stations may
+    feed one (e.g. two IS machines → one Lehr). All counts are units (pulses × the
+    station's OK / NG factor).
+
+    Per station:  input = OK + NG;  quality = OK / input;
+                  gap   = OK of the station(s) feeding it − its own input
+                          (> 0: units that left upstream good but never arrived —
+                           broken / removed on the way; < 0: it counted more than it
+                           was sent, e.g. stock fed in by hand)
+    Per line:     input  = input of the first station(s);  output = OK of the last;
+                  Quality      = output / input  (every NG and every gap on the way)
+                  Availability = the least available station (a stop anywhere stops
+                                 the line; min, not a product, because one stop makes
+                                 the stations around it idle too)
+                  Performance  = the first station(s) — they set the line's pace
+                  OEE          = A × P × Q
+    Units still travelling between stations (e.g. inside a Lehr) look like a gap in a
+    short window — use a window much longer than the line's transit time."""
+    _ensure_schema()
+    reg_rows = _exec("SELECT register_id, name, next_watcher FROM watcher_registry",
+                     fetch="all") or []
+    name = {r: (n or r) for r, n, _ in reg_rows}
+    nxt = {r: x for r, _, x in reg_rows if x and x in name and x != r}
+    feeders: Dict[str, List[str]] = {}
+    for a, b in nxt.items():
+        feeders.setdefault(b, []).append(a)
+
+    def _terminal(r: str) -> str:
+        seen = set()
+        while r in nxt and r not in seen:
+            seen.add(r)
+            r = nxt[r]
+        return r
+
+    groups: Dict[str, List[str]] = {}
+    for r in name:
+        if r in nxt or r in feeders:
+            groups.setdefault(_terminal(r), []).append(r)
+
+    lines = []
+    for term, members in groups.items():
+        depth: Dict[str, int] = {}
+
+        def _depth(r: str, trail=()) -> int:
+            if r not in depth:
+                depth[r] = max((_depth(f, trail + (r,)) + 1 for f in feeders.get(r, [])
+                                if f not in trail), default=0)
+            return depth[r]
+
+        for r in members:
+            _depth(r)
+        order = sorted(members, key=lambda r: (depth[r], name[r].lower()))
+        st = {r: compute_oee(r, since_ms, until_ms) for r in order}
+        good = {r: float(st[r].get("good") or 0) for r in order}
+        bad = {r: float(st[r].get("defect") or 0) for r in order}
+
+        stations, missing = [], set()
+        for r in order:
+            o = st[r]
+            inp = good[r] + bad[r]
+            fed = feeders.get(r, [])
+            gap = (sum(good[f] for f in fed) - inp) if fed else None
+            if not o.get("samples"):
+                missing.add(f"no data from {name[r]} in this window")
+            missing.update(o.get("missing") or [])
+            stations.append({
+                "register_id": r, "name": name[r], "depth": depth[r],
+                "next_watcher": nxt.get(r), "feeders": fed,
+                "ok": round(good[r], 2), "ng": round(bad[r], 2), "input": round(inp, 2),
+                "quality": round(good[r] / inp, 4) if inp > 0 else None,
+                "gap": round(gap, 2) if gap is not None else None,
+                "availability": o.get("availability"), "performance": o.get("performance"),
+                "oee": o.get("oee"), "samples": o.get("samples", 0),
+                "ok_factor": o.get("ok_factor"), "ng_factor": o.get("ng_factor"),
+            })
+
+        heads = [r for r in order if depth[r] == 0]
+        line_in = sum(good[r] + bad[r] for r in heads)
+        line_out = good[term]
+        gaps = [s["gap"] for s in stations if s["gap"] is not None]
+        quality = max(0.0, min(1.0, line_out / line_in)) if line_in > 0 else None
+        avs = [s["availability"] for s in stations if s["availability"] is not None]
+        availability = min(avs) if avs else 1.0
+        pw = [(s["performance"], s["input"]) for s in stations
+              if s["depth"] == 0 and s["performance"] is not None]
+        wsum = sum(w for _, w in pw)
+        performance = (sum(p * w for p, w in pw) / wsum) if wsum > 0 else (pw[0][0] if pw else 1.0)
+        oee = availability * performance * quality if quality is not None else None
+
+        levels: Dict[int, List[str]] = {}
+        for r in order:
+            levels.setdefault(depth[r], []).append(name[r])
+        lines.append({
+            "name": " → ".join(" + ".join(v) for _, v in sorted(levels.items())),
+            "terminal": term, "stations": stations,
+            "input": round(line_in, 2), "output": round(line_out, 2),
+            "ng": round(sum(bad.values()), 2),
+            "lost_between": round(sum(g for g in gaps if g > 0), 2),
+            "extra_between": round(-sum(g for g in gaps if g < 0), 2),
+            "quality": round(quality, 4) if quality is not None else None,
+            "availability": round(availability, 4), "performance": round(performance, 4),
+            "oee": round(oee, 4) if oee is not None else None,
+            "missing": sorted(missing),
+        })
+    lines.sort(key=lambda x: x["name"].lower())
+    return {"since_ms": since_ms, "until_ms": until_ms, "lines": lines}
