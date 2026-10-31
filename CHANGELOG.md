@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.431] - 2026-11-01 - Audit batch 11: camera Restart no longer crashes MVE, capture-side fixes
+
+**Fixed**
+- **The per-camera Restart button could kill MVE (exit 139).** `restart_camera()` released the camera from the web request's thread while the camera's own capture thread could be inside `grab()` on it. OpenCV releases the GIL in both calls, so this freed memory still in use: the segfault seen on the 12-camera site (nafis-pardis, 2026-10-31) right after a per-camera restart. Now the capture thread re-opens its own camera between reads (within about one read; immediately if it was waiting out a reconnect backoff), using the same by-path re-resolve as the automatic reconnect. Only a camera with no running capture thread is re-opened from the request, after that thread is confirmed gone. A stress test with a capture that records any release overlapping another thread's grab showed the old code doing this on 60 of 60 restarts and the new code on 0, with every restart still served.
+- **"Trigger Capture" (States tab) never captured anything.** It set the state to CAPTURING, but nothing read or reset that, so every later click got HTTP 400 "already in progress". It now runs one capture cycle and returns to idle.
+- **DataMatrix decoding** could stall a worker on a noisy crop (no decode timeout, unbounded wait on the result). A crashed decode worker (for example OOM-killed) also broke the decode pool for good: DM decoding was silently off until MVE restarted. Decodes are now bounded (1.5 s per attempt, 10 s wait), and a broken pool is rebuilt on the next decode.
+- **Cold-queue janitor**: the stale-frame sweep rebuilt its index from a snapshot, which brought back frames that inference had already taken during the sweep. Those ghost entries produced "Cold queue read failed" errors, and the queue's byte count drifted. Stale entries are now taken out of the live index first, and only those files are deleted.
+- **Auto-cutoff** re-parsed the entire config (states, pipelines, cameras, …) on every encoder line from the board, on the encoder thread. It now keeps a 2 s snapshot of the six values it uses.
+
+**Found, not changed (needs a decision)**: the "remove raw image when DataMatrix decoded" setting has never deleted anything. The path it builds is wrong (`raw_images/raw_images/<id>.jpg.jpg`), and the saved setting never reaches the code that checks it. Fixing it would start deleting images on any site that turned it on.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.430] - 2026-11-01 - Audit batch 10: Hardware serial settings work, UI no longer loses typing, polls don't pile up, dead UI code removed
 
 **Fixed — Hardware tab**

@@ -411,7 +411,8 @@ def restart_camera(camera_id: int, request: Request):
 
     try:
         cam.restart_camera()
-        return JSONResponse(content={"success": True, "message": f"Camera {camera_id} restarted"})
+        # 4.0.431 — the camera's own capture thread re-opens it (within about one read)
+        return JSONResponse(content={"success": True, "message": f"Camera {camera_id} restart requested — it re-opens within a second"})
     except Exception as e:
         logger.error(f"Error restarting camera {camera_id}: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)

@@ -323,39 +323,41 @@ class ColdDiskQueue:
         freed_bytes = 0
         with self._lock:
             paths_snapshot = list(self._index)
-        stale_paths = set()
-        remaining = collections.deque()
+        # 4.0.431 — (1) find the stale entries (filename timestamp + a stat, no lock);
+        # (2) under the lock take them OUT of the CURRENT index; (3) delete only the files
+        # this flush took. It used to delete first and then rebuild the index from the
+        # snapshot: paths get() / eviction consumed meanwhile came back as ghost entries
+        # ("Cold queue read failed"), and bytes were subtracted twice or never.
+        stale_sizes = {}
         for path in paths_snapshot:
             try:
-                fname = os.path.basename(path)
-                ts = float(fname.split('_')[0])
-                if now - ts > max_age_seconds:
-                    try:
-                        freed_bytes += os.path.getsize(path)
-                    except OSError:
-                        pass
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
-                    stale_paths.add(path)
-                    flushed += 1
-                    continue
+                ts = float(os.path.basename(path).split('_')[0])
             except (ValueError, IndexError):
-                pass
-            remaining.append(path)
-        # Re-acquire the lock briefly to reconcile with any concurrent put()
-        # calls that ran while we were doing disk I/O. Preserve every entry
-        # they added; drop the stale entries we identified above.
+                continue
+            if now - ts > max_age_seconds:
+                try:
+                    stale_sizes[path] = os.path.getsize(path)
+                except OSError:
+                    stale_sizes[path] = 0
+        taken = []
         with self._lock:
-            snapshot_set = set(paths_snapshot)
-            live_new = [p for p in self._index if p not in snapshot_set]
-            self._index = remaining
-            for p in live_new:
-                self._index.append(p)
-            self._bytes -= freed_bytes
+            kept = collections.deque()
+            for p in self._index:
+                if p in stale_sizes:
+                    taken.append(p)
+                    self._bytes -= stale_sizes[p]
+                else:
+                    kept.append(p)
+            self._index = kept
             if self._bytes < 0:
                 self._bytes = 0
+        for p in taken:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        flushed = len(taken)
+        freed_bytes = sum(stale_sizes[p] for p in taken)
         if flushed:
             logger.info(
                 f"Cold queue: flushed {flushed} stale frames "
@@ -1267,12 +1269,22 @@ class ArduinoSocket:
         Never raises: any exception is logged at warning and swallowed so a
         malformed config field can't kill the encoder loop.
         """
-        try:
-            from config import load_service_config
-            svc = load_service_config() or {}
-        except Exception as _lce:
-            logger.debug(f"auto-cutoff: config load failed: {_lce}")
-            return
+        # 4.0.431 — only the six fields used below, refreshed at most every 2 s. This runs on
+        # EVERY encoder line (tens per second) and load_service_config() json-parses the
+        # whole config each call (states, pipelines, cameras…) — on the encoder thread.
+        _now = time.monotonic()
+        if _now - getattr(self, "_acf_snap_at", -1e9) > 2.0:
+            try:
+                from config import load_service_config
+                _full = load_service_config() or {}
+            except Exception as _lce:
+                logger.debug(f"auto-cutoff: config load failed: {_lce}")
+                return
+            self._acf_snap = {k: _full.get(k) for k in (
+                "auto_cutoff_enabled", "auto_cutoff_metric", "auto_cutoff_threshold",
+                "max_shipment_length", "encoder_units_per_unit", "encoder_units_per_meter")}
+            self._acf_snap_at = _now
+        svc = self._acf_snap
 
         # v4.0.155 — explicit boolean toggle. Decouples "is the feature on"
         # from the numeric threshold so a real negative threshold value
@@ -1726,6 +1738,16 @@ class ArduinoSocket:
         steps=N means capture on every N step changes.
         analog=-1 means analog threshold is disabled.
         """
+        # 4.0.431 — States tab "Trigger Capture": run ONE capture cycle now, then back to
+        # idle. The button only set CAPTURING and nothing ever read it or reset it — so it
+        # never captured, and every later click answered 400 "already in progress".
+        if _state_manager is not None and getattr(getattr(_state_manager, "capture_state", None), "value", None) == "capturing":
+            try:
+                _state_manager.complete_capture()
+            except Exception:
+                pass
+            return True
+
         # Get thresholds from current state/phase
         current_state = _state_manager.current_state if _state_manager else None
 

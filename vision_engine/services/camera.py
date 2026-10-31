@@ -1392,7 +1392,9 @@ class CameraBuffer:
         }
         logger.info(f"Camera {safe_source(source)}: exposure={exposure}, gain={gain}, brightness={brightness}, contrast={contrast}, saturation={saturation}, fps={fps}"
                     + (" | auto=ON (camera controls its own image settings)" if self.auto else ""))
-        threading.Thread(target=self.buffer).start()
+        self._restart_requested = False
+        self._buffer_thread = threading.Thread(target=self.buffer)
+        self._buffer_thread.start()
 
     def _apply_saved_props(self):
         """Re-apply saved camera properties after reconnect.
@@ -1521,6 +1523,17 @@ class CameraBuffer:
             try:
                 if self.stop or getattr(self, "_buffer_gen", 0) != _my_gen:
                     break
+                # 4.0.431 — an operator restart (restart_camera) is carried out HERE, by the
+                # thread that owns the capture, between reads — never by the web thread
+                # while this one may be inside grab() (use-after-free → exit 139).
+                if getattr(self, "_restart_requested", False):
+                    self._restart_requested = False
+                    self._reopen_owned("operator restart")
+                    failure_count = 0
+                    consecutive_reconnects = 0
+                    stale_reconnect_cycles = 0
+                    _last_live = time.monotonic()
+                    continue
                 # 4.0.368 — PROACTIVE by-path tracking. The reactive reconnect below
                 # only fires after max_failures(=100) blank reads (~10s) AND only if
                 # grab() actually fails; a lingering stale node (exists but streams
@@ -1621,7 +1634,8 @@ class CameraBuffer:
                                 logger.info(f"Reconnect backoff: waiting {_backoff}s before re-opening {_lbl} (attempt {consecutive_reconnects})")
                             _slept = 0.0
                             while (_slept < _backoff and not self.stop
-                                   and getattr(self, "_buffer_gen", 0) == _my_gen):
+                                   and getattr(self, "_buffer_gen", 0) == _my_gen
+                                   and not getattr(self, "_restart_requested", False)):   # 4.0.431 — restart = retry now
                                 _nap = min(0.5, _backoff - _slept)
                                 time.sleep(_nap)
                                 _slept += _nap
@@ -1672,6 +1686,7 @@ class CameraBuffer:
                                         stale_reconnect_cycles = 0
 
                             # Reinitialize camera
+                            self._restart_requested = False   # 4.0.431 — this re-open serves a pending restart too
                             if self.is_ip_camera:
                                 self.camera = open_ip_capture(self.source)
                                 logger.info(f"Reconnecting IP camera: {safe_source(self.source)}")
@@ -1705,24 +1720,63 @@ class CameraBuffer:
             frame = frame[self.roi_ymin:self.roi_ymax, self.roi_xmin:self.roi_xmax]
         return frame
 
-    def restart_camera(self):
-        # 4.0.412 - retire the current buffer thread for sure: it may be parked in
-        # a long reconnect backoff and miss the brief stop=True window below.
-        self._buffer_gen = getattr(self, "_buffer_gen", 0) + 1
-        self.stop = True
-        self.camera.release()
-        # Reinitialize with appropriate backend
+    def _reopen_owned(self, why):
+        """Release + re-open the capture. 4.0.431 — ONLY from the buffer thread (or when
+        no buffer thread is alive): cv2 drops the GIL in grab() and release(), so freeing
+        the capture from another thread while grab() runs inside it is a use-after-free."""
+        try:
+            self.camera.release()
+        except Exception:
+            pass
         if self.is_ip_camera:
             self.camera = open_ip_capture(self.source)
         else:
+            # same durable re-resolve as the reconnect path: the config by-path → its node now
+            if self._config_bypath and os.path.exists(self._config_bypath):
+                try:
+                    fresh = os.path.realpath(self._config_bypath)
+                except Exception:
+                    fresh = None
+                if fresh and fresh.startswith("/dev/video") and os.path.exists(fresh) and fresh != self.source:
+                    _unregister_v4l_binding(self.source)
+                    self.source = fresh
+                    _register_v4l_binding(self.source)
             self.camera = cv2.VideoCapture(self.source, cv2.CAP_V4L2)
-        # Re-apply saved camera properties
+            _remember_by_path(self.source)
         self._apply_saved_props()
+        logger.info(f"Camera {safe_source(self.source)} re-opened ({why})")
+
+    def restart_camera(self):
+        """Operator restart (/api/camera/{id}/restart).
+
+        4.0.431 — it used to release the capture from the CALLER's thread while the
+        buffer thread could be inside grab() on it: a use-after-free that killed MVE with
+        exit 139 (nafis-pardis 2026-10-31, the 12-camera site). Now: if the buffer thread
+        is running, it is asked to re-open the camera itself between reads (within one
+        read; immediately if it is waiting out a reconnect backoff). Only a camera with
+        no live buffer thread is re-opened here, after that thread is confirmed gone."""
+        t = getattr(self, "_buffer_thread", None)
+        if t is not None and t.is_alive() and not self.stop:
+            self._restart_requested = True
+            return True
+        if t is not None and t.is_alive():
+            # stop is set: that thread is on its way out — wait for it; releasing while it
+            # may still be inside grab() is exactly the crash
+            t.join(timeout=5)
+            if t.is_alive():
+                raise RuntimeError("camera is still stopping (blocked in a read) - try again shortly")
+        # 4.0.412 - retire any other (parked) buffer thread for sure
+        self._buffer_gen = getattr(self, "_buffer_gen", 0) + 1
+        self.stop = True
+        self._reopen_owned("operator restart, no running reader")
         success, frame = self.camera.retrieve(0)
         self.success = success
         self.frame = frame
         self.stop = False
-        threading.Thread(target=self.buffer).start()
+        self._restart_requested = False
+        self._buffer_thread = threading.Thread(target=self.buffer)
+        self._buffer_thread.start()
+        return True
 
     def grab(self):
         """Expose the underlying camera's grab method"""

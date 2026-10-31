@@ -22,6 +22,8 @@ import logging
 import pickle
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import TimeoutError as _FutTimeout
+from concurrent.futures.process import BrokenProcessPool
 from pylibdmtx import pylibdmtx
 from redis import Redis
 
@@ -1021,7 +1023,9 @@ def preprocess_and_decode(stage_name, preprocess_func, cropped_dm_gray, dm_chars
     """Helper function to apply preprocessing and decode the image."""
     try:
         processed_image = preprocess_func(cropped_dm_gray)
-        decoded_dm_raw = pylibdmtx.decode(processed_image)
+        # 4.0.431 — bounded: without a timeout libdmtx can grind on a noisy crop for a long
+        # time, holding one of the 4 pool workers (and the caller waiting on it).
+        decoded_dm_raw = pylibdmtx.decode(processed_image, timeout=1500, max_count=1)
         if decoded_dm_raw:
             decoded_dm = decoded_dm_raw[0][0].decode('utf-8')
             if len(decoded_dm) in dm_chars_sizes:
@@ -1057,7 +1061,11 @@ def decode_dm(frame_name, frame, yolo_object, iterator, dm_chars_sizes=[13,19,26
             for stage_name, preprocess in stages
         ]
         for future in futures:
-            decoded_dm, processed_image, stage_name = future.result()
+            # 4.0.431 — bounded wait (was unbounded: one stuck decode blocked this caller)
+            try:
+                decoded_dm, processed_image, stage_name = future.result(timeout=10)
+            except _FutTimeout:
+                continue
             if decoded_dm:
                 # Optionally save the image for debugging
                 name_dm = os.path.join("raw_images", f"{frame_name}_{decoded_dm}_{iterator}_{stage_name}_dm.jpg")
@@ -1066,6 +1074,19 @@ def decode_dm(frame_name, frame, yolo_object, iterator, dm_chars_sizes=[13,19,26
 
         return None
 
+    except BrokenProcessPool as e:
+        # 4.0.431 — a pool child died (e.g. OOM-killed): the pool is unusable for good and
+        # DM decoding silently stayed off until MVE restarted. Drop it; the next call
+        # builds a fresh one.
+        global _dm_process_pool
+        logger.error(f"DataMatrix decode pool broke ({e}) — rebuilding it on the next decode")
+        try:
+            if _dm_process_pool is not None:
+                _dm_process_pool.shutdown(wait=False)
+        except Exception:
+            pass
+        _dm_process_pool = None
+        return None
     except Exception as e:
         logger.error(f"Decoding failed: {frame_name} - {e}")
         return None
