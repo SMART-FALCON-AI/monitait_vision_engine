@@ -46,6 +46,74 @@ def open_ip_capture(url, open_timeout_ms=IP_OPEN_TIMEOUT_MS, read_timeout_ms=IP_
     ])
 
 
+# 4.0.416 — per-camera "Auto" mode (USB). MVE normally forces every image control
+# (manual exposure, gain, brightness, contrast, saturation, gamma, sharpness). Some
+# cameras only work in their own automatic mode: nafis-pardis cam 10, an RGB
+# "Global Shutter Camera", outputs pure black in manual exposure at ANY value, so
+# MVE's forced settings showed a flat grey frame while Cheese (which leaves the
+# camera alone) showed a good colour picture. "Auto" hands the camera back to its
+# firmware: auto exposure, auto white balance, auto gain where it exists, and every
+# other image control at the camera's OWN default (as after a fresh plug-in) — so
+# values MVE wrote earlier (e.g. gain 255) don't linger. OpenCV cannot read a
+# control's default, hence the raw V4L2 ioctls; a second fd on the device is fine
+# while OpenCV streams (v4l2-ctl does the same).
+_VIDIOC_QUERYCTRL = 0xC0445624      # _IOWR('V', 36, struct v4l2_queryctrl) — 68 bytes
+_VIDIOC_S_CTRL = 0xC008561C         # _IOWR('V', 28, struct v4l2_control)  — 8 bytes
+_V4L2_CTRL_FLAG_DISABLED = 0x0001
+_V4L2_CTRL_FLAG_READ_ONLY = 0x0004
+_V4L2_AUTO_RESET_CTRLS = {          # image controls MVE otherwise forces
+    0x00980900: "brightness", 0x00980901: "contrast", 0x00980902: "saturation",
+    0x00980903: "hue", 0x00980910: "gamma", 0x00980913: "gain",
+    0x0098091b: "sharpness", 0x0098091c: "backlight_compensation",
+    0x009a090c: "focus_automatic_continuous",
+}
+_V4L2_CID_AUTOGAIN = 0x00980912
+
+
+def v4l2_reset_to_camera_defaults(node):
+    """Set the camera's image controls back to its own defaults and switch on its
+    auto gain (if it has one). Returns {control: value} actually written; {} if the
+    device can't be opened (never raises — Auto mode must not break capture)."""
+    import fcntl
+    import struct
+    written = {}
+    try:
+        fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
+    except OSError as e:
+        logger.warning(f"Auto mode: cannot open {node} to reset controls: {e}")
+        return written
+    try:
+        def _query(cid):
+            buf = bytearray(struct.pack("<II32siiiiI2I", cid, 0, b"", 0, 0, 0, 0, 0, 0, 0))
+            fcntl.ioctl(fd, _VIDIOC_QUERYCTRL, buf)
+            _, ctype, _, mn, mx, _, dflt, flags, _, _ = struct.unpack("<II32siiiiI2I", buf)
+            usable = ctype in (1, 2, 3, 9) and not flags & (_V4L2_CTRL_FLAG_DISABLED | _V4L2_CTRL_FLAG_READ_ONLY)
+            return usable, dflt
+
+        def _set(cid, name, value):
+            try:
+                fcntl.ioctl(fd, _VIDIOC_S_CTRL, bytearray(struct.pack("<Ii", cid, int(value))))
+                written[name] = int(value)
+            except OSError:
+                pass        # e.g. EBUSY on a control that is inactive in this mode
+
+        for cid, name in _V4L2_AUTO_RESET_CTRLS.items():
+            try:
+                usable, dflt = _query(cid)
+            except OSError:
+                continue    # camera has no such control
+            if usable:
+                _set(cid, name, dflt)
+        try:
+            if _query(_V4L2_CID_AUTOGAIN)[0]:
+                _set(_V4L2_CID_AUTOGAIN, "gain_automatic", 1)
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+    return written
+
+
 # ---------------------------------------------------------------------------
 # 4.0.54 — Self-healing V4L2 path recovery.
 #
@@ -955,6 +1023,8 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         # restart; watcher.py reads it back on next init via
         # CameraBuffer(..., auto_exposure=cc.get('auto_exposure', False))
         "auto_exposure": bool(getattr(cam, 'auto_exposure', False)),
+        # 4.0.416 — per-camera "Auto" (USB): the camera runs everything itself.
+        "auto": bool(getattr(cam, 'auto', False)),
         # 4.0.15 — Per-camera pixel-to-millimetre calibration. None until
         # the operator enters it on the Cameras tab. Consumers convert
         # px → mm only when present.
@@ -1087,6 +1157,23 @@ def apply_camera_config_from_saved(cam, saved_config):
     if 'auto_exposure' in saved_config:
         cam.auto_exposure = bool(saved_config['auto_exposure'])
 
+    # 4.0.416 — "Auto" (USB): remember the manual values for when Auto is switched
+    # off again, but write only FPS; the camera runs the image controls itself.
+    _usb = not getattr(cam, 'is_ip_camera', False) and not getattr(cam, 'is_pro_camera', False)
+    if 'auto' in saved_config and _usb:
+        cam.auto = bool(saved_config['auto'])
+    if _usb and getattr(cam, 'auto', False) and hasattr(cam, '_apply_auto_controls'):
+        try:
+            for key, prop in prop_map.items():
+                if key in saved_config:
+                    cam._saved_props[prop] = saved_config[key]
+            if 'fps' in saved_config:
+                cam.camera.set(cv2.CAP_PROP_FPS, saved_config['fps'])
+            cam._apply_auto_controls()
+        except Exception as e:
+            logger.error(f"Error applying camera config (auto): {e}")
+        return
+
     if hasattr(cam, 'camera'):
         try:
             auto_exp = not getattr(cam, 'is_ip_camera', False) and getattr(cam, 'auto_exposure', False)
@@ -1167,7 +1254,7 @@ class CameraBuffer:
 
     def __init__(self, source, exposure=100, gain=100, brightness=100,
                  contrast=0, saturation=50, fps=10, roi_config=None,
-                 auto_exposure=False) -> None:
+                 auto_exposure=False, auto=False) -> None:
         """Open a video source (USB /dev/videoX or RTSP URL) and start the buffer thread.
 
         auto_exposure (USB only): when True, MVE does NOT force the camera into manual
@@ -1175,6 +1262,11 @@ class CameraBuffer:
         `exposure` value is ignored. `gain`, `brightness`, `contrast`, `saturation`,
         `fps` still apply. Use this for venues where lighting changes a lot and a
         per-state exposure override (state_machine.State.exposure) isn't enough.
+
+        auto (USB only, 4.0.416): the camera runs EVERYTHING itself — auto exposure,
+        auto white balance, auto gain where it has one, and every other image control
+        at the camera's own default. The manual values are kept (for when Auto is
+        switched off) but not written. Only `fps` still applies.
         """
         # If we somehow ended up here for a basler:// source (shouldn't
         # happen thanks to __new__), reroute proactively so we don't crash.
@@ -1189,6 +1281,7 @@ class CameraBuffer:
         self.source = source
         self.auto_exposure = bool(auto_exposure)
         self.is_ip_camera = isinstance(source, str) and source.startswith(("rtsp://", "http://", "https://"))
+        self.auto = bool(auto) and not self.is_ip_camera
         # 4.0.367 — the camera's STABLE /dev/v4l/by-path/… source (from the config).
         # If set, the reconnect loop re-resolves THIS directly to the current
         # /dev/videoN, so a USB re-enumeration mid-run can never leave the camera
@@ -1238,7 +1331,9 @@ class CameraBuffer:
             # USB camera: set format, then either force manual exposure (default) or
             # leave auto-exposure on if the user opted in via camera config.
             self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J', 'P', 'G'))
-            if self.auto_exposure:
+            if self.auto:
+                self._apply_auto_controls()
+            elif self.auto_exposure:
                 # Mode 3 = aperture priority / camera-side AE. We deliberately do NOT
                 # toggle back to mode 1 (manual). Skip the `set(CAP_PROP_EXPOSURE, …)`
                 # call too — writing a value would re-enable manual mode on some
@@ -1248,17 +1343,18 @@ class CameraBuffer:
             else:
                 self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
                 self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
-            self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
-            self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
-            self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-            self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
-            self.camera.set(cv2.CAP_PROP_GAMMA, 1)
-            if not self.auto_exposure:
-                self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
-            self.camera.set(cv2.CAP_PROP_GAIN, gain)
-            self.camera.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
-            self.camera.set(cv2.CAP_PROP_CONTRAST, contrast)
-            self.camera.set(cv2.CAP_PROP_SATURATION, saturation)
+            if not self.auto:
+                self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
+                self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
+                self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
+                self.camera.set(cv2.CAP_PROP_GAMMA, 1)
+                if not self.auto_exposure:
+                    self.camera.set(cv2.CAP_PROP_EXPOSURE, exposure)
+                self.camera.set(cv2.CAP_PROP_GAIN, gain)
+                self.camera.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
+                self.camera.set(cv2.CAP_PROP_CONTRAST, contrast)
+                self.camera.set(cv2.CAP_PROP_SATURATION, saturation)
             self.camera.set(cv2.CAP_PROP_FPS, fps)
 
         success, frame = self.camera.retrieve(0)
@@ -1294,7 +1390,8 @@ class CameraBuffer:
             cv2.CAP_PROP_SATURATION: saturation,
             cv2.CAP_PROP_FPS: fps,
         }
-        logger.info(f"Camera {safe_source(source)}: exposure={exposure}, gain={gain}, brightness={brightness}, contrast={contrast}, saturation={saturation}, fps={fps}")
+        logger.info(f"Camera {safe_source(source)}: exposure={exposure}, gain={gain}, brightness={brightness}, contrast={contrast}, saturation={saturation}, fps={fps}"
+                    + (" | auto=ON (camera controls its own image settings)" if self.auto else ""))
         threading.Thread(target=self.buffer).start()
 
     def _apply_saved_props(self):
@@ -1311,6 +1408,33 @@ class CameraBuffer:
         if not self.is_ip_camera:
             try:
                 self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+            except Exception:
+                pass
+            if getattr(self, 'auto', False):
+                if cv2.CAP_PROP_FPS in self._saved_props:
+                    self.camera.set(cv2.CAP_PROP_FPS, self._saved_props[cv2.CAP_PROP_FPS])
+                self._apply_auto_controls()
+                return
+        self._apply_manual_controls()
+
+    def _apply_auto_controls(self):
+        """4.0.416 — "Auto" (USB): the camera runs exposure, white balance and gain
+        itself; every other image control goes back to the camera's own default."""
+        try:
+            reset = v4l2_reset_to_camera_defaults(self.source)
+            self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+            self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
+            logger.info(f"Camera {safe_source(self.source)}: auto=ON — camera runs exposure/white balance/gain "
+                        f"itself; controls at camera defaults {reset}")
+        except Exception as e:
+            logger.warning(f"Camera {safe_source(self.source)}: auto mode apply failed: {e}")
+
+    def _apply_manual_controls(self):
+        """MVE-controlled image settings (the default): manual exposure unless the
+        Auto-Exposure checkbox is on, then the saved exposure/gain/brightness/
+        contrast/saturation/fps."""
+        if not self.is_ip_camera:
+            try:
                 if getattr(self, 'auto_exposure', False):
                     # Mode 3 = aperture priority / camera-side AE. Do NOT toggle back
                     # to manual (mode 1). Below we also skip the EXPOSURE prop write.
@@ -1321,6 +1445,8 @@ class CameraBuffer:
                 self.camera.set(cv2.CAP_PROP_AUTO_WB, 1)
                 self.camera.set(cv2.CAP_PROP_WB_TEMPERATURE, 6000)
                 self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                self.camera.set(cv2.CAP_PROP_SHARPNESS, 0)
+                self.camera.set(cv2.CAP_PROP_GAMMA, 1)
             except Exception:
                 pass
         if not self._saved_props:
@@ -1344,9 +1470,25 @@ class CameraBuffer:
         )
 
     def update_prop(self, prop, value):
-        """Update a camera property and save it for reconnect persistence."""
-        self.camera.set(prop, value)
+        """Update a camera property and save it for reconnect persistence.
+        In Auto mode the camera owns exposure/gain/brightness/contrast/saturation:
+        the value is remembered (for when Auto is switched off) but not written."""
+        if not (getattr(self, 'auto', False) and prop in (
+                cv2.CAP_PROP_EXPOSURE, cv2.CAP_PROP_GAIN, cv2.CAP_PROP_BRIGHTNESS,
+                cv2.CAP_PROP_CONTRAST, cv2.CAP_PROP_SATURATION)):
+            self.camera.set(prop, value)
         self._saved_props[prop] = value
+
+    def set_auto(self, on):
+        """4.0.416 — switch "Auto" on/off live (no camera restart needed)."""
+        on = bool(on) and not self.is_ip_camera
+        if on == getattr(self, 'auto', False):
+            return
+        self.auto = on
+        if on:
+            self._apply_auto_controls()
+        else:
+            self._apply_manual_controls()
 
     def buffer(self):
         failure_count = 0

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.416] - 2026-10-31 - Per-camera "Auto": the camera sets its own exposure, white balance and gain
+
+**Why** — nafis-pardis cam 10 is an RGB "Global Shutter Camera" (32e4:0144). MVE forces every USB camera into manual mode with fixed values; this camera outputs pure BLACK in manual exposure at ANY value (tested 250 / 500 / 1000 → brightness 2/255). With MVE's gain 1000 (capped to 255) and brightness 100 (capped to 64) on top, that black became the flat grey, colourless frame the operator saw — while Cheese, which leaves the camera alone, showed a good colour picture. Switching the camera to its own auto exposure gave brightness 130, colour saturation 95, nothing clipped.
+
+**New: "Auto" checkbox per USB camera** (Cameras tab, first item of the settings grid; `auto` in the camera config / `POST /api/camera/{id}/config`)
+- ON → the camera runs exposure (V4L2 auto_exposure=3), white balance and gain (auto gain where the camera has one) itself; every other image control (brightness, contrast, saturation, hue, gamma, gain, sharpness, backlight compensation, autofocus) goes back to the CAMERA'S OWN default via V4L2 (`v4l2_reset_to_camera_defaults`, QUERYCTRL → S_CTRL), as after a fresh plug-in — so values MVE wrote earlier (gain 255, …) don't linger. Only FPS still comes from MVE.
+- Applies live (no camera restart), survives reconnects (`_apply_saved_props`) and restarts (saved with the camera config, read back at boot).
+- The manual fields are greyed out while Auto is on; their values are kept and come back when Auto is switched off. Per-state exposure/gain overrides skip Auto cameras. IP and Basler cameras are not affected.
+- The existing Auto-Exposure checkbox (exposure only; gain etc. still forced) is unchanged. Fixed on the way: `GET /api/cameras` never returned `auto_exposure`, so that checkbox always rendered unchecked after a refresh — it now returns `auto_exposure` and `auto`.
+
+Cache-busters `?v=4.0.416`.
+
 ## [4.0.415] - 2026-10-30 - IP camera freeze watchdog: a frozen stream reconnects in ~20 s instead of never
 
 **Shoga cams 21/22/23 stayed frozen while the cameras were fine** (`services/camera.py`)

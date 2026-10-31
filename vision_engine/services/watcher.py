@@ -845,6 +845,7 @@ class ArduinoSocket:
                     fps=cc.get('fps', 10),
                     roi_config=cc if cc.get('roi_enabled') else None,
                     auto_exposure=cc.get('auto_exposure', False),
+                    auto=cc.get('auto', False),
                 )
                 # 4.0.15 — restore per-camera px/mm calibration from saved
                 # config. Stored as a plain attribute so callers can read

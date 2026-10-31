@@ -287,6 +287,10 @@ def get_cameras_status(request: Request):
                         "roi_ymin": getattr(cam, 'roi_ymin', 0),
                         "roi_xmax": getattr(cam, 'roi_xmax', 1280),
                         "roi_ymax": getattr(cam, 'roi_ymax', 720),
+                        # 4.0.416 — the card's checkboxes read these back; without
+                        # them Auto-Exposure always rendered unchecked after a refresh.
+                        "auto_exposure": bool(getattr(cam, 'auto_exposure', False)),
+                        "auto": bool(getattr(cam, 'auto', False)),
                     }
             except:
                 cam_info["config"] = {}
@@ -360,7 +364,7 @@ async def add_detected_camera(request: Request):
             "source": by_path,
             "fps": _g("fps", 10), "gain": _g("gain", 100), "exposure": _g("exposure", 10),
             "brightness": _g("brightness", 100), "contrast": _g("contrast", 0), "saturation": _g("saturation", 50),
-            "auto_exposure": _g("auto_exposure", False), "px_per_mm": None,
+            "auto_exposure": _g("auto_exposure", False), "auto": _g("auto", False), "px_per_mm": None,
             "roi_enabled": False, "roi_xmin": 0, "roi_ymin": 0, "roi_xmax": 1280, "roi_ymax": 720,
         }
         svc["cameras"] = cams
@@ -438,6 +442,11 @@ async def update_camera_config(camera_id: int, request: Request):
         }
 
         updated = []
+        # 4.0.416 — "Auto" (USB) first, so the property writes below already respect
+        # it (in Auto they are remembered, not written). Applies live, no restart.
+        if 'auto' in body and hasattr(cam, 'set_auto'):
+            cam.set_auto(bool(body['auto']))
+            updated.append('auto')
         for key, value in body.items():
             if key in prop_map:
                 if hasattr(cam, 'update_prop'):

@@ -148,7 +148,9 @@ class BaslerBuffer:
 
     def __init__(self, source, exposure=5000, gain=0, brightness=0,
                  contrast=0, saturation=0, fps=30, roi_config=None,
-                 auto_exposure=False, pixel_format=None) -> None:
+                 auto_exposure=False, pixel_format=None, auto=False) -> None:
+        # 4.0.416 — `auto` (the USB "Auto" camera mode) is accepted so a shared
+        # CameraBuffer(...) call can't break a Basler; it has no effect here.
         # 4.0.50 — default pixel_format=None means "keep the camera's
         # native format" (e.g. Mono8 on daA1280-54um monochrome, BayerRG8
         # on colour models). The ImageFormatConverter below always outputs

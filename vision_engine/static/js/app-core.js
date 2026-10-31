@@ -2016,6 +2016,11 @@ function createCameraCard(cameraId, camera) {
     const isConnected = camera.connected;
     const isIPCamera = camera.type === 'ip';
     const cameraName = camera.name || `Camera ${cameraId}`;
+    // 4.0.416 — "Auto" (USB): the camera runs exposure / white balance / gain itself,
+    // so the manual fields are greyed out while it is on.
+    const canAuto = !isIPCamera && camera.type !== 'pro';
+    const autoOn = canAuto && !!config.auto;
+    const manualDisabled = (!isConnected || autoOn) ? 'disabled' : '';
 
     // 4.0.370 — a DETECTED-but-unconfigured camera: show it so the operator sees a
     // newly-plugged camera (not silently ignored), with a one-click Add.
@@ -2100,15 +2105,15 @@ function createCameraCard(cameraId, camera) {
                 ${!isIPCamera ? `
                 <div class="camera-info-item">
                     <span class="camera-info-label">Exposure</span>
-                    <span class="camera-info-value">${config.exposure || '-'}</span>
+                    <span class="camera-info-value">${autoOn ? 'auto' : (config.exposure || '-')}</span>
                 </div>
                 <div class="camera-info-item">
                     <span class="camera-info-label">Gain</span>
-                    <span class="camera-info-value">${config.gain || '-'}</span>
+                    <span class="camera-info-value">${autoOn ? 'auto' : (config.gain || '-')}</span>
                 </div>
                 <div class="camera-info-item">
                     <span class="camera-info-label">Brightness</span>
-                    <span class="camera-info-value">${config.brightness || '-'}</span>
+                    <span class="camera-info-value">${autoOn ? 'auto' : (config.brightness || '-')}</span>
                 </div>
                 ` : ''}
             </div>
@@ -2157,30 +2162,39 @@ function createCameraCard(cameraId, camera) {
         ` : `
         <div class="camera-config-section">
             <div class="camera-config-grid">
+                ${canAuto ? `
+                <div class="camera-config-item">
+                    <label>Auto ${tip('When ON, the camera sets its own exposure, white balance and gain, like a webcam app (e.g. Cheese); every other image setting goes back to the camera\'s default. Use it for cameras that look dark, grey or colourless with manual settings. The manual values below are kept for when you switch Auto off. Click Apply or Save to use it.')}</label>
+                    <label style="display:flex;align-items:center;gap:6px;font-weight:normal;">
+                        <input type="checkbox" id="cam-cfg-auto-${cameraId}" ${autoOn ? 'checked' : ''} ${!isConnected ? 'disabled' : ''}
+                               onchange="toggleCameraAuto(${cameraId})">
+                        <span style="font-size:11px;color:var(--text-secondary);">Camera sets everything</span>
+                    </label>
+                </div>` : ''}
                 <div class="camera-config-item">
                     <label>Exposure ${tip('Sensor exposure time. Higher = brighter but more motion blur.')}</label>
                     <input type="number" id="cam-cfg-exposure-${cameraId}" value="${config.exposure || 100}" min="1" max="100000"
-                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
                     <label>Gain ${tip('Sensor amplification. Higher = brighter but more noise.')}</label>
                     <input type="number" id="cam-cfg-gain-${cameraId}" value="${config.gain || 100}" min="0" max="255"
-                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
                     <label>Brightness ${tip('Overall image brightness offset (0-255).')}</label>
                     <input type="number" id="cam-cfg-brightness-${cameraId}" value="${config.brightness || 100}" min="0" max="255"
-                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
                     <label>Contrast ${tip('Difference between light and dark areas (0-255).')}</label>
                     <input type="number" id="cam-cfg-contrast-${cameraId}" value="${config.contrast || 0}" min="0" max="255"
-                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
                     <label>Saturation ${tip('Color intensity. 0 = grayscale, 255 = vivid colors.')}</label>
                     <input type="number" id="cam-cfg-saturation-${cameraId}" value="${config.saturation || 50}" min="0" max="255"
-                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${!isConnected ? 'disabled' : ''}>
+                           onfocus="pauseCameraRefresh()" onblur="resumeCameraRefresh()" ${manualDisabled}>
                 </div>
                 <div class="camera-config-item">
                     <label>FPS ${tip('Frames per second. Higher = smoother but more CPU/bandwidth.')}</label>
@@ -2190,7 +2204,7 @@ function createCameraCard(cameraId, camera) {
                 <div class="camera-config-item">
                     <label>Auto-Exposure ${tip('When ON, the camera firmware runs its own auto-exposure. The Exposure value above is ignored and any per-state exposure override is also skipped for this camera. Gain still applies.')}</label>
                     <label style="display:flex;align-items:center;gap:6px;font-weight:normal;">
-                        <input type="checkbox" id="cam-cfg-auto-exposure-${cameraId}" ${config.auto_exposure ? 'checked' : ''} ${!isConnected ? 'disabled' : ''}>
+                        <input type="checkbox" id="cam-cfg-auto-exposure-${cameraId}" ${config.auto_exposure ? 'checked' : ''} ${manualDisabled}>
                         <span style="font-size:11px;color:var(--text-secondary);">Use camera firmware AE</span>
                     </label>
                 </div>
@@ -2242,6 +2256,16 @@ function createCameraCard(cameraId, camera) {
     `;
 
     return div;
+}
+
+// 4.0.416 — grey out the manual image fields while "Auto" is ticked (applied on Apply/Save).
+function toggleCameraAuto(cameraId) {
+    pauseCameraRefresh();   // keep the periodic refresh from re-rendering the unsaved tick
+    const on = !!document.getElementById(`cam-cfg-auto-${cameraId}`)?.checked;
+    ['exposure', 'gain', 'brightness', 'contrast', 'saturation', 'auto-exposure'].forEach(f => {
+        const el = document.getElementById(`cam-cfg-${f}-${cameraId}`);
+        if (el) el.disabled = on;
+    });
 }
 
 function pauseCameraRefresh() {
@@ -2331,6 +2355,10 @@ async function applyCameraConfig(cameraId) {
         // connect time AND any per-state exposure override from State.exposure.
         const autoExpEl = document.getElementById(`cam-cfg-auto-exposure-${cameraId}`);
         if (autoExpEl) config.auto_exposure = !!autoExpEl.checked;
+
+        // 4.0.416 — "Auto" (USB): the camera runs exposure / white balance / gain itself.
+        const autoEl = document.getElementById(`cam-cfg-auto-${cameraId}`);
+        if (autoEl) config.auto = !!autoEl.checked;
 
         // 4.0.15 — per-camera pixel-to-mm calibration. Blank → null (clears it).
         const pxMmEl = document.getElementById(`cam-cfg-px-per-mm-${cameraId}`);

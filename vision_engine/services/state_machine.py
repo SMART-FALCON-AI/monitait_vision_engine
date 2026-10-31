@@ -330,6 +330,7 @@ class StateManager:
         - Cameras not in this state's phases are untouched.
         - Cameras with `auto_exposure=true` skip the manual exposure write (still
           allow gain override).
+        - Cameras with `auto=true` (4.0.416) skip both: the camera runs them itself.
         """
         if self.watcher is None or not getattr(self.watcher, "cameras", None):
             return
@@ -349,6 +350,9 @@ class StateManager:
                 continue
             cam_cfg = cam_cfg_root.get(str(cid), {}) if isinstance(cam_cfg_root, dict) else {}
             auto_exposure = bool(cam_cfg.get("auto_exposure", False))
+            if cam_cfg.get("auto") or getattr(cam, "auto", False):
+                logger.info(f"State '{state.name}': cam {cid} is in Auto — exposure/gain left to the camera")
+                continue
 
             # Decide target exposure
             target_exp = state.exposure if state.exposure is not None else cam_cfg.get("exposure")
