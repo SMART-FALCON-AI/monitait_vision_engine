@@ -589,12 +589,20 @@ def save_service_config(config):
         except Exception:
             orig = None
         if isinstance(orig, dict):
-            config["saved_at"] = datetime.now().isoformat()
+            config["saved_at"] = _saved_at_now()
             with _CONFIG_WRITE_LOCK:
                 merged = _apply_changes(_fresh_service_config(), orig, config)
                 return save_config_key("service_config", merged)
-    config["saved_at"] = datetime.now().isoformat()
+    config["saved_at"] = _saved_at_now()
     return save_config_key("service_config", config)
+
+
+def _saved_at_now():
+    """4.0.430 — WITH its UTC offset. The container clock is UTC and the bare
+    isoformat() was shown as-is in "Last saved" — 3.5 h off for an operator in Iran.
+    The browser now converts it to local time."""
+    from datetime import timezone as _tz
+    return datetime.now(_tz.utc).isoformat(timespec="seconds")
 
 
 def update_service_config(changes):

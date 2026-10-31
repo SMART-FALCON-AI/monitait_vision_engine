@@ -598,6 +598,9 @@ def save_all_config(request: Request):
         if save_service_config(config):
             return JSONResponse(content={
                 "success": True,
+                # 4.0.430 — the UI shows this as "Last saved" (it fell back to the browser's
+                # UTC clock — 3.5 h off in Iran — because nothing was returned)
+                "saved_at": config.get("saved_at"),
                 "message": f"Configuration saved to {DATA_FILE}",
                 "cameras_saved": len(config["cameras"]),
                 "states_saved": len(config.get("states", {})),

@@ -441,7 +441,7 @@ function timelineWsSendPage(page) {
 
 // Fetch health data (infrastructure status) - called periodically
 function fetchHealth() {
-    fetch('/health')
+    return fetch('/health')
         .then(response => response.json())
         .then(data => {
             // Update version display
@@ -515,13 +515,6 @@ function fetchHealth() {
         .catch(error => console.error('Error fetching health:', error));
 }
 
-// Legacy polling fallback (not used with SSE)
-function fetchStatus() {
-    fetch('/api/status')
-        .then(response => response.json())
-        .then(data => updateStatusUI(data))
-        .catch(error => console.error('Error fetching status:', error));
-}
 
 // Separate function to fetch config - only called once on page load
 function fetchConfig() {
@@ -571,8 +564,16 @@ function fetchConfig() {
             // Serial configuration
             if (data.serial) {
                 document.getElementById('watcher-usb-input').value = data.serial.port || '/dev/ttyUSB0';
-                document.getElementById('baud-rate-input').value = data.serial.baud_rate || 57600;
+                // 4.0.430 — the server sends `baudrate` (this read `baud_rate` → always 57600)
+                document.getElementById('baud-rate-input').value = String(data.serial.baudrate ?? data.serial.baud_rate ?? 57600);
                 document.getElementById('serial-mode-input').value = data.serial.mode || 'legacy';
+            }
+            // 4.0.430 — the server sends redis.{host,port}; `infrastructure` (below) is never
+            // in this response, so the Redis inputs always showed the HTML defaults.
+            if (data.redis) {
+                const rh = document.getElementById('redis-host-input'), rp = document.getElementById('redis-port-input');
+                if (rh) rh.value = data.redis.host || 'redis';
+                if (rp) rp.value = data.redis.port || 6379;
             }
             // Infrastructure configuration
             if (data.infrastructure) {
@@ -604,45 +605,6 @@ async function loadDataFile() {
     }
 }
 
-async function saveDataFile() {
-    const responseEl = document.getElementById('data-file-response');
-    const content = document.getElementById('data-file-content').value;
-
-    try {
-        // Validate JSON first
-        JSON.parse(content);
-
-        const response = await fetch('/api/data-file', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ content: content })
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-            responseEl.textContent = `Saved! ${data.entries_count} entries. Backup: ${data.backup_path}`;
-            responseEl.className = 'control-response success';
-        } else {
-            responseEl.textContent = `Error: ${data.detail || 'Unknown error'}`;
-            responseEl.className = 'control-response error';
-        }
-
-        setTimeout(() => {
-            responseEl.textContent = '';
-            responseEl.className = 'control-response';
-        }, 5000);
-    } catch (error) {
-        responseEl.textContent = `Error: ${error.message}`;
-        responseEl.className = 'control-response error';
-        setTimeout(() => {
-            responseEl.textContent = '';
-            responseEl.className = 'control-response';
-        }, 5000);
-    }
-}
 
 function formatDataFile() {
     const textarea = document.getElementById('data-file-content');
@@ -708,60 +670,7 @@ function updateCameraTable(cameras) {
     }
 }
 
-async function fetchGradioModels() {
-    try {
-        const response = await fetch('/api/gradio/models');
-        const data = await response.json();
 
-        if (data.models && Array.isArray(data.models)) {
-            const modelSelect = document.getElementById('gradio-model-select');
-            modelSelect.innerHTML = '';  // Clear existing options
-
-            data.models.forEach(model => {
-                const option = document.createElement('option');
-                option.value = model;
-                option.textContent = model;
-                modelSelect.appendChild(option);
-            });
-
-            console.log(`Loaded ${data.models.length} models from ${data.source}`);
-        }
-    } catch (error) {
-        console.error('Failed to fetch Gradio models:', error);
-    }
-}
-
-function updateAPITypeFields() {
-    const apiTypeEl = document.getElementById('api-type-select');
-    if (!apiTypeEl) return;  // Element not found, exit early
-
-    const apiType = apiTypeEl.value;
-    const urlLabel = document.getElementById('yolo-url-label');
-    const urlInput = document.getElementById('yolo-url-input');
-    const modelSelector = document.getElementById('gradio-model-selector');
-    const confidenceField = document.getElementById('gradio-confidence-field');
-
-    if (apiType === 'gradio') {
-        urlLabel.textContent = 'Gradio API URL (HuggingFace Space)';
-        urlInput.value = 'https://smartfalcon-ai-industrial-defect-detection.hf.space';
-        urlInput.placeholder = 'https://smartfalcon-ai-industrial-defect-detection.hf.space';
-        modelSelector.style.display = 'block';  // Show model selector
-        confidenceField.style.display = 'block';  // Show confidence field
-        // Fetch models from Gradio
-        fetchGradioModels();
-        // Show helper text
-        const responseDiv = document.getElementById('config-yolo_url-response');
-        responseDiv.innerHTML = '<span style="color: var(--secondary-color);">💡 HuggingFace Space URL set - click "Set URL" to apply</span>';
-    } else {
-        urlLabel.textContent = 'YOLO Inference URL';
-        urlInput.value = 'http://yolo_inference:4442/v1/object-detection/yolov5s/detect/';
-        urlInput.placeholder = 'http://yolo_inference:4442/v1/object-detection/yolov5s/detect/';
-        modelSelector.style.display = 'none';  // Hide model selector
-        confidenceField.style.display = 'none';  // Hide confidence field
-        const responseDiv = document.getElementById('config-yolo_url-response');
-        responseDiv.innerHTML = '';
-    }
-}
 
 // v4.0.140 — Encoder calibration (encoder_unit + encoder_units_per_unit).
 // Fully decoupled from "meter": encoder_unit is any operator-chosen display
@@ -866,104 +775,14 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(loadEncoderCalibr
 //         auto_shipment_id_prefix (string, default "MR"),
 //         auto_cutoff_cooldown_sec (float, default 5).
 
-// Update the "in <unit>" label next to the threshold input based on which
-// metric radio is currently selected. Called on load and on every radio change.
-function _refreshAutoCutoffUnits() {
-    const metric = document.querySelector('input[name="auto-cutoff-metric"]:checked')?.value || 'length';
-    const el = document.getElementById('auto-cutoff-unit-echo');
-    if (!el) return;
-    if (metric === 'encoder') {
-        el.textContent = 'encoder pulses';
-    } else if (metric === 'time_sec') {
-        el.textContent = 'seconds';
-    } else {
-        // "length" — echo the operator's chosen display unit
-        const enc = (window._lengthCache && window._lengthCache.unit) || 'unit';
-        el.textContent = enc;
-    }
-}
-window._refreshAutoCutoffUnits = _refreshAutoCutoffUnits;
 
-async function loadAutoCutoffConfig() {
-    try {
-        const r = await fetch('/api/auto_cutoff_config');
-        if (!r.ok) return;
-        const d = await r.json();
-        const enEl  = document.getElementById('auto-cutoff-enabled-input');
-        const lenEl = document.getElementById('auto-cutoff-length-input');
-        const preEl = document.getElementById('auto-cutoff-prefix-input');
-        const cdEl  = document.getElementById('auto-cutoff-cooldown-input');
-        // v4.0.155 — explicit boolean toggle drives the enable state.
-        if (enEl) enEl.checked = !!d.auto_cutoff_enabled;
-        const metric = (d.auto_cutoff_metric || 'length');
-        const metricRadio = document.querySelector(`input[name="auto-cutoff-metric"][value="${metric}"]`);
-        if (metricRadio) metricRadio.checked = true;
-        // Threshold: prefer new field; fall back to legacy alias.
-        const thr = (d.auto_cutoff_threshold !== undefined && d.auto_cutoff_threshold !== null)
-            ? d.auto_cutoff_threshold
-            : d.max_shipment_length;
-        if (lenEl && thr !== undefined && thr !== null) lenEl.value = thr;
-        if (preEl && d.auto_shipment_id_prefix) preEl.value = d.auto_shipment_id_prefix;
-        if (cdEl  && d.auto_cutoff_cooldown_sec !== undefined) cdEl.value = d.auto_cutoff_cooldown_sec;
-        _refreshAutoCutoffUnits();
-    } catch (e) {}
-}
 
-async function saveAutoCutoffConfig() {
-    const enabled = !!document.getElementById('auto-cutoff-enabled-input')?.checked;
-    const metric = document.querySelector('input[name="auto-cutoff-metric"]:checked')?.value || 'length';
-    const lenRaw = (document.getElementById('auto-cutoff-length-input')?.value || '').trim();
-    const preRaw = (document.getElementById('auto-cutoff-prefix-input')?.value || '').trim();
-    const cdRaw  = (document.getElementById('auto-cutoff-cooldown-input')?.value || '').trim();
-    const resp   = document.getElementById('auto-cutoff-response');
-    const body = {
-        auto_cutoff_enabled: enabled,
-        auto_cutoff_metric: metric,
-    };
-    if (lenRaw !== '') {
-        const n = parseFloat(lenRaw);
-        if (Number.isFinite(n)) body.auto_cutoff_threshold = n;
-    }
-    if (preRaw !== '') body.auto_shipment_id_prefix = preRaw;
-    if (cdRaw !== '') {
-        const n = parseFloat(cdRaw);
-        if (Number.isFinite(n)) body.auto_cutoff_cooldown_sec = n;
-    }
-    try {
-        const r = await fetch('/api/auto_cutoff_config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        const d = await r.json();
-        if (r.ok) {
-            if (resp) {
-                if (!d.auto_cutoff_enabled) {
-                    resp.textContent = 'Saved. Auto-cutoff disabled.';
-                } else {
-                    const unit = metric === 'encoder' ? 'encoder pulses'
-                               : metric === 'time_sec' ? 'seconds'
-                               : ((window._lengthCache && window._lengthCache.unit) || 'unit');
-                    resp.textContent = `Saved. Enabled. Cut at ${d.auto_cutoff_threshold} ${unit} → new id: ${d.auto_shipment_id_prefix}<date>.`;
-                }
-                resp.className = 'control-response success';
-            }
-        } else {
-            if (resp) { resp.textContent = `Error: ${d.detail || 'failed'}`; resp.className = 'control-response error'; }
-        }
-    } catch (e) {
-        if (resp) { resp.textContent = `Error: ${e.message}`; resp.className = 'control-response error'; }
-    }
-}
-window.saveAutoCutoffConfig = saveAutoCutoffConfig;
-window.loadAutoCutoffConfig = loadAutoCutoffConfig;
-document.addEventListener('DOMContentLoaded', () => setTimeout(loadAutoCutoffConfig, 1200));
 
 // 4.0.179 — cache the auto_cutoff_config globally so the procedure card
 // (in audio.js) can render the prefix / cooldown fields with real values
 // when Action = "Close shipment" is picked, without each card doing its
-// own fetch. Legacy loadAutoCutoffConfig() above still writes into the
-// removed DOM inputs — it silently no-ops when those inputs don't exist.
+// own fetch. (4.0.430 — the legacy auto-cutoff form handlers, whose inputs were
+// removed long ago, are gone; this is the one auto_cutoff_config read.)
 async function _cacheAutoCutoffConfig() {
     try {
         const r = await fetch('/api/auto_cutoff_config');
@@ -1386,8 +1205,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(loadDashboardStatePicker,    1500);
     setTimeout(loadDashboardPipelinePicker, 1700);
     // Refresh every 30s so changes from other operators show up too.
-    setInterval(loadDashboardStatePicker,    30000);
-    setInterval(loadDashboardPipelinePicker, 30000);
+    _mvePoll(loadDashboardStatePicker,    30000, true);   // 4.0.430 — see _mvePoll
+    _mvePoll(loadDashboardPipelinePicker, 30000, true);
 });
 
 
@@ -1937,7 +1756,6 @@ async function sendCommand(command, value = null) {
 // ===== CAMERA MONITORING FUNCTIONS =====
 // Direct camera control through counter service API
 let cameraData = {};
-let cameraRefreshInterval = null;
 let isCameraUpdating = false;
 
 async function fetchCameraStatus() {
@@ -2398,7 +2216,6 @@ async function applyCameraConfig(cameraId) {
 
         if (response.ok && result.success) {
             showCameraMessage(cameraId, 'Configuration applied!', 'success');
-            setTimeout(() => fetchCameraStatus(), 1000);
         } else {
             showCameraMessage(cameraId, result.error || 'Failed to apply config', 'error');
         }
@@ -2406,7 +2223,10 @@ async function applyCameraConfig(cameraId) {
         showCameraMessage(cameraId, `Error: ${error.message}`, 'error');
     }
 
-    setTimeout(resumeCameraRefresh, 2000);
+    // 4.0.430 — un-pause THEN re-read: the 1 s re-read used to fire while this function's
+    // own pause (lifted at 2 s) was still on, so it returned early and the card kept
+    // showing the pre-Apply values.
+    setTimeout(() => { isCameraUpdating = false; resumeCameraRefresh(); fetchCameraStatus(); }, 1200);
 }
 
 async function saveCameraConfig(cameraId) {
@@ -2445,23 +2265,13 @@ async function refreshCameras() {
     } catch (e) {
         console.warn('Camera rescan failed, falling back to status fetch:', e);
     }
+    // 4.0.430 — the operator pressed Refresh: always re-read. After ticking "Auto" the
+    // pause was never lifted, so this returned early and the button did nothing.
+    isCameraUpdating = false;
+    resumeCameraRefresh();
     fetchCameraStatus();
 }
 
-function updateCameraImages() {
-    if (isCameraUpdating) return;
-
-    Object.keys(cameraData).forEach(cameraId => {
-        const camera = cameraData[cameraId];
-        if (camera.connected) {
-            const imgEl = document.getElementById(`camera-img-${cameraId}`);
-            if (imgEl) {
-                // Update snapshot to create live feed effect
-                imgEl.src = `/api/camera/${cameraId}/snapshot?t=${Date.now()}`;
-            }
-        }
-    });
-}
 
 // Camera WebSocket live feeds — only active when Cameras tab is visible
 let cameraWsConnections = {}; // { cameraId: WebSocket }
@@ -2563,62 +2373,8 @@ function showConfigMessage(message, type) {
     setTimeout(() => { msgEl.style.display = 'none'; }, 5000);
 }
 
-async function saveServiceConfig() {
-    try {
-        showConfigMessage('Saving all service configuration...', 'info');
-        const response = await fetch('/api/cameras/config/save', { method: 'POST' });
-        const result = await response.json();
-        if (response.ok && result.success) {
-            showConfigMessage(`All config saved! (${result.cameras_saved} cameras, ${result.states_saved || 0} states + service settings)`, 'success');
-            checkServiceConfigStatus();
-            refreshStates();  // Refresh states display
-        } else {
-            showConfigMessage(result.error || 'Failed to save', 'error');
-        }
-    } catch (error) {
-        showConfigMessage(`Error: ${error.message}`, 'error');
-    }
-}
 
-async function loadServiceConfig() {
-    try {
-        showConfigMessage('Loading all service configuration...', 'info');
-        const response = await fetch('/api/cameras/config/load', { method: 'POST' });
-        const result = await response.json();
-        if (response.ok && result.success) {
-            showConfigMessage(`All config loaded! (${result.cameras_loaded} cameras, ${result.states_loaded || 0} states + service settings)`, 'success');
-            setTimeout(() => fetchCameraStatus(), 500);
-            refreshStates();  // Refresh states display
-        } else {
-            showConfigMessage(result.error || 'Failed to load', 'error');
-        }
-    } catch (error) {
-        showConfigMessage(`Error: ${error.message}`, 'error');
-    }
-}
 
-async function downloadServiceConfig() {
-    try {
-        const response = await fetch('/api/cameras/config');
-        const data = await response.json();
-        if (!data.exists || !data.config) {
-            showConfigMessage('No saved configuration to export', 'error');
-            return;
-        }
-        const blob = new Blob([JSON.stringify(data.config, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `service_config_${new Date().toISOString().slice(0,10)}.json`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        showConfigMessage('All configuration exported!', 'success');
-    } catch (error) {
-        showConfigMessage(`Error: ${error.message}`, 'error');
-    }
-}
 
 
 async function checkServiceConfigStatus() {
@@ -4182,29 +3938,6 @@ function pulseHeartbeat(elementId) {
     }, 150);
 }
 
-// Poll for latest detections (fallback for audio when SSE isn't working)
-let lastProcessedDetectionTime = 0;
-async function pollLatestDetections() {
-    try {
-        const response = await fetch('/api/latest_detections');
-        const data = await response.json();
-
-        if (data.has_detection && data.event) {
-            const event = data.event;
-            // Only process if we haven't seen this timestamp before
-            if (event.timestamp !== lastProcessedDetectionTime) {
-                lastProcessedDetectionTime = event.timestamp;
-
-                // Process for audio
-                if (event.details && event.details.detections) {
-                    processDetectionForAudio(event.details);
-                }
-            }
-        }
-    } catch (e) {
-        console.error('[Polling] Error fetching detections:', e);
-    }
-}
 
 // Color based on usage percentage: green → yellow → red
 function usageColor(pct) {
@@ -4273,16 +4006,30 @@ loadProcedures();
 startTimelineRefresh();
 
 // Initial inference stats fetch and set up refresh interval
+// 4.0.430 — pollers go through _mvePoll: ONE request in flight each. Plain setInterval
+// kept firing while the backend was slow, and the pile-up filled the browser's ~6
+// connections per host, so the operator's own Save / Apply requests queued behind them.
+// The stats polls also skip while the browser tab is hidden.
+function _mvePoll(fn, ms, skipHidden) {
+    let busySince = 0;
+    return setInterval(async () => {
+        if (skipHidden && document.hidden) return;
+        if (busySince && Date.now() - busySince < 30000) return;
+        busySince = Date.now();
+        try { await fn(); } catch (e) { /* each poller reports its own errors */ }
+        finally { busySince = 0; }
+    }, ms);
+}
+window._mvePoll = _mvePoll;
+
 fetchInferenceStats();
-setInterval(fetchInferenceStats, 2000);  // Update every 2 seconds
+_mvePoll(fetchInferenceStats, 2000, true);  // Update every 2 seconds
 
 // Initial system metrics fetch and set up refresh interval
 fetchSystemMetrics();
-setInterval(fetchSystemMetrics, 3000);  // Update every 3 seconds
+_mvePoll(fetchSystemMetrics, 3000, true);  // Update every 3 seconds
 
 // Polling disabled - using SSE for audio alerts now
-// pollLatestDetections();
-// setInterval(pollLatestDetections, 1000);
 
 // Initial config fetch (once on page load)
 fetchConfig();
@@ -4292,10 +4039,9 @@ refreshStates();
 refreshInferenceConfig();
 
 // Refresh health status periodically (for YOLO status)
-setInterval(fetchHealth, 10000);
+_mvePoll(fetchHealth, 10000, false);
 
 // Set default API type fields (Gradio with HuggingFace URL)
-updateAPITypeFields();
 
 // Apply saved language preference
 applyLanguage(currentLang);

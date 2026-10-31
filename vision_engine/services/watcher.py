@@ -710,6 +710,18 @@ def set_app(app):
     _app = app
 
 
+def _open_serial(port, baud):
+    """Open + clear the watcher board's serial port.
+
+    4.0.430 — with a WRITE timeout: a hung USB-CDC board stops draining its TX buffer,
+    and without one the capture thread's per-frame light-mode write (or any command)
+    blocked forever. A timed-out write raises and goes through the usual error paths."""
+    s = serial.Serial(port, baud, 8, 'N', 1, timeout=1, write_timeout=2)
+    s.flushInput()   # clear input serial buffer
+    s.flushOutput()  # clear output serial buffer
+    return s
+
+
 class ArduinoSocket:
     def __init__(self, camera_paths: List[str] = None, camera_configs: dict = None,
                  serial_port=None, serial_baudrate=None):
@@ -729,9 +741,7 @@ class ArduinoSocket:
 
         # Try to initialize serial, but continue without it if unavailable
         try:
-            self.serial = serial.Serial(self.serial_port, self.serial_baudrate, 8, 'N', 1, timeout=1)
-            self.serial.flushInput()  # clear input serial buffer
-            self.serial.flushOutput()  # clear output serial buffer
+            self.serial = _open_serial(self.serial_port, self.serial_baudrate)
             self.serial_available = True
             logger.info(f"Serial connected: {self.serial_port} @ {self.serial_baudrate}")
         except Exception as e:
@@ -1032,6 +1042,27 @@ class ArduinoSocket:
         self.cam_2 = self.cameras.get(2)
         self.cam_3 = self.cameras.get(3)
         self.cam_4 = self.cameras.get(4)
+
+    def switch_serial(self, port, baud):
+        """4.0.430 — Hardware tab Set Port / Set Baud Rate: open the new device FIRST and
+        swap only if it opened, so a typo never drops a working connection. Also the only
+        way out of camera-only mode (run() does not retry a port that was missing at boot).
+        Returns (ok, error_text)."""
+        try:
+            new = _open_serial(port, int(baud))
+        except Exception as e:
+            return False, str(e)
+        old = self.serial
+        self.serial_port, self.serial_baudrate = port, int(baud)
+        self.serial = new
+        self.serial_available = True
+        if old is not None and old is not new:
+            try:
+                old.close()
+            except Exception:
+                pass
+        logger.info(f"Serial switched to {port} @ {baud}")
+        return True, None
 
     def rescan_cameras(self):
         """4.0.428 — SAFE, report-only hot-plug check (runs on every click of the Cameras
@@ -1943,9 +1974,7 @@ class ArduinoSocket:
                         if self.serial:
                             try: self.serial.close()
                             except Exception: pass
-                        self.serial = serial.Serial(self.serial_port, self.serial_baudrate, 8, 'N', 1, timeout=1)
-                        self.serial.flushInput()
-                        self.serial.flushOutput()
+                        self.serial = _open_serial(self.serial_port, self.serial_baudrate)
                         if not self.serial_available:
                             logger.warning(f"Serial reconnected on {self.serial_port} after error: {e}")
                         self.serial_available = True

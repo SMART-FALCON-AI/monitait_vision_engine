@@ -34,7 +34,10 @@ function loadAudioSettings() {
 
 // Save audio settings to localStorage
 function saveAudioSettings() {
-    localStorage.setItem('audioSettings', JSON.stringify(audioSettings));
+    // 4.0.430 — a full localStorage threw here, BEFORE the per-class toggles synced to
+    // the server (so the change was silently lost). The server copy is the real one.
+    try { localStorage.setItem('audioSettings', JSON.stringify(audioSettings)); }
+    catch (e) { console.warn('audio settings not cached locally (browser storage full):', e); }
 }
 
 // Update UI to reflect current settings
@@ -152,44 +155,9 @@ function initAudioContext() {
     document.addEventListener('touchstart', onGesture, true);
 })();
 
-// Toggle global bounding boxes
-function toggleGlobalBbox() {
-    const bboxEl = document.getElementById('global-show-bbox');
-    audioSettings.showBoundingBoxes = bboxEl.checked;
-    saveAudioSettings();
-    console.log('[Detection] Bounding boxes', audioSettings.showBoundingBoxes ? 'enabled' : 'disabled');
-}
 
-// Toggle narration
-function toggleNarration() {
-    const narrateEl = document.getElementById('audio-narrate');
-    audioSettings.narrate = narrateEl.checked;
-    saveAudioSettings();
-    console.log('[Audio] Narration', audioSettings.narrate ? 'enabled' : 'disabled');
-}
 
-// Toggle beep
-function toggleBeep() {
-    const beepEl = document.getElementById('audio-beep');
-    audioSettings.beep = beepEl.checked;
 
-    // Initialize audio context when beep is enabled
-    if (audioSettings.beep) {
-        initAudioContext();
-    }
-
-    saveAudioSettings();
-    console.log('[Audio] Beep', audioSettings.beep ? 'enabled' : 'disabled');
-}
-
-// Update volume
-function updateVolume() {
-    const volumeEl = document.getElementById('audio-volume');
-    const volumeDisplay = document.getElementById('audio-volume-display');
-    audioSettings.volume = volumeEl.value / 100;
-    if (volumeDisplay) volumeDisplay.textContent = Math.round(audioSettings.volume * 100) + '%';
-    saveAudioSettings();
-}
 
 // Toggle object in beep list
 function toggleObjectBeep(objectName) {
@@ -200,32 +168,6 @@ function toggleObjectBeep(objectName) {
     if (typeof syncObjectAudioToServer === 'function') syncObjectAudioToServer(objectName);
 }
 
-// Play a beep sound using Web Audio API (non-blocking)
-function playAlarmBeep() {
-    if (!audioContext || !audioSettings.beep) return;
-
-    // Run audio in next event loop to avoid blocking main thread
-    setTimeout(() => {
-        try {
-            const oscillator = audioContext.createOscillator();
-            const gainNode = audioContext.createGain();
-
-            oscillator.connect(gainNode);
-            gainNode.connect(audioContext.destination);
-
-            oscillator.type = 'sine';
-            oscillator.frequency.value = 880;  // A5 - attention-grabbing frequency
-
-            gainNode.gain.setValueAtTime(audioSettings.volume, audioContext.currentTime);
-            gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
-
-            oscillator.start(audioContext.currentTime);
-            oscillator.stop(audioContext.currentTime + 0.2);
-        } catch (e) {
-            console.error('Error playing beep:', e);
-        }
-    }, 0);
-}
 
 // Narrate detected object using Web Speech API (non-blocking)
 function narrateObject(objectName) {
@@ -343,6 +285,17 @@ function getObjectInfo(name) {
 function updateObjectsList() {
     const listEl = document.getElementById('audio-objects-list');
     if (!listEl) return;
+    // 4.0.430 — not while the operator is typing in one of the cards: a first sighting
+    // of any new class re-renders the list and wiped the Min conf / Severity being typed.
+    // Re-render once the field is left (its change handler has saved the value by then).
+    const _ae = document.activeElement;
+    if (_ae && listEl.contains(_ae) && /^(INPUT|SELECT|TEXTAREA)$/.test(_ae.tagName)) {
+        if (!listEl._mveDeferred) {
+            listEl._mveDeferred = true;
+            _ae.addEventListener('blur', () => { listEl._mveDeferred = false; setTimeout(updateObjectsList, 50); }, { once: true });
+        }
+        return;
+    }
 
     listEl.innerHTML = '';
 
@@ -1091,26 +1044,6 @@ document.addEventListener('DOMContentLoaded', () => setTimeout(loadActiveClasses
 window.loadActiveClasses = loadActiveClasses;
 
 
-// 3.21.24 — Set the per-class Min-Conf slider to that camera's p5 baseline
-// (or the overall p5 when no camera is specified). One-click "calibrate
-// against historical noise floor — anything above this is real".
-function suggestMinConfFromBaseline(objectName, camera) {
-    const b = audioSettings.confBaselines?.[objectName];
-    if (!b) return;
-    let p5;
-    if (camera != null && b.by_camera && b.by_camera[String(camera)]) {
-        p5 = b.by_camera[String(camera)].p5;
-    } else {
-        p5 = b.p5;
-    }
-    if (typeof p5 !== 'number') return;
-    const ui = Math.max(0, Math.min(100, Math.round(p5 * 100)));
-    audioSettings.objectConfidence[objectName] = ui;
-    saveAudioSettings();
-    updateObjectsList();
-    syncObjectAudioToServer(objectName);
-}
-window.suggestMinConfFromBaseline = suggestMinConfFromBaseline;
 
 // Toggle DB persistence for object. POSTs to server because detection.py reads
 // this server-side to gate writes to inference_results. Default OFF.
@@ -1513,27 +1446,7 @@ async function loadProcedures() {
     }
 }
 
-// Show all objects (enable all: show + narrate + beep)
-function showAllObjects() {
-    detectedObjectClasses.forEach(objectName => {
-        audioSettings.showObjects[objectName] = true;
-        audioSettings.enabledObjects[objectName] = true;
-        audioSettings.narrateObjects[objectName] = true;
-    });
-    saveAudioSettings();
-    updateObjectsList();
-}
 
-// Hide all objects (disable all: show + narrate + beep)
-function hideAllObjects() {
-    detectedObjectClasses.forEach(objectName => {
-        audioSettings.showObjects[objectName] = false;
-        audioSettings.enabledObjects[objectName] = false;
-        audioSettings.narrateObjects[objectName] = false;
-    });
-    saveAudioSettings();
-    updateObjectsList();
-}
 
 // Update beep sound for specific object
 function updateObjectBeepSound(objectName, soundType) {
@@ -1651,25 +1564,6 @@ function processDetectionForAudio(detectionData) {
     }, 0);
 }
 
-// Test audio button
-function testAudio() {
-    initAudioContext();
-
-    if (audioSettings.narrate) {
-        narrateObject('Test detection');
-    }
-
-    if (audioSettings.beep) {
-        playAlarmBeep();
-    }
-
-    // If nothing is enabled, play beep anyway to test volume
-    if (!audioSettings.narrate && !audioSettings.beep) {
-        audioSettings.beep = true;  // Temporarily enable
-        playAlarmBeep();
-        audioSettings.beep = false;
-    }
-}
 
 // Tab switching functionality
 function switchTab(tabName) {
@@ -1805,7 +1699,10 @@ document.addEventListener('DOMContentLoaded', function() {
     let totalFrames = 0;
     let rowsPerPage = 10;
 
+    let _countBusy = false;   // 4.0.430 — one count request at a time (no pile-up on a slow backend)
     async function updatePageCount() {
+        if (_countBusy) return;
+        _countBusy = true;
         try {
             const response = await fetch('/api/timeline_count');
             const data = await response.json();
@@ -1815,7 +1712,7 @@ document.addEventListener('DOMContentLoaded', function() {
             updateCounter();
         } catch (error) {
             console.error('Error fetching page count:', error);
-        }
+        } finally { _countBusy = false; }
     }
 
     function updateCounter() {
@@ -1950,7 +1847,9 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     // Update page count periodically
-    setInterval(updatePageCount, 5000);
+    // 4.0.430 — only while paused: in auto-update refreshImage() already re-reads the count
+    // every 5 s (this fetched /api/timeline_count a second time). Not in a hidden tab.
+    setInterval(() => { if (!autoUpdate && !document.hidden) updatePageCount(); }, 5000);
     updatePageCount();
 
     // Zoom controls (also guarded — present today but cheap insurance)
@@ -2423,13 +2322,18 @@ document.addEventListener('DOMContentLoaded', function() {
 // so it survives a refresh. The save itself writes service_config.saved_at; we
 // read it back here instead of relying on the in-DOM client timestamp (which is
 // lost on reload — that's why it showed "Never" after refresh).
+// 4.0.430 — "Last saved" in the operator's local time (saved_at is UTC with its offset)
+function _fmtSavedAt(ts) {
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+}
 async function loadLastSavedTime() {
     try {
         const r = await fetch('/api/cameras/config');
         const d = await r.json();
         const ts = (d.config && d.config.saved_at) || d.saved_at;
         const el = document.getElementById('last-saved-time');
-        if (el && ts) el.textContent = ts;
+        if (el && ts) el.textContent = _fmtSavedAt(ts);
     } catch (e) { /* leave the i18n "Never" default */ }
 }
 document.addEventListener('DOMContentLoaded', loadLastSavedTime);
@@ -2443,8 +2347,8 @@ async function saveAllServiceConfig() {
         if (response.ok) {
             const data = await response.json();
             // Prefer the server-persisted saved_at; fall back to client time.
-            const timestamp = (data.config && data.config.saved_at) || new Date().toISOString();
-            document.getElementById('last-saved-time').textContent = timestamp;
+            const timestamp = data.saved_at || (data.config && data.config.saved_at) || new Date().toISOString();
+            document.getElementById('last-saved-time').textContent = _fmtSavedAt(timestamp);
             alert('✓ All settings saved successfully!');
         } else {
             const data = await response.json();
@@ -2456,22 +2360,6 @@ async function saveAllServiceConfig() {
     } finally { _btnDone(_b); }
 }
 
-async function loadServiceConfig() {
-    if (!confirm('Load saved service configuration? This will reload the page.')) return;
-    try {
-        const response = await fetch('/api/cameras/config/load', { method: 'POST' });
-        if (response.ok) {
-            alert('✓ Configuration loaded! Reloading page...');
-            location.reload();
-        } else {
-            const data = await response.json();
-            alert(`❌ Failed to load configuration: ${data.error || 'Unknown error'}`);
-        }
-    } catch (error) {
-        console.error('Error loading config:', error);
-        alert('❌ Error loading configuration');
-    }
-}
 
 async function exportServiceConfig() {
     try {
@@ -2799,7 +2687,22 @@ function _loadConvs() {
     try { return JSON.parse(localStorage.getItem('ai_conversations') || '[]'); }
     catch (e) { return []; }
 }
-function _saveConvs(c) { localStorage.setItem('ai_conversations', JSON.stringify(c)); }
+// 4.0.430 — never throws, and the number of conversations is bounded. It was unbounded
+// (only messages per conversation were capped), and once localStorage filled up the
+// setItem threw inside sendAIMessage BEFORE its try block — the question was never sent.
+const _MAX_CONVS = 50;
+function _saveConvs(c) {
+    let list = Array.isArray(c) ? c.slice(0, _MAX_CONVS) : [];
+    for (let i = 0; i < 6; i++) {
+        try { localStorage.setItem('ai_conversations', JSON.stringify(list)); return; }
+        catch (e) {
+            if (list.length > 1) list = list.slice(0, Math.max(1, Math.floor(list.length / 2)));   // drop the oldest half
+            else if (list.length === 1 && list[0].messages && list[0].messages.length > 10)
+                list[0].messages = list[0].messages.slice(-Math.floor(list[0].messages.length / 2));
+            else { console.warn('chat history not saved (browser storage full):', e); return; }
+        }
+    }
+}
 function _newConvObj() {
     return { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), title: '', created: new Date().toISOString(), messages: [] };
 }

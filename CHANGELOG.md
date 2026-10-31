@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.430] - 2026-11-01 - Audit batch 10: Hardware serial settings work, UI no longer loses typing, polls don't pile up, dead UI code removed
+
+**Fixed — Hardware tab**
+- **"Set Port" and "Set Baud Rate" always failed** with HTTP 400 ("No valid configuration keys provided"); the backend handled neither key, despite the panel's "applied immediately" note. They now work live: the new device is opened **before** the old one is closed, so a typo never drops a working connection, and an error says why. This is also the only way out of camera-only mode, because the serial loop never retries a port that was missing at boot. The choice is kept across restarts as an operator override of `.env`. It is stored under separate `*_override` keys, because `infrastructure.serial_port` only mirrors `.env` at the last save and must not pin a later `.env` change.
+- **Display**: the baud-rate dropdown always showed 57600 (it read `baud_rate`; the server sends `baudrate`), and the Redis host/port inputs always showed the HTML defaults (it read a section the server never sends).
+- **Serial writes have a 2 s timeout.** A hung USB board stops draining its buffer, and the capture thread's per-frame light-mode write (or any command) then blocked forever.
+
+**Fixed — operator work lost or blocked**
+- Typing a Min conf or Severity into a class card was wiped whenever a new class appeared for the first time. The list now re-renders after the field is left.
+- **Hardware → Watcher stations**: saving one row reloaded the table and dropped edits typed into the other rows. Those edits are now kept.
+- **Cameras**:
+  - After ticking "Auto", the Refresh button did nothing; the refresh pause was never lifted.
+  - After Apply, the card kept showing the pre-Apply values; its re-read fired while Apply's own pause was still on.
+- **AI chat**: once browser storage filled up (the number of saved chats had no limit), the question was never sent; the save threw before the request. Saved chats are now capped at 50, and a full storage drops the oldest instead of failing. Per-class toggles also no longer throw before syncing to the server.
+- "Last saved" showed the container's UTC clock, 3.5 h off for Iran. It is now stored with its UTC offset and shown in local time.
+- **Process tab**: its quality thresholds never reloaded on opening the tab (the hook looked for an element that doesn't exist), yet they loaded on every page load whichever tab was open.
+
+**Fixed — load**
+- The dashboard polls (inference stats 2 s, system metrics 3 s, health 10 s, pickers 30 s) kept firing while the backend was slow. The pile-up filled the browser's ~6 connections, so the operator's own Save / Apply requests queued behind them. Each poll now has one request in flight at a time, and the stats polls pause in a hidden browser tab.
+- `/api/timeline_count` was fetched twice every 5 s; it is now fetched once.
+
+**Removed (dead — no caller anywhere in the UI, confirmed with a JS parser plus a repo-wide search)**: about 25 functions in app-core.js and audio.js:
+- the legacy auto-cutoff form handlers, whose inputs were removed long ago but still cost a request on every page load;
+- the old detection poller;
+- the Gradio API-type switcher;
+- toggle / volume / test-audio helpers for elements that no longer exist;
+- a duplicate `loadServiceConfig` defined in both files.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.429] - 2026-11-01 - Audit batch 9: Charts tab (background load, stale answers, wrong labels)
 
 **Fixed — load**

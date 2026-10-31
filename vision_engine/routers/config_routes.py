@@ -123,8 +123,8 @@ def build_current_service_config(app_state):
         "infrastructure": {
             "redis_host": config.REDIS_HOST,
             "redis_port": config.REDIS_PORT,
-            "serial_port": WATCHER_USB,
-            "serial_baudrate": SERIAL_BAUDRATE,
+            "serial_port": config.WATCHER_USB,
+            "serial_baudrate": config.SERIAL_BAUDRATE,
             "serial_mode": config.SERIAL_MODE,
             "postgres_host": POSTGRES_HOST,
             "postgres_port": POSTGRES_PORT,
@@ -219,6 +219,12 @@ def build_current_service_config(app_state):
     for _preserved in ("store_objects", "audio_settings"):
         if _preserved in existing:
             svc_config[_preserved] = existing[_preserved]
+    # 4.0.430 — the operator's serial port / baud override (Hardware tab) has no source in
+    # the literal above either; a full rebuild must not drop it.
+    _ex_infra = existing.get("infrastructure") or {}
+    for _k in ("serial_port_override", "serial_baudrate_override"):
+        if _ex_infra.get(_k):
+            svc_config["infrastructure"][_k] = _ex_infra[_k]
 
     # 4.0.17 — current_shipment ALSO has no source in the literal above.
     # Without this, any auto-save (camera edit, AI model change, state
@@ -318,8 +324,8 @@ def get_config(request: Request):
         },
         "data_file": DATA_FILE,
         "serial": {
-            "port": WATCHER_USB,
-            "baudrate": SERIAL_BAUDRATE,
+            "port": config.WATCHER_USB,          # 4.0.430 — live value (Set Port changes it)
+            "baudrate": config.SERIAL_BAUDRATE,
             "mode": config.SERIAL_MODE
         },
         "cameras": {
@@ -520,6 +526,40 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             config.REDIS_PORT = int(config_data["redis_port"])
             updated["redis_port"] = config.REDIS_PORT
             logger.info(f"Updated REDIS_PORT to {config.REDIS_PORT}")
+
+        # 4.0.430 — serial device / baud rate (Hardware tab "Set Port" / "Set Baud Rate").
+        # These buttons always got HTTP 400 ("No valid configuration keys"). Applied live
+        # (the new device is opened before the old one is closed) and kept as an OVERRIDE
+        # of the .env value — under separate keys, because infrastructure.serial_port holds
+        # whatever .env said at the last full save and must not pin a later .env change.
+        if "watcher_usb" in config_data or "baud_rate" in config_data:
+            port = str(config_data.get("watcher_usb") or config.WATCHER_USB).strip()
+            try:
+                baud = int(config_data.get("baud_rate") or config.SERIAL_BAUDRATE)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="baud_rate must be a number")
+            if not port.startswith("/dev/"):
+                raise HTTPException(status_code=400, detail="Serial port must be a /dev/… device path")
+            if baud not in (9600, 19200, 38400, 57600, 115200):
+                raise HTTPException(status_code=400, detail=f"Unsupported baud rate: {baud}")
+            watcher = request.app.state.watcher_instance
+            if watcher is not None:
+                ok, err = watcher.switch_serial(port, baud)
+                if not ok:
+                    raise HTTPException(status_code=400, detail=f"Could not open {port} @ {baud}: {err}")
+            config.WATCHER_USB, config.SERIAL_BAUDRATE = port, baud
+
+            def _keep(c):
+                infra = c.setdefault("infrastructure", {})
+                infra["serial_port_override"] = port
+                infra["serial_baudrate_override"] = baud
+            from config import mutate_service_config
+            mutate_service_config(_keep)
+            if "watcher_usb" in config_data:
+                updated["watcher_usb"] = port
+            if "baud_rate" in config_data:
+                updated["baud_rate"] = baud
+            logger.info(f"Serial set to {port} @ {baud} (operator override)")
 
         # Serial mode configuration
         if "serial_mode" in config_data:

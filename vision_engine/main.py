@@ -202,6 +202,28 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
                 watcher_inst.serial_mode = SERIAL_MODE
             settings_applied["serial_mode"] = True
             logger.info(f"Serial mode loaded from config: {SERIAL_MODE}")
+        # 4.0.430 — operator's serial port / baud override (Hardware tab Set Port / Set
+        # Baud Rate). Only these *_override keys (written by those buttons) — NOT
+        # serial_port, which just mirrors .env at the last save.
+        _sp = config["infrastructure"].get("serial_port_override")
+        _sb = config["infrastructure"].get("serial_baudrate_override")
+        if _sp or _sb:
+            import config as _cfgmod
+            _port = str(_sp or _cfgmod.WATCHER_USB)
+            try:
+                _baud = int(_sb or _cfgmod.SERIAL_BAUDRATE)
+            except (TypeError, ValueError):
+                _baud = _cfgmod.SERIAL_BAUDRATE
+            _ok = True
+            if watcher_inst and (_port != getattr(watcher_inst, "serial_port", None)
+                                 or _baud != getattr(watcher_inst, "serial_baudrate", None)
+                                 or not getattr(watcher_inst, "serial_available", False)):
+                _ok, _err = watcher_inst.switch_serial(_port, _baud)
+                if not _ok:
+                    logger.warning(f"Serial override {_port} @ {_baud} could not be opened ({_err}) — keeping {watcher_inst.serial_port}")
+            if _ok:
+                _cfgmod.WATCHER_USB, _cfgmod.SERIAL_BAUDRATE = _port, _baud
+                logger.info(f"Serial override loaded from config: {_port} @ {_baud}")
 
     # Apply AI configuration (load from DATA_FILE to Redis for runtime use)
     if "ai" in config and watcher_inst and watcher_inst.redis_connection:
