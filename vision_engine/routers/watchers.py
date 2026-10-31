@@ -142,6 +142,39 @@ def watcher_oee(register_id: str, since_ms: int = 0, until_ms: int = 0):
         return JSONResponse({"error": str(e), "oee": None}, status_code=500)
 
 
+@router.get("/api/watchers/camera_options")
+def watcher_camera_options():
+    """4.0.419 — cameras + object classes (with their Store flag) for a camera station."""
+    try:
+        return wm.camera_options()
+    except Exception as e:
+        logger.warning("camera options failed: %s", e)
+        return JSONResponse({"error": str(e), "cameras": [], "classes": []}, status_code=500)
+
+
+@router.post("/api/watchers/camera_station")
+async def watcher_camera_station(request: Request):
+    """4.0.419 — create (no register_id) or update a camera station: name, cameras
+    (ids; empty = all), ok_classes, ng_classes."""
+    try:
+        b = await request.json()
+        return wm.save_camera_station(b.get("register_id"), b.get("name"), b.get("cameras"),
+                                      b.get("ok_classes"), b.get("ng_classes"))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/api/watchers/camera_count_now")
+def watcher_camera_count_now():
+    """4.0.419 — run one camera-station counting pass now (it also runs every minute)."""
+    try:
+        return {"counted": wm.count_camera_stations()}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @router.get("/api/watchers/lines")
 def watcher_lines(since_ms: int = 0, until_ms: int = 0):
     """4.0.418 — OEE per line (stations chained by next station) with each station's

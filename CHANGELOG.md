@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.419] - 2026-11-01 - Camera stations: a station counted by MVE's cameras (objects as OK, other objects as NG)
+
+**Why** — the operator: "be able to add camera count of object(s) as the OK and the count of another object(s) as NG", so a camera can be a station in a line next to the Watcher Jets (IS, QC machine, QC operator, …).
+
+**New: Hardware tab → Watcher Jets / Stations → "📷 + Camera station"**
+- Pick a station name, the camera(s) (none ticked = all cameras), the object(s) that count as **OK** and the object(s) that count as **NG**. Objects whose Store is off are marked "(not stored)" — they are never written to the DB, so they would count 0.
+- Once a minute MVE counts the newly stored detections of those objects on those cameras (window ends 1 min ago — the detection writer is asynchronous) and files them as an ordinary watcher report. So the camera station has everything a Watcher Jet has: online dot, last report, station name, next station, OK / NG factors, OEE, a place in a line (gap, line OEE) and in the Charts legend.
+- A new station counts from the moment it is saved (no back-fill); after a restart it resumes where it stopped (at most 1 h back). One counting pass at a time (lock), so a manual pass and the minute pass never count the same detections twice.
+- ✎ edits the cameras / objects; ✕ removes it (it stops counting; history kept).
+- Honest limit, shown in the form: MVE does not track objects, so every detection counts — an object seen in two frames counts twice. The counts are real units only when each object is captured once (triggered capture); with periodic capture they are a sample (Quality still right).
+
+**API** — `GET /api/watchers/camera_options` (cameras + object classes with their Store flag), `POST /api/watchers/camera_station {register_id?, name, cameras, ok_classes, ng_classes}` (validated: name, at least one object, an object can't be both OK and NG), `POST /api/watchers/camera_count_now` (one pass now). `GET /api/watchers` returns `kind` ("watcher" / "camera") and `camera_config`. DB: `watcher_registry` gains `cam_config` (JSONB) and `cam_last_ts` (added in place). Counter = daemon thread started at boot (`start_camera_counter`, main.py).
+
+Cache-busters `?v=4.0.419`.
+
 ## [4.0.418] - 2026-10-31 - Line OEE: a chain of watcher stations is a line; OEE from OK, NG and the gap between stations
 
 **Why** — the operator: OEE should come from each station's OK and NG *and the difference between one station and the next*, and a chain of watchers is a production line whose OEE matters too. 4.0.417 let stations be chained (next station) but computed OEE per machine only.

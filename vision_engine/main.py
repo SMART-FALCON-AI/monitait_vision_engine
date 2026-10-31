@@ -770,6 +770,16 @@ async def _start_notifications_scheduler():
 
 
 @app.on_event("startup")
+async def _start_camera_station_counter():
+    """4.0.419 — camera stations (Hardware tab) report their detection counts each minute."""
+    try:
+        from services.watcher_metrics import start_camera_counter
+        start_camera_counter()
+    except Exception as _e:
+        logger.warning(f"camera-station counter failed to start: {_e}")
+
+
+@app.on_event("startup")
 async def _start_timeline_config_selfheal():
     """4.0.385 BOOT-RACE — recover a boot that fell back to default timeline_config.
 

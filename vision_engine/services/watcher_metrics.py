@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from services.db import get_db_connection, release_db_connection
@@ -96,6 +99,11 @@ def _ensure_schema() -> None:
         ("ok_factor",    "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS ok_factor DOUBLE PRECISION"),
         ("ng_factor",    "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS ng_factor DOUBLE PRECISION"),
         ("assigned",     "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS assigned BOOLEAN DEFAULT FALSE"),
+        # 4.0.419 — camera stations: MVE itself reports the station's OK/NG from the
+        # detections of chosen classes on chosen cameras (cam_config); cam_last_ts =
+        # how far the detections have been counted.
+        ("cam_config",   "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS cam_config JSONB"),
+        ("cam_last_ts",  "ALTER TABLE watcher_registry ADD COLUMN IF NOT EXISTS cam_last_ts TIMESTAMPTZ"),
     ):
         try:
             _exec(ddl)
@@ -208,7 +216,7 @@ def list_watchers() -> List[Dict[str, Any]]:
                (SELECT defect_quantity FROM watcher_metrics m WHERE m.register_id=r.register_id ORDER BY ts DESC LIMIT 1),
                (SELECT COUNT(*)        FROM watcher_metrics m WHERE m.register_id=r.register_id),
                EXTRACT(EPOCH FROM (NOW() - r.last_seen)),
-               r.next_watcher, r.ok_factor, r.ng_factor, r.assigned
+               r.next_watcher, r.ok_factor, r.ng_factor, r.assigned, r.cam_config
         FROM watcher_registry r
         ORDER BY r.line NULLS LAST, r.last_seen DESC NULLS LAST, r.register_id
     """, fetch="all") or []
@@ -227,6 +235,9 @@ def list_watchers() -> List[Dict[str, Any]]:
             "station": x[1], "next_watcher": x[11],
             "ok_factor": _factor(x[12]), "ng_factor": _factor(x[13]),
             "assigned": bool(x[14]) or bool(x[1]),
+            # 4.0.419 — "camera" = counted by MVE from detections (see camera_config)
+            "kind": "camera" if x[15] is not None else "watcher",
+            "camera_config": _as_dict(x[15]) if x[15] is not None else None,
         })
     return out
 
@@ -561,3 +572,159 @@ def compute_lines(since_ms: Optional[int] = None,
         })
     lines.sort(key=lambda x: x["name"].lower())
     return {"since_ms": since_ms, "until_ms": until_ms, "lines": lines}
+
+
+# --------------------------------------------------------------------------- #
+# camera stations (4.0.419)
+# --------------------------------------------------------------------------- #
+# A camera station is a station whose OK / NG come from MVE's own detections: OK =
+# detections of the chosen OK object(s), NG = detections of the chosen NG object(s),
+# on the chosen cameras (none chosen = all). Once a minute MVE counts what is new and
+# files it as an ordinary watcher report, so OEE, lines, gaps, charts and the online
+# dot treat it exactly like a Watcher Jet. Only detections that are stored count
+# (class Store ON, at or above its min confidence), and every detection counts — MVE
+# does not track objects, so one object seen in two frames counts twice: a true unit
+# count only when each object is captured once (triggered capture); with periodic
+# capture the counts are a sample (Quality is still right).
+CAMERA_COUNT_INTERVAL_SEC = 60
+CAMERA_COUNT_LAG_SEC = 60                    # detections reach the DB via a batch writer
+CAMERA_COUNT_MAX_CATCHUP = timedelta(hours=1)
+_counter_started = False
+_count_lock = threading.Lock()               # one counting pass at a time
+
+
+def _clean_list(v: Any) -> List[str]:
+    out: List[str] = []
+    for x in (v or []):
+        s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def camera_options() -> Dict[str, Any]:
+    """Cameras and object classes to build a camera station from. A class is
+    `stored` when its Store switch is ON — only stored detections can be counted."""
+    _ensure_schema()
+    from config import load_service_config
+    svc = load_service_config() or {}
+    cameras = sorted(({"id": int(k), "name": (c or {}).get("name") or f"Camera {k}"}
+                      for k, c in (svc.get("cameras") or {}).items() if str(k).isdigit()),
+                     key=lambda c: c["id"])
+    store = svc.get("store_objects") or {}
+    seen = {r[0] for r in (_exec("""
+        SELECT DISTINCT d->>'name' FROM
+          (SELECT detections FROM inference_results ORDER BY time DESC LIMIT 2000) r
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE WHEN jsonb_typeof(r.detections) = 'array' THEN r.detections ELSE '[]'::jsonb END) d
+    """, fetch="all") or []) if r[0]}
+    names = sorted((set(store) | seen) - {"_color"}, key=str.lower)
+    return {"cameras": cameras,
+            "classes": [{"name": n, "stored": bool(store.get(n, False)), "seen_recently": n in seen}
+                        for n in names]}
+
+
+def save_camera_station(register_id: Optional[str], name: str, cameras: Any,
+                        ok_classes: Any, ng_classes: Any) -> Dict[str, Any]:
+    """Create (no register_id) or update a camera station."""
+    _ensure_schema()
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("station name required")
+    ok, ng = _clean_list(ok_classes), _clean_list(ng_classes)
+    if not ok and not ng:
+        raise ValueError("choose at least one OK or NG object")
+    both = sorted(set(ok) & set(ng))
+    if both:
+        raise ValueError(f"{', '.join(both)} cannot be both OK and NG")
+    try:
+        cams = sorted({int(c) for c in (cameras or [])})
+    except (TypeError, ValueError):
+        raise ValueError("cameras must be camera ids")
+    conf = {"cameras": cams, "ok_classes": ok, "ng_classes": ng}
+    reg = str(register_id or "").strip()
+    if reg:
+        row = _exec("SELECT cam_config FROM watcher_registry WHERE register_id=%s", (reg,), fetch="one")
+        if not row or row[0] is None:
+            raise ValueError(f"'{reg}' is not a camera station")
+    else:
+        base = "CAM-" + (re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").upper() or "STATION")[:40]
+        reg, n = base, 2
+        while _exec("SELECT 1 FROM watcher_registry WHERE register_id=%s", (reg,), fetch="one"):
+            reg, n = f"{base}-{n}", n + 1
+        _exec("INSERT INTO watcher_registry (register_id) VALUES (%s)", (reg,))
+    _exec("UPDATE watcher_registry SET name=%s, cam_config=%s, wtype='camera', assigned=TRUE "
+          "WHERE register_id=%s", (name, json.dumps(conf), reg))
+    return {"ok": True, "register_id": reg, "camera_config": conf}
+
+
+def _count_detections(conf: Dict[str, Any], t0: datetime, t1: datetime) -> tuple:
+    cams = [str(c) for c in (conf.get("cameras") or [])]
+    r = _exec("""
+        SELECT COALESCE(SUM(CASE WHEN d->>'name' = ANY(%s::text[]) THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN d->>'name' = ANY(%s::text[]) THEN 1 ELSE 0 END), 0)
+        FROM inference_results r
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE WHEN jsonb_typeof(r.detections) = 'array' THEN r.detections ELSE '[]'::jsonb END) d
+        WHERE r.time > %s AND r.time <= %s
+          AND (%s OR substring(r.image_path from '_p[0-9]+_([0-9]+)\\.jpg$') = ANY(%s::text[]))
+    """, (list(conf.get("ok_classes") or []), list(conf.get("ng_classes") or []),
+          t0, t1, not cams, cams), fetch="one")
+    return (int(r[0]), int(r[1])) if r else (0, 0)
+
+
+def count_camera_stations() -> List[Dict[str, Any]]:
+    """One counting pass: for every camera station, count the detections stored since
+    the last pass (up to 1 min ago — the DB writer is asynchronous) and file them as a
+    report. A new station starts from now (no back-fill); after a restart it resumes
+    where it stopped, at most 1 h back."""
+    with _count_lock:
+        return _count_camera_stations()
+
+
+def _count_camera_stations() -> List[Dict[str, Any]]:
+    _ensure_schema()
+    rows = _exec("SELECT register_id, cam_config, cam_last_ts FROM watcher_registry "
+                 "WHERE cam_config IS NOT NULL", fetch="all") or []
+    if not rows:
+        return []
+    t1 = _exec("SELECT NOW() - make_interval(secs => %s)", (CAMERA_COUNT_LAG_SEC,), fetch="one")[0]
+    out = []
+    for reg, conf, last in rows:
+        conf = _as_dict(conf)
+        if last is None:
+            t0 = t1                                   # baseline: count from now on
+        else:
+            t0 = max(last, t1 - CAMERA_COUNT_MAX_CATCHUP)
+        if t0 > t1:
+            continue
+        ok, ng = _count_detections(conf, t0, t1) if t0 < t1 else (0, 0)
+        # claim the window first; if the station was deleted meanwhile, file nothing
+        if not _exec("UPDATE watcher_registry SET cam_last_ts=%s WHERE register_id=%s "
+                     "AND cam_config IS NOT NULL RETURNING register_id", (t1, reg), fetch="one"):
+            continue
+        ingest({"register_id": reg, "quantity": ok, "defect_quantity": ng,
+                "timestamp": t1.isoformat(), "extra_info": {"source": "camera"}})
+        out.append({"register_id": reg, "ok": ok, "ng": ng,
+                    "from": t0.isoformat(), "to": t1.isoformat()})
+    return out
+
+
+def start_camera_counter() -> None:
+    """Start the once-a-minute camera-station counter (idempotent, daemon thread)."""
+    global _counter_started
+    if _counter_started:
+        return
+    _counter_started = True
+
+    def _loop():
+        time.sleep(30)
+        while True:
+            try:
+                count_camera_stations()
+            except Exception as e:
+                logger.warning("camera station count failed: %s", e)
+            time.sleep(CAMERA_COUNT_INTERVAL_SEC)
+
+    threading.Thread(target=_loop, name="camera-station-counter", daemon=True).start()
+    logger.info("camera-station counter started (every %ss)", CAMERA_COUNT_INTERVAL_SEC)
