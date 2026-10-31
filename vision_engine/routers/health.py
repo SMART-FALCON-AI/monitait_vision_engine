@@ -21,6 +21,25 @@ from fastapi.responses import (
 
 import config as cfg_module  # Direct module ref for runtime-updated values (SSE)
 
+# 4.0.427 — /health's YOLO + DB probes run on their OWN two-thread pool with a hard cap.
+# They used asyncio.to_thread (the event loop's default executor) — the same pool the
+# camera live-feed WebSockets (cam.read + encode) and the timeline WebSocket (a blocking
+# Redis wait per dashboard + composite builds) use. On a 28-camera site that pool was
+# saturated and /health waited in its queue for up to 20 s while /api/status (FastAPI's
+# own threadpool) stayed fast — the "unhealthy" readings. A probe that misses the cap
+# simply reports not-available; the status code depends only on Redis, as before.
+import asyncio as _aio_h
+import functools as _ft_h
+from concurrent.futures import ThreadPoolExecutor as _TPE_h
+_HEALTH_POOL = _TPE_h(max_workers=2, thread_name_prefix="health-probe")
+_HEALTH_PROBE_CAP_S = 3.0
+
+
+async def _probe(fn, *args, **kwargs):
+    loop = _aio_h.get_running_loop()
+    return await _aio_h.wait_for(loop.run_in_executor(_HEALTH_POOL, _ft_h.partial(fn, *args, **kwargs)),
+                                 _HEALTH_PROBE_CAP_S)
+
 
 # v4.0.137 — safe accessor for service config used by /api/status. Wraps
 # load_service_config in a try/except so a stray IOError on the config file
@@ -479,7 +498,7 @@ async def health_check(request: Request):
                     # 4.0.66 — same to_thread wrapping as the traditional-YOLO
                     # branch below. Never call sync requests from an async handler.
                     import asyncio as _asyncio
-                    health_response = await _asyncio.to_thread(_session.get, health_url, timeout=5)
+                    health_response = await _probe(_session.get, health_url, timeout=5)
 
                     if health_response.status_code == 200:
                         # 2. Check recent successful inference from Redis
@@ -539,7 +558,7 @@ async def health_check(request: Request):
                 # loop → every OTHER endpoint stalled behind it. Offload to a
                 # worker thread. Same fix for the psycopg2.connect below.
                 import asyncio as _asyncio
-                response = await _asyncio.to_thread(_session.get, health_url, timeout=2)
+                response = await _probe(_session.get, health_url, timeout=2)
                 # Any response means server is running (200, 404, etc.)
                 yolo_ok = response.status_code in [200, 404, 405]
         except Exception as e:
@@ -576,7 +595,7 @@ async def health_check(request: Request):
                                        password=POSTGRES_PASSWORD, connect_timeout=2)
                 _c.close()
                 return True
-            db_ok = await _asyncio.to_thread(_pg_probe)
+            db_ok = await _probe(_pg_probe)
         except Exception:
             db_ok = False
 

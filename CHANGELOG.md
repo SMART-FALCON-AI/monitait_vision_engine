@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.427] - 2026-11-01 - Audit batch 7: /health no longer waits behind the camera streams
+
+**Why** — an overnight read-only latency watch on shoga (28 IP cameras, 4.0.420) found `/health` slow in 46 of 131 samples (up to the 20 s probe cap) while `/api/status` stayed under 0.8 s throughout — so the event loop was NOT blocked: `/health` itself was waiting. Its YOLO + DB probes ran through `asyncio.to_thread`, i.e. the event loop's default executor (12 threads on an 8-core box), which the camera live-feed WebSockets (cam.read + encode, 3 fps per camera), every dashboard's timeline WebSocket (a blocking Redis wait held back-to-back + composite builds) and other offloads share. Saturated → the probes queued.
+
+**Fixed**
+- `/health`'s YOLO and DB probes run on their own 2-thread pool with a 3 s cap; a probe that misses it reports not-available instead of holding the answer. The status code still depends only on Redis.
+- The event loop's default executor is 32 threads (was min(32, CPUs+4) = 12 on 8 cores) — those users are mostly blocked on I/O, so the extra threads remove the queueing for every `run_in_executor(None, …)` / `to_thread` caller.
+
+Also seen on shoga (host, not MVE — reported, not changed): the GNOME desktop file indexer `localsearch` uses 80–100 % of a core, presumably crawling the saved frames.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.426] - 2026-11-01 - Audit batch 6: config saves no longer undo each other
 
 **Why** — ~30 places do load the config → change one thing → save it, some with an HTTP call, a report run or a 120 s anomaly-worker run in between. Each saved its WHOLE stale copy, silently reverting whatever another writer had saved meanwhile — e.g. an anomaly-baseline build during an auto-cutoff reverted `current_shipment` (the old shipment came back after the next restart), two quick per-class toggles lost one, a pipeline activation could undo a camera tweak. The 4.0.413 `update_service_config` helper existed but most writers never used it.

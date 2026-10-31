@@ -782,6 +782,25 @@ async def _start_notifications_scheduler():
 
 
 @app.on_event("startup")
+async def _larger_default_executor():
+    """4.0.427 — asyncio's default executor (used by every run_in_executor(None, …) and
+    asyncio.to_thread) is min(32, CPUs+4) threads — 12 on an 8-core box. The camera
+    live-feed WebSockets (cam.read + JPEG encode, 3 fps per camera), each dashboard's
+    timeline WebSocket (a blocking Redis wait held back-to-back + composite builds) and
+    the support / health offloads all share it; on a 28-camera site it saturated and
+    every to_thread caller queued for seconds. 32 threads removes the queueing (they are
+    mostly blocked on I/O, not using CPU)."""
+    try:
+        import asyncio as _aio_x
+        import concurrent.futures as _cf
+        _aio_x.get_running_loop().set_default_executor(
+            _cf.ThreadPoolExecutor(max_workers=32, thread_name_prefix="aio-default"))
+        logger.info("default executor: 32 threads")
+    except Exception as _e:
+        logger.warning(f"could not enlarge the default executor: {_e}")
+
+
+@app.on_event("startup")
 async def _start_camera_station_counter():
     """4.0.419 — camera stations (Hardware tab) report their detection counts each minute."""
     try:
