@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.461] - 2026-11-01 - Audit batch 41: settings that did nothing, Persian layout, support tab
+
+**Fixed**
+- **DataMatrix "Set Sizes / Confidence / Overlap" and "Capture Mode" changed nothing.** The decoder always used its built-in values and the capture mode was fixed to "single". The configured values are now used. The defaults are the same as before, so nothing changes unless a value was set.
+- **Redis Host/Port "Set"** answered OK although MVE always connects to Redis as set in the container environment. It now says so.
+- **Persian / Arabic:** the quality, colour-change, ejection and shipment strips under the Charts scatter were drawn mirrored. A defect at the start of the roll appeared at the end, and shipment labels sat over the wrong shipment. They are now always left-to-right like the scatter. The JSON editor in the Advanced tab is now always left-to-right too.
+- **Switching the language** removed 33 "i" tooltips until the page was reloaded. Translated hover titles were never applied.
+- **Support tab:**
+  - An upload was read whole into memory before the 25 MB limit was checked.
+  - A malformed message body gave a server error.
+  - The diagnostics snapshot was collected on the server's main loop.
+  - If the first status check failed, the tab stayed blank.
+  - The setup hint showed values that cannot work: a user and room on `virasad.ir` instead of the homeserver `chat.virasad.ir`, and a room alias starting with `#`, which `.env` reads as a comment.
+- **Hardware tab:** a database error showed as "No watcher has sent data yet" and threw away unsaved edits in the station table.
+- **The station list and the line OEE reports loaded on every page load,** whatever tab was open. They now load only when their tab is opened or open at load.
+- **The capture heartbeat dot next to "Cap" never pulsed** (two elements had the same id).
+- **Score per shipment:** the chosen shipment count reset to 30 on every page load.
+- **Knowledge tab:** loaded an old cached translation file (`?v=4.0.268`); its title said "MonitaQC".
+- **Escaping:** text from the pro-camera discovery (errors, model, serial).
+- **The shipment picker's tooltip** described a behaviour it doesn't have.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.460] - 2026-11-01 - Audit batch 40: frame processing and shutdown
 
 **Fixed**

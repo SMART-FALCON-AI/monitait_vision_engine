@@ -15,11 +15,13 @@ Wired in vision_engine/main.py before commands_router (the catch-all):
 Configuration (all env, nothing hard-coded per site):
 
     MVE_SUPPORT_HOMESERVER   https://chat.virasad.ir      (default)
-    MVE_SUPPORT_USER         @mve-hashtgerd:virasad.ir    (or a bare localpart)
+    MVE_SUPPORT_USER         mve-hashtgerd                (bare localpart; the homeserver's
+                                                          server_name is appended — chat.virasad.ir)
     MVE_SUPPORT_PASSWORD     ...                          (password login)
     MVE_SUPPORT_TOKEN        ...                          (static access token; wins over password)
     MVE_SUPPORT_ROOM_ID      !abc:virasad.ir              (explicit room; skips resolve/create)
-    MVE_SUPPORT_ROOM_ALIAS   #mve-hashtgerd:virasad.ir    (resolved, else CREATED with this alias)
+    MVE_SUPPORT_ROOM_ALIAS   mve-hashtgerd                (resolved, else CREATED; NO leading '#'
+                                                          — .env reads it as a comment)
     MVE_SUPPORT_INVITE       @ali:virasad.ir,@sara:...    (invited when the room is created)
     MVE_SUPPORT_SITE         Hashtgerd                    (human room NAME; defaults to hostname)
     MVE_SUPPORT_FINGERPRINT  a3f9c21b4e77                 (clone guard; see below)
@@ -949,10 +951,12 @@ async def support_send(request: Request):
         body = await request.json()
     except Exception:
         body = {}
-    text = (body.get("text") or "").strip()
+    if not isinstance(body, dict):          # 4.0.461 — a JSON list / string was a raw 500
+        body = {}
+    text = str(body.get("text") or "").strip()
     if not text:
         return JSONResponse(content={"ok": False, "error": "empty message"}, status_code=400)
-    context = (body.get("context") or "").strip()
+    context = str(body.get("context") or "").strip()
     if context:
         text = context[:4000] + "\n\n" + text
     if len(text) > 8000:
@@ -960,7 +964,7 @@ async def support_send(request: Request):
     diags = None
     if body.get("include_diagnostics"):
         try:
-            diags = collect_diagnostics(request.app.state)
+            diags = await asyncio.to_thread(collect_diagnostics, request.app.state)   # 4.0.461 — off the loop
         except Exception as e:
             logger.warning("[support] diagnostics collection failed: %s", _scrub(e))
     try:
@@ -1005,8 +1009,21 @@ async def support_upload(file: UploadFile = File(...)):
     multipart/form-data with field `file`. Uploaded to the homeserver media repo,
     then posted as m.image (images) or m.file (everything else).
     """
+    # 4.0.461 — read up to the cap (+1 byte): the whole file was read into memory first —
+    # a multi-GB upload landed in the process that also runs capture
+    cap = _max_upload_bytes()
     try:
-        data = await file.read()
+        chunks, n = [], 0
+        while True:
+            b = await file.read(1 << 20)
+            if not b:
+                break
+            n += len(b)
+            if n > cap:
+                return JSONResponse(content={"ok": False, "error": "file too large (max {} MB)".format(
+                    cap // (1024 * 1024))}, status_code=413)
+            chunks.append(b)
+        data = b"".join(chunks)
     except Exception as e:
         logger.warning("[support] upload read failed: %s", _scrub(e))
         return JSONResponse(content={"ok": False, "error": "could not read the file"}, status_code=400)

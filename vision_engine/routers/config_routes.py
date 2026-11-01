@@ -731,6 +731,10 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             "updated": updated,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+        if "redis_host" in updated or "redis_port" in updated:
+            # 4.0.461 — the UI answered OK; the connection comes from the container environment
+            _out["note"] = ("Not applied: MVE connects to Redis as set in the container environment "
+                            "(.env); this value is only shown here.")
         if "parent_object_list" in updated:
             # 4.0.455 — say what the list really does: since 4.0.58 the parents come from each
             # class's Role on the Process tab; this list is only used when NO class settings

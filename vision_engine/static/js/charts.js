@@ -5892,7 +5892,10 @@ async function _loadQualityShipmentsChart(win) {
     // Collision caused Detections-count writes to spray into the input's
     // value/layout, breaking the whole Score-per-shipment card layout.
     const nInput = document.getElementById('sqs-shipments');
-    const nRaw = parseInt((nInput && nInput.value) || localStorage.getItem('mve_sqs_count') || '30', 10);
+    // 4.0.461 — the saved count first (the input's HTML value="30" always won → reset on reload)
+    const _savedN = localStorage.getItem('mve_sqs_count');
+    if (nInput && _savedN && nInput.dataset.restored !== '1') { nInput.value = _savedN; nInput.dataset.restored = '1'; }
+    const nRaw = parseInt((nInput && nInput.value) || _savedN || '30', 10);
     const n = Math.max(5, Math.min(200, isNaN(nRaw) ? 30 : nRaw));
     if (nInput && nInput.value !== String(n)) nInput.value = String(n);
     const subtitleEl = document.getElementById('sqs-subtitle');

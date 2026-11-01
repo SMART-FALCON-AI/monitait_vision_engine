@@ -3764,7 +3764,7 @@ async function fetchInferenceStats() {
             if (rawCap !== undefined && rawCap !== null && !isNaN(parseFloat(rawCap))) {
                 const capFps = parseFloat(rawCap);
                 captureFpsValueEl.textContent = capFps.toFixed(2) + ' FPS';
-                if (capFps > 0) pulseHeartbeat('capture-heartbeat');
+                if (capFps > 0) { pulseHeartbeat('capture-heartbeat'); pulseHeartbeat('capture-heartbeat-fps'); }
             } else {
                 captureFpsValueEl.textContent = 'N/A';
             }

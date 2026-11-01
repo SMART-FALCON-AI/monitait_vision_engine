@@ -1739,10 +1739,14 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
             nested = nest_objects(yolo_res)
             q = 0
 
+            # 4.0.461 — the Advanced-tab DataMatrix settings (they were saved, then never passed)
+            _dm_kw = {"confidence_threshold": cfg.DM_CONFIDENCE_THRESHOLD,
+                      "overlap_threshold": cfg.DM_OVERLAP_THRESHOLD,
+                      "dm_chars_sizes": cfg.DM_CHARS_SIZES}
             if capture_mode == "multiple":
 
                 for n in nested["parents"]:
-                    priority , dm = decode_objects(frame_id, frame_data[1], n, q)
+                    priority , dm = decode_objects(frame_id, frame_data[1], n, q, **_dm_kw)
                     q += 1
                     frame_data[3] = priority
                     frame_data.append(dm)
@@ -1751,7 +1755,7 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
 
                 dm_polling_list = []
                 for n in nested["parents"]:
-                    priority , dm = decode_objects(frame_id, frame_data[1], n, q)
+                    priority , dm = decode_objects(frame_id, frame_data[1], n, q, **_dm_kw)
                     q = q + 1
                     dm_polling_list.append({ "dm" : dm, "priority" : priority , "x_center" : (n["xmin"]+n["xmax"])/2, "area" : (n["xmax"] - n["xmin"])*(n["ymax"] - n["ymin"]) } )
                 filtered_dm_polling_list = [obj for obj in dm_polling_list if obj["dm"] is not None]
@@ -1817,7 +1821,8 @@ def process_frame_helper(frame, capture_t=None, encoder=None, precomputed_yolo=N
     # queue backs up to CRITICAL and Inf FPS reads 0. Bug has been in
     # every build since v4.0.82 (2026-07-11) but only fires when the
     # batched-YOLO path is active (i.e. high capture load).
-    capture_mode = "single"  # or "multiple"
+    # 4.0.461 — the configured capture mode (the Set button changed it; this ignored it)
+    capture_mode = cfg.CAPTURE_MODE if cfg.CAPTURE_MODE in ("single", "multiple") else "single"
     return process_frame(frame, capture_mode, capture_t=capture_t, encoder=encoder, precomputed_yolo=precomputed_yolo,
                          shipment=shipment)
 

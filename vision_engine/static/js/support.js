@@ -64,6 +64,10 @@ function refreshSupportStatus() {
             return s;
         })
         .catch(function (e) {
+            // 4.0.461 — the banner sits inside the chat panel, still hidden at this point:
+            // a failed first status call left the tab blank
+            var chat0 = _supportEl('support-chat-wrap');
+            if (chat0) chat0.style.display = 'flex';
             _supportBanner('error', 'status: ' + e);
         });
 }

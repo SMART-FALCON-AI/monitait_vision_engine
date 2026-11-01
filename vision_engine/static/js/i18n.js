@@ -4194,7 +4194,17 @@ function applyLanguage(lang) {
         // "pro_camera_discovery") into the UI — leave the element's original
         // hardcoded (English) text so the worst case is untranslated, not broken.
         if (val === key) return;
+        // 4.0.461 — keep the ⓘ tooltip the page appended to the label (textContent wiped
+        // 33 of them on every language switch)
+        var tip = el.querySelector(':scope > .info-tooltip');
         el.textContent = prefix + val;
+        if (tip) el.appendChild(tip);
+    });
+    // 4.0.461 — translated hover titles (data-i18n-title was never applied)
+    document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
+        var tk = el.getAttribute('data-i18n-title');
+        var tv = t(tk);
+        if (tv !== tk) el.title = tv;
     });
     // Update all data-i18n-placeholder elements
     document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
