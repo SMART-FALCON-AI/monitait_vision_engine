@@ -2,14 +2,12 @@ import pathlib
 from fastapi import APIRouter, Request, HTTPException
 from fastapi import Depends as Depends
 from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response, FileResponse
-from config import (load_data_file, save_data_file, save_config_key, TIMELINE_REDIS_PREFIX,
-                    TIMELINE_THUMBNAIL_WIDTH, TIMELINE_THUMBNAIL_HEIGHT,
-                    latest_detections, latest_detections_timestamp,
+from fastapi.responses import JSONResponse, StreamingResponse, Response, FileResponse
+from config import (save_config_key, TIMELINE_REDIS_PREFIX,
                     DETECTION_EVENTS_REDIS_KEY)
 import config as cfg_module
 from config import timeline_config_locked as _tl_locked   # 4.0.443
-import cv2, numpy as np, time, json, pickle, logging, os
+import cv2, numpy as np, time, json, pickle, logging, os, threading
 from redis import Redis
 from services.detection import evaluate_eject_from_detections
 from services.render import draw_detection_on
@@ -48,6 +46,40 @@ def _endpoint_cache_key(prefix: str, *args) -> str:
     raw = prefix + "|" + "|".join(str(a) for a in args)
     return _hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()
 
+_site_tz_cache = {"t": 0.0, "tz": None}
+
+
+def _site_tz():
+    """4.0.454 — the SITE time zone for times burned into images / PDFs: notifications.timezone
+    (the same setting the report schedules use), else $TZ, else None (= the container clock,
+    UTC). The timeline header strip and the PDF were 3.5 h off on Tehran sites. Cached 60 s."""
+    now = time.time()
+    if now - _site_tz_cache["t"] > 60:
+        _site_tz_cache["t"] = now
+        tz = None
+        try:
+            from config import load_service_config as _lsc
+            name = str(((_lsc() or {}).get("notifications") or {}).get("timezone")
+                       or os.environ.get("TZ") or "").strip()
+            if name:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(name)
+        except Exception:
+            tz = None
+        _site_tz_cache["tz"] = tz
+    return _site_tz_cache["tz"]
+
+
+def _site_clock(ts=None, fmt="%H:%M:%S"):
+    """Format epoch `ts` (default now) in the site time zone."""
+    import datetime as _dtm
+    tz = _site_tz()
+    t = time.time() if ts is None else float(ts)
+    if tz is None:
+        return time.strftime(fmt, time.localtime(t))
+    return _dtm.datetime.fromtimestamp(t, tz).strftime(fmt)
+
+
 def _endpoint_cache_get(key: str):
     v = _endpoint_cache.get(key)
     if v is None:
@@ -57,20 +89,27 @@ def _endpoint_cache_get(key: str):
         return payload
     return None
 
+_endpoint_cache_lock = threading.Lock()
+
+
 def _endpoint_cache_put(key: str, payload) -> None:
     global _endpoint_cache
     # 4.0.422 — drop EXPIRED entries on every put. Before, entries were only evicted once
     # 256 had piled up, and a get never removed a stale one: each progressive-ladder
     # bucket (distinct since/until keys) parked up to 2×6000 scatter dicts here, so a few
     # chart loads held hundreds of MB indefinitely. Now at most the last TTL's worth stays.
-    _now = time.time()
-    for _k in [k for k, (ts, _p) in _endpoint_cache.items() if _now - ts >= _ENDPOINT_CACHE_TTL_SEC]:
-        _endpoint_cache.pop(_k, None)
-    if len(_endpoint_cache) >= _ENDPOINT_CACHE_MAX:
-        # Drop oldest half — cheaper than a strict LRU and avoids unbounded growth.
-        items = sorted(_endpoint_cache.items(), key=lambda kv: kv[1][0])
-        _endpoint_cache = dict(items[len(items) // 2:])
-    _endpoint_cache[key] = (time.time(), payload)
+    # 4.0.454 — under a lock: endpoints run in the thread pool, and a put iterating the dict
+    # while another put changed it raised "dictionary changed size" — inside detection_charts'
+    # try, i.e. an EMPTY chart after all the work was done.
+    with _endpoint_cache_lock:
+        _now = time.time()
+        for _k in [k for k, (ts, _p) in list(_endpoint_cache.items()) if _now - ts >= _ENDPOINT_CACHE_TTL_SEC]:
+            _endpoint_cache.pop(_k, None)
+        if len(_endpoint_cache) >= _ENDPOINT_CACHE_MAX:
+            # Drop oldest half — cheaper than a strict LRU and avoids unbounded growth.
+            items = sorted(_endpoint_cache.items(), key=lambda kv: kv[1][0])
+            _endpoint_cache = dict(items[len(items) // 2:])
+        _endpoint_cache[key] = (time.time(), payload)
 
 # Absolute path to raw_images for path traversal protection
 _RAW_IMAGES_ROOT = pathlib.Path("raw_images").resolve()
@@ -286,7 +325,7 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
         if enc_val is not None:
             label_parts.append(str(int(enc_val)))
         if col_ts is not None:
-            label_parts.append(time.strftime("%H:%M:%S", time.localtime(col_ts)))
+            label_parts.append(_site_clock(col_ts))   # 4.0.454 — site time zone
         if label_parts:
             label = " | ".join(label_parts)
             cv2.putText(header, label, (x_start + 2, 12),
@@ -1186,7 +1225,7 @@ def get_active_classes(window: str = "1h"):
     return JSONResponse(content=out)
 
 
-def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
+def _compute_quality_payload(shipment: str = "", window: str = "24h", timeout_ms=None) -> dict:
     """Shared computation for the score endpoint and PDF report.
 
     Returns the full payload dict (same shape the /api/shipment_quality_score
@@ -1282,6 +1321,13 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             _hp_args = [_hidden_by_process]
 
         cur = conn.cursor()
+        # 4.0.454 — a picked shipment scans ALL its rows twice: on a big one (≈200 k+ frames)
+        # that ran past the pool's statement timeout, the error was swallowed and the score
+        # showed NO_DATA (PDF report, trend, shipment list) — and shipment finalize SAVED that
+        # NO_DATA for good. Its own limit for a shipment; the error is now reported.
+        _tmo = timeout_ms if timeout_ms is not None else (30000 if shipment else None)
+        if _tmo:
+            cur.execute(f"SET LOCAL statement_timeout = {int(_tmo)}")
         # v4.0.107 — filter out synthetic pipeline entries whose class name
         # starts with an underscore. `_color` (LAB colour analysis output),
         # `_lab`, and future `_*` markers are added by post-processing;
@@ -1537,7 +1583,8 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
         }
     except Exception as e:
         logger.warning(f"_compute_quality_payload failed: {e}")
-        return empty
+        # 4.0.454 — marked, so callers can tell "failed" from "no data"
+        return {**empty, "error": f"{type(e).__name__}: {e}"[:300]}
     finally:
         if conn is not None:
             try:
@@ -1980,7 +2027,7 @@ def shipment_quality_score_report(request: Request, shipment: str = "", window: 
     subtitle = []
     subtitle.append(f"Shipment: <b>{payload.get('shipment') or 'ALL SHIPMENTS'}</b>")
     subtitle.append(f"Window: last {payload.get('window', '24h')}")
-    subtitle.append(f"Generated: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    subtitle.append(f"Generated: {_site_clock(None, '%Y-%m-%d %H:%M:%S')}")   # 4.0.454 — site time zone
     story.append(Paragraph(" &nbsp; · &nbsp; ".join(subtitle), Small))
     story.append(Spacer(1, 10))
 
@@ -2133,7 +2180,7 @@ def shipment_quality_score_report(request: Request, shipment: str = "", window: 
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        headers={"Content-Disposition": _content_disposition(fname)},
     )
 
 
@@ -2346,7 +2393,6 @@ def shipment_quality_score_trend(
                 pass
 
 
-from datetime import timedelta as _td   # 3.25.4 — used by /api/quality/heatmap
 
 @router.get("/api/quality/shipments")
 def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
@@ -2464,7 +2510,12 @@ def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
                                          port=6379, decode_responses=True).get("shipment") or "")
             if (_cur_ship_sl and _cur_ship_sl not in ("", "no_shipment")
                     and _cur_ship_sl not in [r[0] for r in rows]):
-                rows = [(_cur_ship_sl, None, None, 0)] + list(rows)
+                # 4.0.454 — keep the requested count: the prepend returned n+1 rows and the
+                # "list is capped" flag then read false
+                _cap_hit = len(rows) >= effective_n
+                rows = [(_cur_ship_sl, None, None, 0)] + list(rows)[:max(0, effective_n - 1)]
+                if _cap_hit:
+                    _capped_by_prepend = True
         except Exception:
             pass
 
@@ -2560,7 +2611,7 @@ def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
         "shipments": out,
         "window": "recent",
         "requested_n": n,
-        "cap_applied": (len(out) == effective_n and n != 0),
+        "cap_applied": (len(out) >= effective_n and n != 0) or bool(locals().get("_capped_by_prepend")),
         "count": len(out),
     })
 
@@ -3841,14 +3892,16 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             base_params,
         )
         cbc_buckets, _seen_b = [], set()
+        cbc_ts = []   # 4.0.454 — epoch ms per bucket (the 4.0.434 local-time fix missed this chart)
         cbc_vals = {}  # cls -> {label: avg_pct}
         for bkt, cls, cavg in cur.fetchall():
             label = bkt.strftime("%m-%d %H:%M")
             if label not in _seen_b:
-                _seen_b.add(label); cbc_buckets.append(label)
+                _seen_b.add(label); cbc_buckets.append(label); cbc_ts.append(int(bkt.timestamp() * 1000))
             cbc_vals.setdefault(cls, {})[label] = round((cavg or 0) * 100, 1)
         confidence_by_class = {
             "buckets": cbc_buckets,
+            "bucket_ts": cbc_ts,
             "series": {cls: [vals.get(b) for b in cbc_buckets] for cls, vals in cbc_vals.items()},
         }
         cur.close()
@@ -5711,6 +5764,16 @@ def _csv_columns_with_unit(unit):
 from urllib.parse import quote as _url_quote
 
 
+def _content_disposition(fname):
+    """4.0.454 — a download header that survives any shipment id. The raw name went into a
+    latin-1 header: a Persian id or a quote raised → HTTP 500 (PDF report, CSV, ZIP, the
+    scheduled shift report). ASCII fallback + RFC 6266 filename* with the real name."""
+    fname = str(fname or "download")
+    ascii_name = "".join(c if (32 <= ord(c) < 127 and c not in ('"', chr(92))) else "_" for c in fname)
+    q = '"'
+    return "attachment; filename=" + q + ascii_name + q + "; filename*=UTF-8''" + _url_quote(fname, safe="")
+
+
 def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, min_conf_f, img_prefix="", upm=None):
     """Build one detection row (list of column values) or None if the row is
     filtered out by min_conf. Extracted so single-CSV and ZIP paths share it.
@@ -5878,9 +5941,19 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     # Single-CSV path (operator picked a specific shipment)
     # ------------------------------------------------------------------
     if shipment:
+        # 4.0.454 — the connection is taken INSIDE the generator. It was taken before the
+        # StreamingResponse and released only by the generator's finally: a client that
+        # disconnected before the first chunk never started the generator → the pool slot
+        # leaked until restart.
+        release_db_connection(conn)
+
         def gen_single():
+            _c = get_db_connection()
+            if _c is None:
+                yield "# ERROR: database unavailable\n"
+                return
             try:
-                cur = conn.cursor(name="export_csv_single_cursor")
+                cur = _c.cursor(name="export_csv_single_cursor")
                 cur.itersize = 500
                 cur.execute(
                     f"""SELECT time, shipment, encoder_value, image_path,
@@ -5912,13 +5985,13 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
                 logger.warning(f"export_csv single stream failed: {e}")
                 yield f"# ERROR: {e}\n"
             finally:
-                try: release_db_connection(conn)
+                try: release_db_connection(_c)
                 except Exception: pass
 
         safe_ship = _re.sub(r"[^A-Za-z0-9_-]+", "_", shipment)
         fname = f"detections_{safe_ship}_{window}{_dir_tag}.csv"
         return StreamingResponse(gen_single(), media_type="text/csv; charset=utf-8",
-                                 headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                                 headers={"Content-Disposition": _content_disposition(fname)})
 
     # ------------------------------------------------------------------
     # ZIP path (all shipments in the window, one CSV per shipment inside)
@@ -6004,7 +6077,7 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
         return Response(content=zip_bytes,
                         media_type="application/zip",
                         headers={
-                            "Content-Disposition": f'attachment; filename="{fname}"',
+                            "Content-Disposition": _content_disposition(fname),
                             "Content-Length": str(len(zip_bytes)),
                         })
     except Exception as e:
@@ -6430,7 +6503,7 @@ def export_images(request: Request, window: str = "24h", shipment: str = "",
     else:
         fname = f"images_{tag}.zip"
     return StreamingResponse(gen(), media_type="application/zip",
-                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+                             headers={"Content-Disposition": _content_disposition(fname)})
 
 
 @router.get("/api/raw_image/{path:path}")
@@ -6513,7 +6586,7 @@ def render_detected(path: str, show: str = "", download: int = 0):
     if cached:
         headers = {}
         if download:
-            headers["Content-Disposition"] = f'attachment; filename="{resolved.stem}_DETECTED.jpg"'
+            headers["Content-Disposition"] = _content_disposition(f"{resolved.stem}_DETECTED.jpg")
         return Response(content=cached, media_type="image/jpeg", headers=headers)
 
     # 4.0.22 — resolve the inference_results row by EXACT image_path first.
@@ -6682,7 +6755,7 @@ def render_detected(path: str, show: str = "", download: int = 0):
 
     headers = {}
     if download:
-        headers["Content-Disposition"] = f'attachment; filename="{resolved.stem}_DETECTED.jpg"'
+        headers["Content-Disposition"] = _content_disposition(f"{resolved.stem}_DETECTED.jpg")
     return Response(content=rendered, media_type="image/jpeg", headers=headers)
 
 

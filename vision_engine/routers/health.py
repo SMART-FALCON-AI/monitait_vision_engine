@@ -418,6 +418,12 @@ async def health_check(request: Request):
         except Exception:
             db_ok = False
 
+        def _db_rows_lost():
+            try:
+                from services.db import db_rows_lost
+                return db_rows_lost()
+            except Exception:
+                return None
         response_content = {
             "status": "healthy" if status_code == 200 else "unhealthy",
             # v4.0.150 — VERSION file read fresh so file-only ships propagate
@@ -427,6 +433,7 @@ async def health_check(request: Request):
             "serial": "connected" if serial_available else "not available",
             "redis": "connected" if redis_ok else "disconnected",
             "db": "connected" if db_ok else "disconnected",
+            "db_rows_lost": _db_rows_lost(),   # 4.0.454 — result rows that never reached the DB
             "yolo": "connected" if yolo_ok else "not available",
             "cameras": cameras_status,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")

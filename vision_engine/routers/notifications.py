@@ -208,9 +208,10 @@ def test_send(payload: Dict[str, Any]):
 async def send_now(payload: Dict[str, Any], request: Request):
     """Manually trigger a shift-report send (skips the cron). Used by the
     'Send now' button in the Notifications panel."""
-    from services.scheduler import run_one_schedule
+    import asyncio as _aio
+    from services.scheduler import run_one_schedule, _cron_target, _read_current_shipment
     schedule = payload.get("schedule")  # an inline schedule object OR null = a one-shot
-    cfg = _get_config()
+    cfg = await _aio.to_thread(_get_config)        # 4.0.454 — DB read off the event loop
     if not schedule:
         # Build a one-shot from the top-level config (telegram is the only channel)
         ch = (cfg.get("channels") or {}).get("telegram", {})
@@ -223,6 +224,16 @@ async def send_now(payload: Dict[str, Any], request: Request):
             "shipment_filter": str(payload.get("shipment_filter") or ""),
             "enabled": True,
         }
+    # 4.0.454 — resolve the shipment like the scheduler does: a blank filter sent the report
+    # for "no_shipment" (90 days of unassigned frames) instead of the running shipment.
+    schedule = dict(schedule)
+    _cur = await _aio.to_thread(_read_current_shipment)
+    _target = _cron_target(schedule.get("shipment_filter"), _cur)
+    if _target is None:
+        return JSONResponse(content={"success": False, "info": {
+            "error": f"the running shipment ({_cur or 'none'}) does not match {schedule.get('shipment_filter')!r}"}},
+            status_code=400)
+    schedule["shipment_filter"] = _target
     ok, info = await run_one_schedule(schedule, cfg, request.app, source="manual")
     return JSONResponse(content={"success": ok, "info": info})
 

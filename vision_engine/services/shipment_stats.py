@@ -185,7 +185,13 @@ def compute_and_store_shipment_stats(shipment, skip_if_exists=False):
     score = score_abs = verdict = None
     try:
         from routers.timeline import _compute_quality_payload
-        qp = _compute_quality_payload(shipment, "90d") or {}
+        qp = _compute_quality_payload(shipment, "90d", timeout_ms=300000) or {}
+        if qp.get("error"):
+            # 4.0.454 — a FAILED score (timeout, DB hiccup) was saved as score NULL /
+            # verdict NO_DATA for good (the backfill skips shipments already cached).
+            # Not cached: the next backfill / finalize tries again.
+            logger.warning(f"shipment_stats: score for {shipment} failed ({qp['error']}) — not cached, will retry")
+            return False
         score = qp.get("score")
         score_abs = qp.get("score_absolute")
         verdict = qp.get("verdict")

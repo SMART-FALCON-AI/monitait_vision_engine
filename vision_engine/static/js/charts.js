@@ -3799,7 +3799,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             }));
         _insightConfClassChart = new Chart(ccCtx, {
             type: 'line',
-            data: { labels: cbc.buckets || [], datasets: clsDatasets },
+            // 4.0.454 — local-time labels (the buckets are UTC strings)
+            data: { labels: (cbc.bucket_ts && cbc.bucket_ts.length === (cbc.buckets || []).length)
+                        ? cbc.bucket_ts.map((ts, i) => _bktLabel({ ts, t: cbc.buckets[i] }))
+                        : (cbc.buckets || []), datasets: clsDatasets },
             options: (() => { const o = _commonScaleOpts('Detection confidence (%) by class over time'); o.scales.y.max = 100; return o; })()
         });
     }

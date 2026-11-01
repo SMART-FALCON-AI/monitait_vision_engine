@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+import time
 import queue
 import psycopg2
 from psycopg2.extras import Json
@@ -212,7 +213,43 @@ def _db_writer_loop():
     # Cache the rewrite per distinct SQL so we don't regex on every row.
     _tmpl_cache = {}
 
+    def _write(conn, sql, prefix, template, rows):
+        cursor = conn.cursor()
+        # (no explicit BEGIN: psycopg2 already opened the transaction — the extra BEGIN
+        # made Postgres log "there is already a transaction in progress" on every batch)
+        cursor.execute("SET LOCAL statement_timeout = 0")
+        if prefix is not None and template is not None:
+            _execute_values(cursor, prefix, rows, template=template, page_size=MAX_BATCH)
+        else:
+            for params in rows:
+                cursor.execute(sql, params)
+        conn.commit()
+        cursor.close()
+
+    def _write_row_by_row(conn, sql, rows):
+        """One bad row must not take the whole batch with it: each row in its own savepoint.
+        Returns how many rows were rejected."""
+        bad = 0
+        cursor = conn.cursor()
+        cursor.execute("SET LOCAL statement_timeout = 0")
+        for params in rows:
+            try:
+                cursor.execute("SAVEPOINT mve_row")
+                cursor.execute(sql, params)
+                cursor.execute("RELEASE SAVEPOINT mve_row")
+            except Exception:
+                bad += 1
+                cursor.execute("ROLLBACK TO SAVEPOINT mve_row")
+        conn.commit()
+        cursor.close()
+        return bad
+
     def _flush(buckets):
+        # 4.0.454 — a failed batch lost ALL its (up to 200) rows with one log line and no
+        # counter: pool exhausted, a dead pooled connection after a TimescaleDB restart, or
+        # ONE bad row. Now: a connection problem is retried once on a fresh connection, a
+        # data error falls back to row-by-row (only the bad rows are lost), and every lost
+        # row is counted (db_rows_lost()).
         for sql, rows in buckets.items():
             if not rows:
                 continue
@@ -221,30 +258,50 @@ def _db_writer_loop():
                 cached = _to_values_template(sql)
                 _tmpl_cache[sql] = cached
             prefix, template = cached
-
-            conn = get_db_connection()
-            if not conn:
-                logger.warning(f"DB write: no connection, dropping batch of {len(rows)} rows")
-                continue
-            try:
-                cursor = conn.cursor()
-                cursor.execute("BEGIN")
-                cursor.execute("SET LOCAL statement_timeout = 0")
-                if prefix is not None and template is not None:
-                    _execute_values(cursor, prefix, rows, template=template, page_size=MAX_BATCH)
-                else:
-                    for params in rows:
-                        cursor.execute(sql, params)
-                conn.commit()
-                cursor.close()
-            except Exception as e:
-                logger.error(f"DB write error (batch of {len(rows)}): {e}")
+            for attempt in (0, 1):
+                conn = get_db_connection()
+                if not conn:
+                    if attempt == 0:
+                        _time.sleep(0.5)
+                        continue
+                    _note_rows_lost(len(rows), "no database connection")
+                    break
+                broken = False
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            finally:
-                release_db_connection(conn)
+                    _write(conn, sql, prefix, template, rows)
+                    break
+                except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                    broken = True
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    if attempt == 1:
+                        _note_rows_lost(len(rows), f"connection error: {e}")
+                except Exception as e:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        bad = _write_row_by_row(conn, sql, rows)
+                    except Exception as e2:
+                        bad = len(rows)
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        e = e2
+                    if bad:
+                        _note_rows_lost(bad, f"rows rejected ({e})")
+                    break
+                finally:
+                    if broken:
+                        try:
+                            conn.close()     # the pool discards a closed connection
+                        except Exception:
+                            pass
+                    release_db_connection(conn)
 
     while True:
         try:
@@ -344,6 +401,28 @@ def add_db_writers(count: int):
 add_db_writers(2)
 
 
+_rows_lost = {"n": 0, "logged": 0.0}
+_rows_lost_lock = threading.Lock()
+
+
+def _note_rows_lost(n, why):
+    """4.0.454 — count every result row that never reached the DB; log at most once a minute
+    (a full queue logged one WARNING per row — thousands a second)."""
+    import time as _t
+    with _rows_lost_lock:
+        _rows_lost["n"] += int(n)
+        now = _t.time()
+        if now - _rows_lost["logged"] < 60:
+            return
+        _rows_lost["logged"] = now
+        total = _rows_lost["n"]
+    logger.error(f"DB write: {why} — {total} result row(s) lost since start")
+
+
+def db_rows_lost():
+    return _rows_lost["n"]
+
+
 def write_inference_to_db(shipment, image_path, detections, inference_time_ms,
                           model_used="yolov8", encoder_value=None,
                           pipeline_id=None, capture_id=None, phase_id=None):
@@ -372,7 +451,7 @@ def write_inference_to_db(shipment, image_path, detections, inference_time_ms,
              int(phase_id) if phase_id is not None else None)
         ))
     except queue.Full:
-        logger.warning("DB write queue full — dropping inference result")
+        _note_rows_lost(1, "write queue full (inference result dropped)")
 
 def write_production_metrics_to_db(encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds):
     """Queue production metrics for async write to TimescaleDB."""
@@ -384,7 +463,7 @@ def write_production_metrics_to_db(encoder_value, ok_counter, ng_counter, shipme
             (encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds)
         ))
     except queue.Full:
-        logger.warning("DB write queue full — dropping production metrics")
+        _note_rows_lost(1, "write queue full (production metrics dropped)")
 
 
 # --- Ejection events (3.17.0) -------------------------------------------------
@@ -645,21 +724,36 @@ def _get_db_size_bytes(conn):
     return int(n or 0)
 
 
+_DB_MIN_KEEP_HOURS = max(1, int(os.environ.get("MVE_DB_MIN_KEEP_HOURS", "48") or 48))
+_keep_warned = [0.0]
+
+
 def _drop_oldest_inference_chunk(conn):
     """Drop the OLDEST TimescaleDB chunk of `inference_results`. Returns
     the range_end of the dropped chunk, or None if nothing was dropped
     (empty hypertable, error, etc.)."""
     cur = conn.cursor()
     try:
+        # 4.0.454 — never a chunk that still holds recent data. "Oldest chunk" became the
+        # CURRENT one once the older ones were gone and the DB was still over budget, and
+        # drop_chunks then deleted up to a chunk interval (7 days by default) of results —
+        # including the shipment being produced. Only chunks that ENDED at least
+        # MVE_DB_MIN_KEEP_HOURS (48) ago are candidates.
         cur.execute(
             "SELECT range_end "
             "FROM timescaledb_information.chunks "
             "WHERE hypertable_name = 'inference_results' "
+            "  AND range_end <= NOW() - make_interval(hours => %s) "
             "ORDER BY range_start ASC "
-            "LIMIT 1"
+            "LIMIT 1",
+            [_DB_MIN_KEEP_HOURS],
         )
         row = cur.fetchone()
         if not row or row[0] is None:
+            if time.time() - _keep_warned[0] > 3600:
+                _keep_warned[0] = time.time()
+                logger.warning(f"[DB Janitor] over budget, but only the last {_DB_MIN_KEEP_HOURS} h of "
+                               f"results are left — not deleting them (raise DB_MAX_PCT_OF_DISK or free disk)")
             return None
         range_end = row[0]
         # drop_chunks drops every chunk WHOLLY-BEFORE the given cutoff. Passing

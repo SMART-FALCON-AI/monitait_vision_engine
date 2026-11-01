@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.454] - 2026-11-01 - Audit batch 34: database writer, disk janitor, quality score, downloads
+
+**Fixed**
+- **Result rows lost without a trace.** A failed database write dropped its whole batch (up to 200 frames' results) with one log line. That happened when the pool was exhausted, when a pooled connection had died after a TimescaleDB restart, or when a single row was bad. Now:
+  - a connection problem is retried once on a fresh connection;
+  - a bad row is set aside on its own and the rest are stored;
+  - every lost row is counted (`db_rows_lost` in /health);
+  - a full write queue no longer logs one warning per row (thousands a second), only once a minute.
+- **The disk janitor could delete the data being produced right now.** When the database was over its disk budget and only recent data was left, the "oldest chunk" was the current one, and dropping it deleted up to 7 days of results, including the running shipment. Chunks that ended less than 48 h ago (`MVE_DB_MIN_KEEP_HOURS`) are never dropped. If only those are left, a warning says so.
+- **The quality score of a large shipment silently showed NO_DATA.** Its queries ran past the database time limit, and the error was swallowed. This affected the PDF report, the trend, the shipment list, and the shipment's cached summary (finalize saved NO_DATA for good). A shipment's score now gets its own time limit (30 s; 5 min when caching at close). A failure is reported as such and is not cached, so it is retried.
+- **A PDF report or CSV export for a shipment with a Persian name or a quote in its id failed** with a server error (also the scheduled report). Download names are now encoded correctly.
+- **CSV export:** a browser that disconnected before the download started leaked a database connection until restart.
+- **"Send now" (shift report) without a shipment filter** reported on `no_shipment` (90 days of unassigned frames). It now uses the running shipment, like the scheduler.
+- **Charts:** concurrent chart loads could fail one of them with "dictionary changed size" (an empty chart after all the work). The shipment list returned one more row than asked for.
+- **Times shown in UTC:**
+  - the timeline header strip and the PDF "Generated" time now use the site time zone (`notifications.timezone`, else `TZ`);
+  - the confidence-by-class chart shows local times.
+
+**Removed**: unused imports in the timeline router.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.453] - 2026-11-01 - Audit batch 33: shipment rules that fired on every frame, calibration wiped, prune of recent data
 
 **Fixed**
