@@ -6779,6 +6779,12 @@ function exportInsightCSV() {
     const ship = document.getElementById('insight-shipment')?.value || '';
     // 3.21.10: honor the min_conf slider too so the CSV matches what the charts show.
     const minConf = (parseFloat(document.getElementById('insight-min-conf')?.value || '0') / 100) || 0;
+    // 4.0.432 — the all-shipments ZIP is built in memory: up to 30 days. Longer windows were
+    // silently exported as 24 h under a "_90d.zip" name.
+    if (!ship && !['1h', '6h', '24h', '7d', '30d'].includes(win)) {
+        alert('The all-shipments CSV export covers up to 30 days. Pick a shipment, or a window of 30 days or less.');
+        return;
+    }
     // 4.0.350: unwind is now ALWAYS a CSV column (`unwind_length`) — no checkbox.
     const url = '/api/export_csv?window=' + encodeURIComponent(win) +
                 '&shipment=' + encodeURIComponent(ship) +

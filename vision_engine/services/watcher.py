@@ -1102,15 +1102,8 @@ class ArduinoSocket:
         return {"added": [], "removed": [], "unchanged": unchanged,
                 "missing": missing, "detected_new": detected_new}
 
-    def on_up_down_off(self):
-        self._send_message('1\n')
 
-    def on_down_up_off(self):
-        self._send_message('2\n')
 
-    def on_up_down_on(self):
-        """Both U and B lights ON."""
-        self._send_message('9\n')
 
     def off(self):
         self._send_message('8\n')
@@ -1468,12 +1461,6 @@ class ArduinoSocket:
         except Exception as e:
             logger.warning(f"restore_length_state failed: {e}")
 
-    def reset_encoder(self):
-        if self.serial_available and self.serial:
-            self.serial.write('3\n'.encode('utf-8'))
-        self.last_encoder_value = 0
-        self.last_capture_encoder = self.step * -1
-        self.encoder_value = 0
 
     def close(self):
         if self.serial_available and self.serial:
@@ -1486,35 +1473,16 @@ class ArduinoSocket:
         else:
             logger.warning(f"[SERIAL_TX] Cannot send '{msg.strip()}': serial_available={self.serial_available}, serial={self.serial is not None}")
 
-    def set_PWM_backlight(self, pwm):
-        if self.serial_available and self.serial:
-            self.serial.write(f"5,{pwm}\n".encode('utf-8'))
 
-    def set_PWM_uplight(self, pwm):
-        if self.serial_available and self.serial:
-            self.serial.write(f"4,{pwm}\n".encode('utf-8'))
 
-    def motor_start(self):
-        self._send_message('6\n')
     
     def motor_stop(self):
         self._send_message('7\n')
 
-    def set_step(self, step):
-        self.step = step
 
-    def keep(self):
-        self.d_or_k = 1
-        self.last_d_or_k = time.time()
 
-    def on_or_off_encoder(self, on_or_off):
-        self.on_or_off_enc = on_or_off
 
-    def buzzer(self, t):
-        ...
 
-    def led(self, t):
-        ...
 
     def find_barcode_scanner(self):
         """Dynamically find barcode scanner device."""
@@ -1786,17 +1754,6 @@ class ArduinoSocket:
     def clear_signal(self):
         self.last_encoder_value_captured = self.encoder_value
 
-    def queue_ejection(self, dm=None):
-        """Add an ejection target to the queue based on current encoder + offset"""
-        if not cfg.EJECTOR_ENABLED:
-            logger.info(f"Ejector disabled, ignoring ejection request for dm={dm}")
-            return
-        target_encoder = self.encoder_value + cfg.EJECTOR_OFFSET
-        self.ejection_queue.append({
-            "target": target_encoder,
-            "dm": dm,
-            "queued_at": self.encoder_value
-        })
 
     def run(self):
         """
@@ -2287,20 +2244,7 @@ class ArduinoSocket:
 
 
                 
-    def off_if_not_moving(self):
-        if abs(time.time() - self.last_move_time) > 1:
-            self.off()
 
-
-    def update_data_on_redis(self, frame_number, mode,buffer, gap, data_gathering):
-        data = self.data
-        data['light_mode'] = mode
-        data['frame_number'] = frame_number
-        data['buffer'] = buffer
-        data['gap'] = gap
-        data['d_or_k'] = self.d_or_k
-        data['data_gathering'] = data_gathering
-        self.redis_connection.update_encoder_redis(data)
     
     def send_queue_messages(self, queue_messages):
         self.redis_connection.update_queue_messages_redis(queue_messages)

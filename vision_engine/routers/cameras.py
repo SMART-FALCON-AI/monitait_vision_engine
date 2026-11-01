@@ -7,9 +7,9 @@ from typing import Optional, Dict, Any, List
 from config import (load_data_file, save_data_file, load_service_config, save_service_config,
                     REDIS_HOST, REDIS_PORT, DATA_FILE)
 from routers.config_routes import build_current_service_config
-from services.camera import (CameraBuffer, safe_source, scan_network_for_cameras, scan_network_for_camera_devices,
-                             test_camera_stream, get_camera_config_for_save, apply_camera_config_from_saved,
-                             format_relative_time, IP_CAMERA_USER, IP_CAMERA_PASS,
+from services.camera import (CameraBuffer, safe_source, scan_network_for_camera_devices,
+                             get_camera_config_for_save, apply_camera_config_from_saved,
+                             IP_CAMERA_USER, IP_CAMERA_PASS,
                              detect_pro_cameras, open_ip_capture)
 from services.state_machine import State
 from services.render import draw_detection_on

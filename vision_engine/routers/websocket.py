@@ -20,7 +20,7 @@ import config as cfg
 from config import TIMELINE_REDIS_PREFIX
 from services.detection import evaluate_eject_from_detections
 from services.render import draw_detection_on
-from routers.timeline import (_unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT,
+from routers.timeline import (_timeline_cam_order, _unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT,
                               draw_eject_boxes)
 
 logger = logging.getLogger(__name__)
@@ -149,23 +149,8 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
         total_pages = max(1, (max_total_frames + frames_per_page - 1) // frames_per_page)
         safe_page = page if 0 <= page < total_pages else 0
 
-        camera_order = tl_config.get('camera_order', 'normal') if tl_config else 'normal'
-        if camera_order == 'custom':
-            custom_order_str = tl_config.get('custom_camera_order', '') if tl_config else ''
-            order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
-            if order_list:
-                # 4.0.398 — custom order is a WHITELIST: the live dashboard shows ONLY the
-                # listed cameras, in this order. Previously non-listed cameras were appended
-                # at the bottom (sort, not filter), so their stale buffered frames kept
-                # showing after you removed them from the order.
-                _order_set = set(order_list)
-                sorted_cam_ids = sorted(
-                    (c for c in camera_frames_raw.keys() if c in _order_set),
-                    key=lambda cid: order_list.index(cid))
-            else:
-                sorted_cam_ids = sorted(camera_frames_raw.keys())
-        else:
-            sorted_cam_ids = sorted(camera_frames_raw.keys(), reverse=(camera_order == 'reverse'))
+        # 4.0.432 — the ONE camera-row order shared with /timeline_image + /api/timeline_meta
+        sorted_cam_ids = _timeline_cam_order(camera_frames_raw.keys(), tl_config)
         cam_page_slices = {}
         num_columns = 0
 

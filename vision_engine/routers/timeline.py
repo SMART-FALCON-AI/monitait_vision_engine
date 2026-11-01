@@ -323,43 +323,6 @@ def _build_header_strip(columns_meta, thumb_width, num_columns, procedures, curr
     return header
 
 
-def generate_detection_stream():
-    """Generator function that yields MJPEG frames from latest detections."""
-    import glob
-    last_file = None
-    last_mtime = 0
-
-    while True:
-        try:
-            # Find all _DETECTED.jpg files in raw_images directory
-            pattern = os.path.join("raw_images", "**", "*_DETECTED.jpg")
-            detected_files = glob.glob(pattern, recursive=True)
-
-            if detected_files:
-                # Get the most recent file by modification time
-                latest_file = max(detected_files, key=os.path.getmtime)
-                current_mtime = os.path.getmtime(latest_file)
-
-                # Only send if file has changed or it's a new file
-                if latest_file != last_file or current_mtime != last_mtime:
-                    # Read the image
-                    with open(latest_file, 'rb') as f:
-                        image_data = f.read()
-
-                    # Yield the frame in MJPEG format
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + image_data + b'\r\n')
-
-                    last_file = latest_file
-                    last_mtime = current_mtime
-
-            # Wait a bit before checking for new frames (2 times per second)
-            time.sleep(0.5)
-
-        except Exception as e:
-            logger.error(f"Error in detection stream: {e}")
-            time.sleep(1)
-
 
 @router.get("/api/latest_detections")
 def get_latest_detections(request: Request):
@@ -389,128 +352,27 @@ def get_latest_detections(request: Request):
         return {"has_detection": False, "error": str(e)}
 
 
-@router.get("/timeline_feed")
-def timeline_feed(request: Request):
-    """MJPEG stream showing camera timeline (history view).
-
-    Shows a grid: columns = cameras, rows = time (newest at bottom).
-    Lightweight alternative to full stitching service.
-    """
-    def generate():
-        while True:
-            try:
-                composite = get_timeline_composite(request)
-                if composite:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + composite + b'\r\n')
-                time.sleep(0.5)  # Update 2 FPS for timeline
-            except Exception as e:
-                logger.error(f"Timeline feed error: {e}")
-                time.sleep(1)
-
-    return StreamingResponse(generate(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
-def get_timeline_composite(request: Request):
-    """Concatenate all camera frames: horizontal axis = time, vertical axis = cameras."""
-    try:
-        # Get configuration (with defaults)
-        try:
-            tl_config = request.app.state.timeline_config
-            quality = tl_config.get('image_quality', 85)
-            image_rotation = tl_config.get('image_rotation', 0)
-        except Exception as e:
-            logger.debug(f"Could not load timeline config for stitching, using defaults: {e}")
-            tl_config = None
-            quality = 85
-            image_rotation = 0
+def _timeline_cam_order(cam_ids, tl_config):
+    """Camera rows of the timeline, top to bottom — ONE implementation for the image and
+    its click metadata (4.0.432: /api/timeline_meta sorted numerically and ignored
+    reverse / custom, so with the timeline paused a click on a row opened ANOTHER
+    camera's frame, and its eject evaluation included hidden cameras).
 
-        # Create Redis connection
-        redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
-
-        # Find all camera timeline keys (timeline:1, timeline:2, ...)
-        all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
-        if not all_keys:
-            logger.debug("Timeline: No frames in Redis")
-            return None
-
-        # Sort keys numerically by camera ID
-        def extract_cam_id(key):
-            k = key.decode() if isinstance(key, bytes) else key
-            try:
-                return int(k.split(":")[-1])
-            except ValueError:
-                return 0
-        camera_order = tl_config.get('camera_order', 'normal') if tl_config else 'normal'
-        if camera_order == 'custom':
-            custom_order_str = tl_config.get('custom_camera_order', '') if tl_config else ''
-            order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
-            if order_list:
-                # 4.0.398 — custom order is a WHITELIST (show ONLY these cameras), not just
-                # a sort; otherwise non-listed cameras with stale buffered frames keep
-                # rendering at the bottom.
-                _order_set = set(order_list)
-                all_keys = [k for k in all_keys if extract_cam_id(k) in _order_set]
-                all_keys.sort(key=lambda key: order_list.index(extract_cam_id(key)))
-            else:
-                all_keys.sort(key=extract_cam_id)
-        else:
-            all_keys.sort(key=extract_cam_id, reverse=(camera_order == 'reverse'))
-
-        # Build one horizontal row per camera (left=oldest, right=newest)
-        camera_rows = []
-        for key in all_keys:
-            frames_raw = redis_client.lrange(key, 0, -1)
-            if not frames_raw:
-                continue
-            # Unpack all frames (handle both 2-tuple and 3-tuple formats)
-            all_frames = []
-            for frame_data in frames_raw:
-                unpacked = pickle.loads(frame_data)
-                ts = unpacked[0]
-                jpeg_bytes = unpacked[1]
-                all_frames.append((ts, jpeg_bytes))
-            # Sort chronologically
-            all_frames.sort(key=lambda x: x[0])
-            row_frames = []
-            for ts, jpeg_bytes in all_frames:
-                thumb = cv2.imdecode(np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR)
-                if thumb is not None:
-                    if image_rotation == 90:
-                        thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
-                    elif image_rotation == 180:
-                        thumb = cv2.rotate(thumb, cv2.ROTATE_180)
-                    elif image_rotation == 270:
-                        thumb = cv2.rotate(thumb, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    row_frames.append(thumb)
-            if row_frames:
-                camera_rows.append(np.hstack(row_frames))
-
-        if not camera_rows:
-            logger.debug("Timeline: No valid frames")
-            return None
-
-        # Pad all rows to the same width before vertical stacking
-        max_width = max(row.shape[1] for row in camera_rows)
-        padded_rows = []
-        for row in camera_rows:
-            if row.shape[1] < max_width:
-                pad = np.zeros((row.shape[0], max_width - row.shape[1], 3), dtype=np.uint8)
-                row = np.hstack([row, pad])
-            padded_rows.append(row)
-
-        # Stack vertically: camera 1 on top, camera 2 below, etc.
-        composite = np.vstack(padded_rows)
-
-        logger.info(f"Timeline: Stitched {len(camera_rows)} camera row(s) into composite")
-
-        # Encode final composite with configured quality
-        _, jpeg = cv2.imencode('.jpg', composite, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        return jpeg.tobytes()
-
-    except Exception as e:
-        logger.error(f"Error generating timeline composite: {e}", exc_info=True)
-        return None
+    4.0.398 — a custom order is a WHITELIST: only these cameras, in this order (removing
+    a camera from the order hides it; its stale buffered frames no longer show)."""
+    cam_ids = list(cam_ids)
+    tl_config = tl_config or {}
+    camera_order = tl_config.get('camera_order', 'normal')
+    if camera_order == 'custom':
+        custom_order_str = str(tl_config.get('custom_camera_order', '') or '')
+        order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
+        if order_list:
+            _order_set = set(order_list)
+            return sorted((c for c in cam_ids if c in _order_set), key=lambda cid: order_list.index(cid))
+        return sorted(cam_ids)
+    return sorted(cam_ids, reverse=(camera_order == 'reverse'))
 
 
 @router.get("/timeline_image")
@@ -594,25 +456,7 @@ def timeline_image(request: Request, page: int = 0, mark_ejects: int = 0, mark_t
 
         # Build one horizontal row per camera for this page
         # Also collect per-column metadata across all cameras
-        camera_order = tl_config.get('camera_order', 'normal')
-        if camera_order == 'custom':
-            custom_order_str = tl_config.get('custom_camera_order', '')
-            order_list = [int(x.strip()) for x in custom_order_str.split(',') if x.strip().isdigit()]
-            if order_list:
-                # 4.0.398 — a custom order is a WHITELIST: render ONLY these cameras, in
-                # this order. Previously non-listed cameras were appended at the bottom
-                # (sort, not filter), so removing a camera from the order did NOT hide it —
-                # its stale buffered frames kept showing (e.g. after switching to a state
-                # that captures fewer cameras). Operators expect the list to control
-                # exactly which cameras appear on the timeline.
-                _order_set = set(order_list)
-                sorted_cam_ids = sorted(
-                    (c for c in camera_frames_raw.keys() if c in _order_set),
-                    key=lambda cid: order_list.index(cid))
-            else:
-                sorted_cam_ids = sorted(camera_frames_raw.keys())
-        else:
-            sorted_cam_ids = sorted(camera_frames_raw.keys(), reverse=(camera_order == 'reverse'))
+        sorted_cam_ids = _timeline_cam_order(camera_frames_raw.keys(), tl_config)
         cam_page_slices = {}  # cam_id -> list of (ts, jpeg_bytes, detections, meta)
         num_columns = 0
 
@@ -791,15 +635,27 @@ def timeline_count(request: Request):
             tl_config = request.app.state.timeline_config
             rows_per_page = tl_config.get('num_rows', 10)
         except:
+            tl_config = {}
             rows_per_page = 10
 
         redis_client = Redis("redis", 6379, db=cfg_module.REDIS_DB)
         all_keys = redis_client.keys(f"{TIMELINE_REDIS_PREFIX}*")
+        # 4.0.432 — count only the cameras the timeline SHOWS (a custom order is a whitelist):
+        # a hidden camera with a longer buffer made the page counter run past the last page.
+        def _cid(k):
+            k = k.decode() if isinstance(k, bytes) else k
+            try:
+                return int(k.split(":")[-1])
+            except ValueError:
+                return 0
+        _shown = set(_timeline_cam_order({_cid(k) for k in all_keys}, tl_config))
         # Use the camera with most frames to determine page count
         max_frames = 0
         total_all = 0
         num_cameras = 0
         for key in all_keys:
+            if _cid(key) not in _shown:
+                continue
             n = redis_client.llen(key)
             if n > 0:
                 num_cameras += 1
@@ -887,9 +743,14 @@ def _compute_conf_baselines():
     import time as _t
     if _t.time() - _baseline_cache["computed_at"] < _BASELINE_TTL_SEC and _baseline_cache["baselines"]:
         return _baseline_cache["baselines"]
+    # 4.0.432 — after a failed compute, don't retry on every call for 5 min (each try is
+    # two full 7-day jsonb scans, ~9 s each, and the Process tab calls this per class card)
+    if _t.time() - _baseline_cache.get("failed_at", 0) < 300:
+        return _baseline_cache.get("baselines", {})
 
     from services.db import get_db_connection, release_db_connection
     out = {}
+    failed = False
     conn = None
     try:
         conn = get_db_connection()
@@ -953,6 +814,7 @@ def _compute_conf_baselines():
             }
         cur.close()
     except Exception as e:
+        failed = True
         logger.warning(f"conf_baselines compute failed: {e}")
     finally:
         if conn is not None:
@@ -961,6 +823,10 @@ def _compute_conf_baselines():
             except Exception:
                 pass
 
+    if failed:
+        # 4.0.432 — keep the last GOOD result (a timeout used to overwrite it with {})
+        _baseline_cache["failed_at"] = _t.time()
+        return _baseline_cache.get("baselines", {})
     _baseline_cache["baselines"] = out
     _baseline_cache["computed_at"] = _t.time()
     return out
@@ -973,12 +839,6 @@ def get_conf_baselines():
     read-only badge under each class card showing 'normal range'."""
     return JSONResponse(content={"baselines": _compute_conf_baselines()})
 
-
-@router.post("/api/conf_baselines/recompute")
-def recompute_conf_baselines():
-    """Force-invalidate the baseline cache (used by admin/dev tools)."""
-    _baseline_cache["computed_at"] = 0.0
-    return JSONResponse(content={"baselines": _compute_conf_baselines()})
 
 
 @router.get("/api/color_drift")
@@ -1672,9 +1532,7 @@ def _compute_quality_payload(shipment: str = "", window: str = "24h") -> dict:
             # 3.25.8 — surface the ejection contribution separately for transparency.
             "ejection_impact": round(ejection_impact, 3),
             "ejection_counts": ejection_counts,
-            # 3.25.12 — surface the calibration knob so the UI + /api/score/calibrate
-            # can read/show the currently-applied loudness.
-            "score_scale_factor": round(score_scale_factor, 4),
+            # (score_scale_factor — the calibration knob, 3.25.12 — is set once, above)
         }
     except Exception as e:
         logger.warning(f"_compute_quality_payload failed: {e}")
@@ -2738,11 +2596,34 @@ def frame_detections(image_path: str = "", request: Request = None):
             return JSONResponse(content={"error": "db unreachable"}, status_code=503)
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT detections FROM inference_results WHERE image_path = %s ORDER BY time DESC LIMIT 1",
-                (image_path,),
-            )
-            row = cur.fetchone()
+            # 4.0.432 — bounded by shipment + the capture time in the filename (±5 s, UTC),
+            # like render_detected (4.0.112/113). `WHERE image_path = %s ORDER BY time DESC`
+            # alone scans back from the newest row (no index on image_path): older frames
+            # timed out, so the annotation editor opened with no boxes prefilled.
+            import re as _re
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            _rel = image_path.split("raw_images/", 1)[-1].strip("/")
+            _parts = [p for p in _rel.split("/") if p]
+            _m = _re.match(r"^(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})", _parts[-1] if _parts else "")
+            row = None
+            cur.execute("SET LOCAL statement_timeout = 3000")
+            if _m and len(_parts) >= 2:
+                _cap = _dt(*(int(_m.group(i)) for i in range(1, 7)), tzinfo=_tz.utc)
+                cur.execute(
+                    "SELECT detections FROM inference_results WHERE image_path = %s AND shipment = %s "
+                    "AND time BETWEEN %s AND %s ORDER BY time DESC LIMIT 1",
+                    (image_path, _parts[0], _cap - _td(seconds=5), _cap + _td(seconds=5)),
+                )
+                row = cur.fetchone()
+            if not row:   # out-of-pattern path: the old lookup, capped at 3 s
+                try:
+                    cur.execute(
+                        "SELECT detections FROM inference_results WHERE image_path = %s ORDER BY time DESC LIMIT 1",
+                        (image_path,),
+                    )
+                    row = cur.fetchone()
+                except Exception:
+                    row = None
             cur.close()
         finally:
             try: release_db_connection(conn)
@@ -2789,530 +2670,6 @@ def frame_detections(image_path: str = "", request: Request = None):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@router.get("/api/quality/ejection_axis")
-def quality_ejection_axis(
-    request: Request,
-    axis: str = "encoder",   # 4.0.280 — encoder is the product default axis (front + back)
-    window: str = "24h",
-    buckets: int = 48,
-    shipment: str = "",
-    lo: float = 0.0,
-    hi: float = 0.0,
-):
-    """Return per-bucket ejection event counts grouped by procedure_name.
-
-    Output: {
-        "axis": "time"|"encoder",
-        "buckets": [{
-            "bucket": <int>,
-            "label":  <str>,                # bucket axis label
-            "n":      <int>,                # total events in bucket
-            "top_procedure": <str|None>,    # most-fired proc name (drives color)
-            "by_procedure": {<name>: <int>, ...}
-        }, ...],
-        # for time:
-        "t_min": iso, "t_max": iso, "secs_per_bucket": int,
-        # for encoder:
-        "encoder_min": int, "encoder_max": int, "width_per_bucket": int,
-    }
-    """
-    _windows = _WINDOWS_STD
-    interval = _windows.get(window, "24 hours")
-    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
-    if shipment:
-        interval = "90 days"
-    # 4.0.39 — raise cap from 120 to 192 so the strip can match the colour
-    # heatmap's max (N_BINS=192 in detection_charts). At 120 the heatmap had
-    # more cells than the quality / ejection strip below it and the columns
-    # didn't line up at high bucket counts.
-    buckets = max(8, min(192, int(buckets)))
-    axis_l = (axis or "time").lower()
-    # v4.0.209 — SINGLE SOURCE OF X-DOMAIN. When the caller passes an explicit
-    # [lo, hi] range (the scatter's exact window._mveUnifiedX domain), bucket
-    # over THAT range instead of computing our own MIN/MAX. Guarantees a
-    # vertical guideline at position X hits the same bucket in the scatter,
-    # colour heatmap, quality strip AND this ejection strip. For encoder, lo/hi
-    # are encoder units; for time, lo/hi are epoch-milliseconds.
-    _explicit = (hi > lo)
-
-    cells = []
-    try:
-        from services.db import get_db_connection, release_db_connection
-        conn = get_db_connection()
-        if conn is None:
-            return JSONResponse(content={"axis": axis_l, "buckets": [], "shipment": shipment})
-        try:
-            cur = conn.cursor()
-            ship_clause = ""
-            params: list = []
-            if shipment:
-                ship_clause = "AND shipment = %s "
-                params.append(shipment)
-
-            if axis_l == "encoder":
-                # v4.0.109 — encoder range now comes from inference_results
-                # (the SAME source that quality/heatmap and detection_charts
-                # use), not from ejection_events. Previously ejection_events
-                # returned a NARROWER encoder range (subset — only rows that
-                # ever fired an ejector), so on the Charts page the ejection
-                # strip cells were narrower and misaligned with the quality
-                # strip and the color heatmap that sit next to it. With the
-                # shared range, empty ejection buckets simply have no
-                # ejection rows in them (renders as a transparent cell),
-                # keeping column-wise alignment across all three widgets.
-                # Fallback: if inference_results has no encoder rows in the
-                # window, fall through to the ejection-events range so the
-                # strip still shows SOMETHING rather than empty.
-                if _explicit:
-                    # Bucket over the scatter's exact encoder domain.
-                    enc_min = int(lo); enc_max = int(hi)
-                else:
-                    cur.execute(
-                        f"""
-                        SELECT MIN(encoder_value), MAX(encoder_value)
-                        FROM inference_results
-                        WHERE time > NOW() - INTERVAL %s
-                          AND encoder_value IS NOT NULL
-                          {ship_clause}
-                        """,
-                        [interval, *params],
-                    )
-                    enc_min, enc_max = cur.fetchone() or (None, None)
-                    if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
-                        # Fall back to ejection_events range (prior behaviour).
-                        cur.execute(
-                            f"""
-                            SELECT MIN(encoder_value), MAX(encoder_value)
-                            FROM ejection_events
-                            WHERE time > NOW() - INTERVAL %s
-                              AND encoder_value IS NOT NULL
-                              {ship_clause}
-                            """,
-                            [interval, *params],
-                        )
-                        enc_min, enc_max = cur.fetchone() or (None, None)
-                    if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
-                        cur.close()
-                        note = "no ejection events in window" if enc_min is None else \
-                               "encoder reports no pulses on ejection events"
-                        return JSONResponse(content={
-                            "axis": "encoder", "buckets": [],
-                            "shipment": shipment, "note": note,
-                        })
-                    enc_min = int(enc_min); enc_max = int(enc_max)
-                span = enc_max - enc_min
-                width = max(1, span // buckets)
-                # v4.0.209 — when an explicit domain is set, EXCLUDE rows outside
-                # [enc_min, enc_max] so edge buckets aren't inflated by clamping.
-                _erng_sql = "AND encoder_value BETWEEN %s AND %s " if _explicit else ""
-                _erng_args = [enc_min, enc_max] if _explicit else []
-                cur.execute(
-                    f"""
-                    SELECT bucket, procedure_name, COUNT(*) AS n
-                    FROM (
-                      SELECT
-                        LEAST(%s - 1, GREATEST(0,
-                            ((encoder_value - %s)::bigint / NULLIF(%s,0)::bigint))::int
-                        ) AS bucket,
-                        procedure_name
-                      FROM ejection_events
-                      WHERE time > NOW() - INTERVAL %s
-                        AND encoder_value IS NOT NULL
-                        {_erng_sql}
-                        {ship_clause}
-                    ) src
-                    GROUP BY bucket, procedure_name
-                    """,
-                    [buckets, enc_min, width, interval, *_erng_args, *params],
-                )
-                bd_data: dict = {}
-                for b, name, n in cur.fetchall():
-                    try: b = int(b or 0)
-                    except (TypeError, ValueError): continue
-                    n_i = int(n or 0)
-                    pname = str(name) if name is not None else "(unknown)"
-                    bd = bd_data.setdefault(b, {"n": 0, "by_procedure": {}})
-                    bd["n"] += n_i
-                    bd["by_procedure"][pname] = bd["by_procedure"].get(pname, 0) + n_i
-                cur.close()
-                for b in range(buckets):
-                    bd = bd_data.get(b, {"n": 0, "by_procedure": {}})
-                    top = max(bd["by_procedure"].items(), key=lambda kv: kv[1])[0] if bd["by_procedure"] else None
-                    cells.append({
-                        "bucket": b,
-                        "label": f"{enc_min + b * width:,} – {enc_min + (b+1) * width - 1:,}",
-                        "n": bd["n"],
-                        "top_procedure": top,
-                        "by_procedure": bd["by_procedure"],
-                    })
-                return JSONResponse(content={
-                    "axis": "encoder", "buckets": cells,
-                    "encoder_min": enc_min, "encoder_max": enc_max,
-                    "width_per_bucket": width, "shipment": shipment,
-                })
-
-            # ----- TIME axis -----
-            # 3.25.13 — bucket the FULL window (NOW() - interval → NOW()) instead
-            # of MIN/MAX of ejection_events, so the strip's X-axis aligns with the
-            # scatter (which spans the full window). Empty buckets at the edges
-            # just render transparent.
-            if _explicit:
-                # lo/hi are epoch-milliseconds — bucket over the scatter's exact
-                # time domain so the ejection strip lines up 1:1 with the scatter.
-                cur.execute("SELECT to_timestamp(%s), to_timestamp(%s)", [lo / 1000.0, hi / 1000.0])
-            else:
-                cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
-            t_min, t_max = cur.fetchone() or (None, None)
-            if not t_min or not t_max:
-                cur.close()
-                return JSONResponse(content={
-                    "axis": "time", "buckets": [],
-                    "shipment": shipment, "note": "no time window",
-                })
-
-            # v4.0.209 — with an explicit domain, exclude rows outside [t_min,t_max]
-            # so edge buckets aren't inflated by clamping.
-            _trng_sql = "AND time BETWEEN %s AND %s " if _explicit else ""
-            _trng_args = [t_min, t_max] if _explicit else []
-            cur.execute(
-                f"""
-                SELECT bucket, procedure_name, COUNT(*) AS n
-                FROM (
-                  SELECT
-                    LEAST(%s - 1, GREATEST(0,
-                        EXTRACT(EPOCH FROM (time - %s))::bigint
-                          / NULLIF(EXTRACT(EPOCH FROM (%s::timestamptz - %s))::bigint / %s, 0)
-                    ))::int AS bucket,
-                    procedure_name
-                  FROM ejection_events
-                  WHERE time > NOW() - INTERVAL %s
-                    {_trng_sql}
-                    {ship_clause}
-                ) src
-                GROUP BY bucket, procedure_name
-                """,
-                [buckets, t_min, t_max, t_min, buckets, interval, *_trng_args, *params],
-            )
-            bd_time: dict = {}
-            for b, name, n in cur.fetchall():
-                try: b = int(b or 0)
-                except (TypeError, ValueError): continue
-                n_i = int(n or 0)
-                pname = str(name) if name is not None else "(unknown)"
-                bd = bd_time.setdefault(b, {"n": 0, "by_procedure": {}})
-                bd["n"] += n_i
-                bd["by_procedure"][pname] = bd["by_procedure"].get(pname, 0) + n_i
-            cur.close()
-
-            total_secs = (t_max - t_min).total_seconds()
-            secs_per_bucket = max(1.0, total_secs / buckets)
-            for b in range(buckets):
-                bd = bd_time.get(b, {"n": 0, "by_procedure": {}})
-                ts_start = t_min + _td(seconds=int(b * secs_per_bucket))
-                top = max(bd["by_procedure"].items(), key=lambda kv: kv[1])[0] if bd["by_procedure"] else None
-                cells.append({
-                    "bucket": b,
-                    "label": ts_start.strftime("%H:%M") if total_secs <= 86400 else ts_start.strftime("%m-%d %H:%M"),
-                    "ts":    ts_start.isoformat(),
-                    "n":     bd["n"],
-                    "top_procedure": top,
-                    "by_procedure": bd["by_procedure"],
-                })
-            return JSONResponse(content={
-                "axis": "time", "buckets": cells,
-                "t_min": t_min.isoformat(), "t_max": t_max.isoformat(),
-                "secs_per_bucket": int(secs_per_bucket), "shipment": shipment,
-            })
-        finally:
-            try:
-                release_db_connection(conn)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.warning(f"quality_ejection_axis failed: {e}")
-        return JSONResponse(content={"axis": axis_l, "buckets": [], "error": str(e)})
-
-
-@router.get("/api/quality/heatmap")
-def quality_heatmap(
-    request: Request,
-    axis: str = "encoder",   # 4.0.280 — encoder is the product default axis (front + back)
-    window: str = "24h",
-    buckets: int = 48,
-    shipment: str = "",
-    lo: float = 0.0,
-    hi: float = 0.0,
-):
-    """3.25.4 — 1D quality heatmap. `axis`: "time" or "encoder".
-
-    Divides the window into N buckets and computes a quality score per
-    bucket. Operator sees a strip like:
-      00:00 ─🟢🟢🟢🟢🟡🔴🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢🟢─ 24:00
-    Each cell carries: {bucket, label, n_detections, score, top_class}.
-
-    Score within a bucket = clip(100 - 100 × normalized_impact, 0, 100)
-    where impact = Σ (severity × confidence) and the normalization
-    target is "1 detection of severity 50 at confidence 0.5 per bucket
-    counts as ~10 points off". Tunable later.
-    """
-    _windows = _WINDOWS_STD
-    interval = _windows.get(window, "24 hours")
-    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
-    if shipment:
-        interval = "90 days"
-    # 4.0.39 — raise cap from 120 to 192 so the strip can match the colour
-    # heatmap's max (N_BINS=192 in detection_charts). At 120 the heatmap had
-    # more cells than the quality / ejection strip below it and the columns
-    # didn't line up at high bucket counts.
-    buckets = max(8, min(192, int(buckets)))
-    axis_l = (axis or "time").lower()
-    # v4.0.209 — SINGLE SOURCE OF X-DOMAIN (same as quality_ejection_axis). An
-    # explicit [lo, hi] range (the scatter's window._mveUnifiedX domain) makes
-    # this strip bucket over the SAME range as the scatter/colour heatmap, so a
-    # vertical guideline hits the same data in every layer. encoder → encoder
-    # units; time → epoch-milliseconds.
-    _explicit = (hi > lo)
-
-    # pull per-class severity from audio_settings
-    try:
-        from config import load_service_config as _load_svc
-        svc = _load_svc() or {}
-        sev_map = {
-            k: int(v.get("severity") or 0)
-            for k, v in (svc.get("audio_settings") or {}).items()
-            if isinstance(v, dict)
-        }
-        # 3.25.12 — same global loudness knob as the shipment quality score so
-        # the heatmap strips reflect the same calibration. The legacy 0.0001
-        # constant stays as the base scale; score_scale_factor multiplies it.
-        try:
-            _heatmap_scale = float(svc.get("score_scale_factor") or 1.0)
-        except (TypeError, ValueError):
-            _heatmap_scale = 1.0
-        # v4.0.111 — classes where the operator un-checked "Show" in the
-        # Process tab must NOT contribute to the quality strip either.
-        # Otherwise a hidden class (e.g. `jean` — dominant frame-label, not
-        # a defect) shows up as top_class in every bucket AND drives its
-        # score. Same source (audio_settings[cls].show === False) that
-        # detection_charts uses for `_hidden_by_process`.
-        _hidden_by_process = sorted([
-            str(cls) for cls, cfg in (svc.get("audio_settings") or {}).items()
-            if isinstance(cfg, dict) and cfg.get("show") is False
-        ])
-    except Exception:
-        sev_map = {}
-        _heatmap_scale = 1.0
-        _hidden_by_process = []
-
-    cells = []
-    try:
-        from services.db import get_db_connection, release_db_connection
-        conn = get_db_connection()
-        if conn is None:
-            return JSONResponse(content={"axis": axis_l, "buckets": [], "shipment": shipment})
-        try:
-            cur = conn.cursor()
-            ship_clause = ""
-            params: list = []
-            if shipment:
-                ship_clause = "AND image_path LIKE %s "
-                params.append(f"{shipment}/%")
-
-            if axis_l == "encoder":
-                if _explicit:
-                    enc_min = int(lo); enc_max = int(hi)
-                else:
-                    cur.execute(
-                        f"""
-                        SELECT MIN(encoder_value), MAX(encoder_value)
-                        FROM inference_results
-                        WHERE time > NOW() - INTERVAL %s
-                          AND encoder_value IS NOT NULL
-                          {ship_clause}
-                        """,
-                        [interval, *params],
-                    )
-                    enc_min, enc_max = cur.fetchone() or (None, None)
-                    if enc_min is None or enc_max is None or enc_max - enc_min <= 0:
-                        cur.close()
-                        # Differentiate "no encoder at all" from "encoder reports all zeros"
-                        # — the second one means the encoder is wired but not pulsing
-                        # (line stopped, hardware unplugged, calibration missing).
-                        note = "encoder reports no pulses (line not moving or encoder unwired)" \
-                               if (enc_min == 0 and enc_max == 0) else "no encoder data in window"
-                        return JSONResponse(content={
-                            "axis": "encoder", "buckets": [],
-                            "shipment": shipment, "note": note,
-                        })
-                    enc_min = int(enc_min); enc_max = int(enc_max)
-                span = enc_max - enc_min
-                width = max(1, span // buckets)
-                # v4.0.209 — exclude rows outside the explicit domain so edge
-                # buckets aren't inflated by LEAST/GREATEST clamping.
-                _erng_sql = "AND encoder_value BETWEEN %s AND %s " if _explicit else ""
-                _erng_args = [enc_min, enc_max] if _explicit else []
-                # v4.0.111 — extend WHERE with the "Show" filter so classes the
-                # operator hid in Process tab don't reach top_class or score.
-                _hp_sql = ""
-                _hp_args = []
-                if _hidden_by_process:
-                    _hp_sql = " AND (det->>'name') <> ALL(%s)"
-                    _hp_args = [_hidden_by_process]
-                cur.execute(
-                    f"""
-                    SELECT bucket, name, COUNT(*) AS n,
-                           AVG((det->>'confidence')::float) AS avg_conf
-                    FROM (
-                      SELECT
-                        LEAST(%s - 1, GREATEST(0,
-                            ((encoder_value - %s)::bigint / NULLIF(%s,0)::bigint))::int
-                        ) AS bucket,
-                        (det->>'name') AS name,
-                        det
-                      FROM inference_results, LATERAL jsonb_array_elements(detections) det
-                      WHERE time > NOW() - INTERVAL %s
-                        AND encoder_value IS NOT NULL
-                        {_erng_sql}
-                        AND (det->>'name') IS NOT NULL
-                        -- v4.0.110 — skip synthetic entries (`_color`, `_lab`, etc.).
-                        -- Without this the quality-strip's top_class showed
-                        -- `_color` as the "top defect" in every bucket (its
-                        -- confidence is always 1.0 so it dominated the count
-                        -- comparison at line 2785). Same filter that
-                        -- detection_charts / detection_stats / _compute_quality_payload
-                        -- already apply. Also removes _color from the score
-                        -- calculation so buckets don't misleadingly turn red
-                        -- when the actual defect density is fine.
-                        AND COALESCE(det->>'name', '') !~ '^_'
-                        {_hp_sql}
-                        {ship_clause}
-                    ) src
-                    GROUP BY bucket, name
-                    """,
-                    [buckets, enc_min, width, interval, *_erng_args, *_hp_args, *params],
-                )
-                bucket_data: dict = {}
-                for b, name, n, ac in cur.fetchall():
-                    b = int(b or 0)
-                    n = int(n or 0)
-                    ac = float(ac or 0)
-                    sev = sev_map.get(name, 0)
-                    impact = sev * ac * n
-                    bd = bucket_data.setdefault(b, {"n": 0, "impact": 0.0, "top_class": None, "top_count": 0})
-                    bd["n"] += n
-                    bd["impact"] += impact
-                    if n > bd["top_count"]:
-                        bd["top_count"] = n
-                        bd["top_class"] = name
-                cur.close()
-
-                for b in range(buckets):
-                    bd = bucket_data.get(b, {"n": 0, "impact": 0.0, "top_class": None})
-                    score = max(0.0, 100.0 - bd["impact"] * 0.0001 * _heatmap_scale)
-                    cells.append({
-                        "bucket": b,
-                        "label": f"{enc_min + b * width:,} – {enc_min + (b+1) * width - 1:,}",
-                        "n": bd["n"],
-                        "score": round(score, 1),
-                        "top_class": bd["top_class"],
-                    })
-                return JSONResponse(content={
-                    "axis": "encoder", "buckets": cells,
-                    "encoder_min": enc_min, "encoder_max": enc_max,
-                    "width_per_bucket": width, "shipment": shipment,
-                })
-
-            # ----- TIME axis -----
-            # 3.25.13 — same alignment fix as quality_ejection_axis: bucket the
-            # full window so the strip matches the scatter X-axis 1:1.
-            if _explicit:
-                # lo/hi are epoch-milliseconds — bucket over the scatter's exact
-                # time domain so the quality strip lines up 1:1 with the scatter.
-                cur.execute("SELECT to_timestamp(%s), to_timestamp(%s)", [lo / 1000.0, hi / 1000.0])
-            else:
-                cur.execute("SELECT NOW() - INTERVAL %s, NOW()", [interval])
-            t_min, t_max = cur.fetchone() or (None, None)
-            if not t_min or not t_max:
-                cur.close()
-                return JSONResponse(content={"axis": "time", "buckets": [], "shipment": shipment})
-
-            # v4.0.209 — exclude rows outside the explicit domain (no edge clamp).
-            _trng_sql = "AND time BETWEEN %s AND %s " if _explicit else ""
-            _trng_args = [t_min, t_max] if _explicit else []
-            # v4.0.111 — same Show-filter wiring as the encoder path.
-            _hp_sql_t = ""
-            _hp_args_t = []
-            if _hidden_by_process:
-                _hp_sql_t = " AND (det->>'name') <> ALL(%s)"
-                _hp_args_t = [_hidden_by_process]
-            cur.execute(
-                f"""
-                SELECT bucket, name, COUNT(*) AS n,
-                       AVG((det->>'confidence')::float) AS avg_conf
-                FROM (
-                  SELECT
-                    LEAST(%s - 1, GREATEST(0,
-                        EXTRACT(EPOCH FROM (time - %s))::bigint
-                          / NULLIF(EXTRACT(EPOCH FROM (%s::timestamptz - %s))::bigint / %s, 0)
-                    ))::int AS bucket,
-                    (det->>'name') AS name,
-                    det
-                  FROM inference_results, LATERAL jsonb_array_elements(detections) det
-                  WHERE time > NOW() - INTERVAL %s
-                    {_trng_sql}
-                    AND (det->>'name') IS NOT NULL
-                    -- v4.0.110 — same synthetic filter as the encoder path.
-                    AND COALESCE(det->>'name', '') !~ '^_'
-                    {_hp_sql_t}
-                    {ship_clause}
-                ) src
-                GROUP BY bucket, name
-                """,
-                [buckets, t_min, t_max, t_min, buckets, interval, *_trng_args, *_hp_args_t, *params],
-            )
-            bucket_data2: dict = {}
-            for b, name, n, ac in cur.fetchall():
-                try:
-                    b = int(b or 0)
-                except (TypeError, ValueError):
-                    continue
-                n = int(n or 0)
-                ac = float(ac or 0)
-                sev = sev_map.get(name, 0)
-                impact = sev * ac * n
-                bd = bucket_data2.setdefault(b, {"n": 0, "impact": 0.0, "top_class": None, "top_count": 0})
-                bd["n"] += n
-                bd["impact"] += impact
-                if n > bd["top_count"]:
-                    bd["top_count"] = n
-                    bd["top_class"] = name
-            cur.close()
-
-            total_secs = (t_max - t_min).total_seconds()
-            secs_per_bucket = max(1.0, total_secs / buckets)
-            for b in range(buckets):
-                bd = bucket_data2.get(b, {"n": 0, "impact": 0.0, "top_class": None})
-                ts_start = t_min + _td(seconds=int(b * secs_per_bucket))
-                score = max(0.0, 100.0 - bd["impact"] * 0.0001 * _heatmap_scale)
-                cells.append({
-                    "bucket": b,
-                    "label": ts_start.strftime("%H:%M") if total_secs <= 86400 else ts_start.strftime("%m-%d %H:%M"),
-                    "ts":    ts_start.isoformat(),
-                    "n":     bd["n"],
-                    "score": round(score, 1),
-                    "top_class": bd["top_class"],
-                })
-            return JSONResponse(content={
-                "axis": "time", "buckets": cells,
-                "t_min": t_min.isoformat(), "t_max": t_max.isoformat(),
-                "secs_per_bucket": int(secs_per_bucket), "shipment": shipment,
-            })
-        finally:
-            try: release_db_connection(conn)
-            except Exception: pass
-    except Exception as e:
-        logger.warning(f"quality/heatmap failed: {e}")
-    return JSONResponse(content={"axis": axis_l, "buckets": cells})
 
 
 @router.get("/api/detection_stats")
@@ -3740,6 +3097,25 @@ def _dc_load_severity():
         return {}, [], 1.0
 
 
+def _dc_heal(conn, timeout_ms=15000):
+    """4.0.432 — detection_charts runs ~10 optional blocks in ONE transaction under a
+    15 s SET LOCAL timeout. One block hitting the timeout (the colour heatmap's full-window
+    jsonb scans) aborted the transaction, and every later block — strips, phases, parent
+    classes, camera order, colour baseline — then failed with "current transaction is
+    aborted", logged at debug; that degraded payload was cached for 20 s. Called from each
+    block's except: if the transaction is aborted, roll back (rows already fetched are in
+    Python) and restore the 15 s timeout for the blocks that follow."""
+    try:
+        import psycopg2.extensions as _ext
+        if conn is not None and conn.get_transaction_status() == _ext.TRANSACTION_STATUS_INERROR:
+            conn.rollback()
+            _c = conn.cursor()
+            _c.execute("SET LOCAL statement_timeout = %d" % int(timeout_ms))
+            _c.close()
+    except Exception:
+        pass
+
+
 @router.get("/api/detection_charts")
 def detection_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0, baseline: str = "camera", phase: str = "", bins: int = 32, since_ms: int = 0, until_ms: int = 0, scatter_only: int = 0, dot_cap: int = 750, parent_class: str = "", include_color_slice: int = 0, color_axis: str = "encoder", bin_ref_lo: float = 0, bin_ref_hi: float = 0, include_strips: int = 0, range_only: int = 0, enc_lo: float = 0, enc_hi: float = 0, frame_cap: int = 0):
     """Rich detection analytics for the Charts tab (3.16.0).
@@ -4077,6 +3453,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             ])
         except Exception as _pse:
             logger.debug(f"audio_settings show-flag lookup failed: {_pse}")
+            _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
         _parent_filter_sql = ""
         _parent_filter_args = []
         if _hidden_by_process:
@@ -4372,6 +3749,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     }
                 except Exception as _cse:
                     logger.debug(f"color_slice compute failed: {_cse}")
+                    _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
                     _payload["color_slice"] = {"cells": []}
             # v4.0.210 — quality + ejection SLICE. Streamed per bucket by the
             # progressive ladder EXACTLY like color_slice, so the quality and
@@ -4425,6 +3803,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     }
                 except Exception as _qse:
                     logger.debug(f"quality/ejection/shipment slice compute failed: {_qse}")
+                    _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
                     _payload["quality_slice"] = {"cells": []}
                     _payload["ejection_slice"] = {"cells": []}
                     _payload["shipment_slice"] = {"cells": []}
@@ -4678,6 +4057,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 color_change_strip_enc["cells"] = ccs_cells
             except Exception as _cce:
                 logger.debug(f"color_change_strip (encoder) compute failed: {_cce}")
+                _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
             # Time-binned twin — v4.0.149 honest positioning: bins 0..N-1
             # computed against the FIXED chart window `[now - interval, now]`.
             # Bin K represents the actual time slice under strip cell K.
@@ -4836,9 +4216,11 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 color_change_strip_time["cells"] = ccs_cells_t
             except Exception as _ccte:
                 logger.debug(f"color_change_strip (time) compute failed: {_ccte}")
+                _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
             _hm_cur.close()
         except Exception as _he:
             logger.debug(f"color heatmap pre-aggregation failed: {_he}")
+            _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
 
         # v4.0.210 — quality + ejection heatmaps in the MAIN payload, binned
         # over the SAME bounds + N_BINS the colour heatmap exposes (enc_min/
@@ -4909,6 +4291,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                     _mn_cur.close()
             except Exception as _mse:
                 logger.debug(f"main quality/ejection/shipment heatmap compute failed: {_mse}")
+                _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
 
         # 4.0.34 — discover the phases that actually have _color data in this
         # window so the UI can render exactly the right buttons. NOT filtered
@@ -4929,6 +4312,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             _ph_cur.close()
         except Exception as _pe:
             logger.debug(f"phases_available discovery failed: {_pe}")
+            _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
 
         # 4.0.161 — discover the parent classes with _color data in this
         # window. Same idea as phases_available: NOT filtered by the current
@@ -4951,6 +4335,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             _pc_cur.close()
         except Exception as _pce:
             logger.debug(f"parent_classes_available discovery failed: {_pce}")
+            _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
 
         # 4.0.24 — propagate the dashboard's camera column ordering into the
         # chart so the scatter Y-axis matches the timeline grid the operator
@@ -5001,6 +4386,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 camera_y_order = sorted(seen)
         except Exception as _e:
             logger.debug(f"camera_y_order compute failed (falling back to numeric): {_e}")
+            _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
             camera_y_order = []
 
         # 4.0.31 — color_heatmap + color_heatmap_time were aggregated
@@ -5154,6 +4540,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             cur.close()
         except Exception as _be:
             logger.debug(f"color baseline compute failed: {_be}")
+            _dc_heal(conn)   # 4.0.432 — keep the later blocks alive
 
         # v4.0.111 — per-shipment encoder + time spans, for the new
         # "shipment lanes" strip the operator asked for. Rendered between
@@ -5449,17 +4836,6 @@ def shipment_baseline_endpoint(request: Request, shipment: str = "", window: str
         logger.debug(f"shipment_baseline endpoint failed: {e}")
         return JSONResponse(content={"source": "none", "current": False, "baselines": {}})
 
-
-@router.get("/api/shipment_scores")
-def shipment_scores_endpoint(request: Request, limit: int = 50):
-    """4.0.318b — the Score-per-shipment lane, read straight from shipment_summary (latest N).
-    No per-shipment recompute — a finished shipment's score was materialized at finalize time."""
-    try:
-        from services.shipment_stats import get_latest_shipment_scores
-        return JSONResponse(content={"shipments": get_latest_shipment_scores(int(limit or 50))})
-    except Exception as e:
-        logger.debug(f"shipment_scores endpoint failed: {e}")
-        return JSONResponse(content={"shipments": []})
 
 
 @router.get("/api/shipment_spans")
@@ -6052,147 +5428,6 @@ def production_stats(request: Request, window: str = "24h", shipment: str = ""):
                 pass
 
 
-@router.get("/api/quality_charts")
-def quality_charts(request: Request, window: str = "24h", shipment: str = "", min_conf: float = 0.0):
-    """Defect diagnostics from inference_results (3.18.0).
-
-    Single expansion pass returns:
-      - by_class:   detections per class (drives the Pareto chart)
-      - by_camera:  detections per camera id (which station sees most defects)
-      - heatmap:    bbox-center density binned into a gw×gh grid (normalized by the
-                    max observed x/y) → where on the product defects cluster
-      - latency_over_time: per-bucket avg/max inference_time_ms (model/pipeline health)
-    Capped at recent rows; returns a well-formed empty payload on any error.
-    """
-    _windows = {
-        "1h":  ("1 hour",   "1 minute"),
-        "6h":  ("6 hours",  "5 minutes"),
-        "24h": ("24 hours", "30 minutes"),
-        "7d":  ("7 days",   "6 hours"),
-        # 4.0.392 — the UI has offered `<option value="30d">Last 30 days</option>` all
-        # along, but this map had no "30d", so `_windows.get(window, _windows["24h"])`
-        # silently served 24 HOURS instead. Charts looked empty on any line whose data
-        # was older than a day, and CSV/PDF exported 24h of rows labelled "30 days".
-        "30d": ("30 days",  "1 day"),
-    }
-    interval, bucket = _windows.get(window, _windows["24h"])
-    # 4.0.196 — specific shipment overrides window (see /api/detection_charts)
-    if shipment:
-        interval = "90 days"
-    GW, GH = 32, 20
-    empty = {"by_class": {}, "by_camera": {},
-             "heatmap": {"gw": GW, "gh": GH, "max": 0, "cells": []},
-             "latency_over_time": [], "window": window, "shipment": shipment}
-    ship_clause = "AND shipment = %s" if shipment else ""
-    base_params = [interval] + ([shipment] if shipment else [])
-
-    conn = None
-    try:
-        from services.db import get_db_connection
-        conn = get_db_connection()
-        if conn is None:
-            return JSONResponse(content=empty)
-        cur = conn.cursor()
-        # v4.0.102 — same 3s-timeout rescue. Also, this endpoint's outer
-        # try/except was surfacing "list index out of range" on khoy — that's
-        # NOT a timeout, it's `base_params` being shorter than the two %s
-        # placeholders when the query was rewritten with `{ship_clause}` but
-        # the confidence filter (which needs `min_conf`) wasn't added to
-        # `base_params`. Adding it here alongside the timeout raise fixes
-        # both bugs at once.
-        cur.execute("SET LOCAL statement_timeout = 15000")
-
-        # by_class / by_camera / heatmap centers (one expansion pass, capped)
-        cur.execute(
-            f"""
-            WITH recent AS (
-                SELECT detections FROM inference_results
-                WHERE time > NOW() - INTERVAL %s {ship_clause}
-                ORDER BY time DESC
-            )
-            SELECT (elem->>'name') AS cls,
-                   COALESCE((elem->>'_cam')::int, 0) AS cam,
-                   ((elem->>'xmin')::float + (elem->>'xmax')::float) / 2.0 AS cx,
-                   ((elem->>'ymin')::float + (elem->>'ymax')::float) / 2.0 AS cy
-            FROM recent, LATERAL jsonb_array_elements(recent.detections) elem
-            WHERE COALESCE((elem->>'confidence')::float, 0) >= %s
-            LIMIT 40000
-            """,
-            base_params + [float(min_conf or 0.0)],   # v4.0.102 — was missing min_conf
-        )
-        by_class, by_camera, centers = {}, {}, []
-        max_x, max_y = 1.0, 1.0
-        for cls, cam, cx, cy in cur.fetchall():
-            if cls is not None:
-                by_class[cls] = by_class.get(cls, 0) + 1
-            ck = str(cam if cam is not None else 0)
-            by_camera[ck] = by_camera.get(ck, 0) + 1
-            if cx and cy and cx > 0 and cy > 0:
-                centers.append((cx, cy))
-                if cx > max_x: max_x = cx
-                if cy > max_y: max_y = cy
-
-        grid = {}
-        for cx, cy in centers:
-            gx = min(GW - 1, int(cx / max_x * GW))
-            gy = min(GH - 1, int(cy / max_y * GH))
-            grid[(gx, gy)] = grid.get((gx, gy), 0) + 1
-        max_c = max(grid.values()) if grid else 0
-        cells = [{"x": gx, "y": gy, "c": c} for (gx, gy), c in grid.items()]
-        heatmap = {"gw": GW, "gh": GH, "max": max_c, "cells": cells}
-
-        # inference latency over time (per row, not per detection)
-        cur.execute(
-            f"""SELECT time_bucket(INTERVAL '{bucket}', time) AS bkt,
-                       AVG(inference_time_ms) AS avg_ms, MAX(inference_time_ms) AS max_ms
-                FROM inference_results
-                WHERE time > NOW() - INTERVAL %s {ship_clause}
-                GROUP BY bkt ORDER BY bkt""",
-            base_params,
-        )
-        latency_over_time = [
-            {"t": bkt.strftime("%m-%d %H:%M"),
-             "avg": round(float(a or 0), 1), "max": round(float(m or 0), 1)}
-            for bkt, a, m in cur.fetchall()
-        ]
-        cur.close()
-        # 4.0.103 — the underlying SELECT is bounded by `LIMIT 40000` (line
-        # 3994) so `by_class` + `by_camera` + `heatmap.cells` are all counts
-        # over the SAME 40k-detection sample, NOT over the whole window.
-        # Surface that fact so the frontend can label the tiles "recent
-        # 40k sample" instead of pretending the numbers are the totals.
-        # `sample_size` = the actual number of detections the counts came
-        # from (may be less than the cap if the window was small). Compare
-        # this against `/api/detection_stats.total` for context — that one
-        # is the true full-window count.
-        sample_size = sum(by_class.values())
-        SAMPLE_CAP = 40000
-        return JSONResponse(content={
-            "by_class": by_class, "by_camera": by_camera, "heatmap": heatmap,
-            "latency_over_time": latency_over_time, "window": window, "shipment": shipment,
-            "sample": {
-                "size": sample_size,
-                "cap":  SAMPLE_CAP,
-                "capped": sample_size >= SAMPLE_CAP,
-                "note": (
-                    f"counts over the most-recent {SAMPLE_CAP}-detection sample "
-                    f"(hit the cap; the full-window total is exposed by /api/detection_stats)"
-                    if sample_size >= SAMPLE_CAP else
-                    f"counts over {sample_size} detections in the window (below the {SAMPLE_CAP} cap)"
-                ),
-            },
-        })
-    except Exception as e:
-        logger.warning(f"quality_charts query failed (returning empty): {e}")
-        return JSONResponse(content=empty)
-    finally:
-        if conn is not None:
-            try:
-                from services.db import release_db_connection
-                release_db_connection(conn)
-            except Exception:
-                pass
-
 
 @router.post("/api/timeline_clear")
 def timeline_clear(request: Request):
@@ -6538,6 +5773,12 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
     unwind, end = 0). No mode toggle.
     """
     _windows = _WINDOWS_STD
+    # 4.0.432 — the all-shipments ZIP is assembled in memory; an unknown / longer window
+    # (90d, 120d, 1y) was silently exported as 24 h under a "..._90d.zip" filename.
+    if not shipment and window not in _windows:
+        return JSONResponse(content={"error": f"window {window!r} is too long for the all-shipments export "
+                                              "(up to 30d) - pick a shipment or a shorter window"},
+                            status_code=400)
     interval = _windows.get(window, "24 hours")
     # 4.0.345 — a PICKED shipment is exported by SHIPMENT ID ALONE — NO time filter whatsoever. The
     # whole point of picking a shipment is "give me THIS shipment's rows", regardless of when it ran.
@@ -6678,7 +5919,11 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
         from collections import defaultdict
         import zipfile as _zip
 
-        per_shipment_rows = defaultdict(list)
+        # 4.0.432 — length / unwind_length from EACH shipment's own encoder span (as the
+        # single-shipment export does). They used the window-wide MIN/MAX across all
+        # shipments; encoders restart per roll, so unwind_length was wrong for every shipment
+        # but the one holding the max. Raw rows are collected per shipment first, then built.
+        per_shipment_raw = defaultdict(list)
         cur = conn.cursor(name="export_csv_zip_cursor")
         cur.itersize = 500
         cur.execute(
@@ -6693,15 +5938,32 @@ def export_csv(request: Request, window: str = "24h", shipment: str = "", min_co
             if not dets or not ship:
                 continue
             for d in dets:
-                if not isinstance(d, dict):
-                    continue
-                row = _detection_row(t, ship, enc, img, infms, model, d,
-                                     sev_map, enc_min_global, enc_max_global,
-                                     min_conf_f, img_prefix, upm=_upm)
-                if row is None:
-                    continue
-                per_shipment_rows[ship].append(row)
+                if isinstance(d, dict):
+                    per_shipment_raw[ship].append((t, enc, img, infms, model, d))
         cur.close()
+        from services.shipment_stats import get_shipment_span as _gss
+        per_shipment_rows = {}
+        for ship, raws in per_shipment_raw.items():
+            _sp = None
+            try:
+                _sp = _gss(ship)
+            except Exception:
+                _sp = None
+            if _sp and _sp.get("enc_min") is not None and _sp.get("enc_max") is not None:
+                s_min, s_max = int(_sp["enc_min"]), int(_sp["enc_max"])
+            else:   # not finalized yet (the running shipment): its own rows in this window
+                _encs = [int(r[1]) for r in raws if r[1] is not None]
+                s_min, s_max = (min(_encs), max(_encs)) if _encs else (enc_min_global, enc_max_global)
+            rows = []
+            for t, enc, img, infms, model, d in raws:
+                row = _detection_row(t, ship, enc, img, infms, model, d,
+                                     sev_map, s_min, s_max,
+                                     min_conf_f, img_prefix, upm=_upm)
+                if row is not None:
+                    rows.append(row)
+            if rows:
+                per_shipment_rows[ship] = rows
+        per_shipment_raw.clear()
 
         # Build the ZIP in memory. One CSV entry per shipment id, sorted so the
         # ZIP has a stable file order (helps diffs and human scanning).
@@ -6832,13 +6094,10 @@ def _img_annotate_bytes(abspath, dets, r):
     ok, enc = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
     if not ok:
         raise RuntimeError("jpeg encode failed")
-    data = bytes(enc)
-    if r is not None:
-        try:
-            r.setex(cache_key, 3600, data)
-        except Exception:
-            pass
-    return data
+    # 4.0.432 — read the hover cache but do NOT fill it from a bulk export: a ~1 GiB image
+    # part pushed ~0.5 GB of JPEGs through Redis (256 MB, allkeys-lru), evicting the
+    # hover renders operators actually re-use and other idle keys.
+    return bytes(enc)
 
 
 def _stream_shipment_csv_entry(zf, sink, shipment, window, min_conf_f, img_prefix):
@@ -7529,6 +6788,7 @@ def timeline_meta(request: Request, page: int = 0):
             image_rotation = tl_config.get('image_rotation', 0)
             procedures = tl_config.get('procedures', [])
         except Exception:
+            tl_config = {}
             frames_per_page = 10
             image_rotation = 0
             procedures = []
@@ -7559,7 +6819,7 @@ def timeline_meta(request: Request, page: int = 0):
         if page < 0 or page >= total_pages:
             page = 0
 
-        sorted_cam_ids = sorted(camera_frames_raw.keys())
+        sorted_cam_ids = _timeline_cam_order(camera_frames_raw.keys(), tl_config)   # 4.0.432 — same rows as the image
         cam_page_slices = {}
         num_columns = 0
 
@@ -7656,159 +6916,7 @@ def timeline_meta(request: Request, page: int = 0):
         return {"type": "timeline_meta", "columns": [], "error": str(e)}
 
 
-@router.get("/timeline_slideshow")
-def timeline_slideshow():
-    """Timeline slideshow page with pan/zoom controls (inspired by FabriQC slideshow service)."""
-    html_content = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Camera Timeline Slideshow</title>
-  <meta http-equiv="refresh" content="5">
-  <style>
-    body {
-      margin: 0;
-      background: #000;
-      color: #fff;
-      width: 100%;
-      height: 100vh;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-    }
-    #app {
-      position: relative;
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-    }
-    #slide-container {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: auto;
-      background: #111;
-    }
-    #slide {
-      max-width: 100%;
-      max-height: 100%;
-      user-select: none;
-      transform-origin: center center;
-      display: block;
-    }
-    #footer {
-      height: 50px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(0,0,0,0.8);
-      gap: 10px;
-      padding: 0 20px;
-    }
-    button {
-      font-size: 1.2em;
-      font-weight: bold;
-      padding: 6px 12px;
-      cursor: pointer;
-      background: #222;
-      color: #fff;
-      border: 1px solid #555;
-      border-radius: 4px;
-    }
-    button:hover { background: #444; }
-    #info {
-      color: #aaa;
-      font-size: 14px;
-    }
-  </style>
-</head>
-<body>
-  <div id="app">
-    <div id="slide-container">
-      <img id="slide" src="/timeline_image" alt="Camera Timeline" draggable="false" />
-    </div>
-    <div id="footer">
-      <button id="zoom-in" onclick="zoomIn()">+</button>
-      <button id="reset-zoom" onclick="resetZoom()">Reset</button>
-      <button id="zoom-out" onclick="zoomOut()">\u2013</button>
-      <button id="fullscreen" onclick="toggleFullscreen()">\u26F6 Fullscreen</button>
-      <span id="info">Auto-refresh every 5 seconds | Columns = Cameras | Rows = Time (newest at top)</span>
-    </div>
-  </div>
 
-  <!-- Panzoom library (embedded for offline use) -->
-  <script>((t,e)=>{"object"==typeof exports&&"undefined"!=typeof module?module.exports=e():"function"==typeof define&&define.amd?define(e):(t="undefined"!=typeof globalThis?globalThis:t||self).Panzoom=e()})(this,function(){var a,X=function(){return(X=Object.assign||function(t){for(var e,n=1,o=arguments.length;n<o;n++)for(var r in e=arguments[n])Object.prototype.hasOwnProperty.call(e,r)&&(t[r]=e[r]);return t}).apply(this,arguments)},i=("undefined"!=typeof window&&(window.NodeList&&!NodeList.prototype.forEach&&(NodeList.prototype.forEach=Array.prototype.forEach),"function"!=typeof window.CustomEvent)&&(window.CustomEvent=function(t,e){e=e||{bubbles:!1,cancelable:!1,detail:null};var n=document.createEvent("CustomEvent");return n.initCustomEvent(t,e.bubbles,e.cancelable,e.detail),n}),"undefined"!=typeof document&&!!document.documentMode);var c=["webkit","moz","ms"],l={};function Y(t){if(l[t])return l[t];var e=a=a||document.createElement("div").style;if(t in e)return l[t]=t;for(var n=t[0].toUpperCase()+t.slice(1),o=c.length;o--;){var r="".concat(c[o]).concat(n);if(r in e)return l[t]=r}}function o(t,e){return parseFloat(e[Y(t)])||0}function s(t,e,n){void 0===n&&(n=window.getComputedStyle(t));t="border"===e?"Width":"";return{left:o("".concat(e,"Left").concat(t),n),right:o("".concat(e,"Right").concat(t),n),top:o("".concat(e,"Top").concat(t),n),bottom:o("".concat(e,"Bottom").concat(t),n)}}function C(t,e,n){t.style[Y(e)]=n}function N(t){var e=t.parentNode,n=window.getComputedStyle(t),o=window.getComputedStyle(e),r=t.getBoundingClientRect(),a=e.getBoundingClientRect();return{elem:{style:n,width:r.width,height:r.height,top:r.top,bottom:r.bottom,left:r.left,right:r.right,margin:s(t,"margin",n),border:s(t,"border",n)},parent:{style:o,width:a.width,height:a.height,top:a.top,bottom:a.bottom,left:a.left,right:a.right,padding:s(e,"padding",o),border:s(e,"border",o)}}}var T={down:"mousedown",move:"mousemove",up:"mouseup mouseleave"};function L(t,e,n,o){T[t].split(" ").forEach(function(t){e.addEventListener(t,n,o)})}function V(t,e,n){T[t].split(" ").forEach(function(t){e.removeEventListener(t,n)})}function G(t,e){for(var n=t.length;n--;)if(t[n].pointerId===e.pointerId)return n;return-1}function I(t,e){if(e.touches)for(var n=0,o=0,r=e.touches;o<r.length;o++){var a=r[o];a.pointerId=n++,I(t,a)}else-1<(n=G(t,e))&&t.splice(n,1),t.push(e)}function R(t){for(var e,n=(t=t.slice(0)).pop();e=t.pop();)n={clientX:(e.clientX-n.clientX)/2+n.clientX,clientY:(e.clientY-n.clientY)/2+n.clientY};return n}function W(t){var e;return t.length<2?0:(e=t[0],t=t[1],Math.sqrt(Math.pow(Math.abs(t.clientX-e.clientX),2)+Math.pow(Math.abs(t.clientY-e.clientY),2)))}"undefined"!=typeof window&&("function"==typeof window.PointerEvent?T={down:"pointerdown",move:"pointermove",up:"pointerup pointerleave pointercancel"}:"function"==typeof window.TouchEvent&&(T={down:"touchstart",move:"touchmove",up:"touchend touchcancel"}));var Z=/^http:[\w\.\/]+svg$/;var q={animate:!1,canvas:!1,cursor:"move",disablePan:!1,disableZoom:!1,disableXAxis:!1,disableYAxis:!1,duration:200,easing:"ease-in-out",exclude:[],excludeClass:"panzoom-exclude",handleStartEvent:function(t){t.preventDefault(),t.stopPropagation()},maxScale:40,minScale:.125,overflow:"hidden",panOnlyWhenZoomed:!1,pinchAndPan:!1,relative:!1,setTransform:function(t,e,n){var o=e.x,r=e.y,a=e.isSVG;C(t,"transform","scale(".concat(e.scale,") translate(").concat(o,"px, ").concat(r,"px)")),a&&i&&(e=window.getComputedStyle(t).getPropertyValue("transform"),t.setAttribute("transform",e))},startX:0,startY:0,startScale:1,step:.3,touchAction:"none"};function t(u,f){if(!u)throw new Error("Panzoom requires an element as an argument");if(1!==u.nodeType)throw new Error("Panzoom requires an element with a nodeType of 1");if(!(t=>{for(var e=t;e&&e.parentNode;){if(e.parentNode===document)return 1;e=e.parentNode instanceof ShadowRoot?e.parentNode.host:e.parentNode}})(u))throw new Error("Panzoom should be called on elements that have been attached to the DOM");f=X(X({},q),f);t=u;var t,l=Z.test(t.namespaceURI)&&"svg"!==t.nodeName.toLowerCase(),n=u.parentNode;n.style.overflow=f.overflow,n.style.userSelect="none",n.style.touchAction=f.touchAction,(f.canvas?n:u).style.cursor=f.cursor,u.style.userSelect="none",u.style.touchAction=f.touchAction,C(u,"transformOrigin","string"==typeof f.origin?f.origin:l?"0 0":"50% 50%");var r,a,i,c,s,d,m=0,h=0,v=1,p=!1;function g(t,e,n){n.silent||(n=new CustomEvent(t,{detail:e}),u.dispatchEvent(n))}function y(o,r,t){var a={x:m,y:h,scale:v,isSVG:l,originalEvent:t};return requestAnimationFrame(function(){var t,e,n;"boolean"==typeof r.animate&&(r.animate?(t=u,e=r,n=Y("transform"),C(t,"transition","".concat(n," ").concat(e.duration,"ms ").concat(e.easing))):C(u,"transition","none")),r.setTransform(u,a,r),g(o,a,r),g("panzoomchange",a,r)}),a}function w(t,e,n,o){var r,a,i,c,l,s,d,o=X(X({},f),o),p={x:m,y:h,opts:o};return!o.force&&(o.disablePan||o.panOnlyWhenZoomed&&v===o.startScale)||(t=parseFloat(t),e=parseFloat(e),o.disableXAxis||(p.x=(o.relative?m:0)+t),o.disableYAxis||(p.y=(o.relative?h:0)+e),o.contain&&(e=((r=(e=(t=N(u)).elem.width/v)*n)-e)/2,i=((a=(i=t.elem.height/v)*n)-i)/2,"inside"===o.contain?(c=(-t.elem.margin.left-t.parent.padding.left+e)/n,l=(t.parent.width-r-t.parent.padding.left-t.elem.margin.left-t.parent.border.left-t.parent.border.right+e)/n,p.x=Math.max(Math.min(p.x,l),c),s=(-t.elem.margin.top-t.parent.padding.top+i)/n,d=(t.parent.height-a-t.parent.padding.top-t.elem.margin.top-t.parent.border.top-t.parent.border.bottom+i)/n,p.y=Math.max(Math.min(p.y,d),s)):"outside"===o.contain&&(c=(-(r-t.parent.width)-t.parent.padding.left-t.parent.border.left-t.parent.border.right+e)/n,l=(e-t.parent.padding.left)/n,p.x=Math.max(Math.min(p.x,l),c),s=(-(a-t.parent.height)-t.parent.padding.top-t.parent.border.top-t.parent.border.bottom+i)/n,d=(i-t.parent.padding.top)/n,p.y=Math.max(Math.min(p.y,d),s))),o.roundPixels&&(p.x=Math.round(p.x),p.y=Math.round(p.y))),p}function b(t,e){var n,o,r,a,e=X(X({},f),e),i={scale:v,opts:e};return!e.force&&e.disableZoom||(n=f.minScale,o=f.maxScale,e.contain&&(a=(e=N(u)).elem.width/v,r=e.elem.height/v,1<a)&&1<r&&(a=(e.parent.width-e.parent.border.left-e.parent.border.right)/a,e=(e.parent.height-e.parent.border.top-e.parent.border.bottom)/r,"inside"===f.contain?o=Math.min(o,a,e):"outside"===f.contain&&(n=Math.max(n,a,e))),i.scale=Math.min(Math.max(t,n),o)),i}function x(t,e,n,o){var r,a,e=X(X({},f),e),p={x:m,y:h,opts:e};return!e.force&&(e.disablePan||e.panOnlyWhenZoomed&&v===e.startScale)||(t=parseFloat(t),e=parseFloat(e),e.disableXAxis||(p.x=(e.relative?m:0)+t),e.disableYAxis||(p.y=(e.relative?h:0)+e)),m!==p.x||h!==p.y?(m=p.x,h=p.y,y("panzoompan",p.opts,o)):{x:m,y:h,scale:v,isSVG:l,originalEvent:o}}function S(t,e,n){var o,r,e=b(t,e),a=e.opts;if(a.force||!a.disableZoom)return t=e.scale,e=m,o=h,a.focal&&(e=((r=a.focal).x/t-r.x/v+m*t)/t,o=(r.y/t-r.y/v+h*t)/t),r=w(e,o,t,{relative:!1,force:!0}),m=r.x,h=r.y,v=t,y("panzoomzoom",a,n)}function e(t,e){e=X(X(X({},f),{animate:!0}),e);return S(v*Math.exp((t?1:-1)*e.step),e)}function E(t,e,n,o){var r=N(u),a=r.parent.width-r.parent.padding.left-r.parent.padding.right-r.parent.border.left-r.parent.border.right,i=r.parent.height-r.parent.padding.top-r.parent.padding.bottom-r.parent.border.top-r.parent.border.bottom,c=e.clientX-r.parent.left-r.parent.padding.left-r.parent.border.left-r.elem.margin.left,e=e.clientY-r.parent.top-r.parent.padding.top-r.parent.border.top-r.elem.margin.top,r=(l||(c-=r.elem.width/v/2,e-=r.elem.height/v/2),{x:c/a*(a*t),y:e/i*(i*t)});return S(t,X(X({},n),{animate:!1,focal:r}),o)}S(f.startScale,{animate:!1,force:!0}),setTimeout(function(){x(f.startX,f.startY,{animate:!1,force:!0})});var M=[];function o(t){((t,e)=>{for(var n,o,r=t;null!=r;r=r.parentNode)if(n=r,o=e.excludeClass,1===n.nodeType&&-1<" ".concat((n.getAttribute("class")||"").trim()," ").indexOf(" ".concat(o," "))||-1<e.exclude.indexOf(r))return 1})(t.target,f)||(I(M,t),p=!0,f.handleStartEvent(t),g("panzoomstart",{x:r=m,y:a=h,scale:v,isSVG:l,originalEvent:t},f),t=R(M),i=t.clientX,c=t.clientY,s=v,d=W(M))}function A(t){var e,n,o;p&&void 0!==r&&void 0!==a&&void 0!==i&&void 0!==c&&(I(M,t),e=R(M),n=1<M.length,o=v,n&&(0===d&&(d=W(M)),E(o=b((W(M)-d)*f.step/80+s).scale,e,{animate:!1},t)),n&&!f.pinchAndPan||x(r+(e.clientX-i)/o,a+(e.clientY-c)/o,{animate:!1},t))}function P(t){1===M.length&&g("panzoomend",{x:m,y:h,scale:v,isSVG:l,originalEvent:t},f);var e=M;if(t.touches)for(;e.length;)e.pop();else{t=G(e,t);-1<t&&e.splice(t,1)}p&&(p=!1,r=a=i=c=void 0)}var O=!1;function z(){O||(O=!0,L("down",f.canvas?n:u,o),L("move",document,A,{passive:!0}),L("up",document,P,{passive:!0}))}return f.noBind||z(),{bind:z,destroy:function(){O=!1,V("down",f.canvas?n:u,o),V("move",document,A),V("up",document,P)},eventNames:T,getPan:function(){return{x:m,y:h}},getScale:function(){return v},getOptions:function(){var t,e=f,n={};for(t in e)e.hasOwnProperty(t)&&(n[t]=e[t]);return n},handleDown:o,handleMove:A,handleUp:P,pan:x,reset:function(t){var t=X(X(X({},f),{animate:!0,force:!0}),t),e=(v=b(t.startScale,t).scale,w(t.startX,t.startY,v,t));return m=e.x,h=e.y,y("panzoomreset",t)},resetStyle:function(){n.style.overflow="",n.style.userSelect="",n.style.touchAction="",n.style.cursor="",u.style.cursor="",u.style.userSelect="",u.style.touchAction="",C(u,"transformOrigin","")},setOptions:function(t){for(var e in t=void 0===t?{}:t)t.hasOwnProperty(e)&&(f[e]=t[e]);(t.hasOwnProperty("cursor")||t.hasOwnProperty("canvas"))&&(n.style.cursor=u.style.cursor="",(f.canvas?n:u).style.cursor=f.cursor),t.hasOwnProperty("overflow")&&(n.style.overflow=t.overflow),t.hasOwnProperty("touchAction")&&(n.style.touchAction=t.touchAction,u.style.touchAction=t.touchAction)},setStyle:function(t,e){return C(u,t,e)},zoom:S,zoomIn:function(t){return e(!0,t)},zoomOut:function(t){return e(!1,t)},zoomToPoint:E,zoomWithWheel:function(t,e){t.preventDefault();var e=X(X(X({},f),e),{animate:!1}),n=0===t.deltaY&&t.deltaX?t.deltaX:t.deltaY;return E(b(v*Math.exp((n<0?1:-1)*e.step/3),e).scale,t,e,t)}}}return t.defaultOptions=q,t});</script>
-
-  <script>
-    const slide = document.getElementById("slide");
-    const container = document.getElementById("slide-container");
-
-    const panzoom = Panzoom(slide, { maxScale: 40 });
-
-    function zoomIn() { panzoom.zoomIn(); }
-    function zoomOut() { panzoom.zoomOut(); }
-    function resetZoom() { panzoom.reset(); }
-    function toggleFullscreen() {
-      if (!document.fullscreenElement) document.getElementById('app').requestFullscreen();
-      else document.exitFullscreen();
-    }
-
-    container.addEventListener("wheel", panzoom.zoomWithWheel);
-    slide.addEventListener("dblclick", () => {
-      panzoom.zoom(panzoom.getScale() === 1 ? 2 : 1);
-    });
-
-    // Keyboard shortcuts
-    document.addEventListener("keydown", e => {
-      if (e.key === "+") zoomIn();
-      if (e.key === "-") zoomOut();
-      if (e.ctrlKey && e.key === "0") resetZoom();
-      if (e.key === "f") toggleFullscreen();
-    });
-  </script>
-</body>
-</html>
-    """
-    return HTMLResponse(content=html_content)
-
-
-@router.get("/latest_detection_image")
-def latest_detection_image():
-    """Serve the latest image with detection bounding boxes."""
-    try:
-        import glob
-        # Find all _DETECTED.jpg files in raw_images directory (including subdirectories)
-        pattern = os.path.join("raw_images", "**", "*_DETECTED.jpg")
-        detected_files = glob.glob(pattern, recursive=True)
-
-        if detected_files:
-            # Get the most recent file by modification time
-            latest_file = max(detected_files, key=os.path.getmtime)
-
-            # Read and return the image
-            with open(latest_file, 'rb') as f:
-                image_data = f.read()
-
-            return Response(content=image_data, media_type="image/jpeg")
-        else:
-            # Return a placeholder image or 404
-            raise HTTPException(status_code=404, detail="No detection images found")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error serving latest detection image: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/detection_stream")
-def detection_stream():
-    """Serve a continuous MJPEG stream of detection results."""
-    return StreamingResponse(
-        generate_detection_stream(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
 
 
 # ============================================================================

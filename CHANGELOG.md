@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.432] - 2026-11-01 - Audit batch 12: timeline click opens the right camera, charts survive a slow block, ~1,350 dead lines removed
+
+**Fixed**
+- **Paused timeline: clicking a row could open another camera's frame.** The click metadata (`/api/timeline_meta`) sorted cameras numerically, ignoring the "reverse" and custom camera orders the image uses. Its eject evaluation also included cameras hidden by a custom order. The image, its click metadata, the dashboard's live socket and the page counter now share one camera-order helper. The counter also ignored the custom whitelist, so a hidden camera with a longer buffer ran the page count past the last page.
+- **Charts: one slow query blanked half the payload.** `detection_charts` runs ~10 blocks in one transaction under a 15 s timeout. When one block hit the timeout (the colour heatmap's full-window scans), every later block failed with "current transaction is aborted": strips, phases, parent classes, camera order, colour baseline. That degraded payload was then cached for 20 s. Each block now recovers the transaction (rollback, timeout restored) so the rest still render.
+- **Annotation editor opened with no boxes on older frames.** Its detection lookup by image path had no time bound and no index, so it timed out. It is now bounded by shipment and the capture time in the filename (±5 s, UTC), as the hover render has been since 4.0.112.
+- **Per-class confidence baselines**: a timed-out compute replaced a good cached result with nothing, and every call then re-ran two ~9 s scans. It now keeps the last good result and retries after 5 minutes.
+- **CSV export, all shipments (ZIP)**:
+  - `unwind_length` / `length` used the window-wide encoder MIN/MAX across all shipments, which was wrong for every shipment but one because encoders restart per roll. Each shipment now uses its own span.
+  - 90 d / 120 d / 1 y silently exported 24 h under a `…_90d.zip` name. The UI and the API now say the all-shipments export covers up to 30 days.
+- **Image export** no longer pushes every annotated frame through Redis (256 MB, LRU). A ~1 GiB part used to evict the hover cache and other idle keys.
+- A state change logged "Changed light mode" although nothing was sent; the capture loop applies the light mode on its next capture.
+
+**Removed (dead — no caller anywhere, AST-verified)**:
+- **Endpoints**: `/timeline_feed`, `/detection_stream`, `/latest_detection_image`, `/timeline_slideshow`, `/api/quality/heatmap`, `/api/quality/ejection_axis`, `/api/quality_charts`, `/api/shipment_scores`, `/api/conf_baselines/recompute`, about 1,000 lines. The stream and latest-image endpoints globbed all of `raw_images/**` for files nothing has written since 4.0.0.
+- **Functions and methods**:
+  - 17 serial helper methods on the watcher: old PWM / motor / buzzer / LED / step helpers, `queue_ejection`, `update_data_on_redis`;
+  - the network camera scanner (`scan_network_for_cameras` and its stream tester), `format_relative_time`;
+  - `check_class_counts`;
+  - `StateManager.save_states` / `load_states` / `should_capture`.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.431] - 2026-11-01 - Audit batch 11: camera Restart no longer crashes MVE, capture-side fixes
 
 **Fixed**

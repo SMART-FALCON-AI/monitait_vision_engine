@@ -6,7 +6,6 @@ Contains all detection functions extracted from main.py:
 - nest_objects: Object nesting based on spatial hierarchy
 - decode_objects: Full object decoding pipeline
 - process_frame: Complete frame processing pipeline
-- check_class_counts: Object class count validation
 - add_detection_event: Audio notification events via Redis
 - add_frame_to_timeline: Timeline frame storage via Redis
 """
@@ -1348,36 +1347,6 @@ def decode_objects(frame_name, frame, nested_object, iterator=0, query_data=None
         logger.error(traceback.format_exc())
         return 4 , None
 
-def check_class_counts(yolo_results, confidence_threshold=None):
-    """
-    Check if the number of specific classes in YOLO results are all equal.
-    Uses cfg.CHECK_CLASS_COUNTS_CLASSES from config.
-    Only counts detections above the confidence threshold.
-    Returns True if all specified class counts are equal, False otherwise.
-    """
-    target_classes = cfg.CHECK_CLASS_COUNTS_CLASSES
-    conf_threshold = confidence_threshold if confidence_threshold is not None else cfg.CHECK_CLASS_COUNTS_CONFIDENCE
-
-    # Filter by confidence threshold and count classes
-    class_counts = Counter(
-        obj['name'] for obj in yolo_results
-        if obj['name'] in target_classes and obj.get('confidence', 1.0) >= conf_threshold
-    )
-
-    # If no target classes found, return True (nothing to check)
-    if not class_counts:
-        return True
-
-    # Ensure all target classes are present (missing = count 0)
-    for cls in target_classes:
-        if cls not in class_counts:
-            class_counts[cls] = 0
-
-    # Check if all counts are equal
-    counts = list(class_counts.values())
-    all_equal = len(set(counts)) == 1  # All counts are equal if set has only 1 unique value
-
-    return all_equal
 
 def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed_yolo=None):
     try:

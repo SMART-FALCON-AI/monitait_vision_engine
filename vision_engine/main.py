@@ -29,10 +29,10 @@ from services.db import (
     write_inference_to_db, write_production_metrics_to_db, write_ejection_event_to_db
 )
 from services.camera import (
-    CameraBuffer, detect_video_devices, scan_network_for_cameras, safe_source,
-    scan_network_for_camera_devices, test_camera_stream, get_all_cameras,
+    CameraBuffer, detect_video_devices, safe_source,
+    scan_network_for_camera_devices, get_all_cameras,
     get_camera_config_for_save, apply_camera_config_from_saved,
-    format_relative_time, DETECTED_CAMERAS,
+    DETECTED_CAMERAS,
     CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
     IP_CAMERA_USER, IP_CAMERA_PASS, IP_CAMERA_SUBNET,
     IP_CAMERA_BRIGHTNESS, IP_CAMERA_CONTRAST, IP_CAMERA_SATURATION

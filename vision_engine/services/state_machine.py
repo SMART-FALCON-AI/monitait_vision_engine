@@ -386,7 +386,12 @@ class StateManager:
                 # Use watcher's light control methods
                 if hasattr(self.watcher, 'send_command'):
                     self.watcher.send_command(cmd)
-                logger.info(f"Changed light mode to: {new_mode}")
+                    logger.info(f"Changed light mode to: {new_mode}")
+                else:
+                    # 4.0.432 — the watcher has no send_command: nothing was sent here, yet
+                    # this logged "Changed light mode". The capture loop applies each phase's
+                    # light mode itself (watcher._set_light_mode) on its next capture.
+                    logger.info(f"Light mode {new_mode} will be applied by the capture loop on the next capture")
         except Exception as e:
             self._handle_error(f"Error changing light mode: {e}")
 
@@ -403,22 +408,6 @@ class StateManager:
             return True  # Default to active if no state set
         return self.current_state.is_camera_active(camera_id)
 
-    def should_capture(self, encoder_value: int = 0, analog_value: int = 0) -> bool:
-        """Check if capture should be triggered based on current state.
-
-        Args:
-            encoder_value: Current encoder/step count since last capture
-            analog_value: Current analog sensor value
-
-        Returns:
-            True if capture should be triggered
-        """
-        if self.current_state is None:
-            return True  # Default to always capture if no state
-        if len(self.current_state.phases) == 0:
-            return False
-        # Check trigger thresholds (steps and analog)
-        return self.current_state.should_trigger(encoder_value, analog_value)
 
     def trigger_capture(self) -> bool:
         """Trigger a capture cycle."""
@@ -458,47 +447,6 @@ class StateManager:
             "error_time": self.error_time
         }
 
-    def save_states(self, filepath: str) -> bool:
-        """Save all states to a file."""
-        try:
-            data = {name: s.to_dict() for name, s in self.states.items()}
-            with open(filepath, 'w') as f:
-                json.dump(data, f, indent=2)
-            logger.info(f"Saved states to {filepath}")
-            return True
-        except Exception as e:
-            self._handle_error(f"Error saving states: {e}")
-            return False
-
-    def load_states(self, filepath: str) -> bool:
-        """Load states from a file."""
-        try:
-            if not os.path.exists(filepath):
-                logger.warning(f"States file not found: {filepath}")
-                return False
-
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-
-            for name, state_data in data.items():
-                self.states[name] = State.from_dict(state_data)
-
-            # 4.0.286 — backfill compact ids for states saved before ids existed. Same
-            # deterministic scheme as pipelines: 'default' stays 0, rest max(existing)+1
-            # in stable order. Keeps capture_id stable across boots.
-            _next_cid = max([getattr(s, "id", 0) or 0 for s in self.states.values()], default=0) + 1
-            for _sname, _sobj in self.states.items():
-                if _sname == "default":
-                    _sobj.id = 0
-                elif not getattr(_sobj, "id", 0):
-                    _sobj.id = _next_cid
-                    _next_cid += 1
-
-            logger.info(f"Loaded {len(data)} states from {filepath}")
-            return True
-        except Exception as e:
-            self._handle_error(f"Error loading states: {e}")
-            return False
 
 
 # Global state manager instance (initialized after watcher)
