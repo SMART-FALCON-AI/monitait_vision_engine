@@ -56,20 +56,34 @@ def create_or_update_state(request: Request, _mve_body=Depends(_json_body_dep)):
 
         if "name" not in data:
             return JSONResponse(content={"error": "State name is required"}, status_code=400)
-
-        state = State.from_dict(data)
+        # 4.0.456 — validated: an explicit empty phase list became "cameras 1-4, U light";
+        # a bad delay / camera list / light mode broke the capture loop on every trigger
+        if "phases" in data and not data.get("phases"):
+            return JSONResponse(content={"error": "A state needs at least one phase"}, status_code=400)
+        try:
+            state = State.from_dict(data, strict=True)
+        except ValueError as ve:
+            return JSONResponse(content={"error": str(ve)}, status_code=400)
         success = sm.add_state(state)
 
         if success:
-            # Auto-save states to DATA_FILE
+            # Auto-save states to DATA_FILE — 4.0.456 atomic, and a failed save is reported
+            # (it answered success and the edit was gone after a restart)
+            _saved = False
             try:
-                config = load_service_config() or {}
-                config["states"] = {name: s.to_dict() for name, s in sm.states.items()}
-                config["current_state_name"] = sm.current_state.name if sm.current_state else "default"
-                save_service_config(config)
+                from config import mutate_service_config
+
+                def _fn(config):
+                    config["states"] = {name: s.to_dict() for name, s in sm.states.items()}
+                    config["current_state_name"] = sm.current_state.name if sm.current_state else "default"
+                _saved = bool(mutate_service_config(_fn))
                 logger.info(f"State '{state.name}' created/updated and saved to DATA_FILE")
             except Exception as save_error:
                 logger.error(f"Failed to auto-save states: {save_error}")
+            if not _saved:
+                return JSONResponse(content={
+                    "error": f"State '{state.name}' is active now but could NOT be saved — it will be lost on restart"},
+                    status_code=500)
 
             return JSONResponse(content={
                 "success": True,

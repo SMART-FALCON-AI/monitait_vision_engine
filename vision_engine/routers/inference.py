@@ -188,12 +188,70 @@ def get_current_pipeline(request: Request):
     return JSONResponse(content={"pipeline": None, "current_model": None})
 
 
+def _push_pipeline_weight(pm, pipeline_name, request):
+    """Push the pipeline's weight_file to YOLO (all replicas) and, once accepted, mirror it to
+    best.pt. Returns the weight status dict, or None when the pipeline names no weight."""
+    pobj = pm.pipelines.get(pipeline_name) if hasattr(pm, "pipelines") else None
+    wf = (getattr(pobj, "weight_file", "") or "").strip() if pobj else ""
+    if not wf:
+        return None
+    safe_name = pathlib.Path(wf).name
+    dest = WEIGHTS_DIR / safe_name
+    if not dest.exists():
+        logger.warning(f"Pipeline '{pipeline_name}' weight_file '{safe_name}' not found in {WEIGHTS_DIR}")
+        return {"weight_file": safe_name, "error": "weight file not found in /weights"}
+    successes, last_error = _call_set_model_all_replicas(f"/weights/{safe_name}", request=request)
+    # 4.0.438 — mirror to best.pt (the weight yolo loads on restart) only AFTER yolo
+    # accepted it. It was copied first, so a weight yolo can't load became the
+    # restart weight even though activation failed.
+    if successes > 0:
+        _mirror_best(dest, safe_name)
+    logger.info(f"Pipeline '{pipeline_name}' weight '{safe_name}' pushed to {successes} replica(s)")
+    # 4.0.456 — accepted by some calls but REFUSED by others (a worker out of memory, a load
+    # error): yolo workers may now run DIFFERENT weights. It was reported as plain success.
+    partial = bool(successes and last_error)
+    return {"weight_file": safe_name, "replicas_updated": successes,
+            "error": (str(last_error) if last_error else None), "partial": partial}
+
+
+def _validate_pipeline_body(pm, body):
+    """4.0.456 — a pipeline that cannot run inference was accepted: no name (it silently
+    overwrote "default"), no phases, or a phase whose model doesn't exist — every frame of
+    such a pipeline was stored as a CLEAN product. Returns an error text or None."""
+    if not isinstance(body, dict):
+        return "expected a JSON object"
+    if not str(body.get("name") or "").strip():
+        return "a pipeline needs a name"
+    phases = body.get("phases")
+    if not isinstance(phases, list) or not phases:
+        return "a pipeline needs at least one phase"
+    models = getattr(pm, "models", {}) or {}
+    for i, ph in enumerate(phases):
+        mid = (ph or {}).get("model_id") if isinstance(ph, dict) else None
+        if not mid or mid not in models:
+            return f"phase {i + 1}: unknown model {mid!r}"
+    return None
+
+
 @router.post("/api/pipelines/activate/{pipeline_name}")
 def activate_pipeline(pipeline_name: str, request: Request):
     """Set the active pipeline by name."""
     pm = request.app.state.pipeline_manager
     if pm is None:
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+
+    # 4.0.456 — a pipeline whose models were deleted since (delete_model only guards the
+    # ACTIVE pipeline) ran nothing and stored every frame as clean
+    _pobj = pm.pipelines.get(pipeline_name) if hasattr(pm, "pipelines") else None
+    if _pobj is not None:
+        _missing = [ph.model_id for ph in (getattr(_pobj, "phases", None) or [])
+                    if getattr(ph, "enabled", True) and ph.model_id not in (getattr(pm, "models", {}) or {})]
+        if _missing or not [ph for ph in (getattr(_pobj, "phases", None) or []) if getattr(ph, "enabled", True)]:
+            return JSONResponse(content={
+                "success": False,
+                "error": (f"Pipeline '{pipeline_name}' cannot run: "
+                          + (f"its model(s) {_missing} no longer exist" if _missing else "it has no enabled phase")
+                          + " — fix the pipeline first.")}, status_code=400)
 
     if pm.set_current_pipeline(pipeline_name):
         # Auto-save pipeline configuration to DATA_FILE
@@ -212,24 +270,7 @@ def activate_pipeline(pipeline_name: str, request: Request):
         # the pipeline stays active even if the weight push fails.
         weight_status = None
         try:
-            pobj = pm.pipelines.get(pipeline_name) if hasattr(pm, "pipelines") else None
-            wf = (getattr(pobj, "weight_file", "") or "").strip() if pobj else ""
-            if wf:
-                safe_name = pathlib.Path(wf).name
-                dest = WEIGHTS_DIR / safe_name
-                if dest.exists():
-                    successes, last_error = _call_set_model_all_replicas(f"/weights/{safe_name}", request=request)
-                    # 4.0.438 — mirror to best.pt (the weight yolo loads on restart) only AFTER yolo
-                    # accepted it. It was copied first, so a weight yolo can't load became the
-                    # restart weight even though activation failed.
-                    if successes > 0:
-                        _mirror_best(dest, safe_name)
-                    weight_status = {"weight_file": safe_name, "replicas_updated": successes,
-                                     "error": (str(last_error) if last_error else None)}
-                    logger.info(f"Pipeline '{pipeline_name}' weight '{safe_name}' pushed to {successes} replica(s)")
-                else:
-                    weight_status = {"weight_file": safe_name, "error": "weight file not found in /weights"}
-                    logger.warning(f"Pipeline '{pipeline_name}' weight_file '{safe_name}' not found in {WEIGHTS_DIR}")
+            weight_status = _push_pipeline_weight(pm, pipeline_name, request)
         except Exception as _we:
             logger.error(f"Error pushing pipeline weight on activate: {_we}")
             weight_status = {"error": str(_we)}
@@ -248,11 +289,16 @@ def activate_pipeline(pipeline_name: str, request: Request):
                 "weight": weight_status,
             }, status_code=502)
 
+        _warn = None
+        if weight_status and weight_status.get("partial"):
+            _warn = (f"some YOLO workers refused the weight ({weight_status.get('error')}) — they may still run "
+                     f"the previous one; activate again")
         return JSONResponse(content={
             "success": True,
             "message": f"Activated pipeline: {pipeline_name} (saved)",
             "current_model": pm.get_current_model().to_dict() if pm.get_current_model() else None,
-            "weight": weight_status
+            "weight": weight_status,
+            "warning": _warn,
         })
     return JSONResponse(content={"error": f"Pipeline not found: {pipeline_name}"}, status_code=404)
 
@@ -266,7 +312,13 @@ def create_or_update_pipeline(request: Request, _mve_body=Depends(_json_body_dep
 
     try:
         body = _req_body(_mve_body)
+        _err = _validate_pipeline_body(pm, body)
+        if _err:
+            return JSONResponse(content={"error": _err}, status_code=400)
         pipeline = Pipeline.from_dict(body)
+        _prev = pm.pipelines.get(pipeline.name) if hasattr(pm, "pipelines") else None
+        _prev_wf = (getattr(_prev, "weight_file", "") or "").strip() if _prev else ""
+        _is_active = getattr(getattr(pm, "current_pipeline", None), "name", None) == pipeline.name
 
         if pm.add_pipeline(pipeline):
             # Auto-save pipeline configuration to DATA_FILE
@@ -278,10 +330,31 @@ def create_or_update_pipeline(request: Request, _mve_body=Depends(_json_body_dep
             except Exception as save_err:
                 logger.error(f"Error saving pipeline to DATA_FILE: {save_err}")
 
+            # 4.0.456 — editing the ACTIVE pipeline's weight only changed MVE's record: the
+            # weight is pushed on ACTIVATE only, so YOLO kept the old one (also after a
+            # restart — best.pt was never mirrored) while the UI showed the new one.
+            weight_status = None
+            _new_wf = (getattr(pipeline, "weight_file", "") or "").strip()
+            if _is_active and _new_wf and _new_wf != _prev_wf:
+                try:
+                    weight_status = _push_pipeline_weight(pm, pipeline.name, request)
+                except Exception as _we:
+                    weight_status = {"weight_file": _new_wf, "error": str(_we)}
+                if weight_status and weight_status.get("error") and not weight_status.get("replicas_updated"):
+                    return JSONResponse(content={
+                        "success": False,
+                        "error": (f"Pipeline '{pipeline.name}' saved, but YOLO could NOT load its new weight "
+                                  f"'{weight_status.get('weight_file', '?')}': {weight_status['error']}. "
+                                  f"YOLO is still running the previous weight."),
+                        "pipeline": pipeline.to_dict(), "weight": weight_status,
+                    }, status_code=502)
+
             return JSONResponse(content={
                 "success": True,
-                "message": f"Pipeline '{pipeline.name}' created/updated and saved",
-                "pipeline": pipeline.to_dict()
+                "message": f"Pipeline '{pipeline.name}' created/updated and saved"
+                           + (" — its new weight is loaded on YOLO" if weight_status else ""),
+                "pipeline": pipeline.to_dict(),
+                "weight": weight_status,
             })
         return JSONResponse(content={"error": "Failed to add pipeline"}, status_code=500)
     except Exception as e:

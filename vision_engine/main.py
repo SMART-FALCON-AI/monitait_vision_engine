@@ -1095,6 +1095,9 @@ app.state.redis_conn = watcher.redis_connection
 app.state.state_manager = state_manager
 app.state.pipeline_manager = pipeline_manager
 app.state.apply_config_settings = apply_config_settings
+# 4.0.456 — a config backup upload loads its states + pipelines too (see routers/cameras.py)
+app.state.apply_states_from_config = apply_states_from_config
+app.state.apply_pipeline_config = apply_pipeline_config_at_startup
 app.state.apply_saved_config_at_startup = apply_saved_config_at_startup
 # System capacity — detected once at startup
 _cpu_logical = psutil.cpu_count(logical=True) or 1
@@ -1181,6 +1184,12 @@ apply_states_from_config(state_manager)
 
 # Load saved pipeline configuration
 apply_pipeline_config_at_startup(pipeline_manager)
+
+# 4.0.456 — only now (saved state + pipeline in place) may the line be captured
+try:
+    watcher.arm_capture("saved state and pipeline applied")
+except Exception as _ae:
+    logger.warning(f"arm_capture failed: {_ae}")
 
 # Concurrent inference threads — each thread independently pops a frame from
 # the hot queue (RAM) or cold queue (disk), calls YOLO, and handles results.

@@ -928,6 +928,13 @@ class ArduinoSocket:
         # Turn off ejector at startup
         self.motor_stop()
 
+        # 4.0.456 — capture waits until main has applied the SAVED state (arm_capture()). It
+        # started here, with the built-in default state (every camera, U_ON_B_OFF, a capture
+        # on every encoder step), up to ~180 s before the saved state was loaded on a cold
+        # boot: those frames were captured with the wrong light / cameras and stored.
+        # Safety: armed anyway after MVE_CAPTURE_ARM_TIMEOUT_S (240).
+        self._capture_armed = False
+        self._capture_arm_deadline = time.time() + float(os.environ.get("MVE_CAPTURE_ARM_TIMEOUT_S", "240") or 240)
         threading.Thread(target=self.capture_frames).start()
         time.sleep(0.5)
         threading.Thread(target=self.run).start()
@@ -2140,11 +2147,22 @@ class ArduinoSocket:
                 # restarting BLPOP failed instantly and this spun + flooded the log.
                 time.sleep(0.5)
 
+    def arm_capture(self, why=""):
+        """4.0.456 — start capturing (main.py calls this once the saved state is applied)."""
+        if not getattr(self, "_capture_armed", True):
+            self._capture_armed = True
+            logger.info(f"Capture armed{(' — ' + why) if why else ''}")
+
     def capture_frames(self):
         """Capture frames when a signal is detected."""
 
         while True:
             try:
+                if not getattr(self, "_capture_armed", True):
+                    if time.time() < getattr(self, "_capture_arm_deadline", 0):
+                        time.sleep(0.05)
+                        continue
+                    self.arm_capture("boot did not arm it in time (safety timeout)")
                 if self.signal_captured():
                     self.clear_signal()
                     capture_timestamp = time.time()

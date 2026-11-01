@@ -1800,6 +1800,30 @@ async function sendCommand(command, value = null) {
 // Direct camera control through counter service API
 let cameraData = {};
 let isCameraUpdating = false;
+// 4.0.456 — cameras whose card has edits not yet applied. Every card refresh (the 1.2 s
+// re-read after an Apply on ANOTHER camera, Restart, Refresh) rebuilt all cards from the
+// server values: those edits — and Auto ticks — were silently lost.
+const _camDirty = {};
+['input', 'change'].forEach(ev => document.addEventListener(ev, (e) => {
+    const m = /^cam-cfg-.+-(\d+)$/.exec((e.target && e.target.id) || '');
+    if (m) _camDirty[m[1]] = true;
+}, true));
+function _snapDirtyCamInputs() {
+    const keep = [];
+    Object.keys(_camDirty).forEach(id => {
+        document.querySelectorAll(`[id^="cam-cfg-"][id$="-${id}"]`).forEach(el => {
+            keep.push([el.id, el.type === 'checkbox' ? el.checked : el.value, el.type === 'checkbox']);
+        });
+    });
+    return keep;
+}
+function _restoreDirtyCamInputs(keep) {
+    keep.forEach(([id, v, isCb]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (isCb) el.checked = v; else el.value = v;
+    });
+}
 
 async function fetchCameraStatus() {
     if (isCameraUpdating) return;
@@ -1824,7 +1848,9 @@ async function fetchCameraStatus() {
         cameraData = {};
         cameras.forEach(c => cameraData[c.id] = c);
 
+        const _keep = _snapDirtyCamInputs();      // 4.0.456 — unsaved edits survive the redraw
         renderCameraCards();
+        _restoreDirtyCamInputs(_keep);
 
         statusEl.textContent = 'Active';
         statusEl.className = 'camera-refresh-status';
@@ -2207,6 +2233,8 @@ function _intOr(v, d) { const n = parseInt(v, 10); return Number.isFinite(n) ? n
 async function applyCameraConfig(cameraId) {
     pauseCameraRefresh();
     showCameraMessage(cameraId, 'Applying configuration...', 'info');
+    delete _camDirty[String(cameraId)];     // 4.0.456 — this card's edits are being sent now
+    let _ok = false;
 
     try {
         // Build config object with only available fields
@@ -2259,6 +2287,7 @@ async function applyCameraConfig(cameraId) {
         const result = await response.json();
 
         if (response.ok && result.success) {
+            _ok = true;
             showCameraMessage(cameraId, 'Configuration applied!', 'success');
         } else {
             showCameraMessage(cameraId, result.error || 'Failed to apply config', 'error');
@@ -2271,6 +2300,7 @@ async function applyCameraConfig(cameraId) {
     // own pause (lifted at 2 s) was still on, so it returned early and the card kept
     // showing the pre-Apply values.
     setTimeout(() => { isCameraUpdating = false; resumeCameraRefresh(); fetchCameraStatus(); }, 1200);
+    return _ok;
 }
 
 async function saveCameraConfig(cameraId) {
@@ -2279,7 +2309,8 @@ async function saveCameraConfig(cameraId) {
         showCameraMessage(cameraId, 'Saving camera configuration...', 'info');
 
         // First apply the current settings
-        await applyCameraConfig(cameraId);
+        // 4.0.456 — stop if that failed: the save then reported "Camera settings saved!"
+        if (!(await applyCameraConfig(cameraId))) return;
 
         // Then save all config to file
         const response = await fetch('/api/cameras/config/save', { method: 'POST' });
@@ -3242,8 +3273,8 @@ async function activatePipeline(pipelineName) {
         const result = await response.json();
 
         if (response.ok) {
-            responseEl.textContent = `Pipeline '${pipelineName}' activated!`;
-            responseEl.className = 'control-response success';
+            responseEl.textContent = `Pipeline '${pipelineName}' activated!` + (result.warning ? ` — ${result.warning}` : '');
+            responseEl.className = result.warning ? 'control-response error' : 'control-response success';   // 4.0.456
             refreshPipelineConfig();
         } else {
             responseEl.textContent = result.error || 'Failed to activate pipeline';
@@ -3314,7 +3345,7 @@ async function createOrUpdatePipeline() {
 
         const result = await response.json();
         if (response.ok) {
-            responseEl.textContent = `Pipeline '${pipelineName}' saved!`;
+            responseEl.textContent = result.message || `Pipeline '${pipelineName}' saved!`;   // 4.0.456 — incl. "new weight loaded"
             responseEl.className = 'control-response success';
             refreshPipelineConfig();
         } else {

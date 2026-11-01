@@ -23,6 +23,10 @@ class CaptureState(Enum):
     ERROR = "error"           # Error state
 
 
+LIGHT_MODES = ("U_ON_B_OFF", "U_OFF_B_ON", "U_ON_B_ON", "U_OFF_B_OFF")
+MAX_PHASE_DELAY_S = 10.0
+
+
 @dataclass
 class CapturePhase:
     """Represents a single capture phase (light mode + delay + cameras + trigger thresholds).
@@ -51,14 +55,53 @@ class CapturePhase:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'CapturePhase':
+    def from_dict(cls, data: Dict[str, Any], strict: bool = True) -> 'CapturePhase':
+        # 4.0.456 — validated / clamped: the single capture thread sleeps `delay` per phase
+        # per trigger, so a typo such as 130 (meant as ms) froze capture for 130 s per product
+        # and 1e400 (inf) raised on every trigger; cameras=null raised TypeError on every
+        # trigger; an unknown light mode was sent to the board as command 1.
+        # strict (the API): a bad value is a 400. Not strict (saved states at boot): fall
+        # back + warn, so one odd old phase can't stop every state from loading.
+        def _bad(msg, fallback):
+            if strict:
+                raise ValueError(msg)
+            logger.warning(f"saved state phase: {msg} — using {fallback!r}")
+            return fallback
+        try:
+            delay = float(data.get('delay', 0.13))
+        except (TypeError, ValueError):
+            delay = _bad(f"phase delay must be a number of seconds (got {data.get('delay')!r})", 0.13)
+        delay = _clamp_delay(delay)
+        cams = data.get('cameras', [1, 2, 3])
+        if cams is None:
+            cams = []
+        if not isinstance(cams, list):
+            cams = _bad("phase cameras must be a list of camera numbers", [])
+        cam_ids = []
+        for c in cams:
+            try:
+                cam_ids.append(int(c))
+            except (TypeError, ValueError):
+                _bad(f"phase camera {c!r} is not a camera number", None)
+        mode = str(data.get('light_mode') or 'U_ON_B_OFF')
+        if mode not in LIGHT_MODES:
+            mode = _bad(f"unknown light mode {mode!r} (one of {', '.join(LIGHT_MODES)})", 'U_ON_B_OFF')
         return cls(
-            light_mode=data.get('light_mode', 'U_ON_B_OFF'),
-            delay=float(data.get('delay', 0.13)),
-            cameras=data.get('cameras', [1, 2, 3]),
+            light_mode=mode,
+            delay=delay,
+            cameras=cam_ids,
             steps=int(data.get('steps', 1)),  # Default: 1 step change
             analog=int(data.get('analog', -1))
         )
+
+
+def _clamp_delay(delay):
+    if delay != delay or delay in (float('inf'), float('-inf')):
+        return 0.13
+    if delay < 0 or delay > MAX_PHASE_DELAY_S:
+        logger.warning(f"phase delay {delay} s clamped to 0..{MAX_PHASE_DELAY_S} s")
+        return min(max(delay, 0.0), MAX_PHASE_DELAY_S)
+    return delay
 
 
 def _get_default_cameras() -> List[int]:
@@ -141,16 +184,17 @@ class State:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'State':
-        """Create a State instance from a dictionary."""
+    def from_dict(cls, data: Dict[str, Any], strict: bool = False) -> 'State':
+        """Create a State instance from a dictionary. strict=True (the states API): a bad
+        phase value is an error; otherwise it falls back with a warning (saved states)."""
         phases_data = data.get('phases', [])
         if phases_data:
-            phases = [CapturePhase.from_dict(p) for p in phases_data]
+            phases = [CapturePhase.from_dict(p, strict=strict) for p in phases_data]
         else:
             # Legacy format support - convert old single-phase format
             phases = [CapturePhase(
                 light_mode=data.get('light_mode', 'U_ON_B_OFF'),
-                delay=float(data.get('delay', 0.13)),
+                delay=_clamp_delay(float(data.get('delay', 0.13))),
                 cameras=data.get('active_cameras', [1, 2, 3, 4])
             )]
 
@@ -391,6 +435,30 @@ class StateManager:
                 )
             except Exception as ce:
                 logger.warning(f"V4L2 prop set on cam {cid} failed: {ce}")
+
+        # 4.0.456 — cameras the NEW state doesn't use but the previous one overrode: their
+        # override stayed on the hardware AND in _state_override_props, so every reconnect
+        # re-applied the old state's exposure over the operator's Cameras-tab value
+        # ("settings don't stick"). Back to the camera's own configured values.
+        try:
+            _all = list(self.watcher.cameras.items()) if isinstance(self.watcher.cameras, dict) else []
+        except Exception:
+            _all = []
+        for cid, cam in _all:
+            if cid in cam_ids or cam is None or not getattr(cam, "_state_override_props", None):
+                continue
+            cam._state_override_props = {}
+            cam_cfg = cam_cfg_root.get(str(cid), {}) if isinstance(cam_cfg_root, dict) else {}
+            if cam_cfg.get("auto") or getattr(cam, "auto", False) or not getattr(cam, "camera", None):
+                continue
+            try:
+                if cam_cfg.get("exposure") is not None and not cam_cfg.get("auto_exposure", False):
+                    cam.camera.set(cv2.CAP_PROP_EXPOSURE, float(cam_cfg.get("exposure")))
+                if cam_cfg.get("gain") is not None:
+                    cam.camera.set(cv2.CAP_PROP_GAIN, float(cam_cfg.get("gain")))
+                logger.info(f"State '{state.name}': cam {cid} is not in this state — its own exposure/gain restored")
+            except Exception as ce:
+                logger.warning(f"V4L2 restore on cam {cid} failed: {ce}")
 
     def _handle_light_mode_change(self, new_mode: str) -> None:
         """Handle light mode changes via watcher commands."""

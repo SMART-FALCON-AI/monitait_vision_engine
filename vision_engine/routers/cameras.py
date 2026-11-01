@@ -552,6 +552,26 @@ def upload_config(request: Request, _mve_body=Depends(_json_body_dep)):
             svc, watcher, full_data=full_data
         )
 
+        # 4.0.456 — states + pipelines of the backup are LOADED, not only written: the live
+        # managers kept the old ones and the next state / pipeline / camera save rebuilt
+        # those keys from memory, overwriting the restored ones ("uploaded and applied").
+        restored = {}
+        _st = getattr(request.app.state, "apply_states_from_config", None)
+        _sm = getattr(request.app.state, "state_manager", None)
+        if isinstance(svc, dict) and svc.get("states") and _st and _sm is not None:
+            restored["states"] = bool(_st(_sm))
+        _pl = getattr(request.app.state, "apply_pipeline_config", None)
+        _pm = getattr(request.app.state, "pipeline_manager", None)
+        if isinstance(svc, dict) and svc.get("pipeline_config") and _pl and _pm is not None:
+            restored["pipelines"] = bool(_pl(_pm))
+            try:
+                from routers.inference import _push_pipeline_weight
+                _cur = getattr(getattr(_pm, "current_pipeline", None), "name", None)
+                if _cur:
+                    restored["weight"] = _push_pipeline_weight(_pm, _cur, request)
+            except Exception as _we:
+                restored["weight"] = {"error": str(_we)}
+
         # Invalidate the per-class caches in services.detection so the freshly
         # imported store_objects / audio_settings take effect immediately instead
         # of serving stale values for up to the 5s TTL.
@@ -566,7 +586,8 @@ def upload_config(request: Request, _mve_body=Depends(_json_body_dep)):
             "success": True,
             "message": "Configuration uploaded and applied",
             "cameras_loaded": cameras_loaded,
-            "applied": list(settings_applied.keys()) if isinstance(settings_applied, dict) else None
+            "applied": list(settings_applied.keys()) if isinstance(settings_applied, dict) else None,
+            "restored": restored,
         })
     except Exception as e:
         logger.error(f"Error uploading config: {e}")

@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 # 4.0.444 — model name returned with detections=None when every phase of a frame failed
 INFERENCE_FAILED = "failed"
+GRADIO_TIMEOUT_S = float(os.environ.get("MVE_GRADIO_TIMEOUT_S", "30") or 30)
 
 
 @dataclass
@@ -500,6 +501,7 @@ class PipelineManager:
         all_detections = []
         models_used = []
         ran = failed = 0   # 4.0.444 — phases attempted / failed for THIS frame
+        missing = 0        # 4.0.456 — phases whose model no longer exists
 
         # Frame counter drives per-phase stride (run phase every Nth frame of this camera).
         fc = self._stride_counts([stream_key])[0]
@@ -516,7 +518,8 @@ class PipelineManager:
 
             model = self.models.get(phase.model_id)
             if not model:
-                logger.warning(f"Model not found for phase: {phase.model_id}")
+                missing += 1
+                self._missing_model(phase.model_id)
                 continue
 
             ran += 1
@@ -533,7 +536,9 @@ class PipelineManager:
 
         # 4.0.444 — every phase that ran FAILED → the frame was not inspected: report it
         # (None) so the caller retries / spills it, instead of storing it as clean.
-        if ran and failed == ran:
+        if (ran and failed == ran) or (not ran and missing):
+            # 4.0.456 — also when NOTHING could run because the models are gone: the frame
+            # was returned as ([], "none") and stored as a clean product
             return None, INFERENCE_FAILED
         model_names = ", ".join(models_used) if models_used else "none"
         return all_detections, model_names
@@ -546,7 +551,18 @@ class PipelineManager:
             return self._run_yolo_inference(image_bytes, model)
         else:
             logger.error(f"Unknown model type: {model.model_type}")
-            return []
+            return None      # 4.0.456 — not run = not inspected (was [] = a clean frame)
+
+    def _missing_model(self, model_id):
+        """4.0.456 — a phase whose model no longer exists: counted, logged once a minute
+        (it logged a WARNING per frame per phase)."""
+        now = time.time()
+        last = self._missing_logged.get(model_id, 0.0) if hasattr(self, "_missing_logged") else 0.0
+        if now - last > 60:
+            if not hasattr(self, "_missing_logged"):
+                self._missing_logged = {}
+            self._missing_logged[model_id] = now
+            logger.warning(f"Model not found for phase: {model_id} — frames are reported as NOT inspected")
 
     def _run_gradio_inference(self, image_bytes: bytes, model: InferenceModel) -> List[Dict]:
         """Run inference through Gradio API."""
@@ -567,13 +583,19 @@ class PipelineManager:
                 tmp_path = tmp_file.name
 
             try:
-                # Call Gradio API
-                result = client.predict(
-                    handle_file(tmp_path),
-                    model.model_name,
-                    model.confidence_threshold,
-                    api_name="/detect"
-                )
+                # Call Gradio API — 4.0.456 with a time limit (a stuck Space queue held an
+                # inference worker forever); a timeout is an inference failure, not "clean"
+                if hasattr(client, "submit"):
+                    _job = client.submit(handle_file(tmp_path), model.model_name,
+                                         model.confidence_threshold, api_name="/detect")
+                    result = _job.result(timeout=GRADIO_TIMEOUT_S)
+                else:
+                    result = client.predict(
+                        handle_file(tmp_path),
+                        model.model_name,
+                        model.confidence_threshold,
+                        api_name="/detect"
+                    )
 
                 # Convert Gradio response to standard format
                 detections = []
@@ -601,7 +623,10 @@ class PipelineManager:
 
         except Exception as e:
             logger.error(f"Gradio inference error: {e}")
-            return []
+            # 4.0.456 — None = inference FAILED (retried / replayed, 4.0.444). It returned [],
+            # so a Gradio outage stored every product as clean (the built-in "default"
+            # pipeline is Gradio-only).
+            return None
 
     def _run_yolo_inference(self, image_bytes: bytes, model: InferenceModel) -> List[Dict]:
         """Run inference through YOLO API."""
@@ -695,6 +720,7 @@ class PipelineManager:
         models_used_per_image: List[List[str]] = [[] for _ in range(N)]
         ran_per_image = [0] * N      # 4.0.444 — phases attempted / failed per image
         failed_per_image = [0] * N
+        missing_per_image = [0] * N  # 4.0.456 — phases whose model no longer exists
 
         # Each image advances its own camera stream's counter by one, exactly like the
         # single-image path.
@@ -714,7 +740,9 @@ class PipelineManager:
 
             model = self.models.get(phase.model_id)
             if not model:
-                logger.warning(f"Model not found for phase: {phase.model_id}")
+                for i in active_indices:
+                    missing_per_image[i] += 1
+                self._missing_model(phase.model_id)
                 continue
 
             do_batch = False
@@ -763,7 +791,8 @@ class PipelineManager:
                             models_used_per_image[i].append(model.name)
 
         return [
-            ((None, INFERENCE_FAILED) if ran_per_image[i] and failed_per_image[i] == ran_per_image[i]
+            ((None, INFERENCE_FAILED) if ((ran_per_image[i] and failed_per_image[i] == ran_per_image[i])
+                                          or (not ran_per_image[i] and missing_per_image[i]))
              else (all_dets_per_image[i], ", ".join(models_used_per_image[i]) or "none"))
             for i in range(N)
         ]

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.456] - 2026-11-01 - Audit batch 36: pipelines, states, backups, camera cards
+
+**Fixed**
+- **Changing the active pipeline's weight never reached YOLO.** The weight was only sent to YOLO on "Activate", so editing the active pipeline (or uploading a weight to it) and pressing Save left YOLO on the old weight, also after a restart, while MVE showed the new one. Saving the active pipeline with a new weight now loads it on YOLO, and says so (or says it failed).
+- **A pipeline that could not run stored every frame as a clean product.** A pipeline whose model had been deleted, one with no phases, or one saved without a name (that silently overwrote "default") ran no inference at all. Such pipelines are now refused when saved or activated. A frame whose models are gone is reported as not inspected (retried and replayed), not as clean.
+- **Gradio models: an outage counted every product as good.** The built-in "default" pipeline is Gradio-only. Failures are now reported as failed. A call also gives up after 30 s (`MVE_GRADIO_TIMEOUT_S`) instead of possibly hanging an inference worker for good.
+- **Restoring a configuration backup didn't load its states or pipelines.** It wrote them, but the running system kept the old ones, and the next save overwrote the restored ones. They are now loaded, and the restored pipeline's weight is sent to YOLO.
+- **For up to 3 minutes after a cold boot the line was captured with the built-in default state** (every camera, U light, a capture on every encoder step) until the saved state was loaded. Capture now starts only once the saved state and pipeline are in place (safety limit 240 s).
+- **Capture states:**
+  - A phase delay is limited to 0–10 s. A typo like 130 (meant as ms) made capture sleep 130 s per product; "inf" stopped capture.
+  - `cameras: null` no longer breaks every trigger.
+  - An unknown light mode or an empty phase list is refused by the API (saved states still load, with a warning).
+  - A state save that fails is reported (it said success and the state was gone after a restart).
+- **A previous state's exposure/gain stayed on cameras the new state doesn't use**, and was re-applied on every reconnect ("settings don't stick"). Those cameras get their own settings back.
+- **Partly failed weight activation:** when some YOLO workers refused the weight, Activate said OK. It now warns to activate again.
+- **Camera cards:**
+  - Applying one camera redrew all cards from the server, throwing away unsaved edits on the others. They are now kept.
+  - "Save" after a failed Apply said "Camera settings saved!"; it now stops at the failure.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.455] - 2026-11-01 - Audit batch 35: dashboard fixes (procedures wipe, model edit, AI chat, escaping)
 
 **Fixed**
