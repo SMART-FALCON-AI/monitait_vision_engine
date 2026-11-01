@@ -1,25 +1,17 @@
-from fastapi import APIRouter, Request, HTTPException, File, UploadFile
+from fastapi import APIRouter, Request, HTTPException
 from fastapi import Depends as Depends
 from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
-from config import (load_data_file, save_data_file, load_service_config, save_service_config,
-                    REDIS_HOST, REDIS_PORT, DATA_FILE)
+from config import load_service_config, save_service_config, DATA_FILE
 from routers.config_routes import build_current_service_config
-from services.camera import (CameraBuffer, safe_source, scan_network_for_camera_devices,
-                             get_camera_config_for_save, apply_camera_config_from_saved,
-                             IP_CAMERA_USER, IP_CAMERA_PASS,
-                             detect_pro_cameras, open_ip_capture)
-from services.state_machine import State
-from services.render import draw_detection_on
-import asyncio
+from services.camera import (CameraBuffer, safe_source, mask_url_password, scan_network_for_camera_devices,
+                             get_camera_config_for_save, detect_pro_cameras, open_ip_capture)
 import base64
 import cv2
-import numpy as np
 import os
 import time
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,6 +32,17 @@ class CameraDiscoveryRequest(BaseModel):
 # CAMERA STATUS & CONTROL ENDPOINTS
 # =============================================================================
 
+def _live_cam_path(watcher, cam_id, cam):
+    """4.0.452 — the camera's CURRENT source. The boot-time camera_paths entry is never
+    updated when a USB camera re-enumerates (by-path re-resolve / drift switch), so a
+    streaming camera read 'disconnected' once its old /dev/videoN was gone."""
+    boot = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else None
+    src = getattr(cam, "source", None) if cam is not None else None
+    if isinstance(src, str) and src.startswith("/dev/video"):
+        return src
+    return boot
+
+
 @router.get("/api/cameras")
 def get_cameras_status(request: Request):
     """Get status of all cameras (dynamically detected)."""
@@ -51,7 +54,7 @@ def get_cameras_status(request: Request):
     # Use dynamic cameras dict
     for cam_id, cam in list(watcher.cameras.items()):   # 4.0.442 — a copy (hot-add / reconciler mutate it)
         # Get camera path from stored paths
-        cam_path = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else "unknown"
+        cam_path = _live_cam_path(watcher, cam_id, cam) or "unknown"
 
         # Get camera metadata if available
         metadata = {}
@@ -82,7 +85,9 @@ def get_cameras_status(request: Request):
 
         cam_info = {
             "id": cam_id,
-            "path": cam_path,
+            # 4.0.452 — masked: for IP cameras this is the full rtsp://user:PASSWORD@… source,
+            # and GET requests are never role-gated (the card shows it when camera_path is empty)
+            "path": mask_url_password(cam_path),
             "by_path": by_path,   # v4.0.139 — None when not a USB or no symlink present
             "name": metadata.get("name", f"Camera {cam_id}"),
             "type": cam_type,
@@ -309,6 +314,8 @@ def update_camera_config(camera_id: int, request: Request, _mve_body=Depends(_js
         body = _req_body(_mve_body)
 
         # Apply configuration via update_prop (persists across reconnects)
+        # 4.0.452 — width / height are not accepted: the resolution is fixed (1280×720) and
+        # setting it on a streaming V4L2 camera from this thread could crash MVE (exit 139)
         prop_map = {
             'fps': cv2.CAP_PROP_FPS,
             'exposure': cv2.CAP_PROP_EXPOSURE,
@@ -316,11 +323,10 @@ def update_camera_config(camera_id: int, request: Request, _mve_body=Depends(_js
             'brightness': cv2.CAP_PROP_BRIGHTNESS,
             'contrast': cv2.CAP_PROP_CONTRAST,
             'saturation': cv2.CAP_PROP_SATURATION,
-            'width': cv2.CAP_PROP_FRAME_WIDTH,
-            'height': cv2.CAP_PROP_FRAME_HEIGHT,
         }
 
         updated = []
+        ignored = [k for k in ('width', 'height') if k in body]
         # 4.0.416 — "Auto" (USB) first, so the property writes below already respect
         # it (in Auto they are remembered, not written). Applies live, no restart.
         if 'auto' in body and hasattr(cam, 'set_auto'):
@@ -330,9 +336,9 @@ def update_camera_config(camera_id: int, request: Request, _mve_body=Depends(_js
             if key in prop_map:
                 if hasattr(cam, 'update_prop'):
                     cam.update_prop(prop_map[key], value)
+                    updated.append(key)
                 else:
-                    cam.camera.set(prop_map[key], value)
-                updated.append(key)
+                    ignored.append(key)    # no settable capture (never cam.camera.set from here)
 
         # Handle ROI settings (stored on CameraBuffer object, not OpenCV)
         roi_props = ['roi_enabled', 'roi_xmin', 'roi_ymin', 'roi_xmax', 'roi_ymax']
@@ -376,7 +382,10 @@ def update_camera_config(camera_id: int, request: Request, _mve_body=Depends(_js
             except Exception as save_err:
                 logger.warning(f"Camera config auto-save failed: {save_err}")
 
-        return JSONResponse(content={"success": True, "updated": updated})
+        out = {"success": True, "updated": updated}
+        if ignored:
+            out["ignored"] = ignored
+        return JSONResponse(content=out)
     except Exception as e:
         logger.error(f"Error updating camera {camera_id} config: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -446,7 +455,9 @@ def save_all_config(request: Request):
 import re as _re
 # 4.0.424 — secret-named fields + the password inside stream URLs (rtsp://user:PASS@…)
 _SECRET_KEY = _re.compile(r"(api_?key|password|passwd|secret|access_token|refresh_token|bot_token|^token)$", _re.I)
-_URL_PASSWORD = _re.compile(r"(://[^:/@\s]+:)[^@/\s]+@")
+# 4.0.452 — greedy to the LAST '@' of the address: a password containing '@' (e.g. the
+# standard 'abc!@#xyz') was masked only up to its own '@' and the rest leaked
+_URL_PASSWORD = _re.compile(r"(://[^:/@\s]+:)\S*@")
 
 
 def _mask_secrets(obj):
@@ -745,6 +756,15 @@ def save_pro_camera(request: Request, _mve_body=Depends(_json_body_dep)):
             "fps":         int(body.get("fps", 30)),
             "enabled":     True,
         }
+        if existing_id:
+            # 4.0.452 — keep the existing entry's settings (ROI, px/mm, auto …); only the
+            # identity + the values this request actually sent change
+            _prev = dict(config["cameras"].get(existing_id) or {})
+            _upd = {k: camera_entry[k] for k in ("name", "source", "type", "model", "serial")}
+            for k in ("exposure", "gain", "fps"):
+                if k in body:
+                    _upd[k] = camera_entry[k]
+            camera_entry = {**_prev, **_upd}
 
         config["cameras"][camera_id] = camera_entry
         logger.info(
@@ -910,6 +930,7 @@ def save_camera(request: Request, _mve_body=Depends(_json_body_dep)):
             camera_id = str(max(existing_ids) + 1) if existing_ids else "1"
 
         # Prepare camera entry
+        _prev = dict(config["cameras"].get(existing_id) or {}) if existing_id else {}
         camera_entry = {
             "name": camera_name,
             "source": camera_url,
@@ -929,6 +950,10 @@ def save_camera(request: Request, _mve_body=Depends(_json_body_dep)):
             "fps": 25,
             "enabled": True
         }
+        if _prev:
+            # 4.0.452 — re-saving an existing camera (rename / re-test) keeps its ROI,
+            # exposure, px/mm, … — only the identity fields change (it reset them to defaults)
+            camera_entry = {**_prev, **{k: camera_entry[k] for k in ("name", "source", "type", "ip", "path")}}
 
         # Save camera
         config["cameras"][camera_id] = camera_entry
@@ -944,7 +969,7 @@ def save_camera(request: Request, _mve_body=Depends(_json_body_dep)):
             cam_id_int = int(camera_id)
             if watcher is not None and cam_id_int not in watcher.cameras:
                 try:
-                    cam = CameraBuffer(camera_url, exposure=0, gain=0)
+                    cam = CameraBuffer(camera_url, exposure=0, gain=0, fps=camera_entry.get("fps", 25))
                     watcher.cameras[cam_id_int] = cam
                     watcher.camera_metadata[cam_id_int] = {
                         "name": camera_name,

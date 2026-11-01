@@ -13,8 +13,6 @@ logger = logging.getLogger(__name__)
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 # Camera configuration (from environment)
-IP_CAMERA_USER = os.environ.get("IP_CAMERA_USER", "admin")
-IP_CAMERA_PASS = os.environ.get("IP_CAMERA_PASS", "")
 IP_CAMERA_SUBNET = os.environ.get("IP_CAMERA_SUBNET", "")
 IP_CAMERA_BRIGHTNESS = int(os.environ.get("IP_CAMERA_BRIGHTNESS", 128))
 IP_CAMERA_CONTRAST = int(os.environ.get("IP_CAMERA_CONTRAST", 128))
@@ -33,6 +31,11 @@ CAM_4_PATH = os.environ.get("CAM_4_PATH", "")
 IP_OPEN_TIMEOUT_MS = 10000
 IP_READ_TIMEOUT_MS = 10000
 IP_STALL_SECONDS = 20
+# 4.0.452 — the same freeze watchdog for USB: an open camera that stops delivering
+# frames (each V4L2 grab() then blocks ~10 s) took 100 failed reads ≈ 17 min to
+# reconnect and ≈ 50 min to reach the USB rescue; grey (truncated) frames never
+# counted at all, so the last good image was re-captured for every product.
+USB_STALL_SECONDS = max(5, int(os.environ.get("MVE_USB_STALL_SECONDS", "30") or 30))
 
 
 def open_ip_capture(url, open_timeout_ms=IP_OPEN_TIMEOUT_MS, read_timeout_ms=IP_READ_TIMEOUT_MS):
@@ -180,6 +183,19 @@ _CONFIG_BYPATH_FOR_SOURCE: Dict[str, str] = {}
 # cameras quietly lost their settings (hashtgerd 2026-09-01: keys 3,4,6,7,8,9 → cams
 # 1,2,5 reset to gain 100). Keyed: resolved node → persisted config ID (str).
 _PERSISTED_CFG_ID_FOR_SOURCE: Dict[str, str] = {}
+
+
+def mask_url_password(source) -> str:
+    """4.0.452 — `rtsp://user:pass@host/path` → `rtsp://user:***@host/path` (for the UI).
+    Split at the LAST '@' of the address so a password containing '@' or '#' is hidden whole."""
+    s = str(source or "")
+    if "://" not in s or "@" not in s:
+        return s
+    scheme, rest = s.split("://", 1)
+    creds, _, host = rest.rpartition("@")
+    if ":" not in creds:
+        return s
+    return f"{scheme}://{creds.split(':', 1)[0]}:***@{host}"
 
 
 def safe_source(source) -> str:
@@ -957,7 +973,11 @@ def get_camera_config_for_save(cam, cam_id, camera_metadata=None):
         if config.get("type") == "ip":
             try:
                 from urllib.parse import urlparse
-                parsed = urlparse(cam.source)
+                # 4.0.452 — parse WITHOUT the credentials: a password with '#' (or '?')
+                # made urlparse return hostname=None, path='' → every save wrote ip None
+                _src = str(cam.source)
+                _scheme, _, _rest = _src.partition("://")
+                parsed = urlparse(f"{_scheme}://{_rest.rpartition('@')[2]}")
                 config["ip"] = parsed.hostname
                 config["path"] = parsed.path + ("?" + parsed.query if parsed.query else "")
             except:
@@ -1039,6 +1059,20 @@ def apply_camera_config_from_saved(cam, saved_config):
             logger.error(f"Error applying camera config (auto): {e}")
         return
 
+    if getattr(cam, 'is_pro_camera', False) and hasattr(cam, 'update_prop'):
+        # 4.0.452 — Basler (pylon InstantCamera has no .set): through its own update_prop,
+        # which maps exposure / gain / fps onto the NodeMap and keeps _saved_props, so a
+        # config upload is applied and not written back with the old values by the next save
+        try:
+            for key, prop in prop_map.items():
+                if key in saved_config:
+                    cam.update_prop(prop, saved_config[key])
+            if 'auto_exposure' in saved_config:
+                cam.update_prop("basler.auto_exposure", bool(saved_config['auto_exposure']))
+        except Exception as e:
+            logger.error(f"Error applying pro camera config: {e}")
+        return
+
     if hasattr(cam, 'camera'):
         try:
             auto_exp = not getattr(cam, 'is_ip_camera', False) and getattr(cam, 'auto_exposure', False)
@@ -1065,28 +1099,6 @@ def apply_camera_config_from_saved(cam, saved_config):
             logger.error(f"Error applying camera config: {e}")
 
 
-def open_camera_source(source, **kwargs):
-    """Factory: return the right buffer class for this source URI.
-
-    Preserves the existing `CameraBuffer(...)` call convention that watcher.py
-    and routers/cameras.py already use. The change: if `source` starts with
-    `basler://` we hand off to services.basler_camera.BaslerBuffer, which
-    exposes the same public interface (frame/success/stop/_saved_props/roi_*
-    /read/release). Callers cannot tell which backend they got.
-
-    Rest of the codebase should migrate to calling this factory instead of
-    instantiating CameraBuffer directly, but CameraBuffer(source=...) is kept
-    fully backwards-compatible via the dispatch in __new__ below.
-    """
-    # 4.0.50 — "pro" camera dispatch. Anything that is not UVC (/dev/videoX)
-    # or IP (rtsp://, http(s)://) is routed to its vendor-specific backend.
-    from services import basler_camera as _basler
-    if _basler.is_basler_source(source):
-        return _basler.BaslerBuffer(source, **kwargs)
-    # Otherwise fall through to the classic UVC/IP CameraBuffer.
-    return CameraBuffer(source, **kwargs)
-
-
 class CameraBuffer:
     def __new__(cls, source, *args, **kwargs):
         """Route to BaslerBuffer when the URI says so.
@@ -1097,7 +1109,7 @@ class CameraBuffer:
         BaslerBuffer instance and __init__ below is skipped by Python
         because the returned instance's type is not a CameraBuffer subclass.
         """
-        # 4.0.50 — transparent Basler dispatch. See open_camera_source() docstring.
+        # 4.0.50 — transparent Basler dispatch.
         from services import basler_camera as _basler
         if _basler.is_basler_source(source):
             return _basler.BaslerBuffer(source, *args, **kwargs)
@@ -1333,6 +1345,17 @@ class CameraBuffer:
         """Update a camera property and save it for reconnect persistence.
         In Auto mode the camera owns exposure/gain/brightness/contrast/saturation:
         the value is remembered (for when Auto is switched off) but not written."""
+        if prop in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT):
+            # 4.0.452 — the resolution is fixed (1280×720, _apply_saved_props) and setting it
+            # stops + re-maps the V4L2 buffers while the buffer thread may be inside grab():
+            # a native crash (exit 139). Refused.
+            raise ValueError("resolution is fixed at 1280x720")
+        if prop == cv2.CAP_PROP_FPS and not self.is_ip_camera:
+            # 4.0.452 — uvcvideo refuses a frame-rate change while streaming (EBUSY): it was
+            # saved but never took effect. Apply it by a re-open on the camera's own thread.
+            self._saved_props[prop] = value
+            self._restart_requested = True
+            return
         if not (getattr(self, 'auto', False) and prop in (
                 cv2.CAP_PROP_EXPOSURE, cv2.CAP_PROP_GAIN, cv2.CAP_PROP_BRIGHTNESS,
                 cv2.CAP_PROP_CONTRAST, cv2.CAP_PROP_SATURATION)):
@@ -1461,17 +1484,18 @@ class CameraBuffer:
                         self.success = success
                         failure_count += 1
 
-                    # 4.0.415 — freeze watchdog: an IP stream that delivered no usable
-                    # frame for IP_STALL_SECONDS is frozen, however its reads fail
-                    # (each blocking up to IP_READ_TIMEOUT_MS, or grey) — reconnect now
-                    # instead of after max_failures reads.
+                    # 4.0.415 — freeze watchdog: a stream that delivered no usable frame for
+                    # its stall window is frozen, however its reads fail (each blocking up to
+                    # the read timeout, or grey) — reconnect now instead of after max_failures
+                    # reads. 4.0.452 — USB cameras too (USB_STALL_SECONDS).
                     _silent = time.monotonic() - _last_live
-                    if (self.is_ip_camera and failure_count < max_failures
-                            and _silent > IP_STALL_SECONDS):
+                    _stall = IP_STALL_SECONDS if self.is_ip_camera else USB_STALL_SECONDS
+                    if failure_count < max_failures and _silent > _stall:
                         self.success = False
                         self.frozen_reconnects += 1
-                        logger.warning(f"IP camera {safe_source(self.source)}: no frame for {_silent:.0f}s "
-                                       f"- stream frozen, reconnecting (freeze #{self.frozen_reconnects})")
+                        logger.warning(f"{'IP' if self.is_ip_camera else 'USB'} camera {safe_source(self.source)}: "
+                                       f"no usable frame for {_silent:.0f}s - frozen, reconnecting "
+                                       f"(freeze #{self.frozen_reconnects})")
                         failure_count = max_failures
 
                     # Auto-reconnect after consecutive failures
@@ -1530,8 +1554,12 @@ class CameraBuffer:
                                         _register_v4l_binding(self.source)
                                         stale_reconnect_cycles = 0
                                 # Secondary: memo/fuzzy self-heal after N blind cycles.
+                                # 4.0.452 — NOT for a camera with a config by-path: its USB port
+                                # IS its identity. Unplugged → it stays down; the hunt took over
+                                # ANOTHER camera's unclaimed node (its ROI / rules ran on the
+                                # wrong images) and the next save made the swap permanent.
                                 stale_reconnect_cycles += 1
-                                if stale_reconnect_cycles >= STALE_CYCLES_BEFORE_HEAL:
+                                if stale_reconnect_cycles >= STALE_CYCLES_BEFORE_HEAL and not self._config_bypath:
                                     replacement = _find_replacement_v4l_path(self.source)
                                     if replacement:
                                         logger.warning(
@@ -1636,10 +1664,3 @@ class CameraBuffer:
         self._buffer_thread.start()
         return True
 
-    def grab(self):
-        """Expose the underlying camera's grab method"""
-        return self.camera.grab()
-
-    def retrieve(self):
-        """Expose the retrieve functionality"""
-        return self.camera.retrieve(0)

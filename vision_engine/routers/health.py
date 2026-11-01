@@ -283,6 +283,10 @@ async def health_check(request: Request):
             # ("dictionary changed size during iteration" → a spurious 503)
             for cam_id, cam in list(watcher.cameras.items()):
                 cam_path = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else None
+                # 4.0.452 — the live node after a USB re-enumeration (the boot path is stale)
+                _src = getattr(cam, "source", None) if cam is not None else None
+                if isinstance(_src, str) and _src.startswith("/dev/video"):
+                    cam_path = _src
                 is_usb = True
                 if hasattr(watcher, 'camera_metadata') and cam_id in watcher.camera_metadata:
                     is_usb = watcher.camera_metadata[cam_id].get("type", "usb") == "usb"

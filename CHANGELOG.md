@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.452] - 2026-11-01 - Audit batch 32: cameras (wrong-camera self-heal, frozen USB, passwords)
+
+**Fixed**
+- **A camera's self-heal could switch it onto ANOTHER physical camera.** When a USB camera with a configured port path stayed down, its last-resort recovery took over any free video device. That could be another camera waiting for a restart, or one skipped at start-up, so its ROI and eject rules ran on the wrong images. The next save then made the swap permanent. A camera with a configured port path now only comes back on its own port.
+- **A USB camera that stays open but stops sending pictures was black for about 17 minutes** before the first reconnect (each failed read waits about 10 s and 100 were needed), and about 50 minutes before the USB rescue. Truncated grey frames never counted at all, so the last good image was captured for every product. The freeze watchdog that IP cameras have now covers USB cameras too: no usable frame for 30 s (`MVE_USB_STALL_SECONDS`) → reconnect.
+- **IP camera passwords:**
+  - The camera list (GET /api/cameras) returned the full `rtsp://user:PASSWORD@…` address; it is now masked.
+  - In the settings view, a password containing `@` (such as the standard site password) was only partly masked.
+  - A password containing `#` or `?` saved the camera's IP as empty.
+- **A working USB camera showed "disconnected" after its device number changed**, until MVE restarted. The status now uses the camera's current device.
+- **Camera settings API:**
+  - `width`/`height` are no longer accepted (the resolution is fixed at 1280×720). Setting them on a streaming camera from the web thread could crash MVE.
+  - A USB frame-rate change was saved but never took effect while the camera streamed. It is now applied by a quick re-open on the camera's own thread.
+- **Basler cameras: uploaded camera settings were never applied** (exposure, gain and fps raised an error), and the next save wrote the old values back.
+- **Re-saving an existing IP or Basler camera** (rename, re-test) reset its ROI, exposure, px/mm and other settings to defaults.
+
+**Removed**: unused `open_camera_source`, `CameraBuffer.grab/retrieve`, the `IP_CAMERA_USER/PASS` constants and unused imports.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.451] - 2026-11-01 - Audit batch 31: shipment length after a restart
 
 **Fixed**
