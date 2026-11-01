@@ -686,6 +686,9 @@ _SIDE_TABLE_RETENTION = [
     ("mve_audit_log", "ts", int(os.environ.get("MVE_AUDIT_LOG_DAYS", "365") or 0)),
     ("ai_usage_log", "time", int(os.environ.get("MVE_AI_USAGE_LOG_DAYS", "365") or 0)),
     ("notification_log", "time", int(os.environ.get("MVE_NOTIFICATION_LOG_DAYS", "180") or 0)),
+    # 4.0.441 — Watcher Jet / camera-station reports (one row per device report; the
+    # Hardware-tab ingestion is unauthenticated). Pruned before only by a billing plan.
+    ("watcher_metrics", "ts", int(os.environ.get("MVE_WATCHER_METRICS_DAYS", "365") or 0)),
 ]
 _PRUNE_BATCH = 50000
 _PRUNE_MAX_BATCHES = 20

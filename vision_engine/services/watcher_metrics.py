@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -139,7 +140,11 @@ def _num(v: Any) -> Optional[float]:
     try:
         if v is None or v == "":
             return None
-        return float(v)
+        f = float(v)
+        # 4.0.441 — "nan" / "inf" / 1e309 were stored; Starlette's JSON refuses non-finite
+        # numbers, so ONE such device report made /api/watchers, /oee and /lines answer 500
+        # for everyone.
+        return f if math.isfinite(f) else None
     except Exception:
         return None
 
@@ -166,9 +171,14 @@ def ingest(payload: Dict[str, Any]) -> Dict[str, Any]:
     reg = str(payload.get("register_id") or "").strip()
     if not reg:
         raise ValueError("register_id required")
+    if len(reg) > 120:   # 4.0.441 — unauthenticated ingestion: bound the id (one row per id)
+        raise ValueError("register_id longer than 120 characters")
 
     ts = _parse_ts(payload.get("timestamp"))
     extra = _as_dict(payload.get("extra_info"))
+    # 4.0.441 — non-finite numbers can't be stored in jsonb / served as JSON
+    extra = {k: v for k, v in extra.items()
+             if not (isinstance(v, float) and not math.isfinite(v))}
     lot = payload.get("lot_info")
     lot_txt = (json.dumps(lot) if isinstance(lot, (dict, list))
                else (str(lot) if lot not in (None, "") else None))
@@ -182,9 +192,12 @@ def ingest(payload: Dict[str, Any]) -> Dict[str, Any]:
          lot_txt),
         fetch="one")
 
-    _exec("INSERT INTO watcher_registry (register_id, last_seen) VALUES (%s,%s) "
-          "ON CONFLICT (register_id) DO UPDATE SET last_seen=EXCLUDED.last_seen",
-          (reg, ts))
+    # 4.0.441 — last_seen = when MVE RECEIVED it (server clock). It was the device's own
+    # timestamp: a replayed offline-buffered report moved it BACKWARDS (station "offline"),
+    # a device clock running ahead kept it "online" forever.
+    _exec("INSERT INTO watcher_registry (register_id, last_seen) VALUES (%s, NOW()) "
+          "ON CONFLICT (register_id) DO UPDATE SET last_seen=NOW()",
+          (reg,))
 
     return {"ok": True, "id": int(row[0]) if row else None, "register_id": reg}
 
@@ -336,8 +349,12 @@ def metrics(register_id: str, since_ms: Optional[int] = None,
     where = " AND ".join(conds)
     rows = _exec(
         f"SELECT ts, quantity, defect_quantity, extra_info FROM watcher_metrics "
-        f"WHERE {where} ORDER BY ts ASC LIMIT %s",
+        f"WHERE {where} ORDER BY ts DESC LIMIT %s",
         tuple(params) + (int(limit),), fetch="all") or []
+    # 4.0.441 — the NEWEST `limit` points (in time order): ASC + LIMIT returned the OLDEST
+    # ones forever once a station had more reports than the limit, and the chart's HH:MM
+    # labels made months-old data look current.
+    rows = list(reversed(rows))
 
     okf, ngf = _factors(register_id)
     points: List[Dict[str, Any]] = []
@@ -365,7 +382,8 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
     Monitait console uses (efficiency × quality × (1 − downtime)).
 
       Quality      = good / (good + defect)        — exact, from the OK/NG counters
-      Performance  = actual_rate / ideal_rate      — needs the machine's ideal_rate
+      Performance  = actual_rate / ideal_rate      — actual_rate = ALL output (good + NG)
+                                                      per hour; needs the machine's ideal_rate
                                                       (units/hr); 1.0 until it's set
       Availability = 1 − downtime_fraction         — from extra_info.downtime_percent
                                                       if the device sends it; else 1.0
@@ -432,7 +450,14 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
         hours = max(0.0, (t1 - t0).total_seconds() / 3600.0)
     except Exception:
         hours = 0.0
-    actual_rate = (good_total / hours) if hours > 0 else None
+    # 4.0.441 — Performance counts ALL output (good + NG): with good only, quality was in
+    # OEE twice (A × good/ideal × good/total read low by a factor Q). And each report is an
+    # INCREMENT that also covers the interval BEFORE its own timestamp, so N reports span
+    # N intervals, not N-1 (first→last) — the rate was overstated by N/(N-1).
+    n_rows = len(rows)
+    if n_rows > 1:
+        hours = hours * n_rows / (n_rows - 1)
+    actual_rate = (total / hours) if hours > 0 else None
     if ideal_rate and actual_rate is not None:
         performance = max(0.0, min(1.0, actual_rate / ideal_rate))
     else:
@@ -689,6 +714,10 @@ def save_camera_station(register_id: Optional[str], name: str, cameras: Any,
         # name is free text the operator may change any time, in any language.
         used = {r[0] for r in (_exec("SELECT register_id FROM watcher_registry "
                                      "WHERE register_id LIKE %s", ("CAM-%",), fetch="all") or [])}
+        # 4.0.441 — also ids that only remain in the HISTORY (a deleted station keeps its
+        # metrics): reusing one made a new station inherit the deleted station's counts
+        used |= {r[0] for r in (_exec("SELECT DISTINCT register_id FROM watcher_metrics "
+                                      "WHERE register_id LIKE %s", ("CAM-%",), fetch="all") or [])}
         n = 1
         while f"CAM-{n}" in used:
             n += 1

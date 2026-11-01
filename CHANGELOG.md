@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.441] - 2026-11-01 - Audit batch 21: watcher stations: OEE math and data
+
+**Fixed**
+- **Station and line OEE read low.** Performance used GOOD output per hour against the ideal rate, so quality was counted twice: OEE = A × (good / ideal) × (good / total) instead of A × (total / ideal) × (good / total). It now uses all output, good + NG. The rate is also no longer overstated by N/(N-1): each report is an increment covering the interval before it, so N reports span N intervals. Line OEE inherits both fixes.
+- **The Machines chart showed the OLDEST data.** The watcher series returned the first 2,000 reports ever, and the HH:MM labels made months-old data look current. It now returns the newest. That panel's watcher OEE and line OEE were all-time, next to a 24 h MVE line; all use the same 24 h window now.
+- **One bad device report broke the Hardware and Charts tabs.** "nan", "inf" or 1e309 were stored, and the JSON encoder refuses non-finite numbers, so `/api/watchers`, `/oee` and `/lines` answered 500 for everyone. Non-finite values are no longer stored.
+- **A station's online/offline used the device's clock.** A replayed offline-buffered report made it look offline, and a device clock running ahead kept it "online" forever. `last_seen` is now when MVE received the report.
+- **A new camera station could inherit a deleted station's history.** Its `CAM-n` id was reused while the old metrics remained; ids still present in the history are now skipped.
+- **Unbounded data**: watcher reports now have retention (365 days by default, `MVE_WATCHER_METRICS_DAYS`), applied by the daily DB janitor; before, only a billing plan pruned them. Ingested `register_id`s are capped at 120 characters (the ingestion is unauthenticated).
+
+Deployed to **vteam12 only**.
+
 ## [4.0.440] - 2026-11-01 - Audit batch 20: security
 
 **Fixed**
