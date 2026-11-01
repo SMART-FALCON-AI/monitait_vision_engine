@@ -33,6 +33,7 @@ health probe) inspect the module-level ``HAS_TURBO`` flag.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -164,9 +165,13 @@ def imwrite_jpeg(path: str, frame_bgr, quality: int = 85) -> bool:
     data = encode_jpeg(frame_bgr, quality=quality)
     if data is None:
         return False
+    # 4.0.462 — temp file + rename: a reader (timeline, export) or a stop mid-write saw /
+    # left a TRUNCATED jpeg under the real name
+    tmp = path + '.part'
     try:
-        with open(path, 'wb') as fh:
+        with open(tmp, 'wb') as fh:
             fh.write(data)
+        os.replace(tmp, path)
         return True
     except OSError as e:
         logger.warning(f"jpeg_codec.imwrite_jpeg({path}) failed: {e}")

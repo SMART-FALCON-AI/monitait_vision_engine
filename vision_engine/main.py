@@ -2070,11 +2070,10 @@ def _pro_camera_reconciler():
                             "source": cam_url,
                         }
                         apply_camera_config_from_saved(cam, cam_config)
-                        consecutive_failures.pop(cam_id, None)
+                        _tries = consecutive_failures.pop(cam_id, 0) + 1   # 4.0.462 — read before popping
                         logger.info(
                             f"[ProReconcile] ✓ cam_{cam_id} ({cam_name}) recovered — "
-                            f"back in the running set after "
-                            f"{consecutive_failures.get(cam_id, 0) + 1} attempts"
+                            f"back in the running set after {_tries} attempts"
                         )
                     except Exception as _pe:
                         # Keep the loop quiet on repeated failure — 1 WARN

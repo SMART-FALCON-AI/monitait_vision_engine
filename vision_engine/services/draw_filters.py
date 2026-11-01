@@ -47,8 +47,8 @@ def _load_audio_settings() -> Dict[str, Dict[str, Any]]:
     """Return a fresh-or-cached copy of service_config.audio_settings."""
     global _cache, _cache_loaded_at
     now = time.time()
-    if _cache and now - _cache_loaded_at < _TTL_SEC:
-        return _cache
+    if now - _cache_loaded_at < _TTL_SEC:      # 4.0.462 — an EMPTY dict is cached too
+        return _cache                          # (was re-parsed on every draw call)
     try:
         import config as cfg
         svc = cfg.load_service_config() or {}

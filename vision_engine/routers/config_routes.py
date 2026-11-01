@@ -1194,9 +1194,10 @@ from pathlib import Path as _Path
 def _compose_env_path():
     # Try common locations
     candidates = [
+        _os.environ.get("COMPOSE_ENV_FILE", "").strip(),       # explicit override (4.0.462: first —
+                                                               # it was ignored whenever a default existed)
         "/host_compose/.env",                                  # if user adds this bind-mount
         "/code/../.env",                                       # relative from /code
-        _os.environ.get("COMPOSE_ENV_FILE", "").strip(),       # explicit override
     ]
     for c in candidates:
         if c and _os.path.isfile(c):
@@ -1232,8 +1233,25 @@ def _write_env_var(path, key, value):
             if lines and not lines[-1].endswith("\n"):
                 lines[-1] += "\n"
             lines.append(f"{key}={value}\n")
-        with open(path, "w") as f:
-            f.writelines(lines)
+        # 4.0.462 — write a temp file and swap it in: truncate-then-write left an EMPTY .env
+        # after a crash mid-write (the next `docker compose up` lost every setting). A file
+        # bind-mount can't be renamed over (EBUSY) → fall back to an in-place write + fsync.
+        tmp = f"{path}.mve-tmp"
+        try:
+            with open(tmp, "w") as f:
+                f.writelines(lines)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(tmp, path)
+        except OSError:
+            try:
+                _os.remove(tmp)
+            except OSError:
+                pass
+            with open(path, "w") as f:
+                f.writelines(lines)
+                f.flush()
+                _os.fsync(f.fileno())
         return True
     except Exception as e:
         logger.error(f"Failed to write {key} to {path}: {e}")
@@ -1263,7 +1281,8 @@ def set_data_root(request: Request, body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="path is required")
     if not new_path.startswith("/"):
         raise HTTPException(status_code=400, detail="path must be absolute (start with /)")
-    if any(c in new_path for c in (";", "&", "|", "$", "`", "\n", "\r")):
+    # 4.0.462 — + '#' (a comment in .env), whitespace and quotes
+    if any(c in new_path for c in (";", "&", "|", "$", "`", "\n", "\r", "#", " ", "\t", '"', "'")):
         raise HTTPException(status_code=400, detail="path contains invalid characters")
 
     env_path = _compose_env_path()
@@ -1288,7 +1307,7 @@ def set_data_root(request: Request, body: Dict[str, Any]):
         "data_root": new_path,
         "env_file": env_path,
         "warning":  warning,
-        "next":     "Run `docker compose -p monitaqc up -d --force-recreate monitait_vision_engine` to apply.",
+        "next":     "In the MVE folder, run `docker compose up -d --force-recreate monitait_vision_engine` to apply.",
     })
 
 
@@ -1371,7 +1390,7 @@ def api_export_service_config(request: Request):
             full = {"service_config": load_service_config() or {}}
 
         json_str = json.dumps(full, indent=2)
-        filename = f"monitaqc_config_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        filename = f"mve_config_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
 
         return Response(
             content=json_str,

@@ -1708,7 +1708,8 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                         model_used=model_name_used,
                         encoder_value=encoder,  # 3.21.0: roll position per detection
                         pipeline_id=_pid,       # 4.0.286: compact inference-pipeline id
-                        capture_id=_cid         # 4.0.286: compact capture-state id
+                        capture_id=_cid,        # 4.0.286: compact capture-state id
+                        capture_t=capture_t,    # 4.0.462: the row's time = capture time
                     )
                     _stored = True
 

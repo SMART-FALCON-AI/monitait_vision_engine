@@ -126,9 +126,12 @@ def draw_detection_on(
         cv2.rectangle(img, (rx1, ry1), (rx2, ry2), _RECT_COLOR, bbox_thickness)
         label = f"{name} {confidence:.0%}"
         (lw, lh), _ = cv2.getTextSize(label, _FONT, fs, label_thickness)
-        cv2.rectangle(img, (rx1, ry1 - lh - 6),
-                      (rx1 + lw + 6, ry1), _RECT_COLOR, -1)
-        cv2.putText(img, label, (rx1 + 3, ry1 - 3),
+        # 4.0.462 — a box at the top edge drew its label above the image (invisible): put it
+        # inside the box then, like the live view does
+        ly = ry1 if ry1 - lh - 6 >= 0 else min(h - 1, ry1 + lh + 6)
+        cv2.rectangle(img, (rx1, ly - lh - 6),
+                      (rx1 + lw + 6, ly), _RECT_COLOR, -1)
+        cv2.putText(img, label, (rx1 + 3, ly - 3),
                     _FONT, fs, _LABEL_FG, label_thickness, cv2.LINE_AA)
         return kv_y
     except Exception:

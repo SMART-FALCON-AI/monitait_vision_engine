@@ -425,7 +425,7 @@ def db_rows_lost():
 
 def write_inference_to_db(shipment, image_path, detections, inference_time_ms,
                           model_used="yolov8", encoder_value=None,
-                          pipeline_id=None, capture_id=None, phase_id=None):
+                          pipeline_id=None, capture_id=None, phase_id=None, capture_t=None):
     """Queue inference result for async write to TimescaleDB.
 
     encoder_value (3.21.0): capture-time encoder position, so charts can plot
@@ -436,14 +436,26 @@ def write_inference_to_db(shipment, image_path, detections, inference_time_ms,
     the name/classes/category snapshot are resolved from the pipeline/state config,
     so charts can filter/colour detections by pipeline and show that pipeline's classes.
     """
+    # 4.0.462 — the row's time is the CAPTURE time (epoch s) when known and sane: NOW() at the
+    # write put cold-queue replays (up to 10 min late) and DB-writer backlog at the wrong time
+    # on every time axis / window / export
+    _ct = None
+    try:
+        if capture_t is not None:
+            _ct = float(capture_t)
+            _now = time.time()
+            if not (_now - 7 * 86400 < _ct <= _now + 60):
+                _ct = None
+    except (TypeError, ValueError):
+        _ct = None
     try:
         _db_queue.put_nowait((
             """INSERT INTO inference_results
                (time, shipment, image_path, detections, detection_count,
                 inference_time_ms, model_used, encoder_value,
                 pipeline_id, capture_id, phase_id)
-               VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (shipment, image_path, Json(detections), len(detections),
+               VALUES (COALESCE(to_timestamp(%s::double precision), NOW()), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (_ct, shipment, image_path, Json(detections), len(detections),
              inference_time_ms, model_used,
              int(encoder_value) if encoder_value is not None else None,
              int(pipeline_id) if pipeline_id is not None else None,

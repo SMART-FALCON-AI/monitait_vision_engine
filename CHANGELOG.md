@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.462] - 2026-11-01 - Audit batch 42: watcher ingestion, capture times, safe writes
+
+**Fixed**
+- **A watcher report with a NaN inside `extra_info` blocked that device's whole backlog.** The report was refused, and the Jet firmware keeps a failed report at the head of its replay queue, so every buffered report behind it was stuck. Non-finite values at any depth are now stored as empty.
+- **Camera stations:** one station that failed to count (a timeout, a bad configuration) stopped the counting of every station after it.
+- **Hardware tab after the database was recreated** (volume reset while MVE runs): every watcher endpoint failed until a restart. The tables are now created again on the next call.
+- **Watcher metrics:** a negative `limit` gave a server error, and a huge one loaded everything.
+- **Result rows now carry the capture time.** They carried the time of the database write, so frames replayed from the cold queue (up to 10 minutes late) and rows held up by a write backlog appeared at the wrong time on time charts, time windows and exports.
+- **Changing the data folder (DATA_ROOT)** truncated and rewrote the compose `.env` in place, so a crash mid-write left it empty and the next `docker compose up` lost every setting. It is now written to a temporary file and swapped in.
+  - An explicit `COMPOSE_ENV_FILE` is now honoured even when a default `.env` exists.
+  - Paths with `#`, spaces or quotes are refused.
+  - The follow-up hint no longer names a fixed compose project.
+- **Saved images are written to a temporary file and renamed,** so a reader or a stop mid-write never sees a half-written JPEG.
+- **Annotated images:** the label of a box touching the top edge was drawn outside the image; it is now drawn inside the box.
+- **Drawing on sites with no class settings** re-read the whole configuration for every box drawn.
+- **Pro-camera reconnect log** always said "after 1 attempts".
+- **The configuration export** is named `mve_config_…`.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.461] - 2026-11-01 - Audit batch 41: settings that did nothing, Persian layout, support tab
 
 **Fixed**

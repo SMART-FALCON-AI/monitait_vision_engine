@@ -41,6 +41,7 @@ _schema_ready = False
 # tiny DB helper (tuple cursors — MVE's pool hands back raw connections)
 # --------------------------------------------------------------------------- #
 def _exec(sql: str, params: tuple = (), fetch: Optional[str] = None):
+    global _schema_ready
     conn = get_db_connection()
     if conn is None:
         raise RuntimeError("db unavailable")
@@ -51,8 +52,25 @@ def _exec(sql: str, params: tuple = (), fetch: Optional[str] = None):
         conn.commit()
         cur.close()
         return out
+    except Exception as e:
+        # 4.0.462 — the tables are gone (database volume recreated while MVE runs): create
+        # them again on the next call; every watcher endpoint failed until a restart
+        if getattr(e, "pgcode", None) == "42P01":
+            _schema_ready = False
+        raise
     finally:
         release_db_connection(conn)
+
+
+def _finite_json(v):
+    """4.0.462 — NaN / ±Infinity anywhere in a nested value → None (jsonb can't store them)."""
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, dict):
+        return {k: _finite_json(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_finite_json(x) for x in v]
+    return v
 
 
 def _ensure_schema() -> None:
@@ -197,7 +215,10 @@ def ingest(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 4.0.441 — non-finite numbers can't be stored in jsonb / served as JSON
     extra = {k: v for k, v in extra.items()
              if not (isinstance(v, float) and not math.isfinite(v))}
-    lot = payload.get("lot_info")
+    # 4.0.462 — and NESTED ones: the insert failed (500), and the Jet firmware keeps a failed
+    # report at the head of its replay queue — every buffered report behind it was stuck
+    extra = _finite_json(extra)
+    lot = _finite_json(payload.get("lot_info"))
     lot_txt = (json.dumps(lot) if isinstance(lot, (dict, list))
                else (str(lot) if lot not in (None, "") else None))
 
@@ -779,22 +800,27 @@ def _count_camera_stations() -> List[Dict[str, Any]]:
     t1 = _exec("SELECT NOW() - make_interval(secs => %s)", (CAMERA_COUNT_LAG_SEC,), fetch="one")[0]
     out = []
     for reg, conf, last in rows:
-        conf = _as_dict(conf)
-        if last is None:
-            t0 = t1                                   # baseline: count from now on
-        else:
-            t0 = max(last, t1 - CAMERA_COUNT_MAX_CATCHUP)
-        if t0 > t1:
-            continue
-        ok, ng = _count_detections(conf, t0, t1) if t0 < t1 else (0, 0)
-        # claim the window first; if the station was deleted meanwhile, file nothing
-        if not _exec("UPDATE watcher_registry SET cam_last_ts=%s WHERE register_id=%s "
-                     "AND cam_config IS NOT NULL RETURNING register_id", (t1, reg), fetch="one"):
-            continue
-        ingest({"register_id": reg, "quantity": ok, "defect_quantity": ng,
-                "timestamp": t1.isoformat(), "extra_info": {"source": "camera"}})
-        out.append({"register_id": reg, "ok": ok, "ng": ng,
-                    "from": t0.isoformat(), "to": t1.isoformat()})
+        # 4.0.462 — one station's failure (a statement timeout, a bad config) no longer stops
+        # the pass: every station after it went uncounted
+        try:
+            conf = _as_dict(conf)
+            if last is None:
+                t0 = t1                                   # baseline: count from now on
+            else:
+                t0 = max(last, t1 - CAMERA_COUNT_MAX_CATCHUP)
+            if t0 > t1:
+                continue
+            ok, ng = _count_detections(conf, t0, t1) if t0 < t1 else (0, 0)
+            # claim the window first; if the station was deleted meanwhile, file nothing
+            if not _exec("UPDATE watcher_registry SET cam_last_ts=%s WHERE register_id=%s "
+                         "AND cam_config IS NOT NULL RETURNING register_id", (t1, reg), fetch="one"):
+                continue
+            ingest({"register_id": reg, "quantity": ok, "defect_quantity": ng,
+                    "timestamp": t1.isoformat(), "extra_info": {"source": "camera"}})
+            out.append({"register_id": reg, "ok": ok, "ng": ng,
+                        "from": t0.isoformat(), "to": t1.isoformat()})
+        except Exception as e:
+            logger.warning("camera station %s: count failed (the others continue): %s", reg, e)
     return out
 
 

@@ -80,6 +80,7 @@ def watcher_metrics_ep(register_id: str, since_ms: int = 0, until_ms: int = 0,
                        limit: int = 5000):
     """Time-series for one machine (OK/NG + the analog keys in extra_info)."""
     try:
+        limit = max(1, min(20000, int(limit or 5000)))   # 4.0.462 — negative → 500, huge → all in RAM
         return wm.metrics(register_id, since_ms or None, until_ms or None, limit)
     except Exception as e:
         logger.warning("watcher metrics failed: %s", e)
