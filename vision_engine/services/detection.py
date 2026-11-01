@@ -1,7 +1,6 @@
-"""Detection, inference, and frame processing for MonitaQC Vision Engine.
+"""Detection, inference, and frame processing for MVE (Monitait Vision Engine).
 
 Contains all detection functions extracted from main.py:
-- req_predict: Unified YOLO/Gradio inference
 - decode_dm: DataMatrix decoding with multiple preprocessing stages
 - nest_objects: Object nesting based on spatial hierarchy
 - decode_objects: Full object decoding pipeline
@@ -16,7 +15,6 @@ import json
 import os
 import numpy as np
 import math
-import requests
 import logging
 import pickle
 from collections import Counter
@@ -205,9 +203,6 @@ def _min_conf_for(class_name: str, audio_map: dict) -> float:
 # Prepared query data for DataMatrix validation
 prepared_query_data = []
 
-# HTTP session for inference requests
-session = requests.Session()
-
 # Reusable process pool for DataMatrix decoding (avoids fork overhead per call)
 _dm_process_pool = None
 
@@ -307,8 +302,47 @@ def extract_lab_color(image, detection):
         return None
 
 
-def update_color_references(detections):
-    """Update Redis color references (previous + running_avg) after LAB extraction."""
+# 4.0.449 — the reference is kept PER PRODUCT. It was overwritten with THIS frame's colour
+# before the rules ran, so "vs Previous" (the UI default) compared a product with itself
+# (ΔE 0, never fired) and "vs Average" included the current sample. Now `:current` holds
+# {pid, lab, conf} of the product being inspected (best-confidence sample across its
+# cameras / phases); only when a DIFFERENT product arrives does the finished one become
+# `:previous` and enter the running-average list. Atomic (several inference workers).
+_COLOR_REF_LUA = """
+local cur = redis.call('GET', KEYS[1])
+if cur then
+  local ok, c = pcall(cjson.decode, cur)
+  if ok and type(c) == 'table' and c.pid ~= nil then
+    if tostring(c.pid) ~= ARGV[1] then
+      local lab = cjson.encode(c.lab)
+      redis.call('SET', KEYS[2], lab)
+      redis.call('LPUSH', KEYS[3], lab)
+      redis.call('LTRIM', KEYS[3], 0, tonumber(ARGV[4]) - 1)
+      redis.call('SET', KEYS[1], ARGV[2])
+    elseif tonumber(ARGV[3]) > tonumber(c.conf or 0) then
+      redis.call('SET', KEYS[1], ARGV[2])
+    end
+    return 1
+  end
+end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+"""
+_color_ref_script = None
+
+
+def _product_id(frame_id):
+    """Frames of one trigger share the capture stamp: '<…>/<stamp>_p<ph>_<cam>' → '<stamp>'."""
+    stem = str(frame_id or "").rsplit("/", 1)[-1]
+    if "_p" in stem:
+        return stem.rsplit("_p", 1)[0]
+    return stem.rsplit("_", 1)[0]
+
+
+def update_color_references(detections, product_id=None):
+    """Record this product's colour per class (see _COLOR_REF_LUA). Called after LAB
+    extraction; the previous product's colour is what `previous` / `running_avg` return."""
+    global _color_ref_script
     try:
         redis_client = _get_timeline_redis()
         best_per_class = {}
@@ -324,15 +358,17 @@ def update_color_references(detections):
 
         if not best_per_class:
             return
-
-        pipe = redis_client.pipeline()
+        if _color_ref_script is None:
+            _color_ref_script = redis_client.register_script(_COLOR_REF_LUA)
+        pid = str(product_id if product_id is not None else time.time())
         for class_name, det in best_per_class.items():
-            lab_json = json.dumps(det['lab_color'])
-            pipe.set(f"{_COLOR_REF_PREFIX}{class_name}:previous", lab_json)
-            running_key = f"{_COLOR_REF_PREFIX}{class_name}:running_avg_list"
-            pipe.lpush(running_key, lab_json)
-            pipe.ltrim(running_key, 0, _COLOR_RUNNING_AVG_SIZE - 1)
-        pipe.execute()
+            conf = float(det.get('confidence', 0) or 0)
+            _color_ref_script(
+                keys=[f"{_COLOR_REF_PREFIX}{class_name}:current", f"{_COLOR_REF_PREFIX}{class_name}:previous",
+                      f"{_COLOR_REF_PREFIX}{class_name}:running_avg_list"],
+                args=[pid, json.dumps({"pid": pid, "lab": det['lab_color'], "conf": conf}), conf,
+                      _COLOR_RUNNING_AVG_SIZE],
+                client=redis_client)
     except Exception as e:
         logger.debug(f"Color reference update failed: {e}")
 
@@ -397,7 +433,7 @@ def _has_color_delta_procedure():
 
 
 def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out=None,
-                                   conf_mode='critical', side_effects=False):
+                                   conf_mode='critical', side_effects=False, shipment=None):
     """Evaluate eject rules from stored detections and procedures config.
 
     4.0.423 SIDE-EFFECTS — only the live inference path passes side_effects=True. The
@@ -620,7 +656,9 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
                 if cond == 'E_less':
                     return e_val < float(rule.get('E', 30.0))
                 if cond == 'E_between':
-                    return float(rule.get('E_min', 30.0)) <= e_val <= float(rule.get('E_max', 100.0))
+                    # 4.0.449 — documented (3.22.5, UI tooltip) as "keep inside the band, eject
+                    # outside"; the code ejected the products INSIDE the band
+                    return not (float(rule.get('E_min', 30.0)) <= e_val <= float(rule.get('E_max', 100.0)))
             return False
 
         def _rule_detail(rule, triggered):
@@ -664,7 +702,7 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
                         if cond == 'E_less':
                             return f"'{obj}' E {det['_E']} < {rule.get('E', 30.0)}"
                         if cond == 'E_between':
-                            return f"'{obj}' E {det['_E']} in [{rule.get('E_min', 30.0)}, {rule.get('E_max', 100.0)}]"
+                            return f"'{obj}' E {det['_E']} outside [{rule.get('E_min', 30.0)}, {rule.get('E_max', 100.0)}]"
                 return f"'{obj}' E out of range"
 
             expected = rule.get('count', 1)
@@ -695,6 +733,10 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
                 # shipment_close is a CRITICAL-only shipment operation, not an
                 # eject-severity warning — the marginal (yellow) pass ignores it.
                 if conf_mode != 'critical' or not side_effects:
+                    continue
+                # 4.0.449 — only a frame of the LIVE shipment may close it: a replayed (cold)
+                # or backlogged frame of shipment A closed shipment B, just scanned
+                if shipment is not None and _watcher is not None and str(shipment) != str(getattr(_watcher, "shipment", "")):
                     continue
                 try:
                     if _watcher is not None:
@@ -754,12 +796,13 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
                             break
                     if _enc is None:
                         _enc = int(time.time())
-                    _shipment = "no_shipment"
-                    try:
-                        sv = rc.get("shipment")
-                        if sv: _shipment = sv.decode("utf-8") if isinstance(sv, bytes) else str(sv)
-                    except Exception:
-                        pass
+                    _shipment = str(shipment) if shipment else "no_shipment"   # 4.0.449 — capture-time
+                    if not shipment:
+                        try:
+                            sv = rc.get("shipment")
+                            if sv: _shipment = sv.decode("utf-8") if isinstance(sv, bytes) else str(sv)
+                        except Exception:
+                            pass
                     dedupe_key = f"ejdedupe:{_shipment}:{proc_name}:{_enc}"
                     if rc.set(dedupe_key, "1", ex=60, nx=True):  # write once per 60s window
                         write_ejection_event_to_db(proc_name, reason, _shipment, _enc)
@@ -841,121 +884,6 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None, d_p
             pass
     except Exception as e:
         logger.error(f"Timeline add frame error: {e}", exc_info=True)
-
-def req_predict(image):
-    """
-    Unified prediction function supporting both YOLO and Gradio APIs.
-    Returns detections in standardized format with keys: x1, y1, x2, y2, confidence, class_id, name
-    """
-    start_time = time.time()
-
-    # Check if we're using Gradio API (HuggingFace Space)
-    if "hf.space" in cfg.YOLO_INFERENCE_URL or "huggingface" in cfg.YOLO_INFERENCE_URL:
-        try:
-            from gradio_client import Client, handle_file
-            import tempfile
-
-            # Initialize Gradio client (cached globally for reuse)
-            if not hasattr(req_predict, 'gradio_client'):
-                logger.info(f"Initializing Gradio client for {cfg.YOLO_INFERENCE_URL}")
-                req_predict.gradio_client = Client(cfg.YOLO_INFERENCE_URL)
-                logger.info("Gradio client initialized successfully")
-
-            # Decode image bytes and save to temp file
-            nparr = np.frombuffer(image, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
-                cv2.imwrite(tmp.name, img)
-                tmp_path = tmp.name
-
-            # Get model name and confidence from globals (loaded from config)
-            model_name = cfg.GRADIO_MODEL
-            confidence = cfg.GRADIO_CONFIDENCE_THRESHOLD
-
-            logger.info(f"Calling Gradio API: model={model_name}, confidence={confidence}")
-
-            # Call Gradio /api/detect endpoint
-            result = req_predict.gradio_client.predict(
-                handle_file(tmp_path),
-                model_name,
-                confidence,
-                api_name="/detect"
-            )
-
-            # Clean up temp file
-            try:
-                os.unlink(tmp_path)
-            except Exception as e:
-                logger.debug(f"Could not delete temp file {tmp_path}: {e}")
-
-            logger.info(f"Gradio API response: {len(result) if isinstance(result, list) else 0} detection(s)")
-            logger.info(f"Gradio result type: {type(result)}")
-            if result:
-                logger.info(f"First detection sample: {result[0] if isinstance(result, list) else result}")
-
-            # Convert Gradio response format to match YOLO format exactly
-            # YOLO format: {"xmin", "ymin", "xmax", "ymax", "confidence", "class", "name"}
-            # Gradio format: {"x1", "y1", "x2", "y2", "confidence", "class_id", "name"}
-            normalized_detections = []
-            if result and isinstance(result, list):
-                for det in result:
-                    # Convert Gradio format to YOLO format
-                    normalized_det = {
-                        "xmin": det.get('x1', det.get('xmin', 0)),
-                        "ymin": det.get('y1', det.get('ymin', 0)),
-                        "xmax": det.get('x2', det.get('xmax', 0)),
-                        "ymax": det.get('y2', det.get('ymax', 0)),
-                        "confidence": det.get('confidence', 0.0),
-                        "class": det.get('class_id', det.get('class', 0)),
-                        "name": det.get('name', f"Class {det.get('class_id', det.get('class', 0))}")
-                    }
-                    normalized_detections.append(normalized_det)
-
-                logger.info(f"Normalized {len(normalized_detections)} detections to YOLO format")
-                if normalized_detections:
-                    logger.info(f"First normalized detection: {normalized_detections[0]}")
-
-            # Cache detections in module-level variables and Redis (for cross-process sharing)
-            cfg.latest_detections = normalized_detections
-            cfg.latest_detections_timestamp = time.time()
-
-            # Also store in Redis for cross-process access
-            if _watcher and _watcher.redis_connection:
-                try:
-                    _watcher.redis_connection.redis_connection.setex(
-                        "gradio_last_detection_timestamp",
-                        60,  # Expire after 60 seconds
-                        str(cfg.latest_detections_timestamp)
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to cache detection timestamp in Redis: {e}")
-
-            logger.info(f"Cached {len(normalized_detections)} detections at timestamp {cfg.latest_detections_timestamp}")
-
-            # Note: detection events and Redis timing are handled by process_frame()
-            # to avoid duplicate writes when called from the inference pipeline.
-
-            return json.dumps(normalized_detections)
-
-        except Exception as e:
-            logger.error(f"Gradio prediction failed: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return "[]"
-    else:
-        # Original YOLO inference endpoint
-        try:
-            # Use Connection: close header to prevent keep-alive issues
-            headers = {'Connection': 'close'}
-            response = requests.post(cfg.YOLO_INFERENCE_URL, files={"image": image}, headers=headers, timeout=10)
-            response.raise_for_status()
-
-            # Note: Redis timing is tracked by process_frame() to avoid duplicate writes
-            return response.text  # Return JSON string, not parsed dict
-        except requests.exceptions.RequestException as e:
-            logger.error(f"YOLO prediction failed: {e}")
-            return "[]"  # Return empty JSON array string
 
 def create_dynamic_images(frame_height):
     h = frame_height # Extract height from the frame's image (frame[1] contains the image)
@@ -1348,7 +1276,8 @@ def decode_objects(frame_name, frame, nested_object, iterator=0, query_data=None
         return 4 , None
 
 
-def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed_yolo=None):
+def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed_yolo=None, shipment=None):
+    _stored = False     # 4.0.449 — the result row is written (an error after it ≠ inference failure)
     try:
 
         frame_id, jpeg_bytes = frame
@@ -1367,7 +1296,12 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
         # watcher is unavailable (e.g. rare boot race).
         capture_shipment = "no_shipment"
         try:
-            if _watcher is not None and getattr(_watcher, "shipment", None):
+            if shipment:
+                # 4.0.449 — the shipment recorded AT CAPTURE (frames_data): a replay (up to
+                # 10 min later, common after a YOLO outage) was filed under whatever shipment
+                # was live by then, while its image sat in the old shipment's folder
+                capture_shipment = str(shipment)
+            elif _watcher is not None and getattr(_watcher, "shipment", None):
                 capture_shipment = str(_watcher.shipment)
             else:
                 _r_val = _get_timeline_redis().get("shipment")
@@ -1407,9 +1341,10 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
             yolo_res, model_name_used = _pipeline_manager.run_inference(
                 img_bytes, _pipeline_manager.stream_key(frame_id))   # 4.0.445 — per-camera stride
         else:
-            # Fallback to legacy inference
-            yolo_res = json.loads(req_predict(img_bytes))
-            model_name_used = "legacy"
+            # 4.0.449 — the legacy req_predict fallback is gone (a PipelineManager is always
+            # created at boot; on failure it returned "[]" = a clean product)
+            logger.error("No pipeline manager — inference not possible")
+            yolo_res = None
         # 4.0.444 — None = inference FAILED for this frame (YOLO down / 500 / timeout).
         # It was stored as a frame with zero detections — a clean product — so a YOLO
         # outage passed every product as good. Return None: the caller retries once, then
@@ -1522,7 +1457,7 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                             pass
                         _any_lab = True
                 if _any_lab:
-                    update_color_references(yolo_res)
+                    update_color_references(yolo_res, _product_id(frame_id))
 
             # 3.22.3 — Bbox area for classes with audio_settings.<name>.area == True.
             # YOLO's inference output doesn't include `area` natively (just xyxy
@@ -1772,29 +1707,19 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
                         pipeline_id=_pid,       # 4.0.286: compact inference-pipeline id
                         capture_id=_cid         # 4.0.286: compact capture-state id
                     )
+                    _stored = True
 
-                # 3.21.11: evaluate eject from the LIVE inference path (every captured
-                # frame), not only from the dashboard websocket render loop. Previously
-                # eject_eval was sampled by dashboard updates, so rare classes (spot_up,
-                # warp_up) were missed almost always while constant classes (weft_up)
-                # fired reliably. Hooking here fixes the spot/warp under-reporting.
-                # The DB-write hook lives inside evaluate_eject_from_detections itself
-                # and is dedupe-gated per (shipment, proc_name, encoder).
-                try:
-                    if yolo_res:
-                        # Stamp encoder onto each detection so the dedupe key is stable
-                        # (otherwise the eval falls back to int(time.time()) and the
-                        # dedupe window is just 60s of wall-clock).
-                        for _d in yolo_res:
-                            if isinstance(_d, dict) and "_encoder" not in _d:
-                                _d["_encoder"] = encoder if encoder is not None else 0
-                        _tl_cfg = getattr(_app.state, "timeline_config", {}) if _app else {}
-                        _procs = [p for p in (_tl_cfg.get("procedures") or [])
-                                  if p.get("enabled", True)]
-                        if _procs:
-                            evaluate_eject_from_detections(yolo_res, _procs, side_effects=True)
-                except Exception as _e:
-                    logger.debug(f"Inference-path eject eval skipped: {_e}")
+                # 4.0.449 — the per-FRAME eject evaluation that ran here is gone. It saw ONE
+                # camera / phase, wrote ejection_events and fired shipment_close on its own
+                # (an event row for a product the group evaluation passed), and it ran even
+                # with the ejector off. The group evaluation in main._process_frame_batch (all
+                # cameras of the product, every path) is the one decision; it now also runs
+                # with the ejector off, so these analytics keep working.
+                # The encoder stamp stays: it is the stable ejection_events dedupe key.
+                if yolo_res:
+                    for _d in yolo_res:
+                        if isinstance(_d, dict) and "_encoder" not in _d:
+                            _d["_encoder"] = encoder if encoder is not None else 0
             except Exception as e:
                 logger.error(f"Failed to write inference to DB: {e}")
 
@@ -1861,7 +1786,19 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
         return queue_message, frame_data
 
     except Exception as e:
-        logger.error(f"Error processing frame {frame_id}: {e}")
+        logger.error(f"Error processing frame {frame.get('frame_id') if isinstance(frame, dict) else (frame[0] if isinstance(frame, (list, tuple)) and frame else '?')}: {e}")
+        if _stored:
+            # 4.0.449 — the result row is already in the DB: returning None here made the
+            # caller treat it as an inference failure → retry + up to 5 cold replays, each
+            # writing ANOTHER row (and timeline / audio entries), and the product was never
+            # eject-evaluated. Hand back what we have instead.
+            try:
+                _fid = frame[0]
+                _dets = yolo_res if isinstance(yolo_res, list) else []
+                return ({"ts": _fid, "dms": [None], "priority": 5, "detection": _dets,
+                         "shipment": capture_shipment}, [_fid, None, _dets, 5, None])
+            except Exception:
+                pass
         return None
 
 def most_frequent_string(dms_list):
@@ -1869,7 +1806,7 @@ def most_frequent_string(dms_list):
     counter = Counter(dms_list)
     return counter.most_common(1)[0][0] if counter else None
 
-def process_frame_helper(frame, capture_t=None, encoder=None, precomputed_yolo=None):
+def process_frame_helper(frame, capture_t=None, encoder=None, precomputed_yolo=None, shipment=None):
     # v4.0.125 — accept and forward `precomputed_yolo` so the v4.0.82
     # batched-YOLO callsite in main.py:886 stops raising TypeError on
     # every frame. Without this, `_process_frame_batch`'s
@@ -1878,5 +1815,6 @@ def process_frame_helper(frame, capture_t=None, encoder=None, precomputed_yolo=N
     # every build since v4.0.82 (2026-07-11) but only fires when the
     # batched-YOLO path is active (i.e. high capture load).
     capture_mode = "single"  # or "multiple"
-    return process_frame(frame, capture_mode, capture_t=capture_t, encoder=encoder, precomputed_yolo=precomputed_yolo)
+    return process_frame(frame, capture_mode, capture_t=capture_t, encoder=encoder, precomputed_yolo=precomputed_yolo,
+                         shipment=shipment)
 

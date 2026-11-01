@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.449] - 2026-11-01 - Audit batch 29: colour rule, partial inference failure, one eject decision
+
+**Fixed**
+- **"ΔE vs Previous" never fired.** The colour reference was overwritten with the current product's colour before the rules ran, so the product was compared with itself (ΔE 0). "vs Previous" is the default in the rule editor. "vs Average" also included the current product. The reference is now kept per product: the product being inspected (its best sample across cameras and lighting phases) becomes "previous", and enters the average, only when the next product arrives.
+- **When one camera's inference failed, that camera's frame was lost for good.** A retry and replay only happened when every frame of a product failed. Otherwise the failed frame was dropped and the product was judged on the other cameras alone, so a defect visible only on that camera passed. Each failed frame is now retried once and then replayed later (stored, never a physical eject). With the opt-in fail-safe (`MVE_FAILSAFE_EJECT=1`), an incompletely inspected product is ejected.
+- **One eject decision per product.** A second evaluation ran for every single frame (one camera, one lighting phase). It wrote ejection events and could fire shipment-close rules on its own, even for products the real (all-camera) evaluation passed, and it ran with the ejector off. It is removed. The product-level evaluation now also runs with the ejector off, so ejection analytics and shipment-close rules keep working there. Only the physical eject and the OK/NG counters need the ejector.
+- **Replayed frames were filed under the wrong shipment.** A frame replayed after a YOLO outage (up to 10 minutes later) was stored under whatever shipment was live by then, while its image sat in the old shipment's folder. Its shipment-close rule could also close the new shipment. Rows and ejection events now use the shipment recorded at capture, and only a frame of the live shipment can close it.
+- **An error after a result was stored counted as an inference failure.** The frame was then retried and replayed up to 5 times, writing a duplicate row (plus timeline and audio entries) each time, and the product was never evaluated.
+- **`E_between` was inverted.** It ejected products inside the band; it is documented (3.22.5, rule tooltip) as "keep inside, eject outside". **`E`, `E_min` and `E_max` are now validated** when procedures are saved: an empty or text value stopped every procedure on every frame.
+
+**Removed**: the legacy `req_predict` inference fallback (never used; on failure it returned "no detections") and its HTTP session.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.448] - 2026-11-01 - Audit batch 28: config wipe on an empty database, knowledge polling, messaging
 
 **Fixed**

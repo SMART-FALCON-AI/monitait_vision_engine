@@ -1287,21 +1287,39 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
     )
     if use_precomputed:
         results = [
-            process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder, precomputed_yolo=py)
+            process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder, precomputed_yolo=py,
+                                 shipment=capture_shipment)
             for f, py in zip(valid_frames, precomputed_yolo_per_frame)
         ]
     else:
-        results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
+        results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder, shipment=capture_shipment)
+                   for f in valid_frames]
 
-    # Filter out None results
+    # 4.0.449 — retry EACH failed frame once (the non-batched single-frame path). Only an
+    # all-failed group was retried / replayed: with one camera's inference down, its frame
+    # was dropped for good and the product judged on the other cameras alone.
+    for _i, _r in enumerate(results):
+        if _r is None:
+            results[_i] = process_frame_helper(valid_frames[_i], capture_t=capture_t, encoder=capture_encoder,
+                                               shipment=capture_shipment)
     valid_results = [r for r in results if r is not None]
     if not valid_results:
-        # Retry once — always via the non-batched single-frame path (safer default when the
-        # first attempt failed for whatever reason).
-        results = [process_frame_helper(f, capture_t=capture_t, encoder=capture_encoder) for f in valid_frames]
-        valid_results = [r for r in results if r is not None]
-        if not valid_results:
-            return False  # Inference failed
+        return False  # Inference failed
+    _failed_frames = [f for f, r in zip(valid_frames, results) if r is None]
+    if _failed_frames:
+        # replay just those frames (stored + evaluated later; never a physical eject)
+        _n = int(frames_data.get('_cold_attempts', 0) or 0) + (0 if allow_eject else 1)
+        if _n < 5:
+            try:
+                import services.watcher as _wm
+                _sub = {k: v for k, v in frames_data.items() if k != "frames"}   # keeps _enqueue_t (10-min limit)
+                _sub["frames"] = _failed_frames
+                _sub["_cold_attempts"] = _n
+                _wm._cold_queue_disk.put(_sub)
+            except Exception as _pe:
+                logger.warning(f"partial-failure replay not queued: {_pe}")
+        logger.warning(f"Inference failed for {len(_failed_frames)} of {len(valid_frames)} frame(s) of this product "
+                       f"(encoder={capture_encoder}) — judged on the rest, failed frames replayed")
 
     queue_messages, processed_frames = zip(*valid_results)
 
@@ -1366,7 +1384,10 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
         _tl_cfg = getattr(app.state, 'timeline_config', {})
         _procedures = _tl_cfg.get('procedures', [])
         _enabled_procs = [p for p in _procedures if p.get('enabled', True)]
-        if _enabled_procs and cfg_module.EJECTOR_ENABLED:
+        # 4.0.449 — evaluated with the ejector OFF too (event rows / shipment_close rules are
+        # analytics + shipment logic; that used to come from a per-frame duplicate). Only the
+        # physical push + the OK/NG counters below need the ejector.
+        if _enabled_procs:
             # Collect all detections across all messages
             all_detections = []
             for msg in queue_messages:
@@ -1375,25 +1396,31 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
                     all_detections.extend(d for d in det_list if isinstance(d, dict))
 
             should_eject, eject_reasons = evaluate_eject_from_detections(all_detections, _enabled_procs,
-                                                                         side_effects=True)
+                                                                         side_effects=True,
+                                                                         shipment=capture_shipment)
+            if (not should_eject and _failed_frames and allow_eject and cfg_module.EJECTOR_ENABLED
+                    and _FAILSAFE_EJECT):
+                should_eject = True     # opt-in fail-safe: the product was not fully inspected
+                eject_reasons = [f"fail-safe: inference failed on {len(_failed_frames)} of {len(valid_frames)} frames"]
             det_names = [d.get('name', '?') for d in all_detections]
             logger.info(f"[EJECT_EVAL] {len(_enabled_procs)} procs, {len(all_detections)} dets ({','.join(det_names)}), result={'EJECT' if should_eject else 'OK'} path={'hot' if allow_eject else 'cold'}")
 
             if should_eject:
-                if allow_eject:
+                if allow_eject and cfg_module.EJECTOR_ENABLED:
                     eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
                     watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
                     with _COUNTER_LOCK:   # 4.0.442 — N worker threads: unlocked += lost increments
                         watcher.eject_ng_counter += 1
                     logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
                 else:
-                    logger.info(f"EJECT condition met on cold path (no physical eject) | reasons={' '.join(eject_reasons)} | encoder={capture_encoder}")
+                    logger.info(f"EJECT condition met ({'ejector off' if allow_eject else 'cold path'}, no physical eject) "
+                                f"| reasons={' '.join(eject_reasons)} | encoder={capture_encoder}")
 
                 # 4.0.439 — the ejection_events row is written by evaluate_eject_from_detections
                 # itself (side_effects=True above; deduped per shipment/procedure/encoder). This
                 # block wrote a SECOND row for every Store=ON eject, with no dedupe — doubling the
                 # per-procedure eject analytics.
-            elif allow_eject:
+            elif allow_eject and cfg_module.EJECTOR_ENABLED:
                 with _COUNTER_LOCK:
                     watcher.eject_ok_counter += 1
     except Exception as e:

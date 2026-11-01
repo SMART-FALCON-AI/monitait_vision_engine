@@ -34,7 +34,10 @@ def _num(v, kind, field, where):
 
 
 _RULE_NUMS = {"count": "int", "area": "float", "threshold": "float", "min_confidence": "float",
-              "marginal_confidence": "float", "max_delta_e": "float"}
+              "marginal_confidence": "float", "max_delta_e": "float",
+              # 4.0.449 — E rules: a null / text value raised outside every try in the evaluator
+              # and aborted ALL procedures on every frame (the 4.0.438 failure class)
+              "E": "float", "E_min": "float", "E_max": "float"}
 
 
 def _clean_procedures(procs):
