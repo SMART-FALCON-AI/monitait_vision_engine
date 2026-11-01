@@ -679,6 +679,51 @@ def _drop_oldest_inference_chunk(conn):
         except Exception: pass
 
 
+# 4.0.433 — side tables nothing pruned: one audit row per mutating request, AI usage,
+# notifications, and auth tokens that are never deleted after they expire. Daily, in
+# batches (first run on a long-lived site may have a backlog), per-table commits.
+_SIDE_TABLE_RETENTION = [
+    ("mve_audit_log", "ts", int(os.environ.get("MVE_AUDIT_LOG_DAYS", "365") or 0)),
+    ("ai_usage_log", "time", int(os.environ.get("MVE_AI_USAGE_LOG_DAYS", "365") or 0)),
+    ("notification_log", "time", int(os.environ.get("MVE_NOTIFICATION_LOG_DAYS", "180") or 0)),
+]
+_PRUNE_BATCH = 50000
+_PRUNE_MAX_BATCHES = 20
+
+
+def _prune_side_tables(conn):
+    total = {}
+    jobs = [(t, f"{c} < NOW() - make_interval(days => %s)", [d]) for t, c, d in _SIDE_TABLE_RETENTION if d > 0]
+    jobs.append(("mve_auth_tokens", "expires_at < EXTRACT(EPOCH FROM NOW()) - 86400", []))
+    for table, where, args in jobs:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT to_regclass(%s)", [table])
+            if not (cur.fetchone() or [None])[0]:
+                conn.rollback()
+                continue
+            n = 0
+            for _ in range(_PRUNE_MAX_BATCHES):
+                cur.execute("SET LOCAL statement_timeout = 60000")
+                cur.execute(f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {where} LIMIT {_PRUNE_BATCH})", args)
+                k = cur.rowcount or 0
+                conn.commit()
+                n += k
+                if k < _PRUNE_BATCH:
+                    break
+            if n:
+                total[table] = n
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"[DB Janitor] prune {table} failed: {e}")
+    if total:
+        logger.info(f"[DB Janitor] pruned old rows: {total}")
+    return total
+
+
 def _db_disk_pressure_janitor_loop():
     """Every DB_JANITOR_INTERVAL_S seconds, compare pg_database_size()
     against DB_MAX_PCT_OF_DISK % of the DB volume's TOTAL. When over,
@@ -694,6 +739,7 @@ def _db_disk_pressure_janitor_loop():
         f"(budget={DB_MAX_PCT_OF_DISK}% of {DB_DISK_CHECK_PATH}, "
         f"interval={DB_JANITOR_INTERVAL_S}s, max_drops_per_run={DB_MAX_CHUNKS_PER_RUN})"
     )
+    _last_side_prune = 0.0
     while True:
         try:
             _t.sleep(DB_JANITOR_INTERVAL_S)
@@ -705,6 +751,10 @@ def _db_disk_pressure_janitor_loop():
                 logger.warning("DB janitor: no DB connection, skipping this tick")
                 continue
             try:
+                # 4.0.433 — once a day: retention for the side tables (see _prune_side_tables)
+                if _t.time() - _last_side_prune > 86400:
+                    _last_side_prune = _t.time()
+                    _prune_side_tables(conn)
                 db_size = _get_db_size_bytes(conn)
                 if db_size <= budget:
                     # Log once per hour so ops can see the janitor IS running.

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.433] - 2026-11-01 - Audit batch 13: AI / services: DB profiles, cron time zone, usage logging, retention
+
+**Fixed**
+- **Activating a DB profile (AI settings) dropped MVE's live DB work.** It ran `closeall()` on the main connection pool, closing connections in use, including the DB writer's in-flight batches (up to 200 rows). It changed nothing else: the rebuilt pool still used `POSTGRES_*`. A profile is what the AI assistant's database tool reads, and now that is all activation does; the message says so.
+- **Scheduled reports ran on UTC.** The scheduler used the container clock, which has no time zone, so "0 8 * * *" fired at 11:30 in Tehran. Cron is now matched in `notifications.timezone` (e.g. `Asia/Tehran`), else the `TZ` env var, else UTC. UTC stays the default so existing schedules don't move until a zone is set.
+- **AI chat usage was never logged.** The most expensive call (up to 5 tool rounds) was missing from `ai_usage_log` and so from billing. It is now logged like the other AI endpoints.
+- **The AI assistant was given the wrong schema.**
+  - It was told the columns `pipeline_name` / `module_id`, which are legacy and usually NULL; the live ones are `pipeline_id` / `capture_id`.
+  - It was told to filter images by `"class":"weft_up"`, but `class` is the numeric id and the label is `name`.
+  - It was told boxes are stored as `bbox`; they are `xmin…ymax`.
+
+  Its SQL errored, and "show me the latest weft_up image" never matched. The prompt and the tool description now use the real names, and the prompt says MVE.
+- **JPEGs were written with 4:4:4 chroma** on images that ship simplejpeg (its default), although the codec documents 4:2:0 and the OpenCV fallback uses 4:2:0. Frames are now 4:2:0 there too: smaller files. vteam12's image has no simplejpeg (OpenCV path), so nothing changes there.
+- **AI usage and notification logs** ran CREATE TABLE/INDEX plus COMMIT on every write; now once per process.
+- **Never-pruned tables now have retention**, applied daily by the DB janitor in batches:
+  - `mve_audit_log` (one row per mutating request): 365 days;
+  - `ai_usage_log`: 365 days;
+  - `notification_log`: 180 days;
+  - expired auth tokens: one day after expiry.
+
+  Each is env-tunable: `MVE_AUDIT_LOG_DAYS`, `MVE_AI_USAGE_LOG_DAYS`, `MVE_NOTIFICATION_LOG_DAYS` (0 = keep).
+- **Support chat** now logs in with a stable Matrix device id (the machine fingerprint). Every restart or re-login used to create a new device on the homeserver.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.432] - 2026-11-01 - Audit batch 12: timeline click opens the right camera, charts survive a slow block, ~1,350 dead lines removed
 
 **Fixed**

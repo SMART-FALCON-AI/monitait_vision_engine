@@ -308,31 +308,6 @@ def _save_db_profiles_to_redis(data):
         return False
 
 
-def _reconnect_db_pool():
-    """Reconnect the database pool using the active profile."""
-    import services.db as db_module
-    data = _get_db_profiles_from_redis()
-    active_name = data.get("active")
-    if not active_name or active_name not in data.get("profiles", {}):
-        return False
-    p = data["profiles"][active_name]
-    host = p.get("host", "timescaledb")
-    port = int(p.get("port", 5432))
-    database = p.get("database", "monitaqc")
-    user = p.get("user", "monitaqc")
-    password = p.get("password", "monitaqc2024")
-    # Close existing pool
-    if db_module.db_connection_pool:
-        try:
-            db_module.db_connection_pool.closeall()
-        except Exception:
-            pass
-        db_module.db_connection_pool = None
-    # New pool will be created on next get_db_connection() call
-    logger.info(f"Database pool will reconnect to {host}:{port}/{database}")
-    return True
-
-
 # =============================================================================
 # DATABASE CONFIGURATION ENDPOINTS (multi-profile)
 # =============================================================================
@@ -408,9 +383,12 @@ def activate_db_profile(config: Dict[str, Any]):
 
         data["active"] = name
         if _save_db_profiles_to_redis(data):
-            _reconnect_db_pool()
-            logger.info(f"DB profile activated: {name}")
-            return JSONResponse(content={"success": True, "message": f"Profile '{name}' activated. DB reconnecting."})
+            # 4.0.433 — a profile is the database the AI assistant's query tool reads (see
+            # execute_tool / query_database). Activating one used to also closeall() MVE's
+            # MAIN pool — dropping in-use connections (the DB writer's in-flight batches) —
+            # and the rebuilt pool used POSTGRES_* anyway, so the switch did nothing else.
+            logger.info(f"DB profile activated for the AI assistant: {name}")
+            return JSONResponse(content={"success": True, "message": f"Profile '{name}' activated for the AI assistant's database queries."})
         else:
             return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
     except Exception as e:
@@ -432,9 +410,7 @@ def delete_db_profile(profile_name: str):
             data["active"] = remaining[0] if remaining else None
 
         if _save_db_profiles_to_redis(data):
-            if data.get("active"):
-                _reconnect_db_pool()
-            logger.info(f"DB profile deleted: {profile_name}")
+            logger.info(f"DB profile deleted: {profile_name}")   # (4.0.433 — no main-pool reset)
             return JSONResponse(content={"success": True, "message": f"Profile '{profile_name}' deleted", "active": data["active"]})
         else:
             return JSONResponse(content={"error": "Failed to save to Redis"}, status_code=500)
@@ -486,13 +462,13 @@ def get_ai_tools():
     tools = [
         {
             "name": "query_database",
-            "description": "Execute SQL query on TimescaleDB. Tables: production_metrics (time, encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds), inference_results (time, shipment, image_path, detections JSONB, detection_count, inference_time_ms, model_used, pipeline_name, module_id, phase_id). Both are time-partitioned hypertables.",
+            "description": "Execute SQL query on TimescaleDB. Tables: production_metrics (time, encoder_value, ok_counter, ng_counter, shipment, is_moving, downtime_seconds), inference_results (time, shipment, image_path, detections JSONB, detection_count, inference_time_ms, model_used, encoder_value, pipeline_id, capture_id, phase_id). Both are time-partitioned hypertables.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "PostgreSQL SQL query. Use NOW() - INTERVAL for time ranges. Detections is JSONB array with {class, confidence, bbox}."
+                        "description": "PostgreSQL SQL query. Use NOW() - INTERVAL for time ranges. Detections is a JSONB array of {name (class label), class (numeric id), confidence, xmin, ymin, xmax, ymax, _cam}."
                     }
                 },
                 "required": ["query"]
@@ -2339,7 +2315,7 @@ def query_ai(request: Request, payload: Dict[str, Any]):
             camera_info = "; ".join(cam_details)
 
         # Build comprehensive AI prompt with full schema and context
-        system_prompt = f"""You are a powerful AI assistant embedded in the MonitaQC industrial quality control system. You have full access to query the database, read real-time sensor data, check camera status, and analyze system health.
+        system_prompt = f"""You are a powerful AI assistant embedded in MVE (Monitait Vision Engine), an industrial quality control system. You have full access to query the database, read real-time sensor data, check camera status, and analyze system health.
 
 ## Current System State
 - Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -2369,16 +2345,18 @@ You MUST use these exact table and column names:
 | time | TIMESTAMPTZ | When inference ran |
 | shipment | TEXT | Shipment/batch identifier |
 | image_path | TEXT | Path to the inspected image |
-| detections | JSONB | Array of detection objects (class, confidence, bbox) |
+| detections | JSONB | Array of detection objects (see below) |
 | detection_count | INTEGER | Number of objects detected |
 | inference_time_ms | INTEGER | How long inference took in ms |
 | model_used | TEXT | Which AI model was used |
-| pipeline_name | TEXT | Pipeline that produced this result |
-| module_id | TEXT | Inference module identifier |
+| encoder_value | BIGINT | Conveyor encoder position at capture |
+| pipeline_id | INTEGER | Compact id of the inference pipeline that produced this result |
+| capture_id | INTEGER | Compact id of the capture state |
 | phase_id | INTEGER | Capture phase number |
+(pipeline_name / module_id also exist but are legacy and usually NULL — do not filter on them.)
 
 ### Showing a stored image to the operator
-When the operator asks to SEE or SHOW an image (e.g. "the latest image with weft_up", "show me a stitch defect"), query inference_results for the matching row's `image_path` (the detections JSONB holds each object's class — filter with e.g. `detections @> '[{{"class":"weft_up"}}]'` and `ORDER BY time DESC LIMIT 1`), strip a leading `raw_images/` from the path if present, and return it as a MARKDOWN IMAGE so the UI renders it inline:
+When the operator asks to SEE or SHOW an image (e.g. "the latest image with weft_up", "show me a stitch defect"), query inference_results for the matching row's `image_path` (the detections JSONB holds each object's class — filter with e.g. `detections @> '[{{"name":"weft_up"}}]'` and `ORDER BY time DESC LIMIT 1`), strip a leading `raw_images/` from the path if present, and return it as a MARKDOWN IMAGE so the UI renders it inline:
 `![weft_up](/api/raw_image/<image_path WITHOUT the leading raw_images/ prefix>)`
 The `/api/raw_image/<path>` endpoint serves the JPEG. Add one short caption line above it (time · shipment · confidence).
 
@@ -2386,8 +2364,8 @@ The `/api/raw_image/<path>` endpoint serves the JPEG. Add one short caption line
 - Recent defects: `SELECT time, detections, detection_count, inference_time_ms FROM inference_results ORDER BY time DESC LIMIT 20`
 - Defect rate last hour: `SELECT COUNT(*) FILTER (WHERE detection_count > 0) as defective, COUNT(*) as total FROM inference_results WHERE time > NOW() - INTERVAL '1 hour'`
 - Production summary: `SELECT shipment, MAX(ok_counter) as ok, MAX(ng_counter) as ng FROM production_metrics WHERE time > NOW() - INTERVAL '24 hours' GROUP BY shipment`
-- Detections JSON example: each item in detections array has: {{"class": "defect_name", "confidence": 0.95, "bbox": [x1,y1,x2,y2]}}
-- To parse JSONB: `SELECT jsonb_array_elements(detections)->>'class' as defect_class FROM inference_results WHERE detection_count > 0`
+- Detections JSON example: each item in the detections array looks like {{"name": "defect_name", "class": 3, "confidence": 0.95, "xmin": 10, "ymin": 20, "xmax": 110, "ymax": 90, "_cam": "2"}} — `name` is the class LABEL, `class` its numeric id, `_cam` the camera.
+- To parse JSONB: `SELECT jsonb_array_elements(detections)->>'name' as defect_class FROM inference_results WHERE detection_count > 0`
 
 ## Available Redis Keys (real-time data)
 encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds, inference_times (list), frame_intervals (list), capture_timestamps (list), detection_events (list of JSON)
@@ -2417,7 +2395,19 @@ encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds, inferenc
         # Call AI API based on model. citations_out/proposals_out collect anything
         # the KB tools surface during the agentic loop (empty when KB is down).
         _citations, _proposals = [], []
+        import time as _tq
+        _tq0 = _tq.time()
         ai_response = asyncio.run(call_ai_model(model, api_key, system_prompt, user_query, watcher_instance=watcher, base_url=base_url, model_id=model_id, citations_out=_citations, proposals_out=_proposals))
+        # 4.0.433 — log usage like the other AI endpoints. The chat — the most expensive
+        # call, up to 5 agentic tool rounds — was missing from ai_usage_log (and so billing).
+        try:
+            from services.ai_usage import log_usage
+            log_usage(endpoint="/api/ai_query", mode="chat", model_name=active_name, provider=model,
+                      prompt_text=(system_prompt + "\n" + user_query), answer_text=str(ai_response or ""),
+                      latency_ms=int((_tq.time() - _tq0) * 1000), status="ok",
+                      operator=request.headers.get("X-Operator") or None)
+        except Exception:
+            pass
 
         return JSONResponse(content={"response": ai_response, "model": model,
                                      "citations": _citations, "proposed_actions": _proposals,

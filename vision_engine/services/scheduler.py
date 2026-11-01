@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -268,6 +269,28 @@ def _read_current_shipment() -> str:
         return ""
 
 
+_tz_warned = set()
+
+
+def _sched_now(notif_cfg):
+    """Wall-clock time the cron schedules are matched against.
+
+    4.0.433 — this was `datetime.now()  # local time`, but the container has no TZ, so
+    "local" was UTC: "0 8 * * *" fired at 11:30 in Tehran. Now: notifications.timezone
+    (e.g. "Asia/Tehran"), else the TZ env var, else UTC (the previous behaviour, so existing
+    schedules don't move until a zone is set)."""
+    tzname = str((notif_cfg or {}).get("timezone") or os.environ.get("TZ") or "").strip()
+    if tzname:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(tzname)).replace(tzinfo=None)
+        except Exception as e:
+            if tzname not in _tz_warned:
+                _tz_warned.add(tzname)
+                logger.warning(f"notifications: unknown time zone {tzname!r} ({e}) - using UTC")
+    return datetime.now()
+
+
 async def _scheduler_loop(app):
     """Wake every minute, check each enabled schedule, fire matching ones.
 
@@ -295,7 +318,7 @@ async def _scheduler_loop(app):
             svc = load_service_config() or {}
             cfg = svc.get("notifications") or {}
             schedules = cfg.get("schedules") or []
-            now = datetime.now()  # local time
+            now = _sched_now(cfg)  # 4.0.433 — in the configured time zone (was UTC: see _sched_now)
 
             current_shipment = _read_current_shipment()
             shipment_changed = (

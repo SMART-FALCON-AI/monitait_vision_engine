@@ -146,7 +146,15 @@ def send_text(
 
 # ---------- Notification log ----------
 
+_schema_ready = False   # 4.0.433 — bootstrap once per process (see below)
+
+
 def _ensure_log_schema(conn) -> bool:
+    # 4.0.433 — CREATE TABLE/INDEX IF NOT EXISTS + COMMIT ran on EVERY notification_log write
+    # and read (the churn 4.0.321 removed from config_db). Once per process now.
+    global _schema_ready
+    if _schema_ready:
+        return True
     try:
         cur = conn.cursor()
         cur.execute(
@@ -168,6 +176,7 @@ def _ensure_log_schema(conn) -> bool:
         )
         conn.commit()
         cur.close()
+        _schema_ready = True
         return True
     except Exception as e:
         logger.warning(f"notification_log schema bootstrap failed: {e}")

@@ -225,6 +225,13 @@ def _login() -> str:
         "password": password,
         "initial_device_display_name": "MVE " + _site_name(),
     }
+    # 4.0.433 — a STABLE device id (this machine's hardware fingerprint): without one the
+    # homeserver created a new Matrix device on every restart / token re-login, so the
+    # bot account piled up hundreds of stale devices.
+    try:
+        body["device_id"] = "MVE" + machine_fingerprint().upper()
+    except Exception:
+        pass
     try:
         r = _SESSION.post(_homeserver() + "/_matrix/client/v3/login", json=body, timeout=_timeout())
     except requests.RequestException as e:

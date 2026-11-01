@@ -101,7 +101,9 @@ def encode_jpeg(frame_bgr, quality: int = 85) -> Optional[bytes]:
         try:
             # simplejpeg expects colorspace name; 'BGR' matches our arrays
             # exactly (no channel-swap needed).
-            return _sj.encode_jpeg(frame_bgr, quality=int(quality), colorspace='BGR')
+            # 4.0.433 — 4:2:0 as documented above: simplejpeg's default is '444', so frames
+            # (raw_images, MJPEG stream, timeline) were ~larger than intended.
+            return _sj.encode_jpeg(frame_bgr, quality=int(quality), colorspace='BGR', colorsubsampling='420')
         except Exception as e:
             logger.debug(f"jpeg_codec: simplejpeg encode failed, one-frame fallback: {e}")
     elif _backend == "pyturbojpeg":

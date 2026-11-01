@@ -34,7 +34,15 @@ DEFAULT_RATE_INPUT_PER_M  = 0.28   # USD per 1M input tokens
 DEFAULT_RATE_OUTPUT_PER_M = 1.40   # USD per 1M output tokens
 
 
+_schema_ready = False   # 4.0.433 — bootstrap once per process (see below)
+
+
 def _ensure_schema(conn) -> bool:
+    # 4.0.433 — CREATE TABLE/INDEX IF NOT EXISTS + COMMIT ran on EVERY ai_usage_log write
+    # and read (the churn 4.0.321 removed from config_db). Once per process now.
+    global _schema_ready
+    if _schema_ready:
+        return True
     try:
         cur = conn.cursor()
         cur.execute(
@@ -59,6 +67,7 @@ def _ensure_schema(conn) -> bool:
         )
         conn.commit()
         cur.close()
+        _schema_ready = True
         return True
     except Exception as e:
         logger.warning(f"ai_usage_log schema bootstrap failed: {e}")
