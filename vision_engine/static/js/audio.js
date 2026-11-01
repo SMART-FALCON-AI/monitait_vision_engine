@@ -370,7 +370,7 @@ function updateObjectsList() {
                 <button onclick="askWhyForClass(${safeName}, this)" title="Ask the AI why this class is behaving this way right now" style="background:linear-gradient(135deg,#10b981,#047857); color:#fff; border:none; padding:1px 7px; cursor:pointer; font-size:11px; border-radius:3px; font-weight:600;">🤔</button>
                 <span class="info-tooltip-sm" style="cursor: help;">i<span class="info-tooltip-text" style="text-align: left; min-width: 280px;">${infoHtml}</span></span>
             </div>
-            <div class="per-class-why-${safeName.replace(/[^a-zA-Z0-9]/g,'_')}" style="display:none; font-size:11px; color:#d1fae5; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:4px; padding:6px 8px; margin-bottom:6px; line-height:1.45;"></div>
+            <div class="per-class-why-${String(objectName).replace(/[^a-zA-Z0-9]/g,'_')}" style="display:none; font-size:11px; color:#d1fae5; background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.3); border-radius:4px; padding:6px 8px; margin-bottom:6px; line-height:1.45;"></div>
             <div style="display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px;">
                 <label style="display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;" title="Show bounding box">
                     <input type="checkbox" ${isShown ? 'checked' : ''} onchange="toggleObjectShow(${safeName})" style="width: 14px; height: 14px; cursor: pointer;">
@@ -556,7 +556,9 @@ function _clearAudioSyncBanner(objectName) {
 
 // Toggle show/hide bounding box for object
 function toggleObjectShow(objectName) {
-    const current = audioSettings.showObjects[objectName] !== false;
+    // 4.0.455 — same test as the card renders with (=== true): a class with no stored value
+    // showed UNticked, but this read it as on, so the first click wrote false (no change)
+    const current = audioSettings.showObjects[objectName] === true;
     audioSettings.showObjects[objectName] = !current;
     saveAudioSettings();
     updateObjectsList();
@@ -824,16 +826,17 @@ function _renderSeveritySuggestions(rows, procRows) {
             const arrow = r.suggested_severity > r.current_severity ? '↑' :
                           r.suggested_severity < r.current_severity ? '↓' : '=';
             const arrowColor = arrow === '↑' ? '#86efac' : arrow === '↓' ? '#fcd34d' : '#94a3b8';
-            const nameDisp = (kind === 'procedure') ? `⏏ ${name}` : name;
+            // 4.0.455 — escaped: class / procedure names and the AI's tier / reason text
+            const nameDisp = (kind === 'procedure') ? `⏏ ${_mveEsc(name)}` : _mveEsc(name);
             return `
-                <tr style="border-top:1px solid rgba(51,65,85,0.4);" data-${kind}="${name}">
+                <tr style="border-top:1px solid rgba(51,65,85,0.4);" data-${kind}="${_mveEsc(name)}">
                     <td style="padding:4px 8px; font-weight:600;">${nameDisp}</td>
-                    <td style="text-align:center; padding:4px 8px;">${r.current_severity}</td>
+                    <td style="text-align:center; padding:4px 8px;">${_mveEsc(r.current_severity)}</td>
                     <td style="text-align:center; padding:4px 8px; font-weight:700;">
-                        ${r.suggested_severity} <span style="color:${arrowColor}; font-weight:400;">${arrow}</span>
+                        ${_mveEsc(r.suggested_severity)} <span style="color:${arrowColor}; font-weight:400;">${arrow}</span>
                     </td>
-                    <td style="text-align:center; padding:4px 8px; color:${_tierColor(r.tier)}; font-weight:600;">${r.tier || '?'}</td>
-                    <td style="padding:4px 8px; color:var(--text-secondary); font-size:11px;">${(r.reason || '').replace(/</g, '&lt;')}</td>
+                    <td style="text-align:center; padding:4px 8px; color:${_tierColor(r.tier)}; font-weight:600;">${_mveEsc(r.tier || '?')}</td>
+                    <td style="padding:4px 8px; color:var(--text-secondary); font-size:11px;">${_mveEsc(r.reason || '')}</td>
                     <td style="text-align:center; padding:4px 8px;">
                         <button onclick="${handler}(${idx})" ${same ? 'disabled' : ''} style="background:${same?'rgba(51,65,85,0.4)':'var(--primary-color)'}; color:#fff; border:none; padding:3px 9px; cursor:${same?'default':'pointer'}; font-size:11px; border-radius:3px; font-weight:600;">${same ? '=' : '✓'}</button>
                     </td>
@@ -851,7 +854,12 @@ function _renderSeveritySuggestions(rows, procRows) {
 async function applyOneSeveritySuggestion(idx) {
     if (!_severitySuggestions || !_severitySuggestions[idx]) return;
     const row = _severitySuggestions[idx];
-    await _postSeverityUpdates([{ class: row.class, severity: row.suggested_severity }]);
+    const res = await _postSeverityUpdates([{ class: row.class, severity: row.suggested_severity }]);
+    if (!res || res.error) {
+        const st = document.getElementById('severity-suggest-status');
+        if (st) st.textContent = 'Not applied: ' + ((res && res.error) || 'no answer');
+        return;
+    }
     // Reflect locally
     audioSettings.severityObjects = audioSettings.severityObjects || {};
     audioSettings.severityObjects[row.class] = row.suggested_severity;
@@ -893,6 +901,10 @@ async function applyAllSeveritySuggestions() {
     let appliedCls = 0, appliedProc = 0;
     if (classUpdates.length) {
         const r = await _postSeverityUpdates(classUpdates);
+        if (!r || r.error) {
+            document.getElementById('severity-suggest-status').textContent = 'Not applied: ' + ((r && r.error) || 'no answer');
+            return;
+        }
         appliedCls = r?.applied ?? classUpdates.length;
         audioSettings.severityObjects = audioSettings.severityObjects || {};
         _severitySuggestions.forEach(r => {
@@ -952,7 +964,10 @@ async function _postSeverityUpdates(updates) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ updates }),
         });
-        return await r.json();
+        const d = await r.json();
+        // 4.0.455 — an HTTP error is a failure too (it was shown as "Applied")
+        if (!r.ok && !(d && d.error)) return { error: 'HTTP ' + r.status };
+        return d;
     } catch (e) {
         return { error: e.message };
     }
@@ -1443,8 +1458,21 @@ function renderProcedures() {
     }).join('');
 }
 
+// 4.0.455 — true only once the saved list really arrived. A failed load left the editor
+// empty ("No ejection procedures configured"); adding one and saving then REPLACED the
+// stored list with that one rule — every existing eject rule wiped.
+let _proceduresLoaded = false;
+
 async function saveProcedures() {
     const statusEl = document.getElementById('procedures-save-status');
+    if (!_proceduresLoaded) {
+        if (statusEl) {
+            statusEl.textContent = 'Not saved — the saved procedures could not be loaded; reloading them first';
+            statusEl.style.color = '#ef4444';
+        }
+        loadProcedures();
+        return;
+    }
     try {
         statusEl.textContent = 'Saving...';
         statusEl.style.color = 'var(--text-secondary)';
@@ -1473,12 +1501,21 @@ async function loadProcedures() {
     try {
         const response = await fetch('/api/procedures');
         const data = await response.json();
-        if (data.procedures) {
+        if (response.ok && Array.isArray(data.procedures)) {
             procedures = data.procedures;
+            _proceduresLoaded = true;
             renderProcedures();
+            return;
         }
+        throw new Error((data && data.error) || ('HTTP ' + response.status));
     } catch (e) {
         console.error('Error loading procedures:', e);
+        if (!_proceduresLoaded) {
+            const c = document.getElementById('procedures-list');
+            if (c) c.innerHTML = '<div style="padding: 15px; border-radius: 6px; text-align: center; color: #fca5a5;">'
+                + 'Could not load the ejection procedures (' + _mveEsc(e.message || String(e)) + '). '
+                + 'Reload the page — changes are not saved until they load.</div>';
+        }
     }
 }
 
@@ -2168,14 +2205,6 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             const rotation = parseInt(document.getElementById('timeline-rotation').value) || 0;
 
-            // Build per-object filters from audioSettings
-            const objectFilters = {};
-            detectedObjectClasses.forEach(name => {
-                objectFilters[name] = {
-                    show: audioSettings.showObjects[name] !== false,
-                    min_confidence: (audioSettings.objectConfidence[name] !== undefined ? audioSettings.objectConfidence[name] : 1) / 100
-                };
-            });
 
             // 3.21.22 — object_filters is no longer written from the UI.
             // The Process tab toggle alone is the canonical Show source
@@ -2855,8 +2884,8 @@ function loadChatHistory() {
     renderConvList();
 }
 // Append a message to the ACTIVE conversation (bubbles it to the top of the list).
-function saveChatMessage(type, content) {
-    const id = _ensureConv();
+function saveChatMessage(type, content, convId) {
+    const id = convId || _ensureConv();
     let convs = _loadConvs();
     let c = convs.find(x => x.id === id);
     if (!c) { c = _newConvObj(); c.id = id; convs.unshift(c); }
@@ -2967,6 +2996,10 @@ async function sendAIMessage() {
 
     // Save to history
     saveChatMessage('user', message);
+    // 4.0.455 — the answer belongs to THIS conversation: switching chats (or New Chat) while
+    // "Thinking…" showed and saved it in the newly selected one.
+    const convId = _ensureConv();
+    const _stillHere = () => localStorage.getItem('ai_current_conv') === convId;
 
     // Clear input
     input.value = '';
@@ -3008,6 +3041,10 @@ async function sendAIMessage() {
         // v4.0.224 — knowledge citation chips. Defensive on key names (the MKB
         // passage shape is verified at runtime); empty array (KB off) → no chips,
         // so this is inert when the knowledge service is down.
+        if (!_stillHere()) {            // the operator moved to another chat meanwhile
+            saveChatMessage('ai', formattedResponse, convId);
+            return;
+        }
         if (Array.isArray(data.citations) && data.citations.length) {
             const chips = data.citations.map(function (c) {
                 const label = _escKb(c.citation || c.label || (c.document_id != null ? ('[' + c.document_id + ']') : '') || c.source || 'source');
@@ -3021,7 +3058,7 @@ async function sendAIMessage() {
         chatMessages.appendChild(aiMsg);
 
         // Save to history
-        saveChatMessage('ai', formattedResponse);
+        saveChatMessage('ai', formattedResponse, convId);
 
         // Scroll to bottom
         chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -3034,10 +3071,10 @@ async function sendAIMessage() {
         errorMsg.style.cssText = 'margin-bottom: 10px; padding: 10px; background: rgba(239, 68, 68, 0.2); border: 1px solid var(--danger-color); border-radius: 8px; color: var(--danger-color);';
         const errorContent = 'Failed to get AI response. Please check your configuration.';
         errorMsg.innerHTML = `<strong>Error:</strong> ${errorContent}`;
-        chatMessages.appendChild(errorMsg);
+        if (_stillHere()) chatMessages.appendChild(errorMsg);
 
         // Save to history
-        saveChatMessage('error', errorContent);
+        saveChatMessage('error', errorContent, convId);
 
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }

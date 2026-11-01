@@ -639,11 +639,23 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
         if not updated:
             raise HTTPException(status_code=400, detail="No valid configuration keys provided")
 
-        return JSONResponse(content={
+        _out = {
             "status": "ok",
             "updated": updated,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+        }
+        if "parent_object_list" in updated:
+            # 4.0.455 — say what the list really does: since 4.0.58 the parents come from each
+            # class's Role on the Process tab; this list is only used when NO class settings
+            # exist (the UI answered "OK" while nothing changed)
+            try:
+                _aud = (load_service_config() or {}).get("audio_settings") or {}
+            except Exception:
+                _aud = {}
+            if _aud:
+                _out["note"] = ("Not used on this site: parent objects come from each class's Role "
+                                "(Process tab). This list applies only when no class settings exist.")
+        return JSONResponse(content=_out)
 
     except HTTPException:
         raise

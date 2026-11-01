@@ -268,6 +268,10 @@ function startStatusStream() {
         try {
             _lastSSETime = Date.now();
             const data = JSON.parse(event.data);
+            // 4.0.455 — the server's keep-alive / wake packet ({"wake": true}) is not a status:
+            // fed to updateStatusUI it zeroed the counters and flashed "Serial: Disconnected /
+            // undefined not accessible" on every reconnect
+            if (data && data.wake && Object.keys(data).length <= 2) return;
 
             // 4.0.7 — removed per-event console.log. At 45 FPS this was flooding
             // the console with hundreds of thousands of messages per shift,
@@ -1481,12 +1485,13 @@ async function loadNotifLog() {
             items.map(it => {
                 const colour = it.status === 'ok' ? '#86efac' : '#fca5a5';
                 return '<tr style="border-top:1px solid rgba(51,65,85,0.4);">' +
-                    '<td style="padding:3px;">' + fmtTime(it.time) + '</td>' +
-                    '<td style="text-align:center;">' + (it.channel || '') + '</td>' +
-                    '<td style="text-align:center;">' + (it.chat_id || '') + '</td>' +
-                    '<td style="text-align:center;">' + (it.kind || '') + '</td>' +
-                    '<td style="text-align:center; color:' + colour + ';">' + it.status + (it.error ? ' (' + it.error + ')' : '') + '</td>' +
-                    '<td style="padding:3px; opacity:0.8;">' + (it.caption || '').replace(/</g, '&lt;') + '</td>' +
+                    // 4.0.455 — every field escaped (the error text comes from the bot host)
+                    '<td style="padding:3px;">' + _mveEsc(fmtTime(it.time)) + '</td>' +
+                    '<td style="text-align:center;">' + _mveEsc(it.channel || '') + '</td>' +
+                    '<td style="text-align:center;">' + _mveEsc(it.chat_id || '') + '</td>' +
+                    '<td style="text-align:center;">' + _mveEsc(it.kind || '') + '</td>' +
+                    '<td style="text-align:center; color:' + colour + ';">' + _mveEsc(it.status) + (it.error ? ' (' + _mveEsc(it.error) + ')' : '') + '</td>' +
+                    '<td style="padding:3px; opacity:0.8;">' + _mveEsc(it.caption || '') + '</td>' +
                     '</tr>';
             }).join('') + '</table>';
     } catch (e) {
@@ -1698,13 +1703,17 @@ async function updateConfig(key, value) {
                 if (data.serial_reinitialized) {
                     responseEl.textContent = `OK: ${key} = ${value} - Serial connection reinitialized`;
                 }
+                if (data.note) {                       // 4.0.455 — e.g. a setting that has no effect here
+                    responseEl.textContent = `Saved — ${data.note}`;
+                    responseEl.className = 'control-response error';
+                }
 
                 setTimeout(() => {
                     responseEl.textContent = '';
                     responseEl.className = 'control-response';
                 }, 3000);
             } else {
-                responseEl.textContent = `Error: ${data.detail || 'Unknown error'}`;
+                responseEl.textContent = `Error: ${_errDetail(data)}`;
                 responseEl.className = 'control-response error';
                 setTimeout(() => {
                     responseEl.textContent = '';
@@ -1906,7 +1915,7 @@ function createCameraCard(cameraId, camera) {
                     A camera is plugged into this USB port but isn't in the config yet. Add it to start using it.
                 </div>
                 <div style="font-size:11px; color:var(--text-secondary); word-break:break-all; margin-bottom:12px;">
-                    <b>By-path:</b> ${bp}<br><b>Node:</b> ${camera.path || ''}
+                    <b>By-path:</b> ${_mveEsc(bp)}<br><b>Node:</b> ${_mveEsc(camera.path || '')}
                 </div>
                 <button class="control-button" style="background:#10b981; color:#fff; font-weight:600;"
                         onclick="addDetectedCamera('${(camera.by_path || '').replace(/'/g, '')}', this)">＋ Add this camera</button>
@@ -1942,7 +1951,7 @@ function createCameraCard(cameraId, camera) {
                 ${isIPCamera ? `
                 <div class="camera-info-item">
                     <span class="camera-info-label">Type</span>
-                    <span class="camera-info-value">IP Camera (${camera.ip || 'N/A'})</span>
+                    <span class="camera-info-value">IP Camera (${_mveEsc(camera.ip || 'N/A')})</span>
                 </div>
                 ` : ''}
                 <!-- v4.0.142 — Path row stacked so the by-path symlink can
@@ -1952,14 +1961,15 @@ function createCameraCard(cameraId, camera) {
                     <span class="camera-info-label">Path</span>
                     <span class="camera-info-value" style="font-size: 10px; font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace; line-height: 1.35;">
                         ${(() => {
-                            if (isIPCamera && camera.camera_path) return camera.camera_path;
+                            // 4.0.455 — escaped (server / camera-supplied text into innerHTML)
+                            if (isIPCamera && camera.camera_path) return _mveEsc(camera.camera_path);
                             if (camera.by_path) {
                                 const bp = String(camera.by_path).replace(/^\/dev\/v4l\/by-path\//, '');
                                 const raw = camera.path || '';
-                                return `<span title="by-path: ${camera.by_path}\ncurrently → ${raw}">${bp}</span>` +
-                                       (raw ? ` <span style="font-size: 9px; color: var(--text-secondary); font-weight: normal;">→ ${raw}</span>` : '');
+                                return `<span title="by-path: ${_mveEsc(camera.by_path)}\ncurrently → ${_mveEsc(raw)}">${_mveEsc(bp)}</span>` +
+                                       (raw ? ` <span style="font-size: 9px; color: var(--text-secondary); font-weight: normal;">→ ${_mveEsc(raw)}</span>` : '');
                             }
-                            return camera.path || '-';
+                            return _mveEsc(camera.path || '-');
                         })()}
                     </span>
                 </div>
@@ -2397,21 +2407,6 @@ window.addEventListener('load', () => {
     }, true);
 });
 
-// ===== CAMERA CONFIG PERSISTENCE FUNCTIONS =====
-function showConfigMessage(message, type) {
-    const msgEl = document.getElementById('camera-config-message');
-    msgEl.textContent = message;
-    msgEl.style.display = 'block';
-    msgEl.style.backgroundColor = type === 'success' ? '#d4edda' : type === 'error' ? '#f8d7da' : '#d1ecf1';
-    msgEl.style.color = type === 'success' ? '#155724' : type === 'error' ? '#721c24' : '#0c5460';
-    setTimeout(() => { msgEl.style.display = 'none'; }, 5000);
-}
-
-
-
-
-
-
 // ===== STATE MANAGEMENT FUNCTIONS =====
 let statesData = {};
 
@@ -2568,9 +2563,22 @@ async function triggerCapture() {
 // Phase management functions
 let phaseCounter = 1;  // Start at 1 since we have 1 default phase
 
+// 4.0.455 — the next free row index. A state loaded into the editor numbers its rows from 0
+// without touching phaseCounter, so "+ Add Phase" could create a SECOND phase-row-1: ✕ on the
+// new row then removed the original phase 2 and Save stored the wrong phases.
+function _nextPhaseIdx() {
+    let m = -1;
+    document.querySelectorAll('.phase-row').forEach(r => {
+        const n = parseInt(String(r.id || '').replace('phase-row-', ''), 10);
+        if (Number.isFinite(n) && n > m) m = n;
+    });
+    return Math.max(m + 1, phaseCounter);
+}
+
 function addPhase() {
-    addPhaseRow(phaseCounter, 'U_ON_B_OFF', 0.1, [1, 2, 3, 4]);
-    phaseCounter++;
+    const i = _nextPhaseIdx();
+    addPhaseRow(i, 'U_ON_B_OFF', 0.1, [1, 2, 3, 4]);
+    phaseCounter = i + 1;
 }
 
 function addPhaseRow(idx, lightMode, delay, cameras, steps = 1, analog = -1) {
@@ -2621,7 +2629,7 @@ function removePhase(idx) {
     // Check if we have at least one phase
     const remaining = document.querySelectorAll('.phase-row').length;
     if (remaining === 0) {
-        addPhaseRow(phaseCounter++, 'U_ON_B_OFF', 0.1, [1, 2, 3, 4]);
+        addPhase();
     }
 }
 
@@ -2889,7 +2897,7 @@ function _showYoloClasses(classes) {
         return;
     }
     container.innerHTML = classes.map(c =>
-        `<span style="background: rgba(59,130,246,0.2); border: 1px solid rgba(59,130,246,0.5); border-radius: 4px; padding: 2px 6px; font-size: 10px; color: var(--text-primary);">${c}</span>`
+        `<span style="background: rgba(59,130,246,0.2); border: 1px solid rgba(59,130,246,0.5); border-radius: 4px; padding: 2px 6px; font-size: 10px; color: var(--text-primary);">${_mveEsc(c)}</span>`
     ).join('');
 }
 
@@ -3022,12 +3030,12 @@ function renderModelsList(models) {
         modelDiv.innerHTML = `
             <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                 <div style="flex: 1;">
-                    <strong style="font-size: 14px; color: var(--text-primary);">${model.name}</strong>
-                    <span style="margin-left: 8px; padding: 2px 6px; background: ${model.model_type === 'gradio' ? '#17a2b8' : '#28a745'}; color: white; border-radius: 3px; font-size: 10px;">${model.model_type.toUpperCase()}</span>
+                    <strong style="font-size: 14px; color: var(--text-primary);">${_mveEsc(model.name)}</strong>
+                    <span style="margin-left: 8px; padding: 2px 6px; background: ${model.model_type === 'gradio' ? '#17a2b8' : '#28a745'}; color: white; border-radius: 3px; font-size: 10px;">${_mveEsc(String(model.model_type || '').toUpperCase())}</span>
                     <div style="margin-top: 4px; font-size: 11px; color: var(--text-secondary);">
-                        Model: ${model.model_name} | Confidence: ${model.confidence_threshold}
+                        Model: ${_mveEsc(model.model_name)} | Confidence: ${_mveEsc(model.confidence_threshold)}
                     </div>
-                    <div style="margin-top: 2px; font-size: 10px; color: var(--text-secondary); word-break: break-all;">${model.inference_url}</div>
+                    <div style="margin-top: 2px; font-size: 10px; color: var(--text-secondary); word-break: break-all;">${_mveEsc(model.inference_url)}</div>
                 </div>
                 <div style="display: flex; gap: 4px; margin-left: 10px;">
                     <button onclick="loadModelForEdit(${_mveEsc(JSON.stringify(id))})" style="padding: 4px 8px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">Edit</button>
@@ -3056,10 +3064,10 @@ function renderModelsChecklist(models) {
         // frame; set to N to run this phase every Nth frame (e.g. 10 = math runs
         // every 10th frame to save GPU/CPU). Min 1, max 100.
         label.innerHTML = `
-            <input type="checkbox" name="pipeline-model" value="${id}">
-            <span>${model.name}</span>
+            <input type="checkbox" name="pipeline-model" value="${_mveEsc(id)}">
+            <span>${_mveEsc(model.name)}</span>
             <span style="font-size:11px; color:var(--text-secondary); margin-left:6px;" title="Run this model every Nth frame (1 = every frame)">stride</span>
-            <input type="number" name="pipeline-stride" data-model-id="${id}" value="1" min="1" max="100" step="1"
+            <input type="number" name="pipeline-stride" data-model-id="${_mveEsc(id)}" value="1" min="1" max="100" step="1"
                    style="width:54px; padding:2px 4px; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid var(--border-color); border-radius:3px; font-size:12px;"
                    onclick="event.preventDefault(); event.stopPropagation();">
         `;
@@ -3130,7 +3138,7 @@ async function populatePipelineWeightOptions() {
             .filter(Boolean);
         const keep = sel.value;
         sel.innerHTML = '<option value="">— none / keep current —</option>' +
-            files.map(f => `<option value="${f}">${f}</option>`).join('');
+            files.map(f => `<option value="${_mveEsc(f)}">${_mveEsc(f)}</option>`).join('');
         if (keep && files.includes(keep)) sel.value = keep;
     } catch (e) { /* leave the default option in place */ }
 }
@@ -3183,14 +3191,28 @@ async function uploadPipelineWeight() {
     xhr.send(fd);
 }
 
+// 4.0.455 — the model loaded into the editor: its REAL id is reused while the name is unchanged
+// (the id was re-derived from the display name: editing "Local YOLO" (id default_yolo)
+// created a new local_yolo the pipelines don't use, and Delete aimed at the wrong id).
+window._editingModel = null;
+function _modelIdFor(name) {
+    const em = window._editingModel;
+    if (em && em.name === name) return em.id;
+    return name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+}
+
 function loadModelForEdit(modelId) {
     const model = pipelineData.models[modelId];
     if (!model) return;
+    window._editingModel = { id: modelId, name: model.name };
 
     document.getElementById('model-name-input').value = model.name;
     document.getElementById('model-type-input').value = model.model_type || 'gradio';
     document.getElementById('model-url-input').value = model.inference_url;
     document.getElementById('model-confidence-input').value = model.confidence_threshold;
+    // 4.0.455 — rebuild the type-specific model-name list FIRST, then select the model's own
+    // value: it ran last and reset the selection to "Data Matrix" / "N/A", which Save stored
+    handleModelTypeChange();
 
     const modelSelect = document.getElementById('model-gradio-name-input');
     const modelValue = model.model_name;
@@ -3209,9 +3231,6 @@ function loadModelForEdit(modelId) {
         modelSelect.appendChild(option);
         modelSelect.value = modelValue;
     }
-
-    // Toggle YOLO weights / Gradio sections based on model type
-    handleModelTypeChange();
 }
 
 async function activatePipeline(pipelineName) {
@@ -3350,8 +3369,8 @@ async function createOrUpdateModel() {
         return;
     }
 
-    // Generate model_id from name (lowercase, underscores)
-    const modelId = modelName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    // Generate model_id from name (lowercase, underscores) — or the edited model's own id
+    const modelId = _modelIdFor(modelName);
 
     try {
         const response = await fetch('/api/models', {
@@ -3393,7 +3412,7 @@ async function deleteModel() {
         return;
     }
 
-    const modelId = modelName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    const modelId = _modelIdFor(modelName);
 
     if (!confirm(`Delete model '${modelName}'?`)) return;
 
@@ -3477,11 +3496,11 @@ function displayDiscoveredCameras(cameras) {
     container.innerHTML = '<div class="discovered-cameras-list">' + cameras.map((cam, idx) => {
         const pathsHtml = cam.paths.map((p, pidx) => `
             <div style="margin-top: 10px; padding: 10px; background: #fff; border: 1px solid #e0e0e0; border-radius: 4px;">
-                <div style="font-size: 11px; color: var(--text-secondary); font-family: monospace; margin-bottom: 5px;">Path ${pidx + 1}: ${p.path}</div>
+                <div style="font-size: 11px; color: var(--text-secondary); font-family: monospace; margin-bottom: 5px;">Path ${pidx + 1}: ${_mveEsc(p.path)}</div>
                 <div style="display: flex; gap: 10px; align-items: center;">
                     <input type="text" id="camera-${idx}-path-${pidx}-username" placeholder="Username" value="admin" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 120px;">
                     <input type="password" id="camera-${idx}-path-${pidx}-password" placeholder="Password" style="padding: 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 120px;">
-                    <button class="test-camera-button" onclick='testCameraPath(${idx}, ${pidx}, "${p.url}", "${cam.ip}", "${p.path}")'>
+                    <button class="test-camera-button" onclick="testCameraPath(${idx}, ${pidx}, ${_mveEsc(JSON.stringify(String(p.url || '')))}, ${_mveEsc(JSON.stringify(String(cam.ip || '')))}, ${_mveEsc(JSON.stringify(String(p.path || '')))})">
                         🎥 Test & Preview
                     </button>
                 </div>
@@ -3491,7 +3510,7 @@ function displayDiscoveredCameras(cameras) {
         return `
             <div class="discovered-camera-item" id="discovered-camera-${idx}" style="display: block; grid-template-columns: none;">
                 <div style="margin-bottom: 10px;">
-                    <div class="discovered-camera-ip">📹 ${cam.ip} (${cam.protocol}:${cam.port})</div>
+                    <div class="discovered-camera-ip">📹 ${_mveEsc(cam.ip)} (${_mveEsc(cam.protocol)}:${_mveEsc(cam.port)})</div>
                     <div style="font-size: 12px; color: var(--text-secondary); margin-top: 5px;">Found ${cam.paths.length} possible camera path(s) - test each with credentials:</div>
                 </div>
                 ${pathsHtml}

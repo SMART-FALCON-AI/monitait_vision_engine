@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.455] - 2026-11-01 - Audit batch 35: dashboard fixes (procedures wipe, model edit, AI chat, escaping)
+
+**Fixed**
+- **A failed procedures load could wipe every ejection rule.** If the procedures list could not be loaded (database hiccup), the editor showed "No ejection procedures configured". Adding one and saving then replaced the stored list with that single rule. Saving is now refused until the list has really loaded, and the panel says the load failed.
+- **Editing a model saved the wrong values.** The model-name list was rebuilt after the model was loaded, so Save stored "Data Matrix" or "N/A". The id was also re-derived from the display name, so editing the stock "Local YOLO" created a new model that the pipelines don't use, and Delete aimed at the wrong id. The edited model's own id and model name are now kept.
+- **AI chat:** an answer that arrived after switching chats (or pressing New Chat) was shown and saved in the newly selected chat. It now goes to the chat it belongs to.
+- **State editor:** after loading a state, "+ Add Phase" could create a duplicate row id. ✕ then removed the wrong phase, and Save stored the wrong phases.
+- **Class cards:** the 🤔 (why) button did nothing (broken since 4.0.424). The first click on "Show" for a class with no stored value changed nothing.
+- **"Set Parent Objects"** answered "OK" while having no effect; parent classes come from each class's Role on the Process tab. It now says so.
+- **Severity "Apply"** said "Applied" when the server refused it.
+- **Status stream:** its reconnect packet zeroed the counters and flashed "Serial: Disconnected" on every reconnect.
+- **Configuration errors** show the real message instead of "[object Object]".
+- **Escaping:** model names, YOLO class names, weight files, camera paths and IPs, discovered cameras, the notification log and the AI severity table are escaped before being shown (they could inject HTML into the dashboard).
+
+**Removed**: unused `showConfigMessage` and leftover `objectFilters` code.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.454] - 2026-11-01 - Audit batch 34: database writer, disk janitor, quality score, downloads
 
 **Fixed**
