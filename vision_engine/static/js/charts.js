@@ -51,6 +51,49 @@ try { _loadPipeTaskMap(); } catch (e) {}
 // bucket dots. Same for every other camera. Caching the last good order
 // lets bucket dots reuse it and plot at the same Y-positions.
 let _lastCameraYOrder = [];
+// 4.0.458 — ONE camera→row map for the scatter: the base render, the bucket loader and the
+// colour-heatmap plugin all read these (they used private copies built from the 1h hydrate,
+// so a camera quiet in the last hour had its older dots drawn on ANOTHER camera's row).
+const _camRowIdx = new Map();   // camera id -> row index
+const _camRowCam = new Map();   // row index -> camera id
+let _camOrderMode = 'normal';
+let _camOrderExplicit = [];
+function _setCamRows(order) {
+    _camRowIdx.clear(); _camRowCam.clear();
+    (order || []).forEach(function (c, i) { _camRowIdx.set(c, i); _camRowCam.set(i, c); });
+    _lastCameraYOrder = (order || []).slice();
+}
+// Add cameras not on the axis yet (same rule as the server's camera_y_order), re-number the
+// rows of every dot already drawn and re-pin the Y range. Returns true when rows changed.
+function _growCamRows(cams) {
+    const add = [];
+    for (const c0 of (cams || [])) {
+        const c = Number(c0);
+        if (!Number.isInteger(c) || _camRowIdx.has(c) || add.indexOf(c) >= 0) continue;
+        add.push(c);
+    }
+    if (!add.length) return false;
+    const all = _lastCameraYOrder.concat(add);
+    let order;
+    if (_camOrderMode === 'reverse') order = all.slice().sort((a, b) => b - a);
+    else if (_camOrderMode === 'custom') {
+        const head = [];
+        for (const c of _camOrderExplicit) if (all.indexOf(c) >= 0 && head.indexOf(c) < 0) head.push(c);
+        order = head.concat(all.filter(c => head.indexOf(c) < 0).sort((a, b) => a - b));
+    } else order = all.slice().sort((a, b) => a - b);
+    _setCamRows(order);
+    const ch = _insightCameraScatter;
+    if (ch && ch.data && Array.isArray(ch.data.datasets)) {
+        for (const ds of ch.data.datasets) {
+            for (const p of (ds.data || [])) {
+                if (p && p.cam_id != null && _camRowIdx.has(p.cam_id)) p.y = _camRowIdx.get(p.cam_id);
+            }
+        }
+        const ys = ch.options && ch.options.scales && ch.options.scales.y;
+        if (ys) { ys.min = -0.5; ys.max = Math.max(0.5, order.length - 0.5); }
+    }
+    return true;
+}
 
 // 4.0.180 — narrow-rectangle pointStyle for orientation-tagged defects.
 // Chart.js supports pointStyle: HTMLCanvasElement — it draws the canvas
@@ -116,6 +159,17 @@ function _fmtLenWithUpu(value, upu, label) {
         return (abs < 10 ? c.toFixed(1) : Math.round(c).toLocaleString()) + ' ' + lab;
     }
     return raw.toLocaleString() + ' ' + lab;
+}
+
+// 4.0.458 — a shipment's length for labels: the RESET-SAFE length_units (shipment_summary, already
+// in units) when known; else the raw encoder span through the unit divisor (in-progress shipment).
+function _shipLengthText(s, data) {
+    const lu = (s && s.length_units != null) ? Number(s.length_units) : NaN;
+    if (Number.isFinite(lu) && lu > 0) {
+        return (Math.abs(lu) < 10 ? lu.toFixed(1) : Math.round(lu).toLocaleString()) + ' ' + _unitLabelFromAny(s, data);
+    }
+    if (!(s && Number(s.encoder_span))) return '';
+    return _fmtLenWithUpu(s.encoder_span, _upuFromAny(s, data), _unitLabelFromAny(s, data));
 }
 
 // v4.0.140 — pull upu + label from any of {payload row, top-level payload,
@@ -240,144 +294,12 @@ const _commonScaleOpts = (titleText) => ({
     }
 });
 
-// 3.21.13 — Shipment Quality Score card (Phase 2 preview). Reads
-// /api/shipment_quality_score for the current window + shipment, renders
-// score / verdict / impact / top-defects into the #shipment-quality-card
-// banner. Verdict color matches QUALITY_RELEASE / QUALITY_REINSPECT bands.
-// 3.21.14 — utility: format a number of seconds into "Xh Ym" / "Ym Zs"
-function _fmtDuration(sec) {
-    sec = Math.max(0, Math.round(sec || 0));
-    if (sec >= 3600) {
-        const h = Math.floor(sec / 3600);
-        const m = Math.round((sec % 3600) / 60);
-        return `${h}h ${m}m`;
-    }
-    if (sec >= 60) {
-        const m = Math.floor(sec / 60);
-        const s = sec % 60;
-        return `${m}m ${s}s`;
-    }
-    return `${sec}s`;
-}
-
 // 4.0.429 — newest-request-wins for the Charts-tab panels. Changing the window /
 // shipment fires a new fetch while the previous (slower, wider) one is still out;
 // whichever answered LAST was drawn, so a 24h answer could land on top of a 1h pick.
 const _mveReqSeq = {};
 function _mveSeqNext(k) { return (_mveReqSeq[k] = (_mveReqSeq[k] || 0) + 1); }
 function _mveSeqStale(k, n) { return _mveReqSeq[k] !== n; }
-
-async function refreshShipmentQualityScore() {
-    const win  = document.getElementById('insight-window')?.value   || '24h';
-    const ship = document.getElementById('insight-shipment')?.value || '';
-    const card = document.getElementById('shipment-quality-card');
-    if (!card) return;
-    // 4.0.429 — the card is hidden for good since 4.0.24x (_reorderChartsTab; its PDF and
-    // Calibrate buttons were moved out). It was still fetched + filled on every refresh.
-    if (card.style.display === 'none') return;
-    const _seq = _mveSeqNext('sqs');
-    let data;
-    try {
-        const r = await fetch('/api/shipment_quality_score?window=' + encodeURIComponent(win) +
-                              '&shipment=' + encodeURIComponent(ship));
-        data = await r.json();
-    } catch (e) { console.error('shipment_quality_score fetch failed:', e); return; }
-    if (_mveSeqStale('sqs', _seq)) return;
-
-    const scoreEl   = document.getElementById('sqs-score');       // Relative
-    const scoreAbsEl = document.getElementById('sqs-score-abs');    // 4.0.61 Absolute
-    const verdictEl = document.getElementById('sqs-verdict');
-    const normNoteEl= document.getElementById('sqs-norm-note');
-    const lengthEl  = document.getElementById('sqs-length');
-    const durEl     = document.getElementById('sqs-duration');
-    const throughEl = document.getElementById('sqs-throughput');
-    const impactPerUnitEl = document.getElementById('sqs-impact-per-unit');
-    const impactUnitLabelEl = document.getElementById('sqs-impact-unit-label');
-    const impactEl  = document.getElementById('sqs-impact-total');
-    const countEl   = document.getElementById('sqs-count');
-    const topListEl = document.getElementById('sqs-top-list');
-
-    const score = data.score;
-    const verdict = data.verdict;
-
-    if (score === null || score === undefined) {
-        if (scoreEl)   scoreEl.textContent   = '—';
-        if (scoreAbsEl) scoreAbsEl.textContent = '—';
-        if (verdictEl) { verdictEl.textContent = 'NO DATA'; verdictEl.style.background = 'rgba(51,65,85,0.6)'; verdictEl.style.color = 'var(--text-primary)'; }
-        if (normNoteEl) normNoteEl.textContent = '—';
-        if (lengthEl)  lengthEl.textContent  = '—';
-        if (durEl)     durEl.textContent     = '—';
-        if (throughEl) throughEl.textContent = '—';
-        if (impactPerUnitEl) impactPerUnitEl.textContent = '—';
-        if (impactEl)  impactEl.textContent  = '—';
-        if (countEl)   countEl.textContent   = '—';
-        if (topListEl) topListEl.innerHTML = '<span style="font-style:italic;">No data in this window yet.</span>';
-        return;
-    }
-
-    // 4.0.61 — dual scoring: Absolute has no calibration knob so it's stable
-    // across time / sites; Relative uses the calibrated score_scale_factor.
-    // Fall back gracefully if the older API version doesn't emit `score_absolute`.
-    if (scoreEl) scoreEl.textContent = score.toFixed(1);
-    if (scoreAbsEl) {
-        const abs = (data.score_absolute !== undefined && data.score_absolute !== null)
-            ? data.score_absolute : score;
-        scoreAbsEl.textContent = Number(abs).toFixed(1);
-    }
-
-    // Verdict color: green RELEASE / amber RE-INSPECT / red HOLD
-    let bg = 'rgba(51,65,85,0.6)', fg = 'var(--text-primary)';
-    if (verdict === 'RELEASE')      { bg = 'rgba(34,197,94,0.28)';  fg = '#86efac'; }
-    else if (verdict === 'RE-INSPECT') { bg = 'rgba(234,179,8,0.28)'; fg = '#fcd34d'; }
-    else if (verdict === 'HOLD')    { bg = 'rgba(239,68,68,0.30)';  fg = '#fca5a5'; }
-    if (verdictEl) { verdictEl.textContent = verdict; verdictEl.style.background = bg; verdictEl.style.color = fg; }
-
-    // Normalization note (so operator knows the score basis)
-    if (normNoteEl) {
-        const by = data.normalized_by;
-        if (by === 'encoder') {
-            // v4.0.140 — shared formatter. Uses per-payload upu (falls back
-            // to global cache) and the operator's chosen unit label.
-            normNoteEl.textContent = `Normalized by encoder span (${_fmtLenWithUpu(data.encoder_span, _upuFromAny(null, data), _unitLabelFromAny(null, data))})`;
-        } else if (by === 'frame') {
-            normNoteEl.textContent = `Normalized by frame count (${(data.frame_count || 0).toLocaleString()} frames) — no encoder data`;
-        } else {
-            normNoteEl.textContent = 'No length data available — score may not be meaningful';
-        }
-    }
-
-    if (lengthEl) {
-        // v4.0.140 — same formatter as the norm note above so both strings
-        // never disagree on the same shipment.
-        lengthEl.textContent = _fmtLenWithUpu(data.encoder_span, _upuFromAny(null, data), _unitLabelFromAny(null, data));
-    }
-    if (durEl)    durEl.textContent     = _fmtDuration(data.duration_sec);
-    if (throughEl) {
-        const t = data.throughput ?? 0;
-        throughEl.textContent = t > 0 ? (t.toFixed(2) + ' ' + (data.throughput_label || 'units/sec')) : '—';
-    }
-    if (impactPerUnitEl) impactPerUnitEl.textContent = (data.impact_per_unit ?? 0).toFixed(3);
-    if (impactUnitLabelEl) impactUnitLabelEl.textContent = (data.impact_per_unit_label || '/unit').replace(/^\//, '');
-    if (impactEl) impactEl.textContent = (data.impact_total ?? 0).toFixed(1);
-    if (countEl)  countEl.textContent  = (data.total_detections ?? 0).toLocaleString();
-
-    if (topListEl) {
-        const tops = data.top_defects || [];
-        if (!tops.length) {
-            topListEl.innerHTML = '<span style="font-style:italic;">No class has Severity > 0 yet — set in Process tab.</span>';
-        } else {
-            const unitLbl = (data.impact_per_unit_label || '/unit').replace(/^\//, '');
-            topListEl.innerHTML = tops.map(t =>
-                `<div style="display:flex; justify-content:space-between; gap:8px;">` +
-                `<span style="color:var(--text-primary);">${_mveEsc(t.class)}</span>` +
-                `<span><span style="color:#86efac;">impact ${t.impact.toFixed(1)}</span> · ` +
-                `<span style="color:#fcd34d;">${(t.impact_per_unit ?? 0).toFixed(3)}/${unitLbl}</span> · ` +
-                `${t.count.toLocaleString()} det · sev ${t.severity}</span></div>`
-            ).join('');
-        }
-    }
-}
-window.refreshShipmentQualityScore = refreshShipmentQualityScore;
 
 
 // 3.21.15 — server-rendered PDF download of the score card payload.
@@ -519,10 +441,6 @@ async function calibrateShipmentScore() {
                 '<i>Refresh the page to see the new score / strip colors.</i>';
             btn.textContent = '🎯 Calibrate score';
             btn.dataset.calState = 'preview';
-            // Refresh the score card so the operator sees the new score immediately.
-            if (typeof refreshShipmentQualityScore === 'function') {
-                setTimeout(refreshShipmentQualityScore, 600);
-            }
             if (typeof refreshQualityCharts === 'function') {
                 setTimeout(refreshQualityCharts, 800);
             }
@@ -589,9 +507,6 @@ async function setScoreScaleFactor() {
         }
         if (cur) cur.textContent = 'current: ' + saved;
         // Nudge any Charts-tab cards that read the score to refresh.
-        if (typeof refreshShipmentQualityScore === 'function') {
-            setTimeout(refreshShipmentQualityScore, 300);
-        }
         if (typeof refreshQualityCharts === 'function') {
             setTimeout(refreshQualityCharts, 400);
         }
@@ -1017,7 +932,7 @@ function _renderPhaseButtons(available, activePhase) {
     if (_phSel) {
         const _phCur = (localStorage.getItem('mve_heatmap_phase') || '');
         let _o = '<option value="">🌐 All</option>';
-        for (const ph of (available || [])) { if (!ph && ph !== 0) continue; _o += '<option value="' + String(ph) + '">p' + String(ph) + '</option>'; }
+        for (const ph of (available || [])) { if (!ph && ph !== 0) continue; _o += '<option value="' + _mveEsc(String(ph)) + '">p' + _mveEsc(String(ph)) + '</option>'; }
         _phSel.innerHTML = _o;
         const _avail = (available || []).map(String);
         _phSel.value = (_phCur && _avail.includes(String(_phCur))) ? String(_phCur) : '';
@@ -1070,10 +985,33 @@ function _onBaselinePickClick(chart, evt, axisMode) {
     const xScale = chart.scales.x;
     let pixelX = (evt && (evt.x != null ? evt.x : evt.offsetX));
     if (typeof pixelX !== 'number') return;
-    const xVal = xScale.getValueForPixel(pixelX);
+    let xVal = xScale.getValueForPixel(pixelX);
     const range = (xScale.max - xScale.min) || 1;
-    const win = Math.abs(range * 0.05);   // ±5% of visible range
-    const axis = (axisMode === 'encoder') ? 'encoder' : 'time';
+    let win = Math.abs(range * 0.05);   // ±5% of visible range
+    let axis = (axisMode === 'encoder') ? 'encoder' : 'time';
+    if (axisMode === 'length') {
+        // 4.0.458 — x is CUMULATIVE LENGTH, not a time: it was posted as epoch-ms (January 1970)
+        // → a baseline built from no frames. Map it into the shipment under the click, then to
+        // that shipment's time (linear within the shipment).
+        let seg = null;
+        for (const sid in (_lastLengthOffsets || {})) {
+            const o = _lastLengthOffsets[sid] || {};
+            const off = Number(o.offset) || 0, sp = Number(o.length_span) || 0;
+            if (sp > 0 && xVal >= off && xVal <= off + sp) { seg = o; break; }
+        }
+        const t0 = seg ? Number(seg.t_min) : NaN, t1 = seg ? Number(seg.t_max) : NaN;
+        if (!seg || !(t1 > t0)) {
+            window._pickingBaseline = false;
+            const sc0 = document.getElementById('insight-camera-scatter');
+            if (sc0) sc0.style.cursor = 'default';
+            alert('No shipment under that point — pick the reference on a shipment, or on the Time / Encoder axis.');
+            return;
+        }
+        const sp = Number(seg.length_span);
+        xVal = t0 + ((xVal - (Number(seg.offset) || 0)) / sp) * (t1 - t0);
+        win = Math.abs(win * (t1 - t0) / sp);
+        axis = 'time';
+    }
     fetch('/api/color_reference_position', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1146,110 +1084,6 @@ function _kickAnomalyBaseline(mode, extras) {
 window._kickAnomalyBaseline = _kickAnomalyBaseline;
 
 
-// 3.21.16 — Quality drift / trend chart under the score card.
-// Bucketed impact-per-unit timeline with verdict-threshold guide lines.
-let _sqsTrendChart = null;
-async function refreshShipmentQualityTrend() {
-    const win  = document.getElementById('insight-window')?.value || '24h';
-    const ship = document.getElementById('insight-shipment')?.value || '';
-    const chipEl = document.getElementById('sqs-trend-chip');
-    const noteEl = document.getElementById('sqs-trend-note');
-    const canvas = document.getElementById('sqs-trend-chart');
-    if (!canvas) return;
-    // 4.0.429 — the trend chart sits inside the always-hidden score card (see above)
-    const _card = document.getElementById('shipment-quality-card');
-    if (_card && _card.style.display === 'none') return;
-    const _seq = _mveSeqNext('trend');
-    let data;
-    try {
-        const params = new URLSearchParams({ window: win, buckets: '12' });
-        if (ship) params.set('shipment', ship);
-        const resp = await fetch(`/api/shipment_quality_score/trend?${params}`);
-        data = await resp.json();
-    } catch (e) { console.warn('trend fetch failed', e); return; }
-    if (_mveSeqStale('trend', _seq)) return;
-
-    const buckets = data.buckets || [];
-    if (!buckets.length) {
-        if (chipEl) {
-            chipEl.textContent = '— no data —';
-            chipEl.style.background = 'rgba(71,85,105,0.5)';
-            chipEl.style.color = 'var(--text-primary)';
-        }
-        if (_sqsTrendChart) { _sqsTrendChart.destroy(); _sqsTrendChart = null; }
-        return;
-    }
-
-    // Slope chip
-    const label = data.slope_label || 'stable';
-    const pct = data.slope_pct || 0;
-    if (chipEl) {
-        let arrow = '→', bg = 'rgba(71,85,105,0.6)', fg = '#e2e8f0';
-        if (label === 'degrading') { arrow = '↗'; bg = 'rgba(220,38,38,0.7)';  fg = '#fff'; }
-        else if (label === 'improving') { arrow = '↘'; bg = 'rgba(16,185,129,0.7)'; fg = '#fff'; }
-        const sign = pct > 0 ? '+' : '';
-        chipEl.textContent = `${arrow} ${label} ${sign}${pct}%`;
-        chipEl.style.background = bg;
-        chipEl.style.color = fg;
-    }
-    if (noteEl) {
-        const norm = data.normalized_by || 'none';
-        const unit = data.encoder_unit || 'unit';
-        const basisLbl = norm === 'encoder' ? `impact/${unit}` : (norm === 'frame' ? 'impact/frame' : 'impact (no normalization)');
-        noteEl.textContent = `${basisLbl} per ${data.bucket_size || 'bucket'} — first-third vs last-third`;
-    }
-
-    // Chart.js line of impact_per_unit per bucket
-    const labels = buckets.map(b => {
-        try { return new Date(b.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
-        catch (_) { return ''; }
-    });
-    const ipus = buckets.map(b => b.impact_per_unit ?? 0);
-
-    if (typeof Chart === 'undefined') return;
-    if (_sqsTrendChart) _sqsTrendChart.destroy();
-    _sqsTrendChart = new Chart(canvas, {
-        type: 'line',
-        data: {
-            labels,
-            datasets: [{
-                label: 'impact/unit',
-                data: ipus,
-                borderColor: '#fbbf24',
-                backgroundColor: 'rgba(251,191,36,0.15)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.35,
-                pointRadius: 2,
-                pointHoverRadius: 5,
-            }],
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: (ctx) => {
-                            const b = buckets[ctx.dataIndex] || {};
-                            return [
-                                `impact/unit: ${(b.impact_per_unit ?? 0).toFixed(5)}`,
-                                `score: ${b.score ?? '—'}`,
-                                `dets: ${(b.detections ?? 0).toLocaleString()}`,
-                            ];
-                        },
-                    },
-                },
-            },
-            scales: {
-                x: { ticks: { color: '#94a3b8', font: { size: 9 }, maxTicksLimit: 6 }, grid: { display: false } },
-                y: { beginAtZero: true, ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { color: 'rgba(148,163,184,0.08)' } },
-            },
-        },
-    });
-}
-window.refreshShipmentQualityTrend = refreshShipmentQualityTrend;
 
 
 // 4.0.53 — chart-tab-active check. Used to gate the "Loading charts…" badge
@@ -1357,8 +1191,6 @@ async function _refreshDetectionInsightsNow() {
     }
 
     await _loadShownClasses();  // so per-class charts honor the Show toggle
-    refreshShipmentQualityScore();  // 3.21.13 — Phase 2 preview: score card
-    refreshShipmentQualityTrend();  // 3.21.16 — Phase 2: drift / trend chart
     refreshEjectionCharts();    // independent of detection data (Store gates separately)
     refreshProductionCharts();  // production_metrics KPIs (own data source)
     // v4.0.210 — the quality + ejection strips are now OWNED by the progressive
@@ -1412,7 +1244,7 @@ async function _refreshDetectionInsightsNow() {
     // ---- Class distribution (bar) — honor per-class Show toggle ----
     const classNames = Object.keys(byClass).filter(_isShown);
     const classCounts = classNames.map(k => byClass[k]);
-    const colors = classNames.map((_, i) => _INSIGHT_PALETTE[i % _INSIGHT_PALETTE.length]);
+    const colors = classNames.map(n => _classColor(n));   // 4.0.458 — same colour as the scatter legend
 
     const classCtx = document.getElementById('insight-class-chart');
     if (classCtx) {
@@ -1697,7 +1529,9 @@ function _seedProgressiveColorCache(data, axisMode) {
     _progressiveQualityCells = new Map();
     _progressiveEjectionCells = new Map();
     _progressiveShipmentCells = new Map();
-    const useEnc = (axisMode === 'encoder');
+    // 4.0.458 — Length is encoder-based: until the length ladder pins [0, Σlengths], its domain
+    // is the raw encoder one. It was treated as TIME → epoch-ms domain, dots off the axis.
+    const useEnc = (axisMode === 'encoder' || axisMode === 'length');
     const raw = useEnc ? (data.color_heatmap || {}) : (data.color_heatmap_time || {});
     const bins = Math.max(1, Number(raw.n_bins) || 48);
     // v4.0.210 — a PICKED shipment's payload IS the full span (slice mode), so
@@ -1780,6 +1614,11 @@ function _binLabelForStrip(bin, nbins, axis, lo, hi) {
             ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : d.toLocaleDateString([], { month: '2-digit', day: '2-digit' }) + ' ' +
               d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    if (axis === 'length') {            // 4.0.458 — in the axis' unit (was raw counts)
+        const u = _upuFromAny(null, null), lab = _unitLabelFromAny(null, null);
+        return _fmtLenWithUpu(lo + (bin / nbins) * (hi - lo), u, lab) + ' – ' +
+               _fmtLenWithUpu(lo + ((bin + 1) / nbins) * (hi - lo), u, lab);
     }
     const eL = Math.round(lo + (bin / nbins) * (hi - lo));
     const eR = Math.round(lo + ((bin + 1) / nbins) * (hi - lo)) - 1;
@@ -1921,6 +1760,26 @@ var _shipMetaLoadedAt = 0;     // throttle stamp for the eager fetch
 // Score-per-shipment card. Throttled to once / 20 s. The hover reads whatever is
 // in the cache at hover time, so a late fill still helps a shipment already on
 // screen (no strip repaint needed — content is computed on hover).
+// 4.0.458 — ONE writer for the per-shipment hover cache (two copies of this loop), + the
+// reset-safe length.
+function _cacheShipmentMeta(rows) {
+    window._mveShipmentMeta = window._mveShipmentMeta || {};
+    window._mveShipmentVerdicts = window._mveShipmentVerdicts || {};
+    for (const s of (rows || [])) {
+        if (!s || s.shipment == null) continue;
+        const id = String(s.shipment);
+        if (s.verdict) window._mveShipmentVerdicts[id] = String(s.verdict);
+        window._mveShipmentMeta[id] = {
+            score: s.score, verdict: s.verdict,
+            encoder_span: s.encoder_span, encoder_unit: s.encoder_unit,
+            length_units: s.length_units,
+            encoder_min: s.encoder_min, encoder_max: s.encoder_max,  // 4.0.263 — real encoder start/end for the tooltip
+            first_t: s.first_t, last_t: s.last_t,
+            rows: s.rows, top_defects: s.top_defects
+        };
+    }
+}
+
 function _ensureShipmentMetaLoaded() {
     const now = Date.now();
     if (_shipMetaLoadedAt && (now - _shipMetaLoadedAt) < 20000) return;
@@ -1929,21 +1788,7 @@ function _ensureShipmentMetaLoaded() {
         fetch('/api/quality/shipments?n=60')  // v4.0.236 — windowless; backend escalates the scan (was window=all → timeout)
             .then((r) => r.json())
             .then((d) => {
-                const rows = (d && d.shipments) || [];
-                window._mveShipmentMeta = window._mveShipmentMeta || {};
-                window._mveShipmentVerdicts = window._mveShipmentVerdicts || {};
-                for (const s of rows) {
-                    if (!s || s.shipment == null) continue;
-                    const id = String(s.shipment);
-                    if (s.verdict) window._mveShipmentVerdicts[id] = String(s.verdict);
-                    window._mveShipmentMeta[id] = {
-                        score: s.score, verdict: s.verdict,
-                        encoder_span: s.encoder_span, encoder_unit: s.encoder_unit,
-                        encoder_min: s.encoder_min, encoder_max: s.encoder_max,  // 4.0.263 — real encoder start/end for the tooltip
-                        first_t: s.first_t, last_t: s.last_t,
-                        rows: s.rows, top_defects: s.top_defects
-                    };
-                }
+                _cacheShipmentMeta((d && d.shipments) || []);
             })
             .catch(() => {});
     } catch (_e) {}
@@ -1991,7 +1836,9 @@ function _shipmentTooltipHTML(sh) {
         const sc = (m.score != null && isFinite(m.score)) ? ('&nbsp; score ' + esc(Number(m.score).toFixed(1))) : '';
         line('Verdict', badge + sc);
     }
-    if (m && m.encoder_span != null && isFinite(m.encoder_span)) {
+    if (m && m.length_units != null && isFinite(m.length_units) && Number(m.length_units) > 0) {
+        line('Length', esc(_shipLengthText(m, null)));          // 4.0.458 — reset-safe length
+    } else if (m && m.encoder_span != null && isFinite(m.encoder_span)) {
         // 4.0.263 — DIVIDE the raw encoder span by encoder-units-per-unit (e.g. 1000) so
         // the length is real meters, not raw counts (operator: "the length is not true
         // considering the encoder number of each unit"). _fmtLenWithUpu does the divide +
@@ -2025,7 +1872,7 @@ function _shipmentTooltipHTML(sh) {
             line('Encoder', esc(Math.round(_encS).toLocaleString() + '  →  ' + Math.round(_encE).toLocaleString()));
         }
     }
-    if (m && m.rows != null && isFinite(m.rows)) line('Detections', esc(Number(m.rows).toLocaleString()));
+    if (m && m.rows != null && isFinite(m.rows)) line('Frames', esc(Number(m.rows).toLocaleString()));   // 4.0.458 — it counts frames
     if (m && Array.isArray(m.top_defects) && m.top_defects.length) {
         line('Top defects', esc(m.top_defects.slice(0, 3).join(', ')));
     }
@@ -2339,10 +2186,12 @@ function _applyUpfrontColorDeltas() {
     for (const c of _progressiveColorCells.values()) {
         const e = Number(c.E);
         const parent = (c._parent != null) ? c._parent : _activeParent;   // cells carry their parent
+        // 4.0.458 — "All" ('') = every parent pooled ('*'); "whole frame" (_root) = rows stored with ''
+        const bkey = (parent === '') ? '*' : (parent === '_root' ? '' : parent);
         const cam = String(c.cam);
-        const ps = c._ship && perShip[c._ship] && perShip[c._ship][parent];
+        const ps = c._ship && perShip[c._ship] && perShip[c._ship][bkey];
         let base = (ps && Number.isFinite(Number(ps[cam]))) ? Number(ps[cam])
-                                                            : Number(pooled[parent + '|' + cam]);
+                                                            : Number(pooled[bkey + '|' + cam]);
         if (base == null || !Number.isFinite(base) || Math.abs(base) < _MIN_BASE || !Number.isFinite(e)) {
             // no meaningful baseline (in-progress / no cache / camera sees ~no colour) → neutral, no %
             c._absolute = true; c.delta_e = 0; c.delta_pct = 0;
@@ -2454,6 +2303,7 @@ async function _extendStripsFromBucket(sinceMs, untilMs, shipment, ticket, preDa
         // shipment) baseline. Ready for a future multi-parent view where cells carry different parents.
         const _cellParent = localStorage.getItem('mve_heatmap_parent_class') || '';
         for (const c of data.color_slice.cells) { c._enc = _encOf(c.bin); c._ship = shipment || null; c._parent = _cellParent; _progressiveColorCells.set(`${c.cam}|${Math.round(c._enc)}`, c); }
+        _growCamRows(data.color_slice.cells.map(c => c.cam));   // 4.0.458
         // 4.0.316 — RE-DERIVE the baseline over ALL columns seen so far. Each column's fetch is
         // enc-filtered (fast, no timeout) but the backend's delta_pct in it is bucket-local — its
         // baseline is just that one column's mean, so it collapses toward 0. Mean IS additive, so
@@ -2654,6 +2504,7 @@ async function refreshAdvancedCharts() {
     const myTicket = _progressiveLadderTicket;
     _ladderActive = true;
     window._mveScatterRange = null;  // 4.0.256 — only the all-shipments window branch sets this
+    window._mveEncWindowRange = null; // 4.0.458 — same (1h + Encoder after 24h reused the 24h span)
     // 4.0.334 — REFACTOR step ②: ONE up-front call for layout + colour baseline. Replaces the old
     // fire-and-forget /api/shipment_baseline (which landed at an unpredictable moment and repainted —
     // the operator's "colour lands whenever" race). insight_layout returns the per-(camera, shipment)
@@ -2685,6 +2536,9 @@ async function refreshAdvancedCharts() {
         const _perShip = {}, _poolNum = {}, _poolDen = {};
         for (const s of (_il.shipments || [])) {
             const _pm = {};
+            // 4.0.458 — every parent pooled, for the "All" view (its cells mix all parents; the
+            // '' baseline is only the whole-frame rows → every cell came out neutral)
+            const _allN = {}, _allD = {};
             for (const parent in (s.baseline || {})) {
                 const _cams = s.baseline[parent] || {};
                 const _cm = {};
@@ -2697,9 +2551,16 @@ async function refreshAdvancedCharts() {
                     const k = parent + '|' + cam;
                     _poolNum[k] = (_poolNum[k] || 0) + Number(v) * n;
                     _poolDen[k] = (_poolDen[k] || 0) + n;
+                    _allN[cam] = (_allN[cam] || 0) + Number(v) * n;
+                    _allD[cam] = (_allD[cam] || 0) + n;
+                    _poolNum['*|' + cam] = (_poolNum['*|' + cam] || 0) + Number(v) * n;
+                    _poolDen['*|' + cam] = (_poolDen['*|' + cam] || 0) + n;
                 }
                 _pm[parent] = _cm;
             }
+            const _allCams = {};
+            for (const cam in _allD) if (_allD[cam] > 0) _allCams[cam] = _allN[cam] / _allD[cam];
+            _pm['*'] = _allCams;
             _perShip[s.sid] = _pm;
         }
         const _pooled = {};
@@ -2732,7 +2593,7 @@ async function refreshAdvancedCharts() {
     // oldest, with the loading badge. The v4.0.201 "jamming right" was the Core
     // render RACE (no ticket guard) stamping a stale wide axis — fixed in
     // v4.0.202, so the ladder now lands its dots on the correct [t_min,t_max].
-    if (target === '1h' && !shipment) {
+    if (target === '1h' && !shipment && _insightAxis !== 'length') {   // 4.0.458 — Length needs the layout ladder
         // Clear stale dots immediately so nothing lingers under the new load.
         try {
             if (_insightCameraScatter && _insightCameraScatter.data
@@ -3143,6 +3004,9 @@ async function refreshAdvancedCharts() {
                 } catch (_e) {}
             }
         }
+        // 4.0.458 — no length layout (nothing in the window): the dots stay at raw encoder x like
+        // the axis; the 1h hydrate's offsets put them at its own cumulative positions (piled left).
+        if (_useLengthSeq && !_lenSeqRan) _lastLengthOffsets = {};
         if (_useLengthSeq && _lenSeqRan) {
             /* length ribbon fully loaded above */
         } else if (_useEncoderBuckets) {
@@ -3204,7 +3068,6 @@ async function refreshAdvancedCharts() {
     } finally {
         if (myTicket === _progressiveLadderTicket) {
             _unmountScatterLoader();
-            try { _paintDotsDiag((_useEncoderBuckets ? 'enc-ladder:' : 'ladder:') + bucketCount + 'buckets'); } catch (_) {}
         }
     }
     } finally {
@@ -3274,7 +3137,7 @@ function _scatterPointKey(p, cls) {
     // detection.py — server never mints the same one twice). Falls back to
     // best-available fields when older detection_charts payloads omit them.
     const _cls = cls || p.cls || '';
-    return String(p.x) + '|' + String(p.y ?? p.cam_id ?? '') + '|' + _cls + '|' + String(p.img || '');
+    return String(p.x) + '|' + String(p.cam_id ?? p.y ?? '') + '|' + _cls + '|' + String(p.img || '');
 }
 
 // For a selected target window, return the ordered list of wider-than-1h
@@ -3347,16 +3210,6 @@ function _renormalizeScatterRadii(chart) {
     }
 }
 
-
-// 4.0.246 — VISIBLE dots diagnostic. Paints a red monospace line above the
-// scatter title (shows in screenshots — no console needed). Called after the base
-// render AND after the progressive ladder so we see the FINAL drawn state.
-function _paintDotsDiag(tag) {
-    // 4.0.262 — diagnostic REMOVED now that the loader is fixed. Just clean up any banner
-    // a cached build may have left in the DOM, then no-op.
-    try { const _old = document.getElementById('mve-dots-diag'); if (_old && _old.parentNode) _old.parentNode.removeChild(_old); } catch (_e) {}
-}
-window._paintDotsDiag = _paintDotsDiag;
 
 async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, ticket, preData, encLo, encHi) {
     if (!_insightCameraScatter) return;
@@ -3449,25 +3302,11 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
     // finished. When we still have no order, adopt the server's per-bucket fallback
     // and re-pin the axis. Only ever fills an EMPTY order, so a configured custom
     // order is never overridden.
-    let camOrder = Array.isArray(data.camera_y_order) && data.camera_y_order.length > 0
-        ? data.camera_y_order
-        : _lastCameraYOrder;
-    if ((!camOrder || camOrder.length === 0) &&
-        Array.isArray(data.camera_y_order_fallback) && data.camera_y_order_fallback.length > 0) {
-        camOrder = data.camera_y_order_fallback.slice();
-        _lastCameraYOrder = camOrder;
-        try {
-            const _ys = _insightCameraScatter && _insightCameraScatter.options
-                && _insightCameraScatter.options.scales && _insightCameraScatter.options.scales.y;
-            if (_ys) {
-                _ys.min = -0.5;
-                _ys.max = Math.max(0.5, camOrder.length - 0.5);
-            }
-        } catch (e) { /* axis re-pin is best-effort; never block the dots */ }
-        try { console.info('[charts] adopted camera_y_order fallback', camOrder); } catch (e) {}
-    }
-    const idxByCam = new Map((camOrder || []).map(function (cid, i) { return [cid, i]; }));
-    const _camToIdx = function (cid) { return idxByCam.has(cid) ? idxByCam.get(cid) : cid; };
+    // 4.0.458 — every camera in this bucket gets a row (appended by the configured order
+    // rule, earlier dots re-numbered); before, a camera missing from the 1h hydrate was drawn
+    // at its RAW id — i.e. on another camera's row, or clipped off the axis.
+    _growCamRows(points.map(function (p) { return p.y; }));
+    const _camToIdx = function (cid) { return _camRowIdx.has(cid) ? _camRowIdx.get(cid) : 0; };
 
     const dsByLabel = new Map();
     (_insightCameraScatter.data.datasets || []).forEach(function (ds) {
@@ -3597,7 +3436,11 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
             // refreshAdvancedCharts, so the ladder carpets right→left into a STABLE frame;
             // auto-widening time here rescaled the axis every bucket and made the dots
             // jump around (operator: "why not loading bucket by bucket right→left").
-            if (!_pickedNow && (_am === 'encoder' || _am === 'length') && _xs) {
+            // 4.0.458 — never on a Length axis the length ladder pinned to [0, Σlengths]: this
+            // reset the strip domain to axis 'encoder' (±1%), so the 60 s strip refresh re-binned
+            // the strips by raw encoder over length bounds — undoing 4.0.429 every minute.
+            const _lenPinned = (_am === 'length') && _progressiveColorRange && _progressiveColorRange.axis === 'length';
+            if (!_pickedNow && !_lenPinned && (_am === 'encoder' || _am === 'length') && _xs) {
                 let _lo = Infinity, _hi = -Infinity;
                 for (const _ds of (_insightCameraScatter.data.datasets || [])) {
                     for (const _p of (_ds.data || [])) {
@@ -3920,11 +3763,15 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // return `camera_y_order`. Without the cache, bucket dots plot at
         // Y=raw-cam-id while base dots plot at Y=display-index — same
         // camera appears at TWO Y positions on the axis.
-        const camOrder = Array.isArray(data.camera_y_order) ? data.camera_y_order : [];
-        if (camOrder.length > 0) _lastCameraYOrder = camOrder.slice();
-        const idxByCam = new Map(camOrder.map((cid, i) => [cid, i]));
-        const camByIdx = new Map(camOrder.map((cid, i) => [i, cid]));
-        const _camToIdx = (cid) => idxByCam.has(cid) ? idxByCam.get(cid) : cid;
+        // 4.0.458 — the shared row map (see _growCamRows); the bucket loader extends it.
+        _camOrderMode = String(data.camera_order_mode || 'normal');
+        _camOrderExplicit = Array.isArray(data.camera_order_explicit) ? data.camera_order_explicit.map(Number) : [];
+        _setCamRows(Array.isArray(data.camera_y_order) ? data.camera_y_order : []);
+        _growCamRows(points.map(p => p.y));      // cam 0 ("no camera id") too: own row, not row 0
+        const camOrder = _lastCameraYOrder;
+        const idxByCam = _camRowIdx;
+        const camByIdx = _camRowCam;
+        const _camToIdx = (cid) => idxByCam.has(cid) ? idxByCam.get(cid) : 0;
         // v4.0.134 — class-group shape scheme. Each dot's marker shape is
         // determined by which of the 4 groups its class belongs to (defect
         // / parent / marker / context). Colour still comes from _classColor
@@ -4104,7 +3951,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         // the background paints in both modes. Time mode is what shows up
         // when the line is stopped (encoder collapsed to a single value)
         // but the operator still wants to see colour drift over time.
-        const _hmRaw = (axisMode === 'encoder')
+        const _hmRaw = (axisMode === 'encoder' || axisMode === 'length')     // 4.0.458 — length = encoder-based
             ? (data.color_heatmap || {})
             : (data.color_heatmap_time || {});
         // 4.0.164 — seed the progressive colour-cell cache with whatever the
@@ -4125,10 +3972,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         const _seedLo = (_progressiveColorRange && Number.isFinite(Number(_progressiveColorRange.lo))) ? Number(_progressiveColorRange.lo) : null;
         const _seedHi = (_progressiveColorRange && Number.isFinite(Number(_progressiveColorRange.hi))) ? Number(_progressiveColorRange.hi) : null;
         const _seedOk = (_seedLo != null && _seedHi != null && _seedHi > _seedLo);
-        const _payMin = (axisMode === 'encoder')
+        const _payMin = (axisMode === 'encoder' || axisMode === 'length')
             ? (_hmRaw.enc_min != null ? Number(_hmRaw.enc_min) : null)
             : (_hmRaw.t_min   != null ? Number(_hmRaw.t_min)   : null);
-        const _payMax = (axisMode === 'encoder')
+        const _payMax = (axisMode === 'encoder' || axisMode === 'length')
             ? (_hmRaw.enc_max != null ? Number(_hmRaw.enc_max) : null)
             : (_hmRaw.t_max   != null ? Number(_hmRaw.t_max)   : null);
         const heatmapMin = _seedOk ? _seedLo : _payMin;
@@ -4693,6 +4540,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                         ticks: {
                             color: '#94a3b8', stepSize: 1, precision: 0,
                             callback: (v) => {
+                                if (!Number.isInteger(v)) return '';    // 4.0.458 — no "-0.5" / "3.5" end labels
                                 const cid = camByIdx.get(v);
                                 return (cid != null) ? String(cid) : String(v);
                             }
@@ -4730,9 +4578,8 @@ async function _refreshAdvancedChartsCore(preloadedData) {
             _renormalizeScatterRadii(_insightCameraScatter);
             _insightCameraScatter.update('none');
         } catch (e) { /* keep the chart if renormalize fails */ }
-        // 4.0.246 — visible dots diagnostic (base-render state, before the ladder
-        // blanks + refills). See _paintDotsDiag.
-        try { _insightCameraScatter.__mveAxis = axisMode; _paintDotsDiag('core'); } catch (_diag) {}
+        // the EFFECTIVE axis this chart was built with (read by the bucket loader's auto-widen)
+        try { _insightCameraScatter.__mveAxis = axisMode; } catch (_diag) {}
     }
     // v4.0.113 — populate the shipment-lane strip that sits between the
     // scatter and the quality strip.
@@ -4820,7 +4667,6 @@ window._renderShipmentStripFromScatterDots = _renderShipmentStripFromScatterDots
 // hook below in setInsightAxis re-renders from cache immediately, then
 // kicks a background refresh to pick up any new shipments.
 let _shipmentStripTimer = null;
-let _lastShipmentSpans = [];
 async function _refreshShipmentStripStandalone() {
     // 4.0.207 — the shipment lanes are now derived from the SCATTER'S OWN DOTS
     // (see _renderShipmentStripFromScatterDots). If the scatter already has
@@ -4842,18 +4688,6 @@ async function _refreshShipmentStripStandalone() {
         console.warn('standalone shipment-strip refresh failed:', e);
     }
 }
-// v4.0.120 — instant re-render from cache in the current axisMode.
-// Called by setInsightAxis on toggle so the operator sees the strip
-// flip modes with no perceptible lag.
-function _repaintShipmentStripFromCache() {
-    try {
-        // v4.0.211 — lanes are PURELY dots-derived (same /api/detection_charts
-        // data as the scatter). No _lastShipmentSpans fallback — that painted a
-        // stretched, x-desynced lane. Blank until dots exist.
-        _renderShipmentStripFromScatterDots();
-    } catch (_e) { /* swallow — strip re-render is best-effort */ }
-}
-window._repaintShipmentStripFromCache = _repaintShipmentStripFromCache;
 window._refreshShipmentStripStandalone = _refreshShipmentStripStandalone;
 // Kick off the first paint as soon as the DOM is ready.
 (function _bootstrapStandaloneStrip() {
@@ -4950,7 +4784,6 @@ function setInsightAxis(axis) {
     // the cached spans (no network wait). Then kick a background refresh
     // to pick up any new shipments that may have started since the last
     // 30 s tick.
-    if (typeof _repaintShipmentStripFromCache === 'function') _repaintShipmentStripFromCache();
     if (typeof _refreshShipmentStripStandalone === 'function') _refreshShipmentStripStandalone();
     // Re-fetch insight + re-render scatter + reload both strips for the new axis.
     if (typeof refreshDetectionInsights === 'function') refreshDetectionInsights();
@@ -5382,9 +5215,8 @@ document.addEventListener('DOMContentLoaded', () => {
 //   6. Ejection Insights + Production KPIs (unchanged at bottom)
 // Inner reordering (3-4-5) is done via CSS `order:` on the existing
 // #insight-charts grid items in status.html. This function only handles the
-// outer rearrangement: moving #quality-charts-panel BACK into
-// #detection-insight-panel right after #sqs-trend-row, so it ends up between
-// the quality-score card and the inner charts.
+// outer rearrangement (Score-per-shipment to the top) and relocating the old
+// score card's PDF / Calibrate buttons.
 function _reorderChartsTab() {
     try {
         // v4.0.237 — Score-per-shipment is the operator's TOP chart: it's independent
@@ -5413,7 +5245,11 @@ function _reorderChartsTab() {
         // v4.0.243 — Calibrate lives in the Advanced tab beside the score_scale_factor
         // Set button (operator: it's the same gain knob), NOT in the Charts toolbar.
         const setBtn = document.querySelector('button[onclick="setScoreScaleFactor()"]');
-        if (setBtn && calBtn) { calBtn.style.cssText = 'padding:6px 12px; font-size:12px; cursor:pointer; background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; border:none; border-radius:6px; font-weight:600; margin-left:8px; vertical-align:middle;'; setBtn.parentNode.insertBefore(calBtn, setBtn.nextSibling); }
+        if (setBtn && calBtn) { calBtn.style.cssText = 'padding:6px 12px; font-size:12px; cursor:pointer; background:linear-gradient(135deg,#f59e0b,#d97706); color:#fff; border:none; border-radius:6px; font-weight:600; margin-left:8px; vertical-align:middle;'; setBtn.parentNode.insertBefore(calBtn, setBtn.nextSibling);
+            // 4.0.458 — its result box stayed in the hidden card: the preview ("recommended …,
+            // click again to apply") was never visible
+            const calRes = document.getElementById('sqs-calibrate-result');
+            if (calRes) calBtn.parentNode.insertBefore(calRes, calBtn.nextSibling); }
         const qCard = document.getElementById('shipment-quality-card');
         if (qCard) qCard.style.display = 'none';
     } catch (e) { /* never block page load on reorder errors */ }
@@ -5459,7 +5295,8 @@ function _showHoverPreview(pt, datasetLabel, mouseX, mouseY) {
         if (axisMode === 'encoder' && typeof pt.x === 'number') {
             encTxt = ' • enc ' + Math.round(pt.x).toLocaleString();
         } else if (axisMode === 'length' && typeof pt.x === 'number') {
-            encTxt = ' • at ' + Math.round(pt.x).toLocaleString();
+            // 4.0.458 — in the axis' unit (was raw counts)
+            encTxt = ' • at ' + _fmtLenWithUpu(pt.x, _upuFromAny(null, null), _unitLabelFromAny(null, null));
         }
         // Timestamp: on the time axis, x IS ms-since-epoch. On the encoder
         // axis we parse it out of the image filename stem.
@@ -6097,33 +5934,16 @@ async function _loadQualityShipmentsChart(win) {
         // the verdict of that shipment"). Reuses these already-computed verdicts —
         // no extra backend cost. Repaint the lane once so it recolours immediately.
         try {
-            window._mveShipmentVerdicts = window._mveShipmentVerdicts || {};
             // v4.0.222 — also cache full per-shipment META so the shipment-lane
             // hover can show length / start-end / score / verdict, not just the id.
-            window._mveShipmentMeta = window._mveShipmentMeta || {};
-            for (const s of rows) {
-                if (s && s.shipment != null) {
-                    const id = String(s.shipment);
-                    if (s.verdict) window._mveShipmentVerdicts[id] = String(s.verdict);
-                    window._mveShipmentMeta[id] = {
-                        score: s.score, verdict: s.verdict,
-                        encoder_span: s.encoder_span, encoder_unit: s.encoder_unit,
-                        encoder_min: s.encoder_min, encoder_max: s.encoder_max,  // 4.0.263 — real encoder start/end for the tooltip
-                        first_t: s.first_t, last_t: s.last_t,
-                        rows: s.rows, top_defects: s.top_defects
-                    };
-                }
-            }
+            _cacheShipmentMeta(rows);
             if (typeof _repaintProgressiveStrips === 'function') _repaintProgressiveStrips();
         } catch (_vmap) {}
         // v4.0.140 — 2-line labels: line 1 = shipment ID, line 2 = length
         // formatted through the shared helper so it agrees with tooltip
         // and bar annotation on the same shipment. Uses per-row upu+label
         // (from shipment_quality) with global cache as fallback.
-        const _lengthLabel = (s) => {
-            if (!Number(s.encoder_span)) return '';
-            return _fmtLenWithUpu(s.encoder_span, _upuFromAny(s, d), _unitLabelFromAny(s, d));
-        };
+        const _lengthLabel = (s) => _shipLengthText(s, d);      // 4.0.458 — reset-safe first
         const labels = rows.map(s => [String(s.shipment), _lengthLabel(s)]);
 
         // 4.0.63 — TWO bars per shipment:
@@ -6285,11 +6105,7 @@ async function _loadQualityShipmentsChart(win) {
                                 const r = rows[i];
                                 const tops = (r.top_defects || []).join(', ');
                                 const impPerUnit = r.impact_per_unit;
-                                const span = r.encoder_span;
-                                // v4.0.140 — shared upu + unit label from the
-                                // per-shipment row (shipment_quality carries
-                                // its own upu snapshot) or global cache.
-                                const upu = _upuFromAny(r, d);
+                                // v4.0.140 — shared unit label from the per-shipment row or global cache.
                                 const unitLabel = _unitLabelFromAny(r, d);
                                 const per100 = (impPerUnit != null) ? Number(impPerUnit) * 100 : null;
                                 const abs = r.score_absolute ?? r.score;
@@ -6302,14 +6118,14 @@ async function _loadQualityShipmentsChart(win) {
                                         deltaStr = `${sign}${Math.abs(dv).toFixed(1)}`;
                                     }
                                 }
-                                const lengthLabel = span ? _fmtLenWithUpu(span, upu, unitLabel) : '';
+                                const lengthLabel = _shipLengthText(r, d);   // 4.0.458 — reset-safe first
                                 const lengthPart = lengthLabel
                                     ? (per100 != null
                                         ? `${lengthLabel}  (${per100.toFixed(2)} def/100 ${unitLabel})`
                                         : lengthLabel)
                                     : '';
                                 return [
-                                    `${r.verdict || '—'} · ${(r.rows || 0).toLocaleString()} det${deltaStr ? '  Δ ' + deltaStr : ''}`,
+                                    `${r.verdict || '—'} · ${(r.rows || 0).toLocaleString()} frames${deltaStr ? '  Δ ' + deltaStr : ''}`,
                                     lengthPart ? `Length: ${lengthPart}` : '',
                                     impPerUnit != null ? `Impact/${unitLabel}: ${Number(impPerUnit).toFixed(4)}` : '',
                                     tops ? `Top: ${tops}` : '',
@@ -6526,47 +6342,6 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 
-// 3.23.1 — Why? chip on the Dashboard Shipment Quality Score card. Asks the
-// active AI to explain the CURRENT score in the operator's UI language.
-async function askWhyForScore(btn) {
-    const panel = document.getElementById('sqs-why-panel');
-    const scoreEl = document.getElementById('sqs-score');
-    const verdictEl = document.getElementById('sqs-verdict');
-    if (!panel) return;
-    panel.style.display = 'block';
-    panel.innerHTML = '<span style="opacity:0.7;">🤔 thinking…</span>';
-    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
-    const score = scoreEl ? parseFloat(scoreEl.textContent) : null;
-    const verdict = verdictEl ? (verdictEl.textContent || '').trim() : '';
-    try {
-        const r = await fetch('/api/why', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                mode: 'score',
-                metric: 'shipment_quality_score',
-                value: Number.isFinite(score) ? score : null,
-                window_seconds: 3600,
-                shipment: (window._currentShipment || null),
-                language: window.currentLang || 'en',
-                extra: { verdict: verdict },
-            }),
-        });
-        const d = await r.json();
-        if (!r.ok) {
-            panel.innerHTML = '<span style="color:#fca5a5;">' + _mveEsc(d.error || ('Request failed (' + r.status + ')')) + '</span>';
-            return;
-        }
-        const ans = (d.answer || '').trim();
-        panel.innerHTML =
-            '<div style="color:#a7f3d0; font-size:10px; margin-bottom:3px;">🤔 via <b>' + _mveEsc(d.model || 'AI') + '</b></div>' +
-            '<div>' + _mveEsc(ans).replace(/\n/g, '<br>') + '</div>';
-    } catch (e) {
-        panel.innerHTML = '<span style="color:#fca5a5;">Network error: ' + _mveEsc(e.message || e) + '</span>';
-    } finally {
-        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
-    }
-}
-window.askWhyForScore = askWhyForScore;
 
 
 // 3.21.22 — upload the currently-shown raw frame to ai-trainer.monitait.com.
@@ -6599,7 +6374,7 @@ async function uploadCurrentDefectToAiTrainer() {
         if (r.ok && d.success) {
             if (btn) btn.textContent = '✓ Sent';
             if (meta) {
-                const tid = d.task_id ? ` (task_id=${d.task_id})` : '';
+                const tid = d.task_id ? ` (task_id=${_mveEsc(d.task_id)})` : '';
                 meta.innerHTML = `<span style="color:#86efac;">📤 Raw image uploaded to AI Trainer${tid}.</span>`;
             }
         } else {
@@ -6609,7 +6384,7 @@ async function uploadCurrentDefectToAiTrainer() {
         }
     } catch (e) {
         if (btn) btn.textContent = '⚠️ Failed';
-        if (meta) meta.innerHTML = `<span style="color:#f87171;">📤 Upload error: ${e.message || e}</span>`;
+        if (meta) meta.innerHTML = `<span style="color:#f87171;">📤 Upload error: ${_mveEsc(e.message || e)}</span>`;
     } finally {
         // Restore button label after 3 s so the operator can upload again.
         setTimeout(() => { if (btn) { btn.disabled = false; btn.textContent = origText || '📤 Upload to AI Trainer'; } }, 3000);
@@ -6745,7 +6520,7 @@ function _showImagePartsDialog(plan, base, win, ship) {
     const per = plan.images_per_part || plan.count;
     const parts = plan.parts || 1;
     const perPartBytes = parts > 0 ? (plan.est_total_bytes / parts) : plan.est_total_bytes;
-    const label = ship ? ('shipment ' + ship) : ('all shipments · ' + win);
+    const label = _mveEsc(ship ? ('shipment ' + ship) : ('all shipments · ' + win));   // 4.0.458 — a barcode / PLC id
     const annNote = ' · <span style="color:#fbbf24">raw + annotated</span>';
 
     const ov = document.createElement('div');
@@ -6859,7 +6634,7 @@ document.addEventListener('DOMContentLoaded', function () {
  * object selector (all + per-class), per-camera checklist with averages,
  * Select all / Clear / High-only presets, and 5-point smoothing. Loads the
  * last 3h so the per-object split is available. Self-contained; wraps the
- * core refresh so it repaints with the other charts. _renderDetByCamera kept.
+ * core refresh so it repaints with the other charts (not awaited — 4.0.458). _renderDetByCamera kept.
  * ========================================================================== */
 (function () {
   // 4.0.429 — camera names come from THIS site's cameras (/api/cameras). This was a
@@ -6952,8 +6727,11 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   async function load() {
     var ctx = document.getElementById("insight-detcount-camera-chart"); if (!ctx || typeof Chart === "undefined") return;
-    try { var r = await fetch("/api/detections_by_camera?window=3h"); S.data = await r.json(); }
-    catch (e) { return; }
+    if (S.loading) return;              // 4.0.458 — one at a time (no longer awaited by the caller)
+    S.loading = true;
+    try {
+      var r = await fetch("/api/detections_by_camera?window=3h"); S.data = await r.json();
+    } catch (e) { return; } finally { S.loading = false; }
     if (!NAMES) await loadNames();
     var classes = S.data.classes || [];
     if (!S.obj || classes.indexOf(S.obj) < 0) S.obj = (classes.indexOf("mouth") >= 0) ? "mouth" : (classes[0] || "all");
@@ -6961,6 +6739,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (!S.sel) S.sel = new Set(cams);
     fillObj(classes); renderList(); draw();
   }
+  window._renderDetByCamera = load;     // test hook (jsdom suite charts429)
   document.addEventListener("change", function (e) {
     if (e.target && e.target.id === "detcam-class-sel") { S.obj = e.target.value; renderList(); draw(); }
   });
@@ -6972,10 +6751,10 @@ document.addEventListener('DOMContentLoaded', function () {
     else if (id === "detcam-hi") { S.sel = new Set(cams.filter(function (c) { return avg(S.obj, c) >= 40; })); renderList(); draw(); }
     else if (id === "detcam-smooth") { S.smooth = !S.smooth; e.target.style.opacity = S.smooth ? "1" : "0.6"; draw(); }
   });
-  window._renderDetByCamera = load;
   if (typeof _refreshAdvancedChartsCore === "function" && !window._detByCamWrapped) {
     window._detByCamWrapped = true;
     var _o = _refreshAdvancedChartsCore;
-    _refreshAdvancedChartsCore = async function () { var r = await _o.apply(this, arguments); try { await load(); } catch (e) {} return r; };
+    // 4.0.458 — NOT awaited: every dot load waited for this widget's own 3h query (up to 20 s)
+    _refreshAdvancedChartsCore = async function () { var r = await _o.apply(this, arguments); load().catch(function () {}); return r; };
   }
 })();

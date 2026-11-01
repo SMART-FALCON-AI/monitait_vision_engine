@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.458] - 2026-11-01 - Audit batch 38: Charts tab
+
+**Fixed**
+- **Dots in the wrong camera's row.** The scatter's camera rows came only from the last hour. When a camera was quiet in that hour, its older dots were drawn on another camera's row or clipped off the chart, and its colour cells were skipped. A camera that first appears in an older bucket now gets its own row in the configured order, and the dots already drawn move with it.
+- **Length axis (the default view):**
+  - **Today's roll was missing.** The layout only knew finished shipments, so the running shipment was never drawn. Picking the running shipment also drew it on the wrong axis. It is now included, using its encoder span until it finishes.
+  - **1 h + Length** plotted cumulative lengths on a time scale, so the dots fell off the axis and the ticks read "1,790,000,000 m". It now uses the same length layout as the other windows.
+  - **Strips re-binned by raw encoder every minute.** The auto-widen undid the 4.0.429 fix, so about 60 s after a Length load settled, every strip was redrawn by raw encoder. It no longer touches a Length axis.
+  - **With no shipment in the window,** dots now sit at their encoder position, matching the axis, instead of piling up at the left edge.
+  - **Hover and strip tooltips** now show lengths in the configured unit instead of raw counts.
+  - **Picking a colour reference on the Length axis** sent the length as a timestamp (January 1970), so the baseline was built from no frames. The click is now mapped to that shipment's time.
+- **Colour baseline by parent object:**
+  - **"All"** showed no colour change at all on sites with parent classes. It now compares against all parents pooled.
+  - **"Whole frame"** showed nothing. It now selects the frames without a parent object.
+- **Every dot load waited for the per-camera chart's own 3-hour query** (up to 20 s). That chart now loads alongside the dots.
+- **Clicking a bar or pie slice for an older picked shipment** said "No stored frame found". A picked shipment is now searched whole, like the counts.
+- **1 h + Encoder after a wider window** reused the wider window's encoder range, so the dots squeezed together.
+- **Shipment lane and score-per-shipment:**
+  - The length uses the reset-safe value (the encoder span was wrong for rolls whose encoder reset).
+  - The count is labelled **frames**; it was called "det".
+  - The running shipment showed "0" frames and no times.
+- **Calibrate score:** the preview ("recommended …, click again to apply") was never visible. Its box stayed in the hidden score card when the button moved to the Advanced tab.
+- **Bar and pie colours** now match the scatter legend.
+- **Escaping:**
+  - the shipment id in the image-download dialog (a barcode or PLC value);
+  - phase values;
+  - upload errors.
+
+**Removed**
+- The old Shipment Quality Score + trend card's code: the score, trend and Why functions plus their markup. The card has been hidden since 4.0.241; its PDF and Calibrate buttons stay.
+- A no-op diagnostic, an unused spans cache, a duplicate lane repaint, two copies of the shipment hover cache (now one), and an unused variable.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.457] - 2026-11-01 - Audit batch 37: AI assistant tools
 
 **Security**

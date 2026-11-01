@@ -21,6 +21,18 @@ router = APIRouter()
 # and silently served 24 h / 1 h. New endpoints: use this, don't paste a new dict.
 _WINDOWS_STD = {"1h": "1 hour", "6h": "6 hours", "24h": "24 hours", "7d": "7 days", "30d": "30 days"}
 
+
+def _parent_filter(parent):
+    """4.0.458 — SQL filter on a _color element's parent_class -> (clause, args). "_root" (the
+    picker's "whole frame" entry) means the rows WITHOUT a parent ('' / missing); it was compared
+    literally, so that choice always showed nothing."""
+    p = (parent or "").strip()
+    if not p:
+        return "", []
+    if p == "_root":
+        return " AND COALESCE(elem->>'parent_class', '') = ''", []
+    return " AND elem->>'parent_class' = %s", [p]
+
 # v4.0.75 — in-memory TTL cache for the expensive chart endpoints.
 # /api/detection_charts, /api/quality/heatmap, /api/area_stats,
 # /api/detection_stats each scan inference_results via
@@ -1814,7 +1826,6 @@ def calibrate_score_scale(payload: dict = None):
         else:
             in_data = {rc["class"] for rc in recent_classes}
             covered = [c for c in classes_with_sev if c in in_data]
-            missing = [c for c in classes_with_sev if c not in in_data]
             if covered:
                 headline = (f"Severities are set on {len(classes_with_sev)} class(es) but only "
                             f"{len(covered)} appeared in {window}, and their impact totals "
@@ -2561,6 +2572,9 @@ def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
                     "last_t":  last_t.isoformat()  if last_t  else None,
                     "top_defects": [],
                     "encoder_span":            _cs.get("enc_span"),
+                    # 4.0.458 — the RESET-SAFE length (already in units); the lane/score labels
+                    # showed enc_max − enc_min, which is wrong for a roll whose encoder reset
+                    "length_units":            _cs.get("length_units"),
                     "encoder_min":             _cs.get("enc_min"),
                     "encoder_max":             _cs.get("enc_max"),
                     "encoder_unit":            _cs.get("length_unit") or "unit",
@@ -2579,9 +2593,11 @@ def quality_shipments(request: Request, n: int = 30, window: str = "24h"):
                     "impact_per_unit":  qp.get("impact_per_unit") if qp else None,
                     "impact_total":     qp.get("impact_total") if qp else None,
                     "verdict":          qp.get("verdict") if qp else None,
-                    "rows":             int(n_rows or 0),
-                    "first_t": first_t.isoformat() if first_t else None,
-                    "last_t":  last_t.isoformat()  if last_t  else None,
+                    # 4.0.458 — the in-progress shipment is prepended with no row count / times
+                    # (it read "0 det"): take them from its live quality payload
+                    "rows":             int(n_rows or 0) or (int(qp.get("frame_count") or 0) if qp else 0),
+                    "first_t": first_t.isoformat() if first_t else ((qp or {}).get("first_ts")),
+                    "last_t":  last_t.isoformat()  if last_t  else ((qp or {}).get("last_ts")),
                     "top_defects": [d.get("class") for d in (qp.get("top_defects") or [])][:3] if qp else [],
                     # 4.0.98 — pass length + unit context through so the chart can
                     # show length labels above bars + compute normalized "impact
@@ -3640,19 +3656,9 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "camera_scatter": camera_scatter,
                 "camera_scatter_encoder": camera_scatter_encoder,
                 "camera_y_order": [],  # order was set on the initial render; keep as-is
-                # 4.0.393 — …EXCEPT when the initial render had no data to build one
-                # from. Phase 1 renders a '1h' window; on a line idle longer than an
-                # hour that comes back empty, so camera_y_order was [] and the client
-                # pinned the Y axis to [-0.5, 0.5] and mapped dots to their RAW camera
-                # id — putting every later bucket dot outside the axis, invisible, with
-                # the spinner stuck on "Loading dots". This fallback is derived from the
-                # rows we are already returning (no extra query) and the client adopts
-                # it ONLY when it has no order yet, so a configured custom order is
-                # never overridden.
-                "camera_y_order_fallback": sorted(
-                    {p["y"] for p in camera_scatter
-                     if isinstance(p, dict) and isinstance(p.get("y"), int)}
-                ),
+                # (4.0.458 — the client adds cameras first seen in a bucket itself, from the
+                # dots' own camera ids; the old camera_y_order_fallback came from the TIME
+                # scatter only, which is empty for the default encoder/length buckets)
                 "window": window,
                 "since_ms": int(since_ms) if _use_slice else 0,
                 "until_ms": int(until_ms) if _use_slice else 0,
@@ -3679,9 +3685,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                         _phase_local = (phase or "").strip()
                         _phase_cl_local = " AND elem->>'phase' = %s" if _phase_local else ""
                         _phase_ar_local = [_phase_local] if _phase_local else []
-                        _parent_local = (parent_class or "").strip()
-                        _parent_cl_local = " AND elem->>'parent_class' = %s" if _parent_local else ""
-                        _parent_ar_local = [_parent_local] if _parent_local else []
+                        _parent_cl_local, _parent_ar_local = _parent_filter(parent_class)
                         # 4.0.309 — compare LIKE-FOR-LIKE. shipment_median → median vs median;
                         # everything else (shipment_avg default, camera, reference) → mean vs mean.
                         # Fixes "all cells brown": a bin-MEAN vs a cam-MEDIAN on a right-skewed E
@@ -3930,8 +3934,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # every parent collapsed (back-compat when only one parent exists
         # OR when a site is using the whole-frame `_root` fallback).
         _parent = (parent_class or "").strip()
-        _parent_clause = " AND elem->>'parent_class' = %s" if _parent else ""
-        _parent_args = [_parent] if _parent else []
+        _parent_clause, _parent_args = _parent_filter(_parent)
         # 4.0.161 — snapshot the feature flag once at request time so the
         # response payload can carry it back to the frontend without a
         # second /api/color_config round-trip.
@@ -4404,9 +4407,11 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         # Any camera that appears in the data but NOT in the custom list gets
         # appended at the end in numeric order, so nothing disappears.
         camera_y_order = []
+        _cam_order_mode, _cam_order_explicit = "normal", []
         try:
             tl_config = getattr(request.app.state, "timeline_config", {}) or {}
             mode = str(tl_config.get("camera_order") or "normal").lower()
+            _cam_order_mode = mode if mode in ("normal", "reverse", "custom") else "normal"
             # Discover every camera present in the scatter payloads so the
             # axis covers EVERYTHING shown, even cams not enumerated in the
             # operator's custom list.
@@ -4429,6 +4434,7 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             if mode == "custom":
                 raw = str(tl_config.get("custom_camera_order") or "").strip()
                 explicit = [int(x.strip()) for x in raw.split(",") if x.strip().isdigit()]
+                _cam_order_explicit = explicit
                 # Order = explicit list first (preserving order, dropping dups),
                 # then any cameras present in data that weren't enumerated.
                 seen_in_order = set()
@@ -4816,6 +4822,10 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             "camera_scatter_encoder": camera_scatter_encoder,
             "class_groups": class_groups,
             "camera_y_order": camera_y_order,
+            # 4.0.458 — the RULE behind camera_y_order, so the client can place a camera that
+            # first shows up in an older bucket (the order above only covers the 1h hydrate)
+            "camera_order_mode": _cam_order_mode,
+            "camera_order_explicit": _cam_order_explicit,
             "color_heatmap": color_heatmap,
             "color_heatmap_time": color_heatmap_time,
             # v4.0.210 — quality + ejection strips from the SAME endpoint +
@@ -5166,6 +5176,62 @@ def insight_layout_endpoint(request: Request, axis: str = "length", window: str 
                 "baseline": {},
             })
             cum += _span
+            if _t0 is not None:
+                t_lo = _t0 if t_lo is None else min(t_lo, _t0)
+            if _t1 is not None:
+                t_hi = _t1 if t_hi is None else max(t_hi, _t1)
+            e_lo = _emin_i if e_lo is None else min(e_lo, _emin_i)
+            e_hi = _emax_i if e_hi is None else max(e_hi, _emax_i)
+
+        # 4.0.458 — the IN-PROGRESS shipment is only in shipment_summary once it finishes, so the
+        # default Length view never showed today's roll, and picking it gave no layout at all (→ a
+        # time ladder drawn on a length axis). Add it from a bounded live read; its span is the raw
+        # encoder span (the reset-safe length is computed when it finishes). No colour baseline yet
+        # → its cells show absolute values, as before.
+        _live = []
+        if shipment:
+            if not ships:
+                _live = [shipment]
+        else:
+            try:
+                _cs = Redis("redis", 6379, db=cfg_module.REDIS_DB, socket_timeout=2,
+                            socket_connect_timeout=2).get("shipment")
+                _cs = (_cs.decode() if isinstance(_cs, bytes) else str(_cs or "")).strip()
+                if _cs and _cs != "no_shipment" and _cs not in {s["sid"] for s in ships}:
+                    _live = [_cs]
+            except Exception:
+                _live = []
+        for _ls in _live:
+            try:
+                cur.execute("SAVEPOINT il_live")
+                cur.execute(
+                    """SELECT EXTRACT(EPOCH FROM MIN(time))*1000.0, EXTRACT(EPOCH FROM MAX(time))*1000.0,
+                              MIN(encoder_value), MAX(encoder_value)
+                       FROM (SELECT time, encoder_value FROM inference_results
+                             WHERE time > NOW() - INTERVAL %s AND shipment = %s
+                             ORDER BY time DESC LIMIT 200000) _r""",
+                    [("90 days" if shipment else interval), _ls])
+                _t0, _t1, _emin, _emax = cur.fetchone() or (None, None, None, None)
+                cur.execute("RELEASE SAVEPOINT il_live")
+            except Exception as _le:
+                logger.debug(f"insight_layout live shipment read failed: {_le}")
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT il_live")
+                except Exception:
+                    pass
+                continue
+            if _emin is None or _emax is None or int(_emax) <= int(_emin):
+                continue
+            _emin_i, _emax_i = int(_emin), int(_emax)
+            ships.append({
+                "sid": str(_ls), "offset": int(cum),
+                "enc_min": _emin_i, "enc_max": _emax_i, "length_span": _emax_i - _emin_i,
+                "verdict": None, "live": True,
+                "t_min": float(_t0) if _t0 is not None else None,
+                "t_max": float(_t1) if _t1 is not None else None,
+                "baseline": {},
+            })
+            cum += _emax_i - _emin_i
             if _t0 is not None:
                 t_lo = _t0 if t_lo is None else min(t_lo, _t0)
             if _t1 is not None:
@@ -5655,7 +5721,10 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
 
     ship_clause = "AND shipment = %s" if shipment else ""
     cls_clause = "AND detections @> %s::jsonb" if cls else ""
-    params = [interval]
+    # 4.0.458 — a picked shipment is searched whole: the bar/pie counts (detection_stats) ignore
+    # the window for a pick, so clicking a bar of a 3-day-old shipment found "no stored frame"
+    time_clause = "TRUE" if shipment else "time > NOW() - INTERVAL %s"
+    params = [] if shipment else [interval]
     if shipment:
         params.append(shipment)
     if cls:
@@ -5675,7 +5744,7 @@ def recent_detections(request: Request, window: str = "24h", shipment: str = "",
             SELECT EXTRACT(EPOCH FROM time) * 1000 AS t,
                    shipment, image_path, detection_count, detections
             FROM inference_results
-            WHERE time > NOW() - INTERVAL %s {ship_clause} {cls_clause}
+            WHERE {time_clause} {ship_clause} {cls_clause}
             ORDER BY time DESC LIMIT %s
             """,
             params,

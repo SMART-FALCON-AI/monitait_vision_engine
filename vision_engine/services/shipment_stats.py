@@ -459,8 +459,13 @@ def get_cached_baseline(shipment="", window="7d", phase="", parent_class=""):
         cur = conn.cursor()
         _ph = " AND phase = %s" if str(phase or "").strip() else ""
         _ph_a = [str(phase).strip()] if str(phase or "").strip() else []
-        _pc = " AND parent_class = %s" if str(parent_class or "").strip() else ""
-        _pc_a = [str(parent_class).strip()] if str(parent_class or "").strip() else []
+        _pcv = str(parent_class or "").strip()
+        if _pcv == "_root":
+            _pcv = ""                  # 4.0.458 — the "whole frame" picker entry = rows stored with ''
+            _pc, _pc_a = " AND parent_class = ''", []
+        else:
+            _pc = " AND parent_class = %s" if _pcv else ""
+            _pc_a = [_pcv] if _pcv else []
         if shipment:
             # is this shipment finalized (in the cache)?
             cur.execute("SELECT 1 FROM shipment_summary WHERE shipment = %s", [shipment])
