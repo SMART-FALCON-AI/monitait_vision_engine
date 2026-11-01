@@ -475,8 +475,14 @@ function updateObjectsList() {
 // shows "Horizontal defect" but chart draws a circle because backend never got
 // the update. Now: retry up to 3× with backoff + read-back verify + a subtle
 // warning banner if the change still isn't reflected on the server.
-async function syncObjectAudioToServer(objectName) {
-    const payload = {
+// 4.0.437 — newest change wins. The retries re-posted the payload captured at the FIRST
+// call, so on a flaky tunnel (the case the retries exist for) a retry of an older change
+// could land after a newer one and revert it (e.g. a stale min_confidence). Each sync now
+// carries a per-class number: an older one stands down as soon as a newer one starts, and
+// every attempt sends the CURRENT settings.
+const _audioSyncSeq = {};
+function _audioPayload(objectName) {
+    return {
         class_name: objectName,
         show: audioSettings.showObjects[objectName] === true,
         narrate: !!audioSettings.narrateObjects[objectName],
@@ -487,7 +493,13 @@ async function syncObjectAudioToServer(objectName) {
         color_e: !!audioSettings.colorEObjects?.[objectName],
         area:    !!audioSettings.areaObjects?.[objectName],
     };
+}
+async function syncObjectAudioToServer(objectName) {
+    const mySeq = (_audioSyncSeq[objectName] = (_audioSyncSeq[objectName] || 0) + 1);
+    let payload = _audioPayload(objectName);
     for (let attempt = 1; attempt <= 3; attempt++) {
+        if (_audioSyncSeq[objectName] !== mySeq) return;   // a newer change for this class took over
+        payload = _audioPayload(objectName);
         try {
             const r = await fetch('/api/audio_settings', {
                 method: 'POST',

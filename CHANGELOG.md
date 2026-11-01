@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.437] - 2026-11-01 - Audit batch 17: per-class settings: newest change wins
+
+**Fixed**
+- **A per-class setting could revert to an older value on a flaky link.** Each change to Show / Min conf / Severity / role is posted with up to 3 retries, but the retries re-sent the payload captured at the FIRST attempt. When that first post failed (the tunnel case the retries exist for) and the operator changed the value again meanwhile, the old retry landed after the newer change and reverted it. A replay test shows the old code posting 30, 70, 30 and the new code 30, 70. Each class's sync now carries a number: an older one stands down as soon as a newer one starts, and every attempt sends the current settings.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.436] - 2026-11-01 - Audit batch 16: install / offline-pack / start scripts
 
 These scripts run at install or start time; the running MVE is unchanged.
