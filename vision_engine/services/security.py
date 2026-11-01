@@ -51,7 +51,11 @@ _PROTECTED: List[Tuple[str, str]] = [
     ("/api/billing/", "admin"),            # 4.0.445 — subscribe, mark an invoice paid
                                            # (manual confirm), API keys, LIVE retention prune
     ("/api/notifications/config", "engineer"),  # 4.0.445 — bot host + token (same reason)
-    ("/api/ai_trainer/config", "engineer"),  # 4.0.445 — sets the host the trainer password /
+    ("/api/ai_trainer/config", "engineer"),
+    # 4.0.457 — AI provider keys / base URL and the DB connection profiles (the assistant's
+    # SQL runs as whatever user is configured there)
+    ("/api/ai_config", "engineer"),
+    ("/api/db_config", "engineer"),  # 4.0.445 — sets the host the trainer password /
                                              # tokens are sent to (uploads stay operator)
     ("/api/audio_settings", "operator"),
     ("/api/auth/users", "admin"),

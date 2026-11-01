@@ -505,7 +505,7 @@ def get_ai_tools():
         },
         {
             "name": "call_api_endpoint",
-            "description": "Call an internal MVE API endpoint (read-only, except POST /api/why). GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/gradio/models, /api/conf_baselines, /api/color_drift, /api/area_stats, /api/active_classes, /api/config/db_status, /api/shipment_quality_score, /api/audio_settings, /api/timeline_config. POST endpoint: /api/why (payload: {mode, metric, value, timestamp, camera, encoder, shipment, window_seconds, language, extra}).",
+            "description": "Call an internal MVE API endpoint (read-only, except POST /api/why). GET endpoints: /api/cameras, /api/inference, /api/pipelines, /api/pipelines/current, /api/states, /api/inference/stats, /api/system/metrics, /api/latest_detections, /api/timeline_count, /api/cameras/config, /api/models, /api/conf_baselines, /api/color_drift, /api/area_stats, /api/active_classes, /api/config/db_status, /api/shipment_quality_score, /api/audio_settings, /api/timeline_config. POST endpoint: /api/why (payload: {mode, metric, value, timestamp, camera, encoder, shipment, window_seconds, language, extra}).",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -675,14 +675,88 @@ _AI_POST_ALLOWED = {"/api/why"}
 # the raw data file (API keys, trainer + Telegram tokens, camera passwords), support
 # diagnostics, auth + audit.
 _AI_GET_DENIED = {"/api/export_service_config", "/api/data-file", "/api/support/diagnostics",
-                  "/api/db_config", "/api/ai_models", "/api/ai_config"}
-_AI_GET_DENIED_PREFIX = ("/api/auth", "/api/audit", "/api/billing")
+                  "/api/db_config", "/api/ai_models", "/api/ai_config",
+                  # 4.0.457 — server-side fetch of ANY url (SSRF into the LAN / out of it)
+                  "/api/gradio/models"}
+# 4.0.457 — + endless streams (SSE never ends inside the 10 s read timeout: one request and
+# one server thread hung forever) and bulk exports / binary files (read whole into memory)
+_AI_GET_DENIED_PREFIX = ("/api/auth", "/api/audit", "/api/billing", "/api/status/stream", "/api/export",
+                         "/api/raw_image", "/api/render_detected", "/api/kb", "/api/support",
+                         "/api/shipment_quality_score/report", "/api/camera/")
+_AI_TOOL_OUTPUT_MAX = 20000      # chars returned to the model per tool call
+_AI_SQL_ROW_CAP = 200
+
+# 4.0.457 — the SQL tool. "Read-only" was only a SESSION DEFAULT and the connection is the
+# database SUPERUSER: one input with several statements switched it off
+# ("SET TRANSACTION READ WRITE; DELETE …; COMMIT"), and COPY … TO PROGRAM ran a shell in the
+# database container. Prompt injection (KB text, detections, ERP rows) can write that SQL.
+# Now: ONE statement, SELECT/WITH only, no data-changing keywords, no server-side file /
+# program / sleep / config functions, and a hard row cap around it.
+_SQL_DENY_WORDS = ("insert", "update", "delete", "merge", "truncate", "drop", "alter", "create", "grant",
+                   "revoke", "copy", "call", "do", "set", "reset", "vacuum", "cluster", "reindex",
+                   "listen", "notify", "unlisten", "prepare", "execute", "deallocate", "declare",
+                   "refresh", "discard", "checkpoint", "begin", "commit", "rollback", "savepoint",
+                   "abort", "into")
+# function-name PREFIXES, matched only as calls ("name(")
+_SQL_DENY_FUNCS = ("pg_read_file", "pg_read_binary_file", "pg_ls_", "pg_stat_file", "lo_", "dblink",
+                   "query_to_xml", "cursor_to_xml", "set_config", "pg_sleep", "pg_terminate_backend",
+                   "pg_cancel_backend", "pg_reload_conf", "pg_rotate_logfile", "pg_switch_wal", "pg_promote",
+                   "pg_create_", "pg_drop_", "pg_logical_", "pg_advisory", "pg_file_", "current_setting",
+                   "pg_execute", "pg_import", "ts_stat", "ts_rewrite")   # ts_*: run a query given as text
+
+
+def _ai_sql_problem(query):
+    """Why `query` may not run, or None. Comments are refused (they hide text from checks)."""
+    import re as _re
+    q = str(query or "").strip()
+    while q.endswith(";"):
+        q = q[:-1].rstrip()
+    if not q:
+        return "empty query"
+    if ";" in q:
+        return "only ONE statement is allowed"
+    if "--" in q or "/*" in q:
+        return "SQL comments are not allowed"
+    low = q.lower()
+    if not _re.match(r"^\(*\s*(select|with)\b", low):
+        return "only SELECT / WITH queries are allowed"
+    # quoting tricks that make the text below differ from what the server parses:
+    # E'\'' strings, U&"pg\0073leep" identifiers (+ UESCAPE), $$dollar$$ quoting
+    if "\\" in low or _re.search(r"\bu&", low) or _re.search(r"\$[a-z0-9_]*\$", low):
+        return "backslash escapes, U& escapes and dollar quoting are not allowed"
+    # keywords outside string literals; a "quoted identifier" is checked like a bare name
+    # ("pg_read_file"(…) is a call of pg_read_file)
+    scrubbed = _re.sub(r"'(?:[^']|'')*'", "''", low)
+    scrubbed = _re.sub(r'"((?:[^"]|"")*)"', lambda m: " " + m.group(1).replace('""', "") + " ", scrubbed)
+    words = set(_re.findall(r"[a-z_][a-z0-9_]*", scrubbed))
+    bad = sorted(w for w in _SQL_DENY_WORDS if w in words)
+    if bad:
+        return f"not allowed in a read-only query: {', '.join(bad).upper()}"
+    for f in _SQL_DENY_FUNCS:
+        if _re.search(r"\b" + _re.escape(f) + r"[a-z0-9_]*\s*\(", scrubbed):
+            return f"function {f}… is not allowed"
+    return None
+
+
+def _cap_tool_output(text):
+    text = str(text if text is not None else "")
+    if len(text) > _AI_TOOL_OUTPUT_MAX:
+        return text[:_AI_TOOL_OUTPUT_MAX] + "\n... [truncated]"
+    return text
 
 
 def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str:
-    """Execute a tool and return results."""
+    """Execute a tool and return results (4.0.457 — capped to _AI_TOOL_OUTPUT_MAX chars: the
+    whole result went into the conversation and was re-sent up to 5 rounds)."""
+    return _cap_tool_output(_execute_tool(tool_name, tool_input, watcher_instance))
+
+
+def _execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str:
     try:
         if tool_name == "query_database":
+            _why = _ai_sql_problem((tool_input or {}).get("query"))
+            if _why:
+                return json.dumps({"error": f"query refused: {_why}"})
             # Use active DB profile for connection
             db_data = _get_db_profiles_from_redis()
             active = db_data.get("active")
@@ -705,15 +779,18 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
                                     password=db_pass, connect_timeout=5,
                                     options="-c statement_timeout=15000 -c default_transaction_read_only=on")
             try:
+                conn.set_session(readonly=True)     # an explicit read-only transaction too
                 cursor = conn.cursor()
-                query = tool_input["query"]
-                # Safety: limit results to prevent massive responses
-                if "LIMIT" not in query.upper():
-                    query = query.rstrip(";") + " LIMIT 100"
+                query = str(tool_input["query"]).strip()
+                while query.endswith(";"):
+                    query = query[:-1].rstrip()
+                # 4.0.457 — a HARD cap: "LIMIT" anywhere in the text (a sub-query) disabled
+                # the old one and a whole shipment was fetched and sent to the model
+                query = f"SELECT * FROM ({query}) AS _mve_q LIMIT {_AI_SQL_ROW_CAP}"
                 cursor.execute(query)
 
                 if cursor.description:
-                    results = cursor.fetchall()
+                    results = cursor.fetchmany(_AI_SQL_ROW_CAP)
                     column_names = [desc[0] for desc in cursor.description]
                     formatted_results = [dict(zip(column_names, row)) for row in results]
                     output = json.dumps(formatted_results, default=str)
@@ -726,10 +803,18 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
 
         elif tool_name == "get_redis_data":
             # Use direct Redis connection (not broken watcher chain)
-            r = Redis("redis", 6379, db=REDIS_DB)
+            r = Redis("redis", 6379, db=REDIS_DB, socket_connect_timeout=3, socket_timeout=5)
             list_keys = {"inference_times", "frame_intervals", "capture_timestamps", "detection_events"}
+            # 4.0.457 — ONLY the advertised keys: any key was readable, incl. `ai_models`
+            # (every AI provider API key) and `db_profiles` (DB passwords) — which then went to
+            # the AI provider (and a rendered markdown image could leak them from the browser)
+            str_keys = {"encoder", "ok_counter", "ng_counter", "shipment", "is_moving", "downtime_seconds"}
             results = {}
-            for key in tool_input["keys"]:
+            for key in (tool_input.get("keys") or [])[:20]:
+                key = str(key)
+                if key not in list_keys and key not in str_keys:
+                    results[key] = "(not available to the assistant)"
+                    continue
                 if key in list_keys:
                     raw = r.lrange(key, 0, 49)
                     results[key] = [v.decode('utf-8') if isinstance(v, bytes) else v for v in raw]
@@ -805,25 +890,42 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
             # camera restarts, config load/upload, raw serial-board commands (any
             # one-segment path). And an endpoint like "@host/x" made the URL point at
             # another host.
-            if not endpoint.startswith("/api/") or ".." in endpoint:
+            # 4.0.457 — the checks run on the path the SERVER will route: fragment dropped and
+            # %-escapes decoded first ("/api/export_service_config#" or "%5F" passed the
+            # deny list, then requests / Starlette resolved them to the denied route).
+            from urllib.parse import urlsplit as _us, unquote as _uq
+            _sp = _us(endpoint)
+            _p = _uq(_sp.path)
+            while "//" in _p:
+                _p = _p.replace("//", "/")
+            if _sp.scheme or _sp.netloc or not _p.startswith("/api/") or ".." in _p:
                 return json.dumps({"error": "endpoint must be an /api/ path"})
-            if method == "POST" and endpoint.split("?")[0] not in _AI_POST_ALLOWED:
+            _p = _p.rstrip("/")
+            if method not in ("GET", "POST"):
+                return json.dumps({"error": "only GET (and POST /api/why) are allowed"})
+            if method == "POST" and _p not in _AI_POST_ALLOWED:
                 return json.dumps({"error": f"POST {endpoint} is not allowed for the assistant",
                                    "allowed_post": sorted(_AI_POST_ALLOWED)})
             # 4.0.440 — paths that return secrets / account data are not readable by the
             # assistant: whatever it reads goes to the external AI provider.
-            _p = endpoint.split("?")[0].rstrip("/")
             if _p in _AI_GET_DENIED or any(_p.startswith(x) for x in _AI_GET_DENIED_PREFIX):
-                return json.dumps({"error": f"{endpoint} is not available to the assistant (contains secrets or account data)"})
-            url = f"http://127.0.0.1:5050{endpoint}"
+                return json.dumps({"error": f"{_p} is not available to the assistant"})
+            url = f"http://127.0.0.1:5050{_p}" + (f"?{_sp.query}" if _sp.query else "")
 
             if method == "POST":
-                resp = req.post(url, json=body, timeout=10)
+                resp = req.post(url, json=body, timeout=(5, 20), stream=True)
             else:
-                resp = req.get(url, timeout=10)
-
-            # Truncate large responses
-            text = resp.text
+                resp = req.get(url, timeout=(5, 20), stream=True)
+            # 4.0.457 — read at most ~64 KB (the whole body was read before truncating)
+            buf = b""
+            try:
+                for chunk in resp.iter_content(8192):
+                    buf += chunk
+                    if len(buf) > 65536:
+                        break
+            finally:
+                resp.close()
+            text = buf.decode("utf-8", errors="replace")
             if len(text) > 8000:
                 text = text[:8000] + "\n... [truncated]"
             return text
@@ -959,7 +1061,12 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
         if model == "claude":
             # Anthropic Claude API
             import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
+            # 4.0.457 — bounded (SDK default: 600 s read × 2 retries per round, 5 rounds) and
+            # the configured relay / model are honoured (they were ignored for Claude)
+            _ak = {"api_key": api_key, "timeout": 90.0, "max_retries": 1}
+            if base_url:
+                _ak["base_url"] = base_url
+            client = anthropic.Anthropic(**_ak)
 
             tools = get_ai_tools() if tools_enabled else []
             messages = [{"role": "user", "content": user_query}]
@@ -974,7 +1081,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             max_iterations = 5 if tools_enabled else 1
             for iteration in range(max_iterations):
                 _create_kwargs = {
-                    "model": "claude-sonnet-4-5-20250929",
+                    "model": (model_id or "claude-sonnet-4-5-20250929"),
                     "max_tokens": max_tokens,
                     "system": system_prompt,
                     "messages": messages,
@@ -1034,7 +1141,7 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
             # relay like ai-trainer.monitait.com / rucode.rdemos.com / Ollama /
             # vLLM / LiteLLM), use it. Otherwise the SDK hits openai.com.
             import openai
-            _openai_kwargs = {"api_key": api_key}
+            _openai_kwargs = {"api_key": api_key, "timeout": 90.0, "max_retries": 1}   # 4.0.457 — bounded
             if base_url:
                 _openai_kwargs["base_url"] = base_url
             client = openai.OpenAI(**_openai_kwargs)
@@ -1167,6 +1274,12 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
         return f"AI request failed: {str(e)}"
 
 
+def _ai_call_failed(text):
+    """4.0.457 — call_ai_model reports a failure AS its answer text (one place decides that)."""
+    return isinstance(text, str) and text.lstrip().lower().startswith(
+        ("ai request failed", "error code", "required ai library not installed", "unsupported model"))
+
+
 @router.post("/api/why")
 def why_for_dot(request: Request, payload: Dict[str, Any]):
     """3.23.0 — Explain a single chart dot.
@@ -1226,7 +1339,6 @@ def why_for_dot(request: Request, payload: Dict[str, Any]):
         if not ts_in:
             ts_in = int(_time_mod.time() * 1000)
 
-        from services.db import get_db_connection, release_db_connection
         ctx_lines = []
         conn = None
         try:
@@ -1499,6 +1611,8 @@ def why_for_dot(request: Request, payload: Dict[str, Any]):
                 base_url=base_url, model_id=model_id,
                 tools_enabled=False,
             ))
+            if _ai_call_failed(answer):      # 4.0.457 — was shown as the answer + logged "ok"
+                _status, _err = "error", answer[:600]
         except Exception as _e:
             _status = "error"
             _err = str(_e)
@@ -1529,6 +1643,8 @@ def why_for_dot(request: Request, payload: Dict[str, Any]):
                 )
             except Exception:
                 pass
+        if _status == "error":
+            return JSONResponse(content={"error": _err, "model": active_name}, status_code=502)
         return JSONResponse(content={
             "answer": (answer or "").strip() or "(no answer)",
             "model":  active_name,
@@ -1633,7 +1749,6 @@ def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     # detections of a sev=100 class at conf=1.0. Operators rarely guess this well.
     proc_event_counts: Dict[str, int] = {}
     try:
-        from services.db import get_db_connection, release_db_connection
         _pc = get_db_connection()
         if _pc is not None:
             try:
@@ -1699,7 +1814,6 @@ def suggest_severities(request: Request, payload: Dict[str, Any] = None):
     # (over-weighted) — both are useless for a RELEASE / REINSPECT decision.
     shipment_block = ""
     try:
-        from services.db import get_db_connection, release_db_connection
         conn = get_db_connection()
         if conn is not None:
             try:
@@ -1843,7 +1957,7 @@ def suggest_severities(request: Request, payload: Dict[str, Any] = None):
 
     # Detect the case where call_ai_model swallowed an upstream error and
     # returned it as a fake "answer" — don't try to parse that as JSON.
-    if isinstance(raw, str) and raw.lstrip().lower().startswith(("ai request failed", "error code")):
+    if _ai_call_failed(raw):
         return JSONResponse(content={
             "suggestions": [], "model": active_name,
             "upstream_error": raw[:600],
@@ -2049,7 +2163,6 @@ def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
     # last-hour activity from inference_results so the AI knows whether the line is running
     activity_block = "(no recent activity data)"
     try:
-        from services.db import get_db_connection, release_db_connection
         conn = get_db_connection()
         if conn is not None:
             try:
@@ -2150,7 +2263,7 @@ def ai_recommend_state(request: Request, payload: Dict[str, Any] = None):
     except Exception as e:
         return JSONResponse(content={"error": f"AI call failed: {e}"}, status_code=502)
 
-    if isinstance(raw, str) and raw.lstrip().lower().startswith(("ai request failed", "error code")):
+    if _ai_call_failed(raw):
         return JSONResponse(content={
             "error": "upstream_ai_error", "upstream_error": raw[:600],
             "hint": "Try again or switch model in AI Configuration.",
@@ -2408,16 +2521,20 @@ encoder, ok_counter, ng_counter, shipment, is_moving, downtime_seconds, inferenc
         import time as _tq
         _tq0 = _tq.time()
         ai_response = asyncio.run(call_ai_model(model, api_key, system_prompt, user_query, watcher_instance=watcher, base_url=base_url, model_id=model_id, citations_out=_citations, proposals_out=_proposals))
+        # 4.0.457 — a provider failure went out as HTTP 200 + a chat "answer", logged as "ok"
+        _failed = _ai_call_failed(ai_response)
         # 4.0.433 — log usage like the other AI endpoints. The chat — the most expensive
         # call, up to 5 agentic tool rounds — was missing from ai_usage_log (and so billing).
         try:
             from services.ai_usage import log_usage
             log_usage(endpoint="/api/ai_query", mode="chat", model_name=active_name, provider=model,
                       prompt_text=(system_prompt + "\n" + user_query), answer_text=str(ai_response or ""),
-                      latency_ms=int((_tq.time() - _tq0) * 1000), status="ok",
+                      latency_ms=int((_tq.time() - _tq0) * 1000), status=("error" if _failed else "ok"),
                       operator=request.headers.get("X-Operator") or None)
         except Exception:
             pass
+        if _failed:
+            return JSONResponse(content={"error": ai_response[:600], "model": model}, status_code=502)
 
         return JSONResponse(content={"response": ai_response, "model": model,
                                      "citations": _citations, "proposed_actions": _proposals,

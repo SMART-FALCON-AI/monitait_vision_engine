@@ -5856,7 +5856,7 @@ async function askWhyForCurrentDefect() {
         const data = await r.json();
         if (!r.ok) {
             panel.innerHTML = '<span style="color:#fca5a5;">' +
-                (data.error || ('Request failed (' + r.status + ')')) + '</span>';
+                _mveEsc(data.error || ('Request failed (' + r.status + ')')) + '</span>';   // 4.0.457 — provider text
             return;
         }
         const ans = (data.answer || '').trim();

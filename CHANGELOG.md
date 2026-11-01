@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.457] - 2026-11-01 - Audit batch 37: AI assistant tools
+
+**Security**
+- **The AI assistant's database tool could change or delete data.** "Read-only" was only a default for the session, and one input with several statements turned it off (`SET TRANSACTION READ WRITE; DELETE …`). Other inputs could read server files or run a shell in the database container. Text the AI reads (knowledge-base documents, detection names, ERP rows) can steer what it writes. The tool now runs exactly one SELECT/WITH statement in a read-only transaction. It refuses:
+  - data-changing keywords;
+  - server file, program, sleep and settings functions;
+  - comments and quoting tricks.
+- **The assistant could read every stored secret from Redis**: all AI provider API keys and the database passwords. They were sent to the AI provider. Only the advertised live values (encoder, counters, shipment, …) are readable now.
+- **The assistant's API tool could be turned against the system:**
+  - A trailing `#` or a `%5F` escape in the path got past the "secrets" deny list, so the full config backup (with every password) could be read.
+  - `/api/gradio/models` fetched any URL from inside the factory network.
+  - Reading the live status stream hung a server thread forever.
+
+  Paths are now checked the way the server routes them; streams, exports, images and that proxy are refused; responses are read up to 64 KB with a 20 s limit.
+- **AI and database settings** (provider keys, relay URL, DB profiles) can only be changed by an engineer when roles are enabled. Before, any operator could change them.
+
+**Fixed**
+- **AI chat and "Why?" showed a provider failure as the answer** (HTTP 200, logged as a successful, billable call). They now return an error, and it is logged as an error.
+- **One question could hang for up to an hour.** The AI client default is 600 s per call × 2 retries × 5 tool rounds. Calls now time out after 90 s with one retry.
+- **The configured relay URL and model ID were ignored for Claude.**
+- **The 100-row limit on AI SQL was skipped whenever "LIMIT" appeared anywhere in the query** (e.g. in a sub-query), so a whole shipment could go to the model. There is now a hard limit of 200 rows. Each tool result is capped at 20,000 characters.
+- The "Why?" panel inserted the provider's error text as HTML; it is now escaped.
+
+**Removed**
+- Redundant local imports in the AI router.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.456] - 2026-11-01 - Audit batch 36: pipelines, states, backups, camera cards
 
 **Fixed**
