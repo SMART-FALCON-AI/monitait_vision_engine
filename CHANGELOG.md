@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.438] - 2026-11-01 - Audit batch 18: weights, procedures, states and pipelines
+
+**Fixed — weights / pipelines**
+- **Pipeline activation reported success when YOLO did not load its weight.** The error was buried in `weight.error`, which neither UI caller reads (both showed green "activated"), so YOLO kept the previous weight and the new pipeline's rules ran against the wrong classes. It now answers 502: "selected in MVE, but YOLO could NOT load its weight …; still running the previous weight".
+- **The weight was copied to `best.pt` (YOLO's restart weight) BEFORE YOLO tried to load it**, in pipeline activation, upload and activate-weights. A weight YOLO can't load became the weight it would fail to start with after the next restart. `best.pt` is now updated only after YOLO accepted the weight, and atomically.
+- **set-model went to the wrong service** when a pipeline's first phase isn't YOLO, e.g. [math, yolo] or [gradio, yolo]. The math and anomaly services are registered as model type "yolo" too, so it hit the math service or the HF Space (404). Weights and `/classes` now go to the pipeline's object-detection phase.
+- **Weight upload** wrote straight over the target file, so a failed or over-limit re-upload destroyed the existing weight of that name. It now writes to a `.part` file and renames it when complete. An upload named `best.pt` (the default name of a YOLO training run) is kept under its own name, `uploaded_<time>_best.pt`, instead of replacing YOLO's restart weight.
+- "Fetch classes" used the env-default parent list instead of the operator's configured one.
+
+**Fixed — procedures**
+- **One malformed rule stopped ALL ejection.** Nothing was validated: `{"count": "2"}` made the evaluator raise on every frame, which is caught per frame, so every procedure silently stopped ejecting while the API had answered 200. Numeric fields are now coerced (or rejected with a 400 naming the procedure and field). `enabled` is an explicit true/false; a missing one was read as on in one place and off in another. Colour references must be numbers.
+- **A body without `procedures`** (or with a typo) saved `[]`, wiping every rule. It is now a 400.
+- **Saving procedures after a degraded boot** (DB not ready, defaults in use) replaced the whole stored timeline config: camera order, rows, mark-ejects, bbox padding. It now starts from the stored config when one exists, which also brings those settings back.
+- A save that reached neither the DB nor the disk now says so instead of "success".
+
+**Fixed — states / pipelines**
+- **Editing the ACTIVE state or pipeline did nothing until re-activated**: the runtime kept the old object. It now takes effect at once, including the state's exposure / gain.
+- **Deleting the active state, the active pipeline, or a model the active pipeline uses** is refused (409). Before, the runtime kept the deleted object, and after a restart MVE fell back to "default", which is the Gradio HF pipeline, i.e. no local YOLO at all.
+- **Anomaly "reference frame" baseline** used the newest frames in its window (up to ~35 min after the chosen point, possibly after a defect began). It now uses the frames nearest the point; the frame count is capped at 500.
+
+**Also**:
+- The `[SERIAL_TX] Cannot send` warning in camera-only mode is logged at most once a minute (it was ~11 a minute, 339 lines in 30 min on vteam12).
+- A page-load fetch of the whole service config, written into an element that doesn't exist, was removed.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.437] - 2026-11-01 - Audit batch 17: per-class settings: newest change wins
 
 **Fixed**

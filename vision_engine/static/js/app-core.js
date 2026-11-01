@@ -2377,23 +2377,6 @@ function showConfigMessage(message, type) {
 
 
 
-async function checkServiceConfigStatus() {
-    try {
-        const response = await fetch('/api/cameras/config');
-        const data = await response.json();
-        const statusEl = document.getElementById('camera-config-status');
-        if (statusEl) {
-            if (data.exists && data.config) {
-                statusEl.textContent = `Last saved: ${data.config.saved_at || 'unknown'}`;
-            } else {
-                statusEl.textContent = 'No saved config';
-            }
-        }
-    } catch (error) {
-        const statusEl = document.getElementById('camera-config-status');
-        if (statusEl) statusEl.textContent = '';
-    }
-}
 
 // ===== STATE MANAGEMENT FUNCTIONS =====
 let statesData = {};
@@ -3631,7 +3614,6 @@ async function saveDiscoveredCamera() {
 
 // Initial camera status fetch (SSE will handle updates)
 fetchCameraStatus();
-checkServiceConfigStatus();  // Check if saved service config exists
 
 // Fetch and update inference stats
 async function fetchInferenceStats() {

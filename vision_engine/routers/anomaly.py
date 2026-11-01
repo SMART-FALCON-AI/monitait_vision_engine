@@ -214,9 +214,13 @@ def _select_frames_reference(
         latest = max(m["ts"] for _, m in frames)
         span_s = max(1.0, (latest - earliest).total_seconds())
         half = timedelta(seconds=span_s * float(window_pct) / 2.0)
-        keep = [p for p, m in frames if abs((m["ts"] - pivot).total_seconds())
-                <= half.total_seconds()]
-        return keep[:max_frames]
+        # 4.0.438 — the frames NEAREST the chosen point. `frames` is newest-first, so
+        # keep[:max_frames] took the newest end of the ±window (up to ~35 min after the
+        # point the operator picked as "good" — possibly after a defect started).
+        near = [(abs((m["ts"] - pivot).total_seconds()), p) for p, m in frames
+                if abs((m["ts"] - pivot).total_seconds()) <= half.total_seconds()]
+        near.sort(key=lambda t: t[0])
+        return [p for _, p in near[:max_frames]]
 
     # axis == "encoder" (or anything else): degrade to camera mode + warn.
     logger.warning(
@@ -366,7 +370,7 @@ def build_baseline(request: Request, body: BuildBaselineRequest):
         value=body.value,
         axis=body.axis or "time",
         window_pct=body.window_pct or 0.05,
-        max_frames=int(body.max_frames or DEFAULT_MAX_FRAMES),
+        max_frames=max(1, min(500, int(body.max_frames or DEFAULT_MAX_FRAMES))),   # 4.0.438 — the worker caps at 500; all were read into RAM first
     )
     if not frames:
         return JSONResponse(content={

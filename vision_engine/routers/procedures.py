@@ -19,21 +19,110 @@ def get_procedures(request: Request):
     return {'procedures': config.get('procedures', [])}
 
 
+def _num(v, kind, field, where):
+    """Coerce a numeric rule field; ValueError with an operator-readable message."""
+    if v is None or v == "":
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"{where}: '{field}' must be a number (got {v!r})")
+    if x != x or x in (float("inf"), float("-inf")):
+        raise ValueError(f"{where}: '{field}' must be a finite number")
+    return int(x) if kind == "int" else x
+
+
+_RULE_NUMS = {"count": "int", "area": "float", "threshold": "float", "min_confidence": "float",
+              "marginal_confidence": "float", "max_delta_e": "float"}
+
+
+def _clean_procedures(procs):
+    """4.0.438 — validate + normalise before saving. Nothing was checked: a rule with
+    {"count": "2"} made the evaluator raise TypeError on EVERY frame, which the inference
+    path catches per frame — so ALL procedures silently stopped ejecting while this API had
+    answered 200. A missing `enabled` was read as True in one place and False in another."""
+    if not isinstance(procs, list):
+        raise ValueError("'procedures' must be a list")
+    out = []
+    for i, p in enumerate(procs):
+        where = f"procedure {i + 1}"
+        if not isinstance(p, dict):
+            raise ValueError(f"{where}: must be an object")
+        p = dict(p)
+        if p.get("name"):
+            where = f"procedure '{p.get('name')}'"
+        p["enabled"] = bool(p.get("enabled", False))
+        cams = p.get("cameras", [])
+        if cams in (None, ""):
+            cams = []
+        if not isinstance(cams, list):
+            raise ValueError(f"{where}: 'cameras' must be a list")
+        try:
+            p["cameras"] = [int(c) for c in cams if str(c).strip() != ""]
+        except (TypeError, ValueError):
+            raise ValueError(f"{where}: 'cameras' must be camera numbers")
+        rules = p.get("rules", [])
+        if rules in (None, ""):
+            rules = []
+        if not isinstance(rules, list):
+            raise ValueError(f"{where}: 'rules' must be a list")
+        clean_rules = []
+        for j, r in enumerate(rules):
+            rw = f"{where}, rule {j + 1}"
+            if not isinstance(r, dict):
+                raise ValueError(f"{rw}: must be an object")
+            r = dict(r)
+            for f, kind in _RULE_NUMS.items():
+                if f in r:
+                    v = _num(r.get(f), kind, f, rw)
+                    if v is None:
+                        r.pop(f, None)
+                    else:
+                        r[f] = v
+            clean_rules.append(r)
+        p["rules"] = clean_rules
+        out.append(p)
+    return out
+
+
 @router.post("/api/procedures")
 def update_procedures(request: Request, _mve_body=Depends(_json_body_dep)):
     """Update ejection procedures configuration."""
     try:
         data = _req_body(_mve_body)
-        procedures = data.get('procedures', [])
+        # 4.0.438 — a body without 'procedures' (or a typo) used to save [] = every rule gone
+        if not isinstance(data, dict) or "procedures" not in data:
+            return JSONResponse(status_code=400, content={'success': False, 'error': "body must be {\"procedures\": [...]}"})
+        try:
+            procedures = _clean_procedures(data.get('procedures'))
+        except ValueError as ve:
+            return JSONResponse(status_code=400, content={'success': False, 'error': str(ve)})
 
-        # Update in app.state
         config = getattr(request.app.state, 'timeline_config', {})
+        # 4.0.438 — booted on DEFAULT timeline_config (DB not ready at boot): saving defaults +
+        # these procedures replaced the whole stored timeline_config (camera order, num_rows,
+        # mark-ejects, bbox padding, …) and stopped the self-heal. Start from the STORED one
+        # when there is one (that also recovers those settings); a fresh install has none.
+        if getattr(request.app.state, 'timeline_config_is_default', False):
+            try:
+                from config import invalidate_config_cache, load_data_file as _ldf
+                invalidate_config_cache()
+                stored = (_ldf() or {}).get('timeline_config')
+                if isinstance(stored, dict) and stored:
+                    config = dict(stored)
+                    request.app.state.timeline_config_is_default = False
+                    logger.warning("[BOOT-RACE] procedures save recovered the stored timeline_config first")
+            except Exception as _le:
+                logger.warning(f"procedures: stored timeline_config read failed: {_le}")
         config['procedures'] = procedures
         request.app.state.timeline_config = config
 
         # 4.0.355 — persist ONLY timeline_config so a concurrent service_config
         # save can't wipe these ejection procedures (lost-update race fix).
-        save_config_key('timeline_config', request.app.state.timeline_config)
+        ok = save_config_key('timeline_config', request.app.state.timeline_config)
+        if ok is False:
+            # 4.0.438 — neither DB nor disk took it: say so instead of "success"
+            return JSONResponse(status_code=500, content={'success': False, 'error': 'procedures are active now but could NOT be saved (database and disk write failed) - they will be lost on restart'})
 
         logger.info(f"Procedures updated: {len(procedures)} procedure(s)")
         return {'success': True, 'procedures': procedures}
@@ -66,6 +155,13 @@ def set_color_reference(class_name: str, request: Request, _mve_body=Depends(_js
                     status_code=400,
                     content={'success': False, 'error': 'Expected {"lab": [L, a, b]}'}
                 )
+            # 4.0.438 — numbers only: ["40","1","2"] passed and then broke the ΔE maths per frame
+            try:
+                lab = [float(x) for x in lab]
+                if any(x != x or x in (float("inf"), float("-inf")) for x in lab):
+                    raise ValueError
+            except (TypeError, ValueError):
+                return JSONResponse(status_code=400, content={'success': False, 'error': 'L, a, b must be numbers'})
 
         success = set_fixed_color_reference(class_name, lab)
         if success:

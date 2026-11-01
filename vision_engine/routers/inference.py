@@ -122,9 +122,12 @@ def get_model_classes(request: Request):
     classes = []
     try:
         # Try YOLO service classes endpoint
-        active_url = YOLO_INFERENCE_URL
-        if pm and pm.get_current_model():
-            active_url = pm.get_current_model().inference_url
+        # 4.0.438 — the weights model (object-detection phase), not just the first phase;
+        # live config value, not the import-time copy
+        active_url = config.YOLO_INFERENCE_URL
+        _wm = _weights_model(pm) if pm else None
+        if _wm is not None:
+            active_url = _wm.inference_url
         # Build classes URL from the inference URL
         classes_url = active_url.rstrip('/').rsplit('/detect', 1)[0] + '/classes'
         resp = requests.get(classes_url, timeout=3)
@@ -134,7 +137,9 @@ def get_model_classes(request: Request):
     except Exception as e:
         logger.debug(f"Could not fetch model classes: {e}")
     # Also include PARENT_OBJECT_LIST as known objects
-    for obj in PARENT_OBJECT_LIST:
+    # 4.0.438 — the LIVE list (config.*): the import-time copy was the env default
+    # (box, pack, DP-105, jean, knit), not the operator's configured parents.
+    for obj in (getattr(config, "PARENT_OBJECT_LIST", None) or []):
         if obj not in classes and obj != '_root':
             classes.append(obj)
     return {"classes": classes}
@@ -213,16 +218,14 @@ def activate_pipeline(pipeline_name: str, request: Request):
                 safe_name = pathlib.Path(wf).name
                 dest = WEIGHTS_DIR / safe_name
                 if dest.exists():
-                    try:
-                        import shutil as _shutil
-                        best_dest = WEIGHTS_DIR / "best.pt"
-                        if dest.resolve() != best_dest.resolve():
-                            _shutil.copyfile(dest, best_dest)
-                    except Exception as _me:
-                        logger.warning(f"pipeline weight mirror failed: {_me}")
                     successes, last_error = _call_set_model_all_replicas(f"/weights/{safe_name}", request=request)
+                    # 4.0.438 — mirror to best.pt (the weight yolo loads on restart) only AFTER yolo
+                    # accepted it. It was copied first, so a weight yolo can't load became the
+                    # restart weight even though activation failed.
+                    if successes > 0:
+                        _mirror_best(dest, safe_name)
                     weight_status = {"weight_file": safe_name, "replicas_updated": successes,
-                                     "error": (str(last_error) if successes == 0 and last_error else None)}
+                                     "error": (str(last_error) if last_error else None)}
                     logger.info(f"Pipeline '{pipeline_name}' weight '{safe_name}' pushed to {successes} replica(s)")
                 else:
                     weight_status = {"weight_file": safe_name, "error": "weight file not found in /weights"}
@@ -230,6 +233,20 @@ def activate_pipeline(pipeline_name: str, request: Request):
         except Exception as _we:
             logger.error(f"Error pushing pipeline weight on activate: {_we}")
             weight_status = {"error": str(_we)}
+
+        # 4.0.438 — a pipeline whose weight did NOT reach yolo is not "activated" for the
+        # operator: yolo keeps running the previous weight, so this pipeline's rules would
+        # run against the wrong classes. It answered success:true with the error buried in
+        # weight.error, which neither UI caller reads (both showed green "activated").
+        if weight_status and weight_status.get("error") and not weight_status.get("replicas_updated"):
+            return JSONResponse(content={
+                "success": False,
+                "error": (f"Pipeline '{pipeline_name}' is selected in MVE, but YOLO could NOT load its weight "
+                          f"'{weight_status.get('weight_file', '?')}': {weight_status['error']}. "
+                          f"YOLO is still running the previous weight."),
+                "current_model": pm.get_current_model().to_dict() if pm.get_current_model() else None,
+                "weight": weight_status,
+            }, status_code=502)
 
         return JSONResponse(content={
             "success": True,
@@ -278,6 +295,10 @@ def delete_pipeline(pipeline_name: str, request: Request):
     pm = request.app.state.pipeline_manager
     if pm is None:
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+    # 4.0.438 — not the ACTIVE pipeline: inference kept running the deleted object, and on
+    # restart MVE fell back to "default" (the Gradio HF pipeline → no local YOLO at all).
+    if getattr(getattr(pm, "current_pipeline", None), "name", None) == pipeline_name:
+        return JSONResponse(content={"error": f"Pipeline '{pipeline_name}' is active — activate another pipeline first"}, status_code=409)
 
     if pm.remove_pipeline(pipeline_name):
         # Auto-save pipeline configuration to DATA_FILE
@@ -348,6 +369,13 @@ def delete_model(model_id: str, request: Request):
     pm = request.app.state.pipeline_manager
     if pm is None:
         return JSONResponse(content={"error": "Pipeline manager not initialized"}, status_code=503)
+    # 4.0.438 — not a model the ACTIVE pipeline uses: that phase silently skipped every frame.
+    try:
+        _cp = getattr(pm, "current_pipeline", None)
+        if _cp and any(getattr(ph, "model_id", None) == model_id for ph in (_cp.phases or [])):
+            return JSONResponse(content={"error": f"Model '{model_id}' is used by the active pipeline '{_cp.name}' — remove it from that pipeline or activate another first"}, status_code=409)
+    except Exception:
+        pass
 
     if pm.remove_model(model_id):
         # Auto-save pipeline configuration to DATA_FILE
@@ -442,6 +470,31 @@ WEIGHTS_DIR = pathlib.Path("/weights")
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
 
 
+def _weights_model(pm):
+    """The model of the active pipeline that takes WEIGHTS (/set-model, /classes).
+
+    4.0.438 — this was get_current_model(), the FIRST enabled phase of any type. The math
+    and anomaly services are registered as model_type "yolo" too (YOLO-compatible API), so
+    a pipeline [math, yolo] or [gradio, yolo] sent set-model to the math service / HF
+    Space (404). Prefer an enabled phase on an object-detection service, then any enabled
+    yolo-type phase, then the old behaviour."""
+    if pm is None:
+        return None
+    try:
+        cp = getattr(pm, "current_pipeline", None)
+        phases = sorted(cp.phases, key=lambda p: p.order) if cp and cp.phases else []
+        cands = [pm.models[p.model_id] for p in phases if p.enabled and p.model_id in pm.models]
+        for m in cands:
+            if m.model_type == "yolo" and "/object-detection/" in (m.inference_url or ""):
+                return m
+        for m in cands:
+            if m.model_type == "yolo":
+                return m
+    except Exception:
+        pass
+    return pm.get_current_model()
+
+
 def _yolo_base_url(request: "Request | None" = None):
     """Derive YOLO service base URL (without /detect/) from the ACTIVE pipeline.
 
@@ -462,8 +515,9 @@ def _yolo_base_url(request: "Request | None" = None):
     try:
         if request is not None:
             pm = getattr(request.app.state, "pipeline_manager", None)
-            if pm and pm.get_current_model():
-                url = pm.get_current_model().inference_url
+            m = _weights_model(pm)
+            if m is not None:
+                url = m.inference_url
     except Exception:
         url = None
     if not url:
@@ -472,6 +526,23 @@ def _yolo_base_url(request: "Request | None" = None):
     if url.endswith("/detect"):
         url = url[:-len("/detect")]
     return url
+
+
+def _mirror_best(dest, safe_name):
+    """3.21.12 — copy the ACTIVATED weight to /weights/best.pt, the single-file bind-mount
+    yolo loads at restart, so the choice survives a container recreate.
+    4.0.438 — called only AFTER yolo accepted the weight: it used to run before set-model,
+    so a weight yolo cannot load became the restart weight (yolo then failed to start)."""
+    try:
+        import shutil as _shutil
+        best_dest = WEIGHTS_DIR / "best.pt"
+        if dest.resolve() != best_dest.resolve():
+            tmp = WEIGHTS_DIR / "best.pt.part"
+            _shutil.copyfile(dest, tmp)
+            os.replace(tmp, best_dest)
+            logger.info(f"Mirrored {safe_name} -> /weights/best.pt for restart persistence")
+    except Exception as _e:
+        logger.warning(f"Failed to mirror {safe_name} -> /weights/best.pt: {_e}")
 
 
 def _call_set_model_all_replicas(model_path: str, request=None, base=None):
@@ -579,19 +650,39 @@ def upload_weights(request: Request, file: UploadFile = File(...), activate: int
     if not safe_name or safe_name.startswith("."):
         return JSONResponse(content={"error": "Invalid filename"}, status_code=400)
 
+    # 4.0.438 — "best.pt" IS the weight yolo loads on restart: an upload under that name
+    # replaced it before yolo had even tried to load it. Keep it under its own name (the UI
+    # uses the returned filename); activation mirrors it to best.pt once yolo accepted it.
+    if safe_name.lower() == "best.pt":
+        import time as _tu
+        safe_name = "uploaded_" + _tu.strftime("%Y%m%d-%H%M%S") + "_best.pt"
+
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     dest = WEIGHTS_DIR / safe_name
+    part = WEIGHTS_DIR / (safe_name + ".part")
 
-    # Stream to disk with size check
+    # Stream to disk with size check.
+    # 4.0.438 — into a .part file, renamed over the real name only when complete: writing
+    # the target directly truncated an existing weight of the same name at once (an
+    # over-limit or failed re-upload — ENOSPC, dropped connection — destroyed the original).
     total = 0
-    with open(dest, "wb") as f:
-        while chunk := file.file.read(1024 * 1024):
-            total += len(chunk)
-            if total > MAX_UPLOAD_SIZE:
-                f.close()
-                dest.unlink(missing_ok=True)
-                return JSONResponse(content={"error": "File exceeds 500MB limit"}, status_code=413)
-            f.write(chunk)
+    try:
+        with open(part, "wb") as f:
+            while chunk := file.file.read(1024 * 1024):
+                total += len(chunk)
+                if total > MAX_UPLOAD_SIZE:
+                    f.close()
+                    part.unlink(missing_ok=True)
+                    return JSONResponse(content={"error": "File exceeds 500MB limit"}, status_code=413)
+                f.write(chunk)
+        os.replace(part, dest)
+    except Exception as _ue:
+        try:
+            part.unlink(missing_ok=True)
+        except Exception:
+            pass
+        logger.error(f"Weight upload failed for {safe_name}: {_ue}")
+        return JSONResponse(content={"error": f"Upload failed: {_ue}"}, status_code=500)
 
     size_mb = round(total / (1024 * 1024), 1)
     logger.info(f"Uploaded weight file: {safe_name} ({size_mb}MB)")
@@ -607,19 +698,6 @@ def upload_weights(request: Request, file: UploadFile = File(...), activate: int
             "activated": False,
         })
 
-    # 3.21.12 — also copy to /weights/best.pt so the single-file bind-mount
-    # (./volumes/weights/best.pt:/code/best.pt:ro) picks this up on next yolo
-    # container restart. Without this, in-memory set-model activation is lost
-    # whenever the container is recreated and Detector re-runs init from /code/best.pt.
-    try:
-        import shutil as _shutil
-        best_dest = WEIGHTS_DIR / "best.pt"
-        if dest.resolve() != best_dest.resolve():
-            _shutil.copyfile(dest, best_dest)
-            logger.info(f"Mirrored {safe_name} -> /weights/best.pt for restart persistence")
-    except Exception as _e:
-        logger.warning(f"Failed to mirror {safe_name} -> /weights/best.pt: {_e}")
-
     # Activate on all YOLO replicas (use the just-uploaded path)
     model_path = f"/weights/{safe_name}"
     successes, last_error = _call_set_model_all_replicas(model_path, request=request)
@@ -630,6 +708,7 @@ def upload_weights(request: Request, file: UploadFile = File(...), activate: int
             "filename": safe_name,
             "size_mb": size_mb,
         }, status_code=502)
+    _mirror_best(dest, safe_name)   # 4.0.438 — only once yolo accepted it
 
     classes = _fetch_classes(request)
     logger.info(f"Activated {safe_name} on {successes} replica(s), classes: {classes}")
@@ -656,22 +735,12 @@ def activate_weights(request: Request, _mve_body=Depends(_json_body_dep)):
     if not dest.exists():
         return JSONResponse(content={"error": f"Weight file not found: {safe_name}"}, status_code=404)
 
-    # 3.21.12 — mirror the chosen file to /weights/best.pt so the choice
-    # survives container restarts via the single-file bind-mount.
-    try:
-        import shutil as _shutil
-        best_dest = WEIGHTS_DIR / "best.pt"
-        if dest.resolve() != best_dest.resolve():
-            _shutil.copyfile(dest, best_dest)
-            logger.info(f"Mirrored {safe_name} -> /weights/best.pt for restart persistence")
-    except Exception as _e:
-        logger.warning(f"Failed to mirror {safe_name} -> /weights/best.pt: {_e}")
-
     model_path = f"/weights/{safe_name}"
     successes, last_error = _call_set_model_all_replicas(model_path, request=request)
     if successes == 0:
         err_msg = str(last_error) if last_error else "unknown error"
         return JSONResponse(content={"error": f"Failed to activate model: {err_msg}"}, status_code=502)
+    _mirror_best(dest, safe_name)   # 4.0.438 — only once yolo accepted it
 
     classes = _fetch_classes(request)
     logger.info(f"Activated {safe_name} on {successes} replica(s), classes: {classes}")

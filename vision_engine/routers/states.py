@@ -93,6 +93,10 @@ def delete_state(request: Request, state_name: str):
 
     if state_name == "default":
         return JSONResponse(content={"error": "Cannot delete default state"}, status_code=400)
+    # 4.0.438 — not the ACTIVE state: the capture loop kept running the deleted object, the
+    # deleted name was persisted as current, and on restart MVE fell back to "default".
+    if getattr(getattr(sm, "current_state", None), "name", None) == state_name:
+        return JSONResponse(content={"error": f"State '{state_name}' is active — activate another state first"}, status_code=409)
 
     success = sm.remove_state(state_name)
     if success:

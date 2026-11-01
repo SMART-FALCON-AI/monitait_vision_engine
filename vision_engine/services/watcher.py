@@ -1473,7 +1473,19 @@ class ArduinoSocket:
             self.serial.write(msg.encode('utf-8'))
             logger.debug(f"[SERIAL_TX] Sent: {msg.strip()}")
         else:
-            logger.warning(f"[SERIAL_TX] Cannot send '{msg.strip()}': serial_available={self.serial_available}, serial={self.serial is not None}")
+            # 4.0.438 — at most once a minute: in camera-only mode (no board) every capture
+            # sends a light-mode command, so this warned ~11×/min forever (339 lines / 30 min
+            # on vteam12) and buried every other warning.
+            now = time.monotonic()
+            if now - getattr(self, "_serial_tx_warned_at", -1e9) >= 60:
+                self._serial_tx_warned_at = now
+                skipped = getattr(self, "_serial_tx_skipped", 0)
+                self._serial_tx_skipped = 0
+                logger.warning(f"[SERIAL_TX] Cannot send '{msg.strip()}': serial_available={self.serial_available}, "
+                               f"serial={self.serial is not None}"
+                               + (f" (+{skipped} more unsent commands in the last minute)" if skipped else ""))
+            else:
+                self._serial_tx_skipped = getattr(self, "_serial_tx_skipped", 0) + 1
 
 
 

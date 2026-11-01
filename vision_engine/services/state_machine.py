@@ -261,8 +261,18 @@ class StateManager:
                 elif not state.id:
                     state.id = max([getattr(s, "id", 0) or 0 for s in self.states.values()], default=0) + 1
                 self.states[state.name] = state
-                logger.info(f"Added/updated state: {state.name} (id={state.id})")
-                return True
+                # 4.0.438 — editing the ACTIVE state: the capture loop reads current_state, which
+                # still pointed to the OLD object, so the edit did nothing until re-activated.
+                was_current = getattr(self.current_state, "name", None) == state.name
+                if was_current:
+                    self.current_state = state
+                logger.info(f"Added/updated state: {state.name} (id={state.id})" + (" — active, applied now" if was_current else ""))
+            if was_current:
+                try:
+                    self._apply_state_camera_overrides(state)   # outside the lock (V4L2 writes)
+                except Exception as ce:
+                    logger.warning(f"State '{state.name}' camera-override apply failed (non-fatal): {ce}")
+            return True
         except Exception as e:
             self._handle_error(f"Error adding state: {e}")
             return False

@@ -398,6 +398,10 @@ class PipelineManager:
                 elif not pipeline.id:
                     pipeline.id = max([getattr(p, "id", 0) or 0 for p in self.pipelines.values()], default=0) + 1
                 self.pipelines[pipeline.name] = pipeline
+                # 4.0.438 — editing the ACTIVE pipeline: inference read current_pipeline, which
+                # still pointed to the OLD object, so the edit did nothing until re-activated.
+                if getattr(self.current_pipeline, "name", None) == pipeline.name:
+                    self.current_pipeline = pipeline
                 logger.info(f"Added/updated pipeline: {pipeline.name} (id={pipeline.id})")
                 return True
         except Exception as e:
