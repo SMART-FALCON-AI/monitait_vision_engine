@@ -165,8 +165,12 @@ def imwrite_jpeg(path: str, frame_bgr, quality: int = 85) -> bool:
     data = encode_jpeg(frame_bgr, quality=quality)
     if data is None:
         return False
-    # 4.0.462 — temp file + rename: a reader (timeline, export) or a stop mid-write saw /
-    # left a TRUNCATED jpeg under the real name
+    return write_jpeg_bytes(path, data)
+
+
+def write_jpeg_bytes(path: str, data: bytes) -> bool:
+    """Write already-encoded JPEG bytes. 4.0.462 — temp file + rename: a reader (timeline,
+    export) or a stop mid-write saw / left a TRUNCATED jpeg under the real name."""
     tmp = path + '.part'
     try:
         with open(tmp, 'wb') as fh:

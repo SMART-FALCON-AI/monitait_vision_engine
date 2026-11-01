@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.463] - 2026-11-01 - Batch 43: Charts on busy lines, length across encoder resets, lighter disk writes (found testing on shoga)
+
+**Fixed**
+- **Charts showed no dots at all on busy lines** (shoga: about 84 detections per frame). Every per-bucket dot request first ran 24-hour size and confidence statistics over the newest 50,000 frames, which it never returns. That is about 4 million rows on shoga, so it hit the 15 s timeout, the whole request came back empty, and no dot ever loaded on any axis. Dot requests now skip that work.
+- **Shipment length restarted at 0 after an encoder reset or a restart.** The wrap guard restarted the length from 0. At boot it ran before the saved length was restored, so the shipment's whole length was lost. The length now continues from where it was. A reset is now detected from the previous reading, so it also works after the start has been rebuilt to a negative value.
+- **Raw images were JPEG-encoded twice.** The capture already encodes every frame (quality 85), and the disk writer encoded the raw frame again with the same settings. That doubled the JPEG work and held about 10× the memory per queued frame. The capture's bytes are now written as they are.
+- The raw-image folder lookup looped forever for a path outside `raw_images` (it never left `/`).
+
+Deployed to **vteam12 only**.
+
 ## [4.0.462] - 2026-11-01 - Audit batch 42: watcher ingestion, capture times, safe writes
 
 **Fixed**

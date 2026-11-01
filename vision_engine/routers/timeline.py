@@ -3442,21 +3442,31 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
                 "window": window, "shipment": shipment,
             })
 
+        # 4.0.463 — a per-bucket dot request (scatter_only) returns ONLY the scatter / strips /
+        # colour slice. It still ran the shipment list and the 24 h size / confidence percentiles
+        # below (the newest 50 000 frames × every detection: ~4 M rows on shoga, 84 detections
+        # per frame) → the 15 s statement timeout → the WHOLE request answered empty → no dot
+        # ever loaded on shoga, on any axis. Skipped for those requests (never part of the reply).
+        _dots_only = bool(int(scatter_only or 0))
+        shipments = []
+        size_over_time, confidence_over_time = [], []
         # --- distinct shipments in the window (for the dropdown) ---
-        cur.execute(
-            f"SELECT DISTINCT shipment FROM inference_results "
-            f"WHERE time > NOW() - INTERVAL %s AND shipment IS NOT NULL "
-            f"ORDER BY shipment LIMIT 100",
-            (interval,),
-        )
-        shipments = sorted(set([r[0] for r in cur.fetchall() if r[0]]) | set(_list_shipment_dirs()))
+        if not _dots_only:
+            cur.execute(
+                f"SELECT DISTINCT shipment FROM inference_results "
+                f"WHERE time > NOW() - INTERVAL %s AND shipment IS NOT NULL "
+                f"ORDER BY shipment LIMIT 100",
+                (interval,),
+            )
+            shipments = sorted(set([r[0] for r in cur.fetchall() if r[0]]) | set(_list_shipment_dirs()))
 
         # --- recent slice (capped) expanded to per-detection rows ---
         # Pull bucket, bbox dims, confidence, cam per detection.
         # min_conf filters at the JSONB-expand step so all downstream stats
         # (size percentiles, conf percentiles) respect the slider.
         base_params = [interval] + ([shipment] if shipment else []) + [float(min_conf or 0.0)]
-        cur.execute(
+        if not _dots_only:
+          cur.execute(
             f"""
             WITH recent AS (
                 SELECT time, shipment, detections
@@ -3490,9 +3500,8 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
             GROUP BY bkt ORDER BY bkt
             """,
             base_params,
-        )
-        size_over_time, confidence_over_time = [], []
-        for row in cur.fetchall():
+          )
+        for row in (cur.fetchall() if not _dots_only else []):
             bkt, wp10, wp50, wp90, hp10, hp50, hp90, cmin, cavg, cmax = row
             t = bkt.strftime("%m-%d %H:%M")
             _ts = int(bkt.timestamp() * 1000)   # 4.0.434 — local-time label in the UI

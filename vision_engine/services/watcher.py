@@ -489,7 +489,11 @@ def _resolve_raw_root(some_path):
         return _raw_root
     p = some_path
     while p and os.path.basename(p) != "raw_images":
-        p = os.path.dirname(p)
+        parent = os.path.dirname(p)
+        if parent == p:     # 4.0.463 — at "/" (a path outside raw_images looped forever)
+            p = ""
+            break
+        p = parent
     _raw_root = p or "raw_images"
     return _raw_root
 
@@ -617,8 +621,17 @@ def _disk_writer_loop():
     hotspot on this thread pool — replacing it lets the same # of workers
     absorb 3× the framerate before the queue backs up.
     """
-    from services.jpeg_codec import imwrite_jpeg
+    from services.jpeg_codec import imwrite_jpeg, write_jpeg_bytes
     _q = cfg.RAW_IMAGE_JPEG_QUALITY if hasattr(cfg, 'RAW_IMAGE_JPEG_QUALITY') else 85
+
+    def _write(path, frame):
+        # 4.0.463 — the capture already encoded the frame (quality 85, the same as here): write
+        # those bytes. Re-encoding the raw frame doubled the JPEG work — what made these
+        # writers CPU-bound under load — and each queued item held ~10x the memory.
+        if isinstance(frame, (bytes, bytearray)):
+            return write_jpeg_bytes(path, frame)
+        return imwrite_jpeg(path, frame, quality=_q)
+
     while True:
         try:
             path, frame = _disk_queue.get()
@@ -627,13 +640,13 @@ def _disk_writer_loop():
             # background at (75% - 5%) = 70% so writers always have
             # runway. Ensure raw_root is resolved (janitor needs it).
             _resolve_raw_root(os.path.dirname(path))
-            if not imwrite_jpeg(path, frame, quality=_q):
+            if not _write(path, frame):
                 # Write failed — most likely ENOSPC. Wake the janitor
                 # so it evicts immediately, then retry the frame once.
                 _disk_janitor_event.set()
                 time.sleep(0.1)
-                if not imwrite_jpeg(path, frame, quality=_q):
-                    logger.warning(f"jpeg_codec.imwrite_jpeg failed twice for {path}")
+                if not _write(path, frame):
+                    logger.warning(f"raw image write failed twice for {path}")
         except Exception as e:
             logger.error(f"Disk write error: {e}")
 
@@ -1365,16 +1378,38 @@ class ArduinoSocket:
                 enc = int(getattr(self, "encoder_value", 0) or 0)
                 start = int(getattr(self, "shipment_start_encoder", 0) or 0)
                 REBASE_THRESHOLD = 10000  # < 10k = belt reversal, keep the signed delta
-                if start > 0 and (start - enc) > REBASE_THRESHOLD:
-                    # Real encoder reset. Rebase so length restarts at 0.
+                # 4.0.463 — a reset is a big drop from the PREVIOUS reading (or, before the first
+                # one, from the start). The old test `start > 0` went blind once a rebuilt start
+                # was negative, and the rebase restarted the length at 0 — at boot this ran before
+                # restore_length_state (race) and threw away the whole shipment's length.
+                prev = getattr(self, "_len_prev_enc", None)
+                reset = ((prev is not None and prev - enc > REBASE_THRESHOLD) or
+                         (prev is None and start > 0 and start - enc > REBASE_THRESHOLD))
+                if reset:
+                    # Real encoder reset: CONTINUE the length from where it was.
+                    last_len = 0
+                    if getattr(self, "_len_last_ship", None) == ship:
+                        last_len = int(getattr(self, "_len_last_value", 0) or 0)
+                    else:
+                        try:
+                            with open(self._length_state_path) as _f:
+                                _st = json.load(_f)
+                            if str(_st.get("shipment", "")) == ship:
+                                last_len = int(_st.get("last_seen_length", 0) or 0)
+                        except Exception:
+                            last_len = 0
+                    last_len = max(0, last_len)
+                    new_start = int(enc) - last_len
                     logger.warning(
                         f"length wrap-guard: encoder reset detected mid-shipment "
-                        f"(start={start} enc={enc} drop={start-enc}) — "
-                        f"rebasing shipment_start_encoder={enc}"
+                        f"(start={start} enc={enc} prev={prev}) — continuing at length {last_len} "
+                        f"(shipment_start_encoder={new_start})"
                     )
-                    self.shipment_start_encoder = int(enc)
-                    start = int(enc)
+                    self.shipment_start_encoder = new_start
+                    start = new_start
+                self._len_prev_enc = enc
                 length_delta = enc - start
+                self._len_last_ship, self._len_last_value = ship, max(0, length_delta)
                 state = {
                     "shipment":               ship,
                     "shipment_start_encoder": start,
@@ -2301,9 +2336,9 @@ class ArduinoSocket:
                                                f"({_fe}) — skipped (other cameras of the trigger kept)")
                             continue
 
-                        # Queue raw numpy for async disk archival (non-blocking, drop if full)
+                        # Queue the encoded JPEG for async disk archival (non-blocking, drop if full)
                         try:
-                            _disk_queue.put_nowait((name, grabbed))
+                            _disk_queue.put_nowait((name, jpeg_bytes))   # 4.0.463 — not the raw frame
                         except queue.Full:
                             logger.warning("Disk write queue full — dropping disk write (inference continues)")
 
