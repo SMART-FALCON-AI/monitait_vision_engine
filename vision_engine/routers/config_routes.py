@@ -26,26 +26,17 @@ router = APIRouter()
 # =============================================================================
 
 def _get_ai_models_from_redis():
-    """Load all AI models from Redis. Returns dict: {"models": {...}, "active": "name"}."""
+    """Load all AI models: {"models": {...}, "active": "name"}.
+
+    4.0.435 — ONE implementation (routers.ai): DB first, then the Redis cache, then the
+    legacy single-key migration. This copy read Redis ONLY; Redis runs allkeys-lru, so after
+    an eviction or a Redis restart "Save All" built service_config with an EMPTY ai section
+    and wrote it over the saved AI model / key."""
     try:
-        r = Redis("redis", 6379, db=config.REDIS_DB)
-        raw = r.get("ai_models")
-        if raw:
-            data = json.loads(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
-            if "models" in data:
-                return data
-        # Migration: check legacy single-model keys
-        legacy_model = r.get("ai_model")
-        legacy_key = r.get("ai_api_key")
-        if legacy_model and legacy_key:
-            provider = legacy_model.decode('utf-8') if isinstance(legacy_model, bytes) else legacy_model
-            api_key = legacy_key.decode('utf-8') if isinstance(legacy_key, bytes) else legacy_key
-            name = provider.capitalize()
-            data = {"models": {name: {"provider": provider, "api_key": api_key}}, "active": name}
-            r.set("ai_models", json.dumps(data))
-            return data
+        from routers.ai import _get_ai_models_from_redis as _impl
+        return _impl()
     except Exception as e:
-        logger.warning(f"Failed to load AI models from Redis: {e}")
+        logger.warning(f"Failed to load AI models: {e}")
     return {"models": {}, "active": None}
 
 

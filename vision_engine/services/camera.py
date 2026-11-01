@@ -1302,14 +1302,20 @@ class CameraBuffer:
                 self.camera.set(cv2.CAP_PROP_GAMMA, 1)
             except Exception:
                 pass
-        if not self._saved_props:
+        # 4.0.435 — the ACTIVE STATE's exposure/gain override (StateManager) goes on top of the
+        # camera's own saved values, so a reconnect / restart keeps it. It used to be written to
+        # the hardware only, and the next reconnect silently reverted to the camera's value. Kept
+        # apart from _saved_props: those are what "save camera config" persists.
+        props = dict(self._saved_props or {})
+        props.update(getattr(self, '_state_override_props', None) or {})
+        if not props:
             return
         skip_props = set()
         if not self.is_ip_camera and getattr(self, 'auto_exposure', False):
             # Writing CAP_PROP_EXPOSURE re-enables manual mode on most firmwares,
             # negating the AE we just asked for. Skip just this one prop.
             skip_props.add(cv2.CAP_PROP_EXPOSURE)
-        for prop, val in self._saved_props.items():
+        for prop, val in props.items():
             if prop in skip_props:
                 continue
             try:
@@ -1318,8 +1324,9 @@ class CameraBuffer:
                 pass
         logger.info(
             f"Re-applied saved camera config after reconnect: {safe_source(self.source)} | "
-            f"props={ {p: v for p, v in self._saved_props.items() if p not in skip_props} }"
+            f"props={ {p: v for p, v in props.items() if p not in skip_props} }"
             + (" | auto_exposure=ON (manual exposure skipped)" if cv2.CAP_PROP_EXPOSURE in skip_props else "")
+            + (" | state override on top" if getattr(self, '_state_override_props', None) else "")
         )
 
     def update_prop(self, prop, value):

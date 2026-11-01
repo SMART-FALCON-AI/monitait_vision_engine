@@ -423,11 +423,13 @@ def init_queues(num_cameras, ejector_offset, ejector_enabled):
 
     Hot queue uses the full RAM budget. When hot fills up, frames spill to cold (disk).
     """
-    global _hot_queue, _cold_queue_disk, _inference_queue
+    # 4.0.435 — resize IN PLACE, never replace. The capture thread starts before this runs
+    # (main.py waits up to 180 s for the DB in between); building new queue objects here
+    # stranded every frame captured in that window in the old hot queue (never inferred),
+    # and left two ColdDiskQueue objects indexing the same directory (old-object spill
+    # files were never flushed or evicted). Same sizing as before.
     hot_max = max(10, _ram_budget)
-    _hot_queue = HotQueue(maxsize=hot_max)
-    _cold_queue_disk = ColdDiskQueue(directory="/tmp/cold_queue")
-    _inference_queue = InferenceQueueFacade(_hot_queue, _cold_queue_disk)
+    _hot_queue.maxsize = hot_max
     logger.info(
         f"Inference queues initialized: hot={hot_max} frames (RAM), "
         f"cold=disk (/tmp/cold_queue/), ejector={'ON' if ejector_enabled else 'OFF'}, "

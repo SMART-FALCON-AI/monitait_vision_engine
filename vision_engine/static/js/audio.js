@@ -2086,13 +2086,13 @@ document.addEventListener('DOMContentLoaded', function() {
             if (rotSel && cfg.image_rotation !== undefined && cfg.image_rotation !== null) {
                 rotSel.value = String(cfg.image_rotation);
             }
+            // 4.0.435 — the DEPRECATED timeline_config.object_filters (no longer written by the
+            // UI since 3.21.22; the GET still returns the old copy) only contributes the class
+            // NAMES now. It used to overwrite Show / Min conf too — racing the real per-class
+            // settings (loadAudioSettingsFromServer): if it landed last, the UI showed stale
+            // values and the next per-class toggle synced them back to the server.
             if (cfg.object_filters) {
-                const filters = cfg.object_filters;
-                Object.keys(filters).forEach(name => {
-                    detectedObjectClasses.add(name);
-                    audioSettings.showObjects[name] = filters[name].show !== false;
-                    audioSettings.objectConfidence[name] = Math.round((filters[name].min_confidence || 0.01) * 100);
-                });
+                Object.keys(cfg.object_filters).forEach(name => detectedObjectClasses.add(name));
                 updateObjectsList();
             }
         } catch (error) {

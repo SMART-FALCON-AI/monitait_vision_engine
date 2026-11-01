@@ -303,17 +303,17 @@ class StateManager:
                 self.current_state = state
                 self.state_ready.set()
                 logger.info(f"Set current state to: {name}")
-                # Apply per-state camera-prop override (exposure / gain). If the new
-                # state has neither set, restore each affected camera to its own
-                # configured value from service_config["cameras"][cid]. Done outside
-                # the state_lock-critical-section above is intentional — V4L2 prop
-                # writes can block for hundreds of ms per camera; we don't want to
-                # hold the state_lock for that.
-                try:
-                    self._apply_state_camera_overrides(state)
-                except Exception as ce:
-                    logger.warning(f"State '{name}' camera-override apply failed (non-fatal): {ce}")
-                return True
+            # Apply per-state camera-prop override (exposure / gain). If the new
+            # state has neither set, restore each affected camera to its own
+            # configured value from service_config["cameras"][cid]. Done outside
+            # the state_lock critical section — V4L2 prop writes can block for
+            # hundreds of ms per camera; we don't want to hold the state_lock for that.
+            # (4.0.435 — it actually ran INSIDE the lock, despite this comment.)
+            try:
+                self._apply_state_camera_overrides(state)
+            except Exception as ce:
+                logger.warning(f"State '{name}' camera-override apply failed (non-fatal): {ce}")
+            return True
         except Exception as e:
             self._handle_error(f"Error setting state: {e}")
             return False
@@ -352,11 +352,24 @@ class StateManager:
             auto_exposure = bool(cam_cfg.get("auto_exposure", False))
             if cam_cfg.get("auto") or getattr(cam, "auto", False):
                 logger.info(f"State '{state.name}': cam {cid} is in Auto — exposure/gain left to the camera")
+                cam._state_override_props = {}   # 4.0.435 — no stale override if Auto is switched off later
                 continue
 
             # Decide target exposure
             target_exp = state.exposure if state.exposure is not None else cam_cfg.get("exposure")
             target_gain = state.gain if state.gain is not None else cam_cfg.get("gain")
+            # 4.0.435 — remember the STATE's own values on the camera so its reconnect /
+            # restart re-applies them (camera.py _apply_manual_controls); cleared when the
+            # state sets none, so the camera's own config comes back.
+            try:
+                _ov = {}
+                if state.exposure is not None:
+                    _ov[cv2.CAP_PROP_EXPOSURE] = float(state.exposure)
+                if state.gain is not None:
+                    _ov[cv2.CAP_PROP_GAIN] = float(state.gain)
+                cam._state_override_props = _ov
+            except Exception:
+                pass
             try:
                 if target_exp is not None and not auto_exposure:
                     cam.camera.set(cv2.CAP_PROP_EXPOSURE, float(target_exp))

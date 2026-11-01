@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.435] - 2026-11-01 - Audit batch 15: state exposure survives a reconnect, no frames stranded at boot, AI config kept
+
+**Fixed**
+- **A state's exposure / gain override was lost on the next camera reconnect.** It was written to the camera only, so any reconnect or restart re-applied the camera's own value while the state stayed active. The active state's values are now kept on the camera, applied on top of its own saved values on every re-open, and cleared when a state sets none. They are kept apart from the camera's saved settings, so "save camera config" still stores the camera's own values. The override write also ran inside the state lock, despite the comment, holding it for every camera's property writes; it now runs after.
+- **Frames captured during boot could be stranded.** The capture thread starts before the inference queues are "initialized", and MVE waits up to 180 s for the database in between. `init_queues` then replaced the queue objects, so frames captured in that window stayed in the old queue and were never inferred. Two cold-queue objects also ended up indexing the same directory. The queues are now resized in place (same sizes).
+- **"Save All" could wipe the saved AI model and key.** Building the config read the AI models from Redis only. Redis evicts under memory pressure and empties on restart, so an empty AI section was then written over the saved one. It now uses the same DB-first reader as the AI endpoints.
+- **Per-class settings could revert on page load.** The deprecated `timeline_config.object_filters` (not written since 3.21.22) was copied into Show / Min conf, racing the real per-class settings; if it landed last, the next toggle synced the stale values back. It now only contributes class names.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.434] - 2026-11-01 - Audit batch 14: Charts tab: local times, sticky choices, one hover preview
 
 **Fixed**
