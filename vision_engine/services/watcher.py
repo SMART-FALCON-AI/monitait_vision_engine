@@ -55,6 +55,9 @@ def _insert_by_target(queue, entry):
     queue.insert(i, entry)
 
 
+_EJECT_QUEUE_MAX = max(50, int(os.environ.get("MVE_EJECT_QUEUE_MAX", "1000") or 1000))
+
+
 def _eject_late_tolerance():
     """Pulses past its target a NEW eject request may still be (4.0.439): env
     MVE_EJECT_LATE_TOLERANCE, else 25 % of EJECTOR_OFFSET (the ejector still catches a
@@ -763,6 +766,7 @@ class ArduinoSocket:
         try:
             self.serial = _open_serial(self.serial_port, self.serial_baudrate)
             self.serial_available = True
+            self._serial_ever_open = True
             logger.info(f"Serial connected: {self.serial_port} @ {self.serial_baudrate}")
         except Exception as e:
             self.serial = None
@@ -1076,6 +1080,7 @@ class ArduinoSocket:
         self.serial_port, self.serial_baudrate = port, int(baud)
         self.serial = new
         self.serial_available = True
+        self._serial_ever_open = True
         if old is not None and old is not new:
             try:
                 old.close()
@@ -1807,6 +1812,14 @@ class ArduinoSocket:
             try:
                 # If serial is not available, just sleep and continue (camera-only mode)
                 if not self.serial_available or not self.serial:
+                    # 4.0.447 — a board that WAS connected and then lost (USB re-enumeration,
+                    # brown-out) is retried every ≤5 s. The one reopen in the error path below
+                    # usually runs while /dev/ttyACM* is still gone; it failed, set
+                    # serial_available=False and this branch then slept forever: encoder frozen,
+                    # queued ejects never reached, OK/NG counters stuck until a restart.
+                    # (Missing since boot = camera-only mode: not retried, as before.)
+                    if getattr(self, "_serial_ever_open", False) and self.serial_port:
+                        self._serial_retry_lost()
                     time.sleep(0.1)
                     continue
 
@@ -2005,6 +2018,28 @@ class ArduinoSocket:
                 logger.debug(f"Serial run error (will retry): {e}")
                 time.sleep(0.1)
 
+    def _serial_retry_lost(self):
+        """4.0.447 — reopen a lost watcher board, with backoff (0.5 s doubling to 5 s)."""
+        now = time.time()
+        if now - getattr(self, "_serial_reconnect_last", 0.0) < getattr(self, "_serial_reconnect_backoff", 0.5):
+            return
+        self._serial_reconnect_last = now
+        try:
+            ser = _open_serial(self.serial_port, self.serial_baudrate)
+        except Exception as e:
+            self._serial_reconnect_backoff = min(getattr(self, "_serial_reconnect_backoff", 0.5) * 2, 5.0)
+            logger.debug(f"Serial still lost on {self.serial_port}: {e}")
+            return
+        old, self.serial = self.serial, ser
+        self.serial_available = True
+        self._serial_reconnect_backoff = 0.5
+        if old is not None and old is not ser:
+            try:
+                old.close()
+            except Exception:
+                pass
+        logger.warning(f"Serial reconnected on {self.serial_port} (board was lost)")
+
     def run_ejector(self):
         """
         Encoder-based ejector using Redis list queue.
@@ -2040,7 +2075,11 @@ class ArduinoSocket:
                 # Result: ~200× fewer wakeups when idle, no throughput loss when
                 # busy. Redis-side BLPOP cost is a park on a condition variable,
                 # so idle CPU cost drops to ~zero here.
-                _blpop_timeout = 0.005 if self.ejection_queue or self._ejector_pending else 1.0
+                # 4.0.447 — also while the ejector is ON: its OFF ('7') is only checked after this
+                # BLPOP returns, so with both queues empty it went out up to 1 s late — ~100× the
+                # default EJECTOR_DURATION (0.01 s), rejecting the good products behind.
+                _blpop_timeout = (0.005 if (self.ejection_queue or self._ejector_pending or self.ejector_running)
+                                  else 1.0)
                 blpop_result = self.redis_connection.pop_queue_blocking(
                     stream_name="ejector_queue", timeout=_blpop_timeout
                 )
@@ -2070,6 +2109,18 @@ class ArduinoSocket:
                             "dm": dm,
                             "queued_at": capture_encoder
                         })
+                        # 4.0.447 — bounded: with the encoder not moving (camera-only box with the
+                        # ejector on, a stopped line in Infinite capture) no target is ever reached
+                        # and the list grew forever (rescanned every 5 ms).
+                        if len(self.ejection_queue) > _EJECT_QUEUE_MAX:
+                            _drop = len(self.ejection_queue) - _EJECT_QUEUE_MAX
+                            del self.ejection_queue[:_drop]
+                            self._ej_overflow = getattr(self, "_ej_overflow", 0) + _drop
+                            if time.time() - getattr(self, "_ej_overflow_logged", 0.0) > 60:
+                                self._ej_overflow_logged = time.time()
+                                logger.warning(f"[EJ_QUEUE] {self._ej_overflow} unreachable eject request(s) "
+                                               f"dropped (queue over {_EJECT_QUEUE_MAX}; encoder={self.encoder_value} "
+                                               f"is not reaching their targets — is the encoder moving?)")
                         logger.info(f"[EJ_QUEUE] Added: capture_enc={capture_encoder}, target_enc={target_encoder}, offset={cfg.EJECTOR_OFFSET}, queue_size={len(self.ejection_queue)}, current_enc={self.encoder_value}")
                     except json.JSONDecodeError as e:
                         logger.warning(f"Invalid ejector queue data: {e}")
@@ -2100,7 +2151,12 @@ class ArduinoSocket:
                             self.ejector_start_ts = now
                             self.redis_connection.update_queue_messages_redis("Eject", stream_name="speaker")
                         else:
-                            logger.info(f"[EJ_QUEUE] Discarded stale entry (ejector already running)")
+                            # 4.0.447 — the next defective product is due while the ejector is still
+                            # ON: keep it on for this one's full duration too (it was DISCARDED — the
+                            # pulse could end before this product reached the ejector).
+                            self.ejector_start_ts = now
+                            logger.info(f"[EJ_FIRE] Ejector already ON — extended for the next product | "
+                                        f"target={entry['target']}, enc={self.encoder_value}")
 
                 # Stop ejector after cfg.EJECTOR_DURATION
                 if self.ejector_running and (now - self.ejector_start_ts > cfg.EJECTOR_DURATION):
@@ -2249,7 +2305,22 @@ class ArduinoSocket:
                         # once per frame per camera, so replacing it is the biggest
                         # single CPU win the 4.0.52 change delivers.
                         from services.jpeg_codec import encode_jpeg as _enc_jpeg
-                        jpeg_bytes = _enc_jpeg(grabbed, quality=85)
+                        # 4.0.447 — ONE camera's bad frame (read() → None, an empty ROI crop
+                        # after a resolution change) raised here and lost EVERY camera's frame
+                        # of this trigger, on every trigger. Skip just that camera.
+                        try:
+                            if grabbed is None or getattr(grabbed, "size", 0) == 0:
+                                raise ValueError("empty frame")
+                            jpeg_bytes = _enc_jpeg(grabbed, quality=85)
+                            if not jpeg_bytes:
+                                raise ValueError("encoder returned nothing")
+                        except Exception as _fe:
+                            _k = f"_bad_frame_logged_{camera_index}"
+                            if time.time() - getattr(self, _k, 0.0) > 30:
+                                setattr(self, _k, time.time())
+                                logger.warning(f"Capture: camera {camera_index} gave an unusable frame "
+                                               f"({_fe}) — skipped (other cameras of the trigger kept)")
+                            continue
 
                         # Queue raw numpy for async disk archival (non-blocking, drop if full)
                         try:

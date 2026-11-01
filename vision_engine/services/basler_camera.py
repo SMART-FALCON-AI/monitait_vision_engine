@@ -222,6 +222,14 @@ class BaslerBuffer:
         self.frame: Optional[np.ndarray] = None
         self.success = False
         self.stop = False
+        # 4.0.447 — a frame older than this is stale: `success` goes False so the capture
+        # loop stops judging every new product on the last image before a disconnect.
+        self._last_frame_ts = 0.0
+        try:
+            self._stale_after = max(1.0, 3.0 / float(fps or 0)) if float(fps or 0) > 0 else 1.0
+        except Exception:
+            self._stale_after = 1.0
+        self._reconnect_requested = False
 
         # Saved props for reconnect + get_camera_config_for_save parity.
         # Values map onto the same numeric cv2 prop keys UVC uses, plus a
@@ -283,8 +291,12 @@ class BaslerBuffer:
         # releases the GIL for a while between C++ calls.
         reconnect_backoff = 2.0
         RECONNECT_BACKOFF_CAP = 30.0
+        err_logged = 0.0
 
         while not self.stop:
+            if self._reconnect_requested:            # 4.0.447 — Restart button / API
+                self._reconnect_requested = False
+                failure_count = max_failures
             try:
                 if not self.camera.IsGrabbing():
                     logger.warning("Basler: camera not grabbing, restarting")
@@ -304,6 +316,7 @@ class BaslerBuffer:
                     if res is not None:
                         try: res.Release()
                         except Exception: pass
+                    self._mark_stale_if_old()
                 else:
                     ok = res.GrabSucceeded()
                     if ok:
@@ -321,6 +334,7 @@ class BaslerBuffer:
                         else:
                             self.frame = arr
                             self.success = True
+                            self._last_frame_ts = time.time()
                             failure_count = 0
                     else:
                         self.success = False
@@ -331,29 +345,6 @@ class BaslerBuffer:
                         )
                     res.Release()
 
-                if failure_count >= max_failures:
-                    logger.warning(
-                        f"Basler: {failure_count} consecutive failures — "
-                        f"reconnecting (backoff {reconnect_backoff:.0f}s)"
-                    )
-                    # 4.0.66 — sleep BEFORE the reconnect call so the GIL is
-                    # released for `reconnect_backoff` seconds before we make
-                    # the next GIL-holding EnumerateDevices() call. This is
-                    # what lets uvicorn service /health and /api/status while
-                    # the Basler is misbehaving.
-                    time.sleep(reconnect_backoff)
-                    try:
-                        self._reconnect()
-                        failure_count = 0
-                        reconnect_backoff = 2.0   # reset backoff on success
-                    except Exception as e:
-                        logger.error(f"Basler reconnect failed: {e}")
-                        # Grow backoff for next attempt; hard-cap so we always
-                        # keep trying after the flaky device recovers.
-                        reconnect_backoff = min(
-                            reconnect_backoff * 2, RECONNECT_BACKOFF_CAP
-                        )
-
                 # 4.0.66 — was 0.0001s (100µs) — effectively a busy loop that
                 # kept the GIL nearly continuously and caused failure_count to
                 # hit max_failures within ~10ms whenever RetrieveResult was
@@ -361,8 +352,52 @@ class BaslerBuffer:
                 # real chance to switch threads and lets uvicorn breathe.
                 time.sleep(0.005)
             except Exception as e:
-                logger.error(f"Basler buffer error: {e}")
+                # 4.0.447 — errors COUNT toward a reconnect. After one failed reconnect the
+                # InstantCamera is closed, StartGrabbing raises on every pass, and this branch
+                # never reached the reconnect below: an error 10×/s forever, never recovered.
+                failure_count += 10
+                self._mark_stale_if_old()
+                if time.time() - err_logged > 30:
+                    err_logged = time.time()
+                    logger.error(f"Basler buffer error: {e}")
                 time.sleep(0.1)
+
+            if failure_count >= max_failures:
+                self.success = False
+                logger.warning(
+                    f"Basler: {failure_count} consecutive failures — "
+                    f"reconnecting (backoff {reconnect_backoff:.0f}s)"
+                )
+                # 4.0.66 — sleep BEFORE the reconnect call so the GIL is
+                # released for `reconnect_backoff` seconds before we make
+                # the next GIL-holding EnumerateDevices() call. This is
+                # what lets uvicorn service /health and /api/status while
+                # the Basler is misbehaving.
+                time.sleep(reconnect_backoff)
+                try:
+                    self._reconnect()
+                    failure_count = 0
+                    reconnect_backoff = 2.0   # reset backoff on success
+                except Exception as e:
+                    failure_count = 0         # next attempt after another full count / backoff
+                    logger.error(f"Basler reconnect failed: {e}")
+                    # Grow backoff for next attempt; hard-cap so we always
+                    # keep trying after the flaky device recovers.
+                    reconnect_backoff = min(
+                        reconnect_backoff * 2, RECONNECT_BACKOFF_CAP
+                    )
+
+    def _mark_stale_if_old(self):
+        """4.0.447 — no new frame for longer than the stale window → `success` False (a single
+        RetrieveResult timeout is normal at low fps and must not flip it)."""
+        if self.success and time.time() - self._last_frame_ts > self._stale_after:
+            self.success = False
+
+    def restart_camera(self):
+        """4.0.447 — Restart button / API: reconnect on the grab thread (BaslerBuffer had no
+        restart_camera, so /api/camera/{id}/restart answered 500 for Basler cameras)."""
+        self._reconnect_requested = True
+        return True
 
     def _reconnect(self):
         """Close and re-open the InstantCamera, re-applying saved props."""

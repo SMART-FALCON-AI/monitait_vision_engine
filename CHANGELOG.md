@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.447] - 2026-11-01 - Audit batch 27: ejector timing, watcher board reconnect, Basler freeze
+
+**Fixed**
+- **A lost watcher board was never reconnected.** When the board dropped off USB (cable bump, brown-out), one immediate reopen was attempted, usually while the device was still gone. After that the serial loop slept forever: the encoder froze, queued ejects never fired, and the OK/NG counters stopped until MVE was restarted. A board that was connected and then lost is now retried every 0.5–5 s. A board missing since start-up (camera-only mode) behaves as before.
+- **The ejector stayed ON up to 1 s too long.** The OFF command was only checked once a 1-second wait for new eject requests ended, so with the default 0.01 s pulse the ejector stayed on about 100 times too long and rejected the good products behind. OFF now goes out on time.
+- **A second defective product due while the ejector was still ON was dropped** ("Discarded stale entry"), and the pulse could end before that product reached the ejector. The pulse is now extended for it.
+- **The ejection queue grew forever when the encoder doesn't move** (camera-only box with the ejector on, or a stopped line in Infinite capture). It is now capped at 1000 requests (`MVE_EJECT_QUEUE_MAX`); unreachable ones are dropped with a warning.
+- **One camera's bad frame lost the whole trigger.** No frame, or an empty crop after a resolution change, discarded every camera's image for that product, on every trigger. Now only that camera is skipped, with a warning.
+- **Basler cameras**:
+  - A camera that stopped delivering images kept reporting "ok", and every new product was judged on its last image before the disconnect (all passed or all ejected). A frame older than max(1 s, 3 frame intervals) now counts as no frame.
+  - After one failed reconnect, no reconnect was ever tried again (an error logged 10 times a second, forever). Errors now count toward the next reconnect, with backoff.
+  - The camera Restart button answered with an error for Basler cameras. It now triggers a reconnect.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.446] - 2026-11-01 - Audit batch 26: annotator class map per task, '#' in shipment ids, small fixes
 
 **Fixed**
