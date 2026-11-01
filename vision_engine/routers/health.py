@@ -268,15 +268,20 @@ async def health_check(request: Request):
         redis_ok = False
         if watcher and watcher.redis_connection:
             try:
-                watcher.redis_connection.redis_connection.ping()
+                # 4.0.442 — on the health-probe pool, capped at 3 s: a direct ping on the
+                # event loop waited up to the client's 10 s socket timeout when Redis hung,
+                # freezing every request (every dashboard polls /health)
+                await _probe(watcher.redis_connection.redis_connection.ping)
                 redis_ok = True
-            except:
+            except Exception:
                 pass
 
         # Check cameras dynamically (verify device node exists for USB)
         cameras_status = {}
         if watcher and hasattr(watcher, 'cameras'):
-            for cam_id, cam in watcher.cameras.items():
+            # 4.0.442 — a copy: hot-add / the pro reconciler change the dict while we iterate
+            # ("dictionary changed size during iteration" → a spurious 503)
+            for cam_id, cam in list(watcher.cameras.items()):
                 cam_path = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else None
                 is_usb = True
                 if hasattr(watcher, 'camera_metadata') and cam_id in watcher.camera_metadata:
@@ -290,7 +295,7 @@ async def health_check(request: Request):
         # Check YOLO/Gradio inference availability
         # Use pipeline manager's current model URL if available (more accurate than static global)
         yolo_ok = False
-        active_inference_url = YOLO_INFERENCE_URL
+        active_inference_url = cfg_module.YOLO_INFERENCE_URL   # 4.0.442 — live value, not the import-time copy
         if pipeline_manager and pipeline_manager.get_current_model():
             active_inference_url = pipeline_manager.get_current_model().inference_url
         try:
@@ -862,7 +867,7 @@ def api_status(request: Request):
             "ejector_offset": cfg_module.EJECTOR_OFFSET,
             "ejector_delay": cfg_module.EJECTOR_DELAY,
             "ejector_enabled": cfg_module.EJECTOR_ENABLED,
-            "histogram_enabled": HISTOGRAM_ENABLED,
+            "histogram_enabled": cfg_module.HISTOGRAM_ENABLED,   # 4.0.442 — live value
             "status": {
                 "U": getattr(watcher, "u_status", False) if watcher else False,
                 "B": getattr(watcher, "b_status", False) if watcher else False,
@@ -1078,7 +1083,7 @@ async def status_stream(request: Request):
                             "name": getattr(cam, 'name', name),
                             "type": getattr(cam, 'camera_type', 'unknown'),
                         }
-                        for name, cam in (watcher.cameras.items() if watcher and watcher.cameras else {})
+                        for name, cam in (list(watcher.cameras.items()) if watcher and watcher.cameras else [])
                     },
                     # Inference stats
                     "inference": {

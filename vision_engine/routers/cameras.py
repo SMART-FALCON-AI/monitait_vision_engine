@@ -49,7 +49,7 @@ def get_cameras_status(request: Request):
 
     cameras = []
     # Use dynamic cameras dict
-    for cam_id, cam in watcher.cameras.items():
+    for cam_id, cam in list(watcher.cameras.items()):   # 4.0.442 — a copy (hot-add / reconciler mutate it)
         # Get camera path from stored paths
         cam_path = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else "unknown"
 

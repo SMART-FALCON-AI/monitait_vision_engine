@@ -107,6 +107,9 @@ def _init_db_pool():
         user=POSTGRES_USER,
         password=POSTGRES_PASSWORD,
         options=f'-c statement_timeout={POSTGRES_STATEMENT_TIMEOUT_MS}',
+        # 4.0.442 — bounded: with no connect timeout a getconn() during a DB outage
+        # (half-open TCP, a host that drops SYNs) blocked its caller indefinitely
+        connect_timeout=int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "5") or 5),
     )
     logger.info("Database connection pool initialized (ThreadedConnectionPool)")
 

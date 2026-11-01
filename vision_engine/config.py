@@ -208,6 +208,13 @@ _last_load_source = 'disk'
 def _load_data_file_uncached():
     """The real loader: DB-first (3.22.0), file fallback. Returns a dict (possibly empty)."""
     global _last_load_source
+    # 4.0.442 — a disk-only write is outstanding (possibly from before a restart): push it
+    # into the DB first, so this read doesn't serve the older DB copy
+    if _db_write_pending:
+        try:
+            reconcile_db_from_disk()
+        except Exception:
+            pass
     # 3.22.0 — DB first
     try:
         from services.config_db import load_all as _db_load
@@ -400,7 +407,23 @@ def _atomic_write_disk(data):
 
 
 # 4.0.391 — set when a persist could not reach the DB; cleared once re-pushed.
-_db_write_pending = False
+# 4.0.442 — also kept as a marker FILE next to the data file, so a restart before the
+# re-push still knows the disk copy is newer than the DB (it was memory-only: after a
+# restart the boot preferred the older DB copy and the disk-only change was lost).
+_DB_PENDING_MARKER = DATA_FILE + ".db_pending"
+_db_write_pending = os.path.exists(_DB_PENDING_MARKER)
+
+
+def _set_db_pending(on):
+    global _db_write_pending
+    _db_write_pending = bool(on)
+    try:
+        if on:
+            open(_DB_PENDING_MARKER, "w").close()
+        elif os.path.exists(_DB_PENDING_MARKER):
+            os.remove(_DB_PENDING_MARKER)
+    except OSError:
+        pass
 
 
 def _merge_and_persist(partial, updated_by="mve"):
@@ -430,6 +453,13 @@ def _merge_and_persist(partial, updated_by="mve"):
         db_reachable = base is not None
         if not db_reachable:
             base = _read_disk_dict()
+        elif _db_write_pending:
+            # 4.0.442 — a disk-only write is still outstanding: the DISK copy is the newer
+            # one. Basing this write on the DB silently dropped that change (both stores
+            # were then overwritten and the pending flag cleared).
+            _disk = _read_disk_dict()
+            if _disk:
+                base = _disk
 
         merged = dict(base or {})
         merged.update(partial)
@@ -447,12 +477,12 @@ def _merge_and_persist(partial, updated_by="mve"):
         # 3. if the DB could not take it, remember to push disk up when it returns —
         #    otherwise a DB that comes back with older data silently wins on next boot.
         if not db_ok:
-            _db_write_pending = True
+            _set_db_pending(True)
             logger.warning(
                 "[ONE-KEY] config written to DISK ONLY (DB unreachable) — will re-push "
                 "to the database as soon as it answers")
         else:
-            _db_write_pending = False
+            _set_db_pending(False)
 
         if file_ok or db_ok:
             logger.info(
@@ -485,7 +515,7 @@ def reconcile_db_from_disk():
         try:
             from services.config_db import save_all as _db_save
             if _db_save(disk, updated_by="reconcile:disk->db"):
-                _db_write_pending = False
+                _set_db_pending(False)
                 logger.warning("[ONE-KEY] re-pushed the disk config into the database "
                                "after a disk-only write")
                 try:

@@ -895,9 +895,12 @@ async def _start_timeline_config_selfheal():
             await _a.sleep(10 if tick <= 30 else 60)   # eager for 5 min, then relaxed
             try:
                 # opportunistically push a disk-only write back into the DB
+                # 4.0.442 — in a worker thread: this is the event loop, and the reconcile
+                # takes the config lock and writes the DB (the pool has no connect timeout,
+                # so exactly while the DB is down a slow connect froze every request)
                 try:
                     from config import reconcile_db_from_disk as _recon
-                    _recon()
+                    await _a.to_thread(_recon)
                 except Exception:
                     pass
                 if not getattr(app.state, "timeline_config_is_default", False):
@@ -910,7 +913,7 @@ async def _start_timeline_config_selfheal():
                     continue
                 from config import invalidate_config_cache as _inv, load_data_file as _load
                 _inv()
-                data = _load() or {}
+                data = (await _a.to_thread(_load)) or {}   # 4.0.442 — off the loop
                 tc = data.get("timeline_config")
                 if isinstance(tc, dict) and tc:
                     app.state.timeline_config = tc
@@ -979,7 +982,11 @@ def start_web_server():
             log_level="warning",
             access_log=False,
             loop="asyncio",
-            limit_concurrency=100,
+            # 4.0.442 — 400 (was 100): uvicorn counts every open WebSocket — the Cameras
+            # tab holds one per camera — so three dashboards on a 28-camera site hit the
+            # cap and uvicorn answered 503 to EVERYTHING, the container health check
+            # included. Env MVE_LIMIT_CONCURRENCY overrides.
+            limit_concurrency=int(os.environ.get("MVE_LIMIT_CONCURRENCY", "400") or 400),
             timeout_keep_alive=5
         )
         server = uvicorn.Server(config)
@@ -1158,7 +1165,10 @@ apply_pipeline_config_at_startup(pipeline_manager)
 # the hot queue (RAM) or cold queue (disk), calls YOLO, and handles results.
 # Docker DNS round-robin distributes requests across YOLO replicas.
 _num_cameras = len(watcher.cameras) if watcher.cameras else 1
-INFERENCE_WORKERS = max(4, _num_cameras * 4)
+# 4.0.442 — clamped to the worker cap: cams × 4 gave 112–124 threads on the 28–31-camera
+# sites, ABOVE the cap (≤32) — so the autoscaler's min > max and it could never scale
+# either way, and every idle worker polled the queues (thundering herd on each put).
+INFERENCE_WORKERS = min(max(4, _num_cameras * 4), _max_inference_workers)
 # No semaphore — worker count IS the concurrency limit.
 # Autoscaler adds workers when queue backs up, which naturally increases
 # concurrency to match the API's capacity (local or remote).
@@ -1218,6 +1228,10 @@ logger.info(f"Web server started on http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
 
 
 # ── Shared frame processing logic ──
+# 4.0.442 — counters shared by the inference worker threads
+_COUNTER_LOCK = threading.Lock()
+
+
 def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_frame=None):
     """Process a frame batch through YOLO and handle results.
 
@@ -1353,7 +1367,8 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
                 if allow_eject:
                     eject_data = json.dumps({"encoder": capture_encoder, "dm": first_dms})
                     watcher.redis_connection.update_queue_messages_redis(eject_data, stream_name="ejector_queue")
-                    watcher.eject_ng_counter += 1
+                    with _COUNTER_LOCK:   # 4.0.442 — N worker threads: unlocked += lost increments
+                        watcher.eject_ng_counter += 1
                     logger.info(f"EJECT triggered: {' '.join(eject_reasons)} | encoder={capture_encoder}")
                 else:
                     logger.info(f"EJECT condition met on cold path (no physical eject) | reasons={' '.join(eject_reasons)} | encoder={capture_encoder}")
@@ -1363,7 +1378,8 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
                 # block wrote a SECOND row for every Store=ON eject, with no dedupe — doubling the
                 # per-procedure eject analytics.
             elif allow_eject:
-                watcher.eject_ok_counter += 1
+                with _COUNTER_LOCK:
+                    watcher.eject_ok_counter += 1
     except Exception as e:
         logger.warning(f"Procedure eject evaluation error: {e}")
 
@@ -1475,8 +1491,9 @@ def _process_gathered_groups_batched(gathered, allow_eject=True, failed_out=None
         return ok
 
     # Distribute per-image results back to each group.
-    app.state.batch_stats["batches"] += 1
-    app.state.batch_stats["batched_frames"] += len(all_img_bytes)
+    with _COUNTER_LOCK:   # 4.0.442
+        app.state.batch_stats["batches"] += 1
+        app.state.batch_stats["batched_frames"] += len(all_img_bytes)
     ok = True
     cursor = 0
     for fd, vfs in zip(gathered, per_group_valid_frames):
@@ -1881,6 +1898,17 @@ def _try_usb_soft_reset_for_serial(target_serial):
                         continue
                 dev_dir = os.path.dirname(vpath)
                 port_name = os.path.basename(dev_dir)
+                # 4.0.442 — not a DIFFERENT, healthy Basler: with two cameras and one missing,
+                # the first VID-2676 device found (often the working one) was de-authorized
+                # every few minutes. A readable serial that isn't the target = a camera that
+                # is enumerated fine; skip it. (The wedged one usually has no readable serial.)
+                try:
+                    with open(os.path.join(dev_dir, "serial")) as _sf:
+                        _ser = _sf.read().strip()
+                    if _ser and str(target_serial or "").strip() and _ser != str(target_serial).strip():
+                        continue
+                except OSError:
+                    pass
                 auth_path = os.path.join(dev_dir, "authorized")
                 if not os.path.exists(auth_path):
                     continue

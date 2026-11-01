@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.442] - 2026-11-01 - Audit batch 22: runtime (threads, event loop, config durability)
+
+**Fixed**
+- **Inference workers ignored their cap.** The startup count was cameras × 4, i.e. 112–124 threads on the 28–31-camera sites (shoga runs ~400 threads in all), above the cap of min(2 × CPUs, 32). The autoscaler's minimum was then above its maximum, so it could never scale, and every idle worker polled the queues. The count is now clamped to the cap.
+- **Three dashboards could make MVE answer 503 to everything.** uvicorn's `limit_concurrency=100` counts each open WebSocket, and the Cameras tab holds one per camera, so the container health check failed too. The limit is now 400 (`MVE_LIMIT_CONCURRENCY` overrides).
+- **Event loop**:
+  - The boot self-heal loop ran the disk→DB config reconcile and a config load on the event loop, while the DB was down, which is exactly when they block.
+  - `/health` pinged Redis on the loop (10 s socket timeout).
+
+  Both now run off the loop (`/health` on its capped probe pool). DB connections have a 5 s connect timeout (`POSTGRES_CONNECT_TIMEOUT`); there was none.
+- **A config change saved while the DB was briefly unreachable was lost.** It went to disk only, and the next write by anyone used the DB as its base, then overwrote both stores. The pending flag was also memory-only, so after a restart the boot served the older DB copy. While a disk-only write is outstanding, writes now use the disk copy as their base. The flag is kept as a marker file, and reads push the disk copy into the DB first.
+- **Basler soft-reset could hit the healthy camera.** With two Baslers and one missing, the first Basler on the USB bus, often the working one, was de-authorized every few minutes. A Basler with a readable serial that isn't the missing one is now skipped.
+- `/api/cameras`, `/health` and the status stream iterated the camera list while hot-add or the reconciler changed it, which could give a spurious 503. They now iterate a copy.
+- The eject OK/NG counters and batch stats were incremented from many threads without a lock, losing counts. They are now locked.
+- `/health`'s YOLO fallback URL and `/api/status`'s `histogram_enabled` used import-time copies of the config; they now read the live values.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.441] - 2026-11-01 - Audit batch 21: watcher stations: OEE math and data
 
 **Fixed**
