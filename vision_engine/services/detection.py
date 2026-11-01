@@ -17,6 +17,7 @@ import numpy as np
 import math
 import logging
 import pickle
+import threading
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import TimeoutError as _FutTimeout
@@ -205,13 +206,15 @@ prepared_query_data = []
 
 # Reusable process pool for DataMatrix decoding (avoids fork overhead per call)
 _dm_process_pool = None
+_dm_pool_lock = threading.Lock()   # 4.0.450 — N inference threads: one pool, one rebuild
 
 def _get_dm_pool():
     """Lazy-init a reusable ProcessPoolExecutor for DataMatrix decoding."""
     global _dm_process_pool
-    if _dm_process_pool is None:
-        _dm_process_pool = ProcessPoolExecutor(max_workers=4)
-    return _dm_process_pool
+    with _dm_pool_lock:
+        if _dm_process_pool is None:
+            _dm_process_pool = ProcessPoolExecutor(max_workers=4)
+        return _dm_process_pool
 
 # Reusable Redis connection for timeline + timing (avoids new connection per call)
 _timeline_redis = None
@@ -488,6 +491,10 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
     """
     should_eject = False
     eject_reasons = []
+    # 4.0.450 — per-call scratch for rule details. It was written INTO the rule dicts
+    # (rule['_actual']), i.e. the live app.state.timeline_config shared by every inference
+    # thread: reasons raced between threads and the key could be saved back into config.
+    _actuals = {}
 
     if not detections_list:
         return False, []
@@ -574,13 +581,13 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
                     if start_ts <= 0:
                         return False   # no active shipment
                     elapsed = time.time() - start_ts
-                    rule['_actual'] = round(elapsed, 1)
+                    _actuals[id(rule)] = round(elapsed, 1)
                     return elapsed > thr if cond == 'shipment_time_greater' else elapsed < thr
                 # shipment_encoder_*
                 start_enc = int(getattr(_watcher, 'shipment_start_encoder', 0) or 0)
                 cur_enc = int(getattr(_watcher, 'encoder_value', 0) or 0)
                 delta = cur_enc - start_enc
-                rule['_actual'] = delta
+                _actuals[id(rule)] = delta
                 return delta > thr if cond == 'shipment_encoder_greater' else delta < thr
 
             # Legacy conditions
@@ -671,12 +678,12 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             # 4.0.178 — shipment-life conditions
             if cond in ('shipment_time_greater', 'shipment_time_less'):
                 thr = rule.get('threshold', 0)
-                actual = rule.get('_actual', '?')
+                actual = _actuals.get(id(rule), '?')
                 op = '>' if cond == 'shipment_time_greater' else '<'
                 return f"shipment time {actual}s {op} {thr}s"
             if cond in ('shipment_encoder_greater', 'shipment_encoder_less'):
                 thr = rule.get('threshold', 0)
-                actual = rule.get('_actual', '?')
+                actual = _actuals.get(id(rule), '?')
                 op = '>' if cond == 'shipment_encoder_greater' else '<'
                 return f"shipment encoder Δ {actual} {op} {thr}"
 
@@ -1007,12 +1014,16 @@ def decode_dm(frame_name, frame, yolo_object, iterator, dm_chars_sizes=[13,19,26
         # builds a fresh one.
         global _dm_process_pool
         logger.error(f"DataMatrix decode pool broke ({e}) — rebuilding it on the next decode")
-        try:
-            if _dm_process_pool is not None:
-                _dm_process_pool.shutdown(wait=False)
-        except Exception:
-            pass
-        _dm_process_pool = None
+        # 4.0.450 — drop only the pool THIS call used: another thread may already have
+        # replaced it with a fresh one, which this used to shut down again
+        _used = locals().get("pool")
+        with _dm_pool_lock:
+            if _used is not None and _dm_process_pool is _used:
+                try:
+                    _used.shutdown(wait=False)
+                except Exception:
+                    pass
+                _dm_process_pool = None
         return None
     except Exception as e:
         logger.error(f"Decoding failed: {frame_name} - {e}")

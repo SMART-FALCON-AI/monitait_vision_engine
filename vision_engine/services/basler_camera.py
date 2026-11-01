@@ -484,6 +484,10 @@ class BaslerBuffer:
         if prop == PROP_EXPOSURE:
             self._safe_set("ExposureAuto", "Off")
             self._safe_set("ExposureTime", float(value))
+            # 4.0.450 — a manual exposure turns auto OFF in the saved props too: the stale
+            # basler.auto_exposure=True turned auto exposure back ON at the next reconnect
+            # / restart, silently replacing the operator's value
+            self._saved_props["basler.auto_exposure"] = False
         elif prop == PROP_GAIN:
             self._safe_set("Gain", float(value))
         elif prop == PROP_FPS:

@@ -18,7 +18,6 @@ import shutil
 import queue
 import numpy as np
 import serial
-import requests
 import threading
 import logging
 from datetime import datetime
@@ -28,7 +27,6 @@ import config as cfg
 from services.camera import (
     CameraBuffer, DETECTED_CAMERAS, persisted_cfg_id_for_source, safe_source,
     CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
-    apply_camera_config_from_saved,
 )
 from redis import Redis as DirectRedis
 from services.redis_service import RedisConnection
@@ -97,7 +95,6 @@ _app = None
 # FLOOR 500 (up from 200) gives usable burst headroom even on tiny boxes;
 # CEILING 4000 prevents an oversized queue on a 128+ GB host.
 import psutil as _psutil
-_total_ram_gb = _psutil.virtual_memory().total / (1024 ** 3)
 _avail_ram_gb = _psutil.virtual_memory().available / (1024 ** 3)
 _DISK_QUEUE_PCT_AVAIL = float(os.environ.get("MVE_DISK_QUEUE_PCT_AVAIL", "20"))
 _DISK_QUEUE_ITEM_MB   = float(os.environ.get("MVE_DISK_QUEUE_ITEM_MB",   "3"))
@@ -411,16 +408,17 @@ class InferenceQueueFacade:
 
     def put(self, item, timeout=None):
         """Add frame — hot queue first, spill to cold disk if hot is full."""
-        # v4.0.90 — temporary INFO-level log so we can see the spill rate.
-        # Was DEBUG (hidden by default log level). Revert to DEBUG once we
-        # understand why cold grows while hot=0.
         if not self.hot.put(item):
-            logger.warning(f"Hot queue full ({self.hot.qsize()}/{self.hot.maxsize}) — spilling to cold disk queue")
+            # 4.0.450 — one WARNING per spilled frame flooded the log during any backlog
+            # (thousands of lines a minute) and buried every other warning: once a minute,
+            # with the count.
+            self._spilled = getattr(self, "_spilled", 0) + 1
+            now = time.time()
+            if now - getattr(self, "_spill_logged", 0.0) >= 60:
+                logger.warning(f"Hot queue full ({self.hot.qsize()}/{self.hot.maxsize}) — "
+                               f"{self._spilled} frame(s) spilled to the cold disk queue in the last minute")
+                self._spill_logged, self._spilled = now, 0
             self.cold.put(item)
-
-    def stats(self):
-        """Return (hot_count, cold_count) for dashboard."""
-        return self.hot.qsize(), self.cold.qsize()
 
     @property
     def maxsize(self):
@@ -513,56 +511,6 @@ def _sorted_chunks():
         pass
     chunks.sort(key=lambda x: x[0])
     return chunks
-
-def _ensure_disk_space(write_dir):
-    """DVR-style ring buffer: if disk > 75%, delete oldest hour chunk. Never stop writing."""
-    global _last_disk_ok, _last_disk_check_t
-    _resolve_raw_root(write_dir)
-
-    now = time.time()
-    if now - _last_disk_check_t < 2 and _last_disk_ok:
-        return
-
-    try:
-        usage = shutil.disk_usage(write_dir)
-        # Use (used + free) as denominator to match df's view (excludes ext4's
-        # 5%-reserved-for-root blocks). Using usage.total here understates pct
-        # by ~5–10 points and made DVR cleanup silently never trigger when
-        # df-disk was already at 80% (bug found 2026-05-29 on vteam19).
-        pct = usage.used * 100 // max(1, usage.used + usage.free)
-        _last_disk_check_t = now
-    except OSError:
-        return
-
-    if pct <= _DISK_MAX_PCT:
-        _last_disk_ok = True
-        return
-
-    # Over limit — delete oldest chunks until under 75%
-    _last_disk_ok = False
-    current_hour = datetime.now().strftime("%Y-%m-%d_%H")
-    for chunk_name, chunk_path in _sorted_chunks():
-        if chunk_name >= current_hour:
-            break  # Never delete current hour
-        shutil.rmtree(chunk_path, ignore_errors=True)
-        logger.info(f"DVR cleanup: deleted {chunk_path}")
-        try:
-            # v4.0.108 — MUST use the same (used + free) denominator as the
-            # entry check on line 458. Previously this used `.total` which
-            # includes ext4's 5%-reserved-for-root blocks, silently under-
-            # reporting pct by ~5 pts. Symptom on khoy (SSD-RESERVE 220 GB):
-            # entry sees 79% -> evict; loop check sees 74% -> stops; disk
-            # regrows to 90% before next cycle. Eviction thrashed 159x in
-            # 3 min without holding the disk anywhere near the threshold.
-            _u = shutil.disk_usage(write_dir)
-            pct = _u.used * 100 // max(1, _u.used + _u.free)
-            if pct <= _DISK_MAX_PCT:
-                _last_disk_ok = True
-                logger.info(f"DVR cleanup done — disk at {pct}%")
-                break
-        except OSError:
-            break
-
 
 # v4.0.105 — REVERTED. The age-based raw_images janitor added in v4.0.103
 # was the wrong design. Files retention is DISK-USAGE based (the reactive
@@ -1256,7 +1204,7 @@ class ArduinoSocket:
             from config import persist_current_shipment
             threading.Thread(
                 target=persist_current_shipment,
-                args=(new_id, int(getattr(self, "shipment_start_encoder", 0) or 0)),
+                args=(new_id, int(getattr(self, "shipment_start_encoder", 0) or 0), now_ts),
                 daemon=True,
                 name=f"cutoff-persist-{new_id}",
             ).start()
@@ -1714,10 +1662,11 @@ class ArduinoSocket:
                             # even if a follow-up scan mutates them.
                             _snap_ship = new_shipment
                             _snap_sse = self.shipment_start_encoder if is_new_shipment else None
+                            _snap_sts = self.shipment_start_ts if is_new_shipment else None
                             from config import persist_current_shipment  # 4.0.413 — shared writer
                             threading.Thread(
                                 target=persist_current_shipment,
-                                args=(_snap_ship, _snap_sse),
+                                args=(_snap_ship, _snap_sse, _snap_sts),
                                 daemon=True,
                                 name=f"barcode-persist-{_snap_ship}",
                             ).start()
@@ -2179,7 +2128,6 @@ class ArduinoSocket:
     def capture_frames(self):
         """Capture frames when a signal is detected."""
 
-        light_sleep = True
         while True:
             try:
                 if self.signal_captured():
@@ -2225,7 +2173,6 @@ class ArduinoSocket:
 
                     # Execute capture based on StateManager configuration
                     grabbed_frames = []
-                    start_save = time.time()
 
                     # Get current state from _state_manager
                     current_state = _state_manager.current_state if _state_manager else None

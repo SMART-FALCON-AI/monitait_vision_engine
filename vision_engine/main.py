@@ -382,6 +382,15 @@ def apply_config_settings(config, watcher_inst=None, full_data=None, boot=False)
                     logger.info(f"[SHIPMENT-RESTORE] seeded shipment_start_encoder={sse} (no prior value in config)")
             except (TypeError, ValueError) as _e:
                 logger.warning(f"[SHIPMENT-RESTORE] shipment_start_encoder in config not an int: {_e}")
+            # 4.0.450 — and the start time (time_sec cutoff / shipment_time_* rules counted
+            # from the boot); only a sane past value
+            try:
+                _sts = float(config.get("shipment_start_ts") or 0)
+                if 0 < _sts <= time.time():
+                    watcher_inst.shipment_start_ts = _sts
+                    logger.info(f"[SHIPMENT-RESTORE] restored shipment_start_ts: {_sts:.0f}")
+            except (TypeError, ValueError):
+                pass
             logger.info(f"[SHIPMENT-RESTORE] restored active shipment from service_config: {cur_ship}")
             # 4.0.98 — After shipment + shipment_start_encoder are restored from config,
             # check the length-state sidecar file. If the current encoder is BELOW the

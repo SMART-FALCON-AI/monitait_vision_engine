@@ -599,6 +599,10 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             if watcher and shipment_id != getattr(watcher, "shipment", None):
                 new_start_encoder = int(getattr(watcher, "encoder_value", 0) or 0)
                 watcher.shipment_start_encoder = new_start_encoder
+                # 4.0.450 — and the start time: a UI change kept the PREVIOUS shipment's start,
+                # so with a time cutoff the new shipment was closed within seconds
+                import time as _t
+                watcher.shipment_start_ts = _t.time()
                 logger.info(
                     f"Shipment start encoder: {new_start_encoder} "
                     f"(API set shipment → {shipment_id})"
@@ -623,11 +627,12 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             # request thread anymore.
             from config import persist_current_shipment  # 4.0.413 — shared writer
             if background_tasks is not None:
-                background_tasks.add_task(persist_current_shipment, shipment_id, new_start_encoder)
+                background_tasks.add_task(persist_current_shipment, shipment_id, new_start_encoder,
+                                          getattr(watcher, "shipment_start_ts", None))
             else:
                 # BackgroundTasks unavailable (should not happen in normal
                 # FastAPI request context; kept as defensive fallback).
-                persist_current_shipment(shipment_id, new_start_encoder)
+                persist_current_shipment(shipment_id, new_start_encoder, getattr(watcher, "shipment_start_ts", None))
             updated["shipment"] = shipment_id
             logger.info(f"Updated shipment ID to {shipment_id}")
 

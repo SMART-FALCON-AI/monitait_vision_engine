@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.450] - 2026-11-01 - Audit batch 30: shipment start time, Basler exposure, smaller fixes
+
+**Fixed**
+- **Shipment start time.** Changing the shipment in the UI reset its start encoder but kept the previous shipment's start time, so with a time-based auto cutoff the new shipment was closed within seconds. The start time was also never saved, so after a restart a shipment's elapsed time counted from the boot. That affected the time cutoff and the `shipment_time_*` rules. The start time is now set on every shipment change (UI, barcode, cutoff), saved with the shipment, and restored at start-up.
+- **Basler cameras:** setting a manual exposure did not clear the saved "auto exposure" flag, so the next reconnect or restart turned auto exposure back on and replaced the operator's value.
+- **Log flood:** every frame that spilled from the in-memory queue to disk logged its own warning (thousands per minute during a backlog), burying every other warning. Now one warning a minute, with the count.
+- **Shared rule config written by the evaluator:** shipment-time and shipment-encoder rule details were stored in the live procedure config shared by every inference thread. Threads raced on the reason text, and the key could be saved back into the config.
+- **DataMatrix decode pool:** concurrent first decodes could start extra process pools. A thread recovering from a crashed pool could shut down the fresh pool another thread had just started.
+- **Support tab:**
+  - If support was "not connected" when the tab was opened, a sent message never appeared (operators re-sent it, so support got duplicates).
+  - A failed send dropped the AI conversation it was carrying.
+
+**Removed**: dead code in the watcher (`_ensure_disk_space`, `InferenceQueueFacade.stats`, unused imports and variables).
+
+Deployed to **vteam12 only**.
+
 ## [4.0.449] - 2026-11-01 - Audit batch 29: colour rule, partial inference failure, one eject decision
 
 **Fixed**

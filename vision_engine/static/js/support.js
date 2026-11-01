@@ -168,8 +168,10 @@ function sendSupportMessage() {
     // 4.0.384 - no operator decision here any more. Every message carries a one-line
     // site header from the backend, and support pulls detail with !diag when it needs it.
     var payload = { text: text };
+    var ctxSent = null;              // 4.0.450 — given back if the send fails
     if (_supportPending) {           // transcript escalated from the AI tab
         payload.context = _supportPending;
+        ctxSent = _supportPending;
         _supportPending = null;
         var note = _supportEl('support-context-note');
         if (note) note.style.display = 'none';
@@ -190,13 +192,18 @@ function sendSupportMessage() {
                 _supportBanner('error', (t('support_send_failed') || 'Could not send') +
                     ': ' + ((d && d.error) || '?'));
                 input.value = text;   // give the operator their text back
+                _supportRestoreContext(ctxSent);
                 return;
             }
-            return refreshSupportMessages(true);
+            // 4.0.450 — re-check the status first: if the tab opened while support was "not
+            // connected", the message list refresh returned early and the sent message never
+            // appeared (operators re-sent it → duplicates on the support side)
+            return refreshSupportStatus().then(function () { return refreshSupportMessages(true); });
         })
         .catch(function (e) {
             _supportBanner('error', 'send: ' + e);
             input.value = text;
+            _supportRestoreContext(ctxSent);
         })
         .then(function () { if (btn) btn.disabled = false; });
 }
@@ -294,6 +301,14 @@ function escalateToSupport() {
     if (input) setTimeout(function () { input.focus(); }, 150);
 }
 
+function _supportRestoreContext(ctx) {
+    // 4.0.450 — a failed send gave the text back but dropped the AI transcript it carried
+    if (!ctx || _supportPending) return;
+    _supportPending = ctx;
+    var note = _supportEl('support-context-note');
+    if (note) note.style.display = 'block';
+}
+
 // --- lifecycle --------------------------------------------------------------
 
 function openSupportTab() {
@@ -307,6 +322,9 @@ function openSupportTab() {
             _supportPollTimer = null;
             return;
         }
+        // 4.0.450 — support not connected when the tab opened: keep checking, so the
+        // conversation appears once it is (it stayed blank until the manual Refresh)
+        if (!_supportRoomReady) { refreshSupportStatus(); return; }
         refreshSupportMessages(false);
     }, 5000);
 }

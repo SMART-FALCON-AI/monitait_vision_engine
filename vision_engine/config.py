@@ -726,7 +726,7 @@ def clean_shipment_id(sid):
     return s.strip()[:128]
 
 
-def persist_current_shipment(sid, start_encoder=None):
+def persist_current_shipment(sid, start_encoder=None, start_ts=None):
     """4.0.413 — the ONE writer that makes the active shipment survive a restart.
 
     Boot restores the shipment from service_config["current_shipment"] (main.py
@@ -737,6 +737,9 @@ def persist_current_shipment(sid, start_encoder=None):
     changes = {"current_shipment": sid}
     if start_encoder is not None:
         changes["shipment_start_encoder"] = start_encoder
+        # 4.0.450 — the start TIME too (time_sec cutoff + shipment_time_* rules): it was never
+        # saved, so after a restart a shipment's elapsed time counted from the boot
+        changes["shipment_start_ts"] = float(start_ts) if start_ts else _time.time()
     try:
         update_service_config(changes)
     except Exception as e:
