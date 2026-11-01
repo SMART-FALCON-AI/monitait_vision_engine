@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.464] - 2026-11-01 - A watcher on its own is a line
+
+**Fixed**
+- **A site with one watcher per line had no line at all** (shoga: Mcal-22 and Mcal-23, one watcher on each line). Only stations chained with *Next station* made a line, so a station on its own never showed in Line OEE or the Charts tab line reports, and its line could not be named (the ✎ name box only exists on a line card). A saved station that is not chained to any other is now a line of its own, with its own OEE card and name. A NEW watcher (not saved yet) stays out until the operator saves it.
+- The station-flow and "No line yet" hints explained only chaining; they now say that a saved station on its own is a line.
+
 ## [4.0.463] - 2026-11-01 - Batch 43: Charts on busy lines, length across encoder resets, lighter disk writes (found testing on shoga)
 
 **Fixed**

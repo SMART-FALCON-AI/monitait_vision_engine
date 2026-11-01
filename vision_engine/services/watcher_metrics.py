@@ -523,11 +523,13 @@ def compute_oee(register_id: str, since_ms: Optional[int] = None,
 def _line_graph():
     """The station graph: display names, next-station links, who feeds whom, the
     lines (terminal station → its members) and each station's `line` text."""
-    reg_rows = _exec("SELECT register_id, name, next_watcher, line FROM watcher_registry",
+    reg_rows = _exec("SELECT register_id, name, next_watcher, line, assigned FROM watcher_registry",
                      fetch="all") or []
-    name = {r: (n or r) for r, n, _, _ in reg_rows}
-    line_txt = {r: (l or "").strip() for r, _, _, l in reg_rows}
-    nxt = {r: x for r, _, x, _ in reg_rows if x and x in name and x != r}
+    name = {r: (n or r) for r, n, _, _, _ in reg_rows}
+    line_txt = {r: (l or "").strip() for r, _, _, l, _ in reg_rows}
+    nxt = {r: x for r, _, x, _, _ in reg_rows if x and x in name and x != r}
+    # set up in the Hardware tab (same rule as list_watchers: saved, or named before 4.0.417)
+    set_up = {r for r, n, _, _, a in reg_rows if a or n}
     feeders: Dict[str, List[str]] = {}
     for a, b in nxt.items():
         feeders.setdefault(b, []).append(a)
@@ -539,9 +541,13 @@ def _line_graph():
             r = nxt[r]
         return r
 
+    # 4.0.464 — a set-up station that is not chained to any other is a line of its own
+    # (one watcher per line, e.g. two furnaces with one watcher each). Only chains were
+    # lines, so such a site had no line at all and nowhere to name one. A NEW watcher
+    # (not set up yet) stays out until the operator saves it.
     groups: Dict[str, List[str]] = {}
     for r in name:
-        if r in nxt or r in feeders:
+        if r in nxt or r in feeders or r in set_up:
             groups.setdefault(_terminal(r), []).append(r)
     return name, nxt, feeders, groups, line_txt
 
@@ -569,7 +575,7 @@ def set_line_name(station: str, line_name: str) -> Dict[str, Any]:
     _, _, _, groups, _ = _line_graph()
     members = next((m for m in groups.values() if reg in m), None)
     if members is None:
-        raise ValueError("this station is not in a line yet — set a Next station first")
+        raise ValueError("this station is not set up yet — save it in the station list first")
     for r in members:
         _exec("UPDATE watcher_registry SET line=%s WHERE register_id=%s", (text or None, r))
     return {"ok": True, "line_name": text or None, "stations": members}
@@ -580,7 +586,8 @@ def compute_lines(since_ms: Optional[int] = None,
     """4.0.418 — OEE of every LINE: a chain of stations linked by next_watcher (set in
     the Hardware tab), ending at a station with no next station. Several stations may
     feed one (e.g. two IS machines → one Lehr). All counts are units (pulses × the
-    station's OK / NG factor).
+    station's OK / NG factor). 4.0.464 — a set-up station linked to no other is a
+    one-station line.
 
     Per station:  input = OK + NG;  quality = OK / input;
                   gap   = OK of the station(s) feeding it − its own input
