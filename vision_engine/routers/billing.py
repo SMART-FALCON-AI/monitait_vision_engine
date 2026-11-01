@@ -68,9 +68,9 @@ def callback(request: Request):
     """Public gateway return URL — the user's browser is redirected here after
     paying. Verifies, then bounces to the dashboard. Never gated (a GET)."""
     params = dict(request.query_params)
-    ref = params.get("ref") or params.get("authority") or params.get("order_id") or ""
     ok = False
     try:
+        ref = billing.find_callback_ref(params)    # 4.0.445 — per-gateway parameter names
         if ref:
             ok = bool(billing.confirm_payment(ref, params).get("paid"))
     except Exception as e:

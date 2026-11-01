@@ -903,7 +903,10 @@ async function saveAiTrainerConfig() {
         const d = await r.json();
         if (r.ok && d.success) {
             if (resp) {
-                resp.textContent = `✓ Saved. task_id=${d.task_id || '(none)'}` + (d.has_api_key ? ' · API key on file' : '');
+                resp.textContent = `✓ Saved. task_id=${d.task_id || '(none)'}` + (d.has_api_key ? ' · API key on file' : '')
+                    // 4.0.445 — credentials are bound to the trainer address
+                    + (d.credentials_cleared && !d.has_password && !d.has_api_key
+                        ? ' · new trainer address: enter its password (or API key) again' : '');
                 resp.className = 'control-response success';
             }
             const k2 = document.getElementById('ai-trainer-api-key-input');
@@ -1310,7 +1313,8 @@ async function saveNotifChannel(channel) {
         });
         const d = await r.json();
         if (r.ok) {
-            _notifResp('Saved.', true);
+            // 4.0.445 — the bot token is bound to the bot host (base URL)
+            _notifResp(d.token_cleared ? 'Saved. New bot host: paste the bot token again.' : 'Saved.', !d.token_cleared);
             if (tokenEl) tokenEl.value = '';
             loadNotifConfig();
         } else {

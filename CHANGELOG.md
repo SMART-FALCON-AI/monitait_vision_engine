@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.445] - 2026-11-01 - Audit batch 25: timeline feed, AI trainer, notifications, billing, phase stride
+
+**Fixed**
+- **Phase stride skipped some cameras completely.** A pipeline phase with stride N ran on every N-th frame of a single counter shared by all cameras. Frames arrive camera by camera, so with 2 cameras and stride 2 the strided phase ran only on camera 2 and never on camera 1. Any stride that shares a factor with the camera count skews it the same way. The counter is now per camera stream.
+- **Live timeline (WebSocket)**:
+  - A frame that arrived while a timeline image was being drawn was marked as already shown, so the newest product stayed off the timeline until the next one arrived.
+  - When a page change and a new frame were drawn at the same moment, their two messages could interleave, so the browser paired one image's details with the other's picture. Each connection now sends one complete update at a time.
+  - Every frame of every camera triggered its own redraw, so a busy line queued redraws behind each other. Updates that pile up are now merged: at most about 4 redraws a second per open tab, and none are lost.
+  - Connecting to Redis no longer runs on the web server's main loop with no time limit.
+- **Camera live feed:** a feed for a camera with no picture never noticed the browser had left. Every Cameras-tab visit left one loop per dead camera running until MVE restarted.
+- **AI Trainer**:
+  - Each save in the annotator (Submit and every Update) uploaded the frame again, creating duplicate images on the trainer. The frame is now uploaded once, and a re-save replaces the boxes it sent before, instead of adding to them. A save with no boxes no longer uploads an empty image, and a double click saves once.
+  - An upload was retried after the trainer had already received it (a slow answer), which duplicated the image. It is now retried only when the request never left. The trainer gets 60 s to answer instead of 20.
+  - A login token the trainer refused stayed in use for up to 6 hours. It is now dropped, and the call is made once more after logging in again.
+  - Changing the trainer address kept the stored password, API key and login tokens, so the next call sent them to the new address. They are now cleared unless re-entered in the same save, and a token is never sent to an address other than the one that issued it.
+  - Saving trainer settings or the class map no longer reverts settings saved by others at the same moment.
+- **Notifications**:
+  - A cron schedule whose shipment filter was a pattern (`*`, `PO-*`) asked for the report of a shipment literally named `*`. It now reports on the running shipment, and only when that shipment matches. An exact shipment id works as before.
+  - After sending a report (which can take minutes), the scheduler saved the notification settings it had loaded before the report, undoing any edits made meanwhile. Now only last run and status are written.
+  - Changing the bot host kept the bot token (it would be sent to the new host). It is now cleared unless re-entered in the same save.
+- **Billing**:
+  - The payment return page never recognised Zarinpal (`Authority`), IDPay (`id`) or PayPal (`token`) payments, so a paid subscription was not activated automatically.
+  - Two confirmations at the same moment both activated the subscription.
+- **Access control (when RBAC is on):**
+  - The trainer and notification settings require engineer, because they set the host that passwords and tokens are sent to.
+  - Billing requires admin (marking an invoice paid, API keys, the live retention prune). Service requests stay at operator.
+
+**Removed**: unused WebSocket broadcast helpers, the unused annotation-edit (PUT) proxy, dead imports.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.444] - 2026-11-01 - Audit batch 24: a YOLO outage is no longer "all good", shipment lengths
 
 **Fixed**

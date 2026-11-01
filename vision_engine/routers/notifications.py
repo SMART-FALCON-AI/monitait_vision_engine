@@ -25,13 +25,12 @@ Config shape (lives at service_config.notifications):
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import requests as _requests
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from config import load_service_config, save_service_config
+from config import load_service_config, mutate_service_config
 
 
 logger = logging.getLogger(__name__)
@@ -61,10 +60,13 @@ def _get_config() -> Dict[str, Any]:
     return cfg
 
 
-def _save_config(cfg: Dict[str, Any]) -> None:
-    svc = load_service_config() or {}
-    svc["notifications"] = cfg
-    save_service_config(svc)
+def _normalized(n) -> Dict[str, Any]:
+    cfg = n if isinstance(n, dict) else {}
+    if "channels" not in cfg or not isinstance(cfg["channels"], dict):
+        cfg["channels"] = _default_channels()
+    if "schedules" not in cfg or not isinstance(cfg["schedules"], list):
+        cfg["schedules"] = []
+    return cfg
 
 
 def _mask_token(t: Optional[str]) -> str:
@@ -104,27 +106,46 @@ def post_notifications_config(payload: Dict[str, Any]):
         — partial update of the channel
       - {schedules: [...]}  — replace the schedule list wholesale
     """
-    cfg = _get_config()
+    if "channel" in payload and str(payload["channel"]).lower() != "telegram":
+        return JSONResponse(content={"error": "only 'telegram' channel is supported"}, status_code=400)
+    out = {"token_cleared": False}
 
-    if "channel" in payload:
-        ch = str(payload["channel"]).lower()
-        if ch != "telegram":
-            return JSONResponse(content={"error": "only 'telegram' channel is supported"}, status_code=400)
-        entry = cfg["channels"].setdefault(ch, {"enabled": False, "bot_token": "", "default_chat_id": "", "base_url": ""})
-        if "bot_token" in payload and payload["bot_token"]:  # only overwrite if non-empty
-            entry["bot_token"] = str(payload["bot_token"])
-        if "default_chat_id" in payload:
-            entry["default_chat_id"] = str(payload["default_chat_id"] or "")
-        if "base_url" in payload:
-            entry["base_url"] = str(payload["base_url"] or "").strip()
-        if "enabled" in payload:
-            entry["enabled"] = bool(payload["enabled"])
-    # Strip any unsupported channel keys whenever we save.
-    for _legacy in list(cfg["channels"].keys()):
-        if _legacy != "telegram":
-            cfg["channels"].pop(_legacy, None)
+    # 4.0.445 — atomic (mutate_service_config): the read → edit → whole-blob save let the
+    # scheduler's tick and this save revert each other.
+    def _fn(svc):
+        cfg = _normalized(svc.get("notifications"))
+        _apply(cfg)
+        svc["notifications"] = cfg
 
-    if "schedules" in payload and isinstance(payload["schedules"], list):
+    def _apply(cfg):
+        if "channel" in payload:
+            ch = "telegram"
+            entry = cfg["channels"].setdefault(ch, {"enabled": False, "bot_token": "", "default_chat_id": "", "base_url": ""})
+            if "bot_token" in payload and payload["bot_token"]:  # only overwrite if non-empty
+                entry["bot_token"] = str(payload["bot_token"])
+            if "default_chat_id" in payload:
+                entry["default_chat_id"] = str(payload["default_chat_id"] or "")
+            if "base_url" in payload:
+                nb = str(payload["base_url"] or "").strip()
+                # 4.0.445 — the bot token is sent to base_url on every message: a new host
+                # must not inherit it (anyone able to save settings could point it at a host
+                # of theirs and collect the token). Kept only if this save supplies it again.
+                if nb != str(entry.get("base_url") or "").strip() and not payload.get("bot_token"):
+                    if entry.get("bot_token"):
+                        out["token_cleared"] = True
+                    entry["bot_token"] = ""
+                entry["base_url"] = nb
+            if "enabled" in payload:
+                entry["enabled"] = bool(payload["enabled"])
+        # Strip any unsupported channel keys whenever we save.
+        for _legacy in list(cfg["channels"].keys()):
+            if _legacy != "telegram":
+                cfg["channels"].pop(_legacy, None)
+        _apply_schedules(cfg)
+
+    def _apply_schedules(cfg):
+        if not ("schedules" in payload and isinstance(payload["schedules"], list)):
+            return
         clean = []
         for s in payload["schedules"]:
             if not isinstance(s, dict):
@@ -148,8 +169,8 @@ def post_notifications_config(payload: Dict[str, Any]):
             })
         cfg["schedules"] = clean
 
-    _save_config(cfg)
-    return JSONResponse(content={"success": True})
+    mutate_service_config(_fn)
+    return JSONResponse(content={"success": True, "token_cleared": out["token_cleared"]})
 
 
 @router.post("/api/notifications/test_send")

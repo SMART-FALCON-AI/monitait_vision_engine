@@ -22,7 +22,6 @@ the operator has saved one. Trainer URL templating: if the URL contains
 task_id is sent as a form field.
 """
 
-import os
 import pathlib
 import logging
 from typing import Optional
@@ -33,7 +32,7 @@ from fastapi import Depends as Depends
 from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 
-from config import load_service_config, save_service_config
+from config import load_service_config, mutate_service_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,7 +46,10 @@ _DEFAULT_URL = "https://ai-trainer.monitait.com/api/images/"
 
 def _ai_trainer_cfg() -> dict:
     svc = load_service_config() or {}
-    raw = svc.get("ai_trainer") or {}
+    return _ai_trainer_cfg_from(svc.get("ai_trainer") or {})
+
+
+def _ai_trainer_cfg_from(raw: dict) -> dict:
     # 3.26.0 — `base_url` is the trainer's origin (e.g. https://ai-trainer.monitait.com).
     # We hit MANY endpoints now (/api/images/, /api/categories/, /api/annotations/, ...)
     # so storing the full upload URL never made sense. Backwards-compat: if only the
@@ -79,6 +81,7 @@ def _ai_trainer_cfg() -> dict:
         "refresh_token": str(raw.get("refresh_token") or ""),
         "access_token_expires_at":  int(raw.get("access_token_expires_at")  or 0),
         "refresh_token_expires_at": int(raw.get("refresh_token_expires_at") or 0),
+        "token_origin": str(raw.get("token_origin") or ""),
     }
 
 
@@ -90,20 +93,39 @@ def _trainer_origin(url_or_unused: str = "") -> str:
     return cfg["base_url"]
 
 
-def _save_tokens(access: str, refresh: str) -> None:
+def _save_tokens(access: str, refresh: str, origin: str = "") -> None:
     """Persist the freshly-minted JWT pair into service_config.ai_trainer.
     Expiry times use Python time() seconds since epoch; we conservatively
-    treat 5m before actual expiry as "expired" so we refresh ahead of time."""
+    treat 5m before actual expiry as "expired" so we refresh ahead of time.
+    4.0.445 — atomic (mutate_service_config; the whole-blob save reverted settings saved
+    during the login round trip) and stamped with the origin that minted them."""
     import time as _t
-    svc = load_service_config() or {}
-    cur = svc.get("ai_trainer") or {}
     now = int(_t.time())
-    cur["access_token"]  = access or ""
-    cur["refresh_token"] = refresh or ""
-    cur["access_token_expires_at"]  = (now + 6 * 3600) if access else 0   # 6h
-    cur["refresh_token_expires_at"] = (now + 24 * 3600) if refresh else 0  # 1d
-    svc["ai_trainer"] = cur
-    save_service_config(svc)
+
+    def _fn(svc):
+        cur = dict(svc.get("ai_trainer") or {})
+        cur["access_token"]  = access or ""
+        cur["refresh_token"] = refresh or ""
+        cur["access_token_expires_at"]  = (now + 6 * 3600) if access else 0   # 6h
+        cur["refresh_token_expires_at"] = (now + 24 * 3600) if refresh else 0  # 1d
+        cur["token_origin"] = origin or ""
+        svc["ai_trainer"] = cur
+    mutate_service_config(_fn)
+
+
+def _drop_access_token() -> None:
+    """4.0.445 — the trainer refused the cached access token (401: revoked, trainer
+    re-keyed, clock skew). It stayed cached for up to 6 h and every call failed; now it
+    is dropped so the next call refreshes / logs in again."""
+    def _fn(svc):
+        cur = dict(svc.get("ai_trainer") or {})
+        cur["access_token"] = ""
+        cur["access_token_expires_at"] = 0
+        svc["ai_trainer"] = cur
+    try:
+        mutate_service_config(_fn)
+    except Exception as e:
+        logger.warning(f"ai_trainer: could not drop the rejected access token: {e}")
 
 
 def _post_with_retry(url: str, *, json_body: dict, timeout: int = 20, attempts: int = 3):
@@ -154,22 +176,25 @@ def _ensure_access_token(cfg: dict) -> tuple[Optional[str], Optional[str]]:
     Returns (token, None) on success or (None, error_text)."""
     import time as _t
     now = int(_t.time())
-    origin = _trainer_origin(cfg["url"])
+    origin = cfg["base_url"]
+    # 4.0.445 — a token minted by another trainer address is never sent to this one
+    # (tokens saved before 4.0.445 carry no origin: accepted for the current address).
+    same_origin = cfg.get("token_origin", "") in ("", origin)
     # 1) cached access token still good?
-    if cfg["access_token"] and cfg["access_token_expires_at"] > now + 300:  # 5-min cushion
+    if same_origin and cfg["access_token"] and cfg["access_token_expires_at"] > now + 300:  # 5-min cushion
         return cfg["access_token"], None
     # 2) try refresh
-    if cfg["refresh_token"] and cfg["refresh_token_expires_at"] > now + 300:
+    if same_origin and cfg["refresh_token"] and cfg["refresh_token_expires_at"] > now + 300:
         new_access, err = _trainer_refresh(cfg["refresh_token"], origin)
         if new_access:
-            _save_tokens(new_access, cfg["refresh_token"])
+            _save_tokens(new_access, cfg["refresh_token"], origin)
             return new_access, None
         logger.info(f"trainer refresh failed ({err}); will try fresh login")
     # 3) fresh login with stored email/password
     if cfg["email"] and cfg["password"]:
         access, refresh, err = _trainer_login(cfg["email"], cfg["password"], origin)
         if access and refresh:
-            _save_tokens(access, refresh)
+            _save_tokens(access, refresh, origin)
             return access, None
         return None, f"login failed: {err}"
     return None, "no email/password configured — set them in Advanced → AI Trainer"
@@ -205,9 +230,13 @@ def set_ai_trainer_config(payload: dict):
     to clear. Saving a new password also clears the cached access/refresh
     tokens so the next upload re-logs-in.
     """
-    try:
-        svc = load_service_config() or {}
-        cur = svc.get("ai_trainer") or {}
+    if not isinstance(payload, dict):
+        return JSONResponse(content={"success": False, "error": "expected a JSON object"}, status_code=400)
+    out = {}
+
+    def _fn(svc):
+        cur = dict(svc.get("ai_trainer") or {})
+        old_origin = _ai_trainer_cfg_from(cur)["base_url"]
         # 3.26.0 — accept `base_url` (preferred) OR legacy `url` (which is the
         # full upload endpoint). If only `url` is sent, derive base_url from it.
         if "base_url" in payload:
@@ -232,15 +261,31 @@ def set_ai_trainer_config(payload: dict):
             cur["api_key"] = str(payload.get("api_key") or "")
         if "email" in payload:
             cur["email"] = str(payload.get("email") or "").strip()
-        if "password" in payload and payload["password"]:
-            cur["password"] = str(payload["password"])
-            # invalidate cached tokens — they were tied to the old password
+        # 4.0.445 — a NEW trainer address must not inherit the old one's secrets: the
+        # stored password (sent on the next login), API key and cached JWTs (sent as
+        # Bearer) all went to whatever host was typed in. They are kept only if this
+        # same save supplies them again.
+        cleared = _ai_trainer_cfg_from(cur)["base_url"] != old_origin
+        if cleared:
+            if not payload.get("password"):
+                cur["password"] = ""
+            if not payload.get("api_key"):
+                cur["api_key"] = ""
+        if (cleared or ("password" in payload and payload["password"])):
+            if "password" in payload and payload["password"]:
+                cur["password"] = str(payload["password"])
+            # invalidate cached tokens — they were tied to the old password / address
             cur["access_token"] = ""
             cur["refresh_token"] = ""
             cur["access_token_expires_at"] = 0
             cur["refresh_token_expires_at"] = 0
+            cur["token_origin"] = ""
         svc["ai_trainer"] = cur
-        save_service_config(svc)
+        out.update(cur=cur, cleared=cleared)
+
+    try:
+        mutate_service_config(_fn)
+        cur = out["cur"]
         return JSONResponse(content={
             "success": True,
             "url": cur.get("url"),
@@ -248,6 +293,7 @@ def set_ai_trainer_config(payload: dict):
             "email": cur.get("email"),
             "has_api_key": bool(cur.get("api_key")),
             "has_password": bool(cur.get("password")),
+            "credentials_cleared": bool(out.get("cleared")),
         })
     except Exception as e:
         logger.error(f"ai_trainer config save failed: {e}")
@@ -264,7 +310,7 @@ def ai_trainer_login_test():
     origin = _trainer_origin(cfg["url"])
     access, refresh, err = _trainer_login(cfg["email"], cfg["password"], origin)
     if access and refresh:
-        _save_tokens(access, refresh)
+        _save_tokens(access, refresh, origin)
         return JSONResponse(content={
             "success": True, "origin": origin,
             "access_lifetime_hours": 6, "refresh_lifetime_hours": 24,
@@ -298,8 +344,6 @@ def _resolve_raw_image_path(image_path: str) -> Optional[pathlib.Path]:
     except ValueError:
         return None
     if not candidate.exists() or not candidate.is_file():
-        # Try a second guess: maybe `image_path` already pointed at the raw jpg.
-        annotated = candidate.with_suffix("")
         return None
     return candidate
 
@@ -397,8 +441,13 @@ def upload_to_ai_trainer(request: Request, _mve_body=Depends(_json_body_dep)):
     # ("Errno -5: No address associated with hostname") even though the host's
     # resolver is fine. Three attempts with quick backoff has, empirically,
     # turned ~30% intermittent failures into 0%.
+    # 4.0.445 — ONLY when the request never left (DNS / refused / connect timeout). It also
+    # retried a READ timeout — the trainer had the upload and was still answering — so a
+    # slow trainer got the same frame 2-3 times. And 20 s for the whole upload was short on
+    # a factory uplink: connect 5 s, answer 60 s.
     import time as _t
     last_err = None
+    relogged = False
     file_bytes = raw_path.read_bytes()  # read once so we can retry without re-opening
     for attempt in range(3):
         # 3.24.9 — use the list-of-tuples form so the multipart field name
@@ -407,7 +456,15 @@ def upload_to_ai_trainer(request: Request, _mve_body=Depends(_json_body_dep)):
         # on the trainer side (it ended up unable to identify the bytes).
         files_payload = [("files", (raw_path.name, file_bytes, "image/jpeg"))]
         try:
-            r = requests.post(target_url, files=files_payload, data=data, headers=headers, timeout=20)
+            r = requests.post(target_url, files=files_payload, data=data, headers=headers, timeout=(5, 60))
+            if r.status_code == 401 and not cfg["api_key"] and not relogged:
+                # rejected = not stored → safe to send again with a fresh login
+                relogged = True
+                _drop_access_token()
+                access, auth_err = _ensure_access_token(_ai_trainer_cfg())
+                if access:
+                    headers["Authorization"] = f"Bearer {access}"
+                    continue
             ok = (200 <= r.status_code < 300)
             # 3.26.3 — also parse the trainer's response so the annotate.js modal
             # can lift the new TaskImage id straight off. Old `trainer_response`
@@ -470,6 +527,13 @@ def upload_to_ai_trainer(request: Request, _mve_body=Depends(_json_body_dep)):
         except requests.RequestException as e:
             last_err = e
             logger.warning(f"ai_trainer upload attempt {attempt+1}/3 failed: {e}")
+            if not _never_sent(e):
+                return JSONResponse(content={
+                    "success": False,
+                    "error": f"no answer from the trainer ({type(e).__name__}) — the frame may "
+                             f"already be there; check before uploading it again",
+                    "target_url": target_url, "task_id": task_id,
+                }, status_code=504)
             if attempt < 2:
                 _t.sleep(0.5 * (attempt + 1))
     return JSONResponse(
@@ -508,17 +572,47 @@ def upload_to_ai_trainer(request: Request, _mve_body=Depends(_json_body_dep)):
 # =============================================================================
 
 
-def _trainer_get(path: str, params: dict = None) -> tuple[Optional[dict], Optional[str]]:
-    """Proxy GET to the trainer. Returns (json_or_None, error_or_None)."""
+def _never_sent(e) -> bool:
+    """4.0.445 — True when a requests error happened BEFORE the request reached the
+    trainer (DNS, refused, connect timeout), so sending it again cannot duplicate it."""
+    if isinstance(e, requests.exceptions.ConnectTimeout):
+        return True
+    if isinstance(e, requests.exceptions.ConnectionError) and not isinstance(e, requests.exceptions.Timeout):
+        t = str(e)
+        return any(k in t for k in ("NewConnectionError", "Failed to establish a new connection",
+                                    "NameResolution", "Name or service not known",
+                                    "No address associated", "Temporary failure in name resolution"))
+    return False
+
+
+def _trainer_request(method: str, path: str, **kw):
+    """4.0.445 — one authenticated call to the trainer; on a 401 the cached access token is
+    dropped and the call is made ONCE more after a refresh / fresh login (a rejected
+    request was not applied, so re-sending it is safe). Returns (response, error)."""
     cfg = _ai_trainer_cfg()
     access, auth_err = _ensure_access_token(cfg)
     if not access:
         return None, auth_err or "no access token"
-    origin = _trainer_origin(cfg["url"])
-    url = origin.rstrip("/") + "/" + path.lstrip("/")
+    url = cfg["base_url"].rstrip("/") + "/" + path.lstrip("/")
+    headers = dict(kw.pop("headers", None) or {})
+    for attempt in (0, 1):
+        headers["Authorization"] = f"Bearer {access}"
+        r = requests.request(method, url, headers=headers, **kw)
+        if r.status_code != 401 or attempt:
+            return r, None
+        _drop_access_token()
+        access, auth_err = _ensure_access_token(_ai_trainer_cfg())
+        if not access:
+            return None, auth_err or "trainer rejected the token and re-login failed"
+    return r, None
+
+
+def _trainer_get(path: str, params: dict = None) -> tuple[Optional[dict], Optional[str]]:
+    """Proxy GET to the trainer. Returns (json_or_None, error_or_None)."""
     try:
-        r = requests.get(url, params=params or {}, timeout=10,
-                         headers={"Authorization": f"Bearer {access}"})
+        r, err = _trainer_request("GET", path, params=params or {}, timeout=10)
+        if err:
+            return None, err
         if r.status_code in (200, 201):
             try: return r.json(), None
             except Exception: return None, f"non-JSON: {r.text[:200]}"
@@ -529,16 +623,11 @@ def _trainer_get(path: str, params: dict = None) -> tuple[Optional[dict], Option
 
 def _trainer_send(method: str, path: str, json_body=None) -> tuple[Optional[dict], Optional[str], int]:
     """Proxy a write call to the trainer. Returns (json, error, status)."""
-    cfg = _ai_trainer_cfg()
-    access, auth_err = _ensure_access_token(cfg)
-    if not access:
-        return None, auth_err or "no access token", 401
-    origin = _trainer_origin(cfg["url"])
-    url = origin.rstrip("/") + "/" + path.lstrip("/")
     try:
-        r = requests.request(method, url, json=json_body, timeout=15,
-                             headers={"Authorization": f"Bearer {access}",
-                                      "Content-Type": "application/json"})
+        r, err = _trainer_request(method, path, json=json_body, timeout=15,
+                                  headers={"Content-Type": "application/json"})
+        if err:
+            return None, err, 401
         try:
             body = r.json()
         except Exception:
@@ -656,11 +745,11 @@ def save_class_map(request: Request, _mve_body=Depends(_json_body_dep)):
             cleaned[str(k)] = int(v)
         except (TypeError, ValueError):
             continue
-    svc = load_service_config() or {}
-    ai = dict(svc.get("ai_trainer") or {})
-    ai["class_map"] = cleaned
-    svc["ai_trainer"] = ai
-    save_service_config(svc)
+    def _fn(svc):
+        ai = dict(svc.get("ai_trainer") or {})
+        ai["class_map"] = cleaned
+        svc["ai_trainer"] = ai
+    mutate_service_config(_fn)     # 4.0.445 — atomic (was a whole-blob read-modify-write)
     return JSONResponse(content={"class_map": cleaned, "saved": True})
 
 
@@ -698,32 +787,14 @@ def create_annotations(request: Request, _mve_body=Depends(_json_body_dep)):
     return JSONResponse(content={"created": resp})
 
 
-@router.put("/api/ai_trainer/annotate/{ann_id}")
-def update_annotation(ann_id: int, request: Request, _mve_body=Depends(_json_body_dep)):
-    """Update an existing annotation (single, by id)."""
-    try:
-        body = _req_body(_mve_body)
-    except Exception:
-        body = {}
-    if not isinstance(body, dict) or not body:
-        return JSONResponse(content={"error": "annotation body required"}, status_code=400)
-    resp, err, status = _trainer_send("PUT", f"/api/annotations/{int(ann_id)}/", json_body=body)
-    if err:
-        return JSONResponse(content={"error": err}, status_code=max(400, status))
-    return JSONResponse(content={"updated": resp})
-
-
 @router.delete("/api/ai_trainer/annotate/{ann_id}")
 def delete_annotation(ann_id: int):
-    """Delete an annotation by id."""
-    cfg = _ai_trainer_cfg()
-    access, auth_err = _ensure_access_token(cfg)
-    if not access:
-        return JSONResponse(content={"error": auth_err or "no token"}, status_code=401)
-    origin = _trainer_origin(cfg["url"])
+    """Delete an annotation by id (4.0.445 — used by the annotator to REPLACE the boxes it
+    sent for a frame on a re-save; the trainer's create appends)."""
     try:
-        r = requests.delete(f"{origin.rstrip('/')}/api/annotations/{int(ann_id)}/",
-                            timeout=10, headers={"Authorization": f"Bearer {access}"})
+        r, err = _trainer_request("DELETE", f"/api/annotations/{int(ann_id)}/", timeout=10)
+        if err:
+            return JSONResponse(content={"error": err}, status_code=401)
         if r.status_code in (200, 204):
             return JSONResponse(content={"deleted": int(ann_id)})
         return JSONResponse(content={"error": f"HTTP {r.status_code}: {r.text[:200]}"},

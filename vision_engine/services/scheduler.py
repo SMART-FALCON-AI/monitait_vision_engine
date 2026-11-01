@@ -32,9 +32,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +135,6 @@ async def _fetch_why_for_score(app, shipment: str, language: str = "en") -> str:
     """Best-effort: ask /api/why mode=score for a 2-sentence caption pre-amble."""
     try:
         from routers.ai import why_for_dot
-        import types
         # The handler reads request.app.state — fake a minimal Request shim.
         class _FakeReq:
             def __init__(self, app):
@@ -259,7 +257,7 @@ def _read_current_shipment() -> str:
     try:
         from redis import Redis
         from config import REDIS_DB
-        r = Redis("redis", 6379, db=REDIS_DB)
+        r = Redis("redis", 6379, db=REDIS_DB, socket_connect_timeout=3, socket_timeout=5)
         v = r.get("shipment")
         if not v:
             return ""
@@ -268,6 +266,50 @@ def _read_current_shipment() -> str:
     except Exception:
         return ""
 
+
+def _sched_key(s) -> tuple:
+    """Identity of a schedule (they carry no id; the UI replaces the list wholesale)."""
+    return (str(s.get("name") or ""), str(s.get("trigger_type") or "cron").lower(),
+            str(s.get("cron") or ""), str(s.get("shipment_filter") or ""))
+
+
+def _tick_inputs():
+    """Config + live shipment for one tick (worker thread: DB / Redis reads)."""
+    from config import load_service_config
+    svc = load_service_config() or {}
+    return (svc.get("notifications") or {}), _read_current_shipment()
+
+
+def _record_runs(fired: dict) -> None:
+    """4.0.445 — write ONLY last_run / last_status of the schedules that fired, onto a fresh
+    config (mutate_service_config, worker thread). The tick saved the whole config it had
+    loaded BEFORE generating the reports (minutes for a PDF + "why"), so a schedule, bot
+    token or chat id edited meanwhile was silently reverted."""
+    from config import mutate_service_config
+
+    def _fn(svc):
+        n = svc.get("notifications") or {}
+        for s in (n.get("schedules") or []):
+            if isinstance(s, dict) and _sched_key(s) in fired:
+                s["last_run"], s["last_status"] = fired[_sched_key(s)]
+        svc["notifications"] = n
+    mutate_service_config(_fn)
+
+
+_GLOB_CHARS = set("*?[")
+
+
+def _cron_target(filt, current_shipment):
+    """Shipment a cron schedule reports on, or None to skip this run. 4.0.445 — the filter
+    was passed on as the shipment itself: "*" or "PO-*" asked for the report of a shipment
+    literally named "*". An exact id still means that shipment; a pattern (or blank) means
+    the running shipment, and only when it matches."""
+    filt = str(filt or "").strip()
+    if filt and not (_GLOB_CHARS & set(filt)):
+        return filt
+    if _shipment_filter_matches(filt, current_shipment):
+        return current_shipment or "no_shipment"
+    return None
 
 _tz_warned = set()
 
@@ -314,13 +356,10 @@ async def _scheduler_loop(app):
     last_seen_shipment = ""  # initialised on first tick
     while not _stop_event.is_set():
         try:
-            from config import load_service_config
-            svc = load_service_config() or {}
-            cfg = svc.get("notifications") or {}
+            # 4.0.445 — read in a worker thread (this loop is the web server's event loop)
+            cfg, current_shipment = await asyncio.to_thread(_tick_inputs)
             schedules = cfg.get("schedules") or []
             now = _sched_now(cfg)  # 4.0.433 — in the configured time zone (was UTC: see _sched_now)
-
-            current_shipment = _read_current_shipment()
             shipment_changed = (
                 last_seen_shipment != "" and current_shipment != last_seen_shipment
             )
@@ -337,7 +376,7 @@ async def _scheduler_loop(app):
                 except Exception as _sse:
                     logger.debug(f"shipment_stats finalize hook failed: {_sse}")
 
-            _sched_dirty = False   # 4.0.321 SCHED-SAVE — did any last_run/last_status change this tick?
+            fired = {}   # 4.0.321 SCHED-SAVE / 4.0.445 — _sched_key → (last_run, last_status)
             for sched in schedules:
                 if not sched.get("enabled"):
                     continue
@@ -352,8 +391,10 @@ async def _scheduler_loop(app):
                     this_minute = now.strftime("%Y-%m-%dT%H:%M")
                     if last_run and last_run.startswith(this_minute):
                         continue  # already fired this minute
+                    fire_for_shipment = _cron_target(sched.get("shipment_filter"), current_shipment)
+                    if fire_for_shipment is None:
+                        continue
                     logger.info(f"notifications: firing {sched.get('name')!r} (cron={cron_s})")
-                    fire_for_shipment = sched.get("shipment_filter") or current_shipment or "no_shipment"
 
                 # --- shipment_change trigger ---
                 elif trigger_type == "shipment_change":
@@ -376,25 +417,18 @@ async def _scheduler_loop(app):
                     sched_for_run = dict(sched)
                     sched_for_run["shipment_filter"] = fire_for_shipment
                     ok, info = await run_one_schedule(sched_for_run, cfg, app, source=trigger_type)
-                    sched["last_run"] = now.strftime("%Y-%m-%dT%H:%M:%S")
-                    sched["last_status"] = "ok" if ok else "error"
+                    status = "ok" if ok else "error"
                 except Exception as e:
                     logger.warning(f"schedule {sched.get('name')!r} fire failed: {e}")
-                    sched["last_run"] = now.strftime("%Y-%m-%dT%H:%M:%S")
-                    sched["last_status"] = "error"
-                _sched_dirty = True   # this schedule fired → its last_run/last_status changed
+                    status = "error"
+                fired[_sched_key(sched)] = (now.strftime("%Y-%m-%dT%H:%M:%S"), status)
 
-            # 4.0.321 SCHED-SAVE — only rewrite the config when a last_run/last_status actually
-            # changed this tick. The old `if schedules:` did a full mve_config_kv upsert + a ~50KB
-            # JSON file dump EVERY 60s whenever any schedule existed — pure churn (updated_at bump +
-            # pool + disk) for nothing, forever.
-            if schedules and _sched_dirty:
-                from config import save_service_config
-                svc["notifications"] = cfg
+            # 4.0.321 SCHED-SAVE — only write when a schedule actually fired this tick.
+            if fired:
                 try:
-                    save_service_config(svc)
+                    await asyncio.to_thread(_record_runs, fired)
                 except Exception as _e:
-                    logger.debug(f"save_service_config after scheduler tick failed: {_e}")
+                    logger.warning(f"scheduler: could not record last_run: {_e}")
 
             # Always update last_seen at the end of the tick so we detect the
             # NEXT change. Skip if Redis returned empty (don't accidentally

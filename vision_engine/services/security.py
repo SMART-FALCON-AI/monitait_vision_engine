@@ -47,6 +47,12 @@ _PROTECTED: List[Tuple[str, str]] = [
     ("/api/camera/", "engineer"),          # /api/camera/{id}/config|restart
     ("/api/config", "engineer"),
     ("/api/color_config", "engineer"),
+    ("/api/billing/service-requests", "operator"),
+    ("/api/billing/", "admin"),            # 4.0.445 — subscribe, mark an invoice paid
+                                           # (manual confirm), API keys, LIVE retention prune
+    ("/api/notifications/config", "engineer"),  # 4.0.445 — bot host + token (same reason)
+    ("/api/ai_trainer/config", "engineer"),  # 4.0.445 — sets the host the trainer password /
+                                             # tokens are sent to (uploads stay operator)
     ("/api/audio_settings", "operator"),
     ("/api/auth/users", "admin"),
     ("/api/auth/config", "admin"),

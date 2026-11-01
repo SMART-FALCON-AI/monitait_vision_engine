@@ -1404,7 +1404,8 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
         if precomputed_yolo is not None:
             yolo_res, model_name_used = precomputed_yolo
         elif _pipeline_manager:
-            yolo_res, model_name_used = _pipeline_manager.run_inference(img_bytes)
+            yolo_res, model_name_used = _pipeline_manager.run_inference(
+                img_bytes, _pipeline_manager.stream_key(frame_id))   # 4.0.445 — per-camera stride
         else:
             # Fallback to legacy inference
             yolo_res = json.loads(req_predict(img_bytes))

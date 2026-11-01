@@ -22,6 +22,9 @@ let _annotateFrame = null;       // { image_path, image_url, image_w, image_h, d
 let _annotateLabels = [];        // [{id, category_name, color}]
 let _annotateClassMap = {};      // { mve_class_name: trainer_category_id }
 let _annotateTaskId = null;      // trainer task id (from /api/ai_trainer/config)
+// 4.0.445 — what this page already sent for a frame: { key: image_path|task, imageId, annIds }
+let _annotateSent = null;
+let _annotateSaving = false;
 
 function _setStatus(msg, isErr) {
     const el = document.getElementById('annotate-status');
@@ -388,50 +391,17 @@ async function submitAnnotations() {
     const annStore = _annotateLS.store && _annotateLS.store.annotationStore;
     const cur = annStore && annStore.selected;
     if (!cur) { _setStatus('No active annotation.', true); return; }
-    _setStatus('Saving + shipping to trainer…');
-    _enableSubmit(false);
-
-    // 1. Upload the raw image so the trainer has a TaskImage row to attach
-    //    annotations to. We reuse the existing /api/ai_trainer/upload endpoint
-    //    which knows how to POST multipart with the JWT.
-    let imageId = null;
-    try {
-        const upRes = await fetch('/api/ai_trainer/upload', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                image_path:  _annotateFrame.image_path,
-                shipment:    window._currentDefectItem.shipment || '',
-                class_name:  '',
-                camera:      window._currentDefectItem.camera_index || null,
-                task_id:     _annotateTaskId || undefined,
-            }),
-        });
-        const upData = await upRes.json();
-        if (!upRes.ok || !upData.success) {
-            throw new Error(upData.error || ('upload HTTP ' + upRes.status));
-        }
-        // 3.26.3 — backend now parses the trainer's response and exposes the
-        // first TaskImage.id straight on `image_id`. Old fallbacks kept for
-        // belt-and-braces in case the trainer format changes.
-        if (upData.image_id != null) {
-            imageId = Number(upData.image_id);
-        } else {
-            const tr = upData.trainer_response_json || upData.trainer_response;
-            if (Array.isArray(tr) && tr.length && tr[0].id != null) imageId = Number(tr[0].id);
-            else if (tr && Array.isArray(tr.results) && tr.results.length) imageId = Number(tr.results[0].id);
-        }
-        if (!imageId) throw new Error('upload succeeded but no TaskImage id returned — backend parsed: ' + JSON.stringify(upData).slice(0, 300));
-    } catch (e) {
-        _setStatus('✗ Upload failed: ' + (e.message || e), true);
-        _enableSubmit(true);
-        return;
-    }
+    // 4.0.445 — LSF fires both Submit and Update into here; a second click while the first
+    // save is still talking to the trainer used to upload + annotate twice.
+    if (_annotateSaving) { _setStatus('Still saving the previous change…'); return; }
 
     // 4.0.6 — use `annotation.serializeAnnotation()` (the same call the trainer's
     // own Training.vue:752 uses) instead of iterating `regions` + calling
     // `region.serialize()` per region. The latter silently drops prefilled
     // rectangles in some LSF builds; the former returns the full result array
     // including every box the operator sees.
+    // 4.0.445 — built BEFORE the upload: an empty save used to upload the frame first and
+    // leave an image with no boxes on the trainer.
     const W = _annotateFrame.image_w, H = _annotateFrame.image_h;
     const tidNum = parseInt(_annotateTaskId, 10);
     let serResults = [];
@@ -480,7 +450,7 @@ async function submitAnnotations() {
                 Math.round(h_pct / 100 * H),
             ],
             area: w_pct * h_pct,
-            image_id: imageId,
+            image_id: null,             // set below, once the frame is on the trainer
             category_id: catId,
             normalized_percent_points: [x_pct, y_pct, w_pct, h_pct],
             segmentation: [],
@@ -492,20 +462,87 @@ async function submitAnnotations() {
             ? `(${serResults.length} region${serResults.length === 1 ? '' : 's'} but none had a label — pick a class from the Labels panel before saving)`
             : '(editor returned 0 regions — draw at least one box and label it)';
         _setStatus('Nothing to save ' + why, true);
-        _enableSubmit(true);
         return;
     }
+
+    _annotateSaving = true;
+    _enableSubmit(false);
+    _setStatus('Saving + shipping to trainer…');
     try {
-        const r = await fetch('/api/ai_trainer/annotate', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ annotations: payload }),
-        });
-        const d = await r.json();
-        if (!r.ok) throw new Error(d.error || ('save HTTP ' + r.status));
-        _setStatus(`✓ Sent ${payload.length} annotation${payload.length === 1 ? '' : 's'} to trainer (image ${imageId}).`);
-    } catch (e) {
-        _setStatus('✗ Save failed: ' + (e.message || e), true);
+        // 1. Upload the raw image ONCE per frame so the trainer has a TaskImage row to attach
+        //    annotations to (/api/ai_trainer/upload knows how to POST multipart with the JWT).
+        //    4.0.445 — it uploaded on EVERY save: each Update made another copy of the frame.
+        const key = (_annotateFrame.image_path || '') + '|' + (_annotateTaskId || '');
+        if (!_annotateSent || _annotateSent.key !== key) _annotateSent = { key, imageId: null, annIds: [] };
+        const sent = _annotateSent;
+        if (!sent.imageId) {
+            let imageId = null;
+            try {
+                const upRes = await fetch('/api/ai_trainer/upload', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        image_path:  _annotateFrame.image_path,
+                        shipment:    window._currentDefectItem.shipment || '',
+                        class_name:  '',
+                        camera:      window._currentDefectItem.camera_index || null,
+                        task_id:     _annotateTaskId || undefined,
+                    }),
+                });
+                const upData = await upRes.json();
+                if (!upRes.ok || !upData.success) {
+                    throw new Error(upData.error || ('upload HTTP ' + upRes.status));
+                }
+                // 3.26.3 — backend parses the trainer's response and exposes the first
+                // TaskImage.id straight on `image_id`. Old fallbacks kept in case the
+                // trainer format changes.
+                if (upData.image_id != null) {
+                    imageId = Number(upData.image_id);
+                } else {
+                    const tr = upData.trainer_response_json || upData.trainer_response;
+                    if (Array.isArray(tr) && tr.length && tr[0].id != null) imageId = Number(tr[0].id);
+                    else if (tr && Array.isArray(tr.results) && tr.results.length) imageId = Number(tr.results[0].id);
+                }
+                if (!imageId) throw new Error('upload succeeded but no TaskImage id returned — backend parsed: ' + JSON.stringify(upData).slice(0, 300));
+            } catch (e) {
+                _setStatus('✗ Upload failed: ' + (e.message || e), true);
+                return;
+            }
+            sent.imageId = imageId;
+        }
+        for (const p of payload) p.image_id = sent.imageId;
+
+        // 2. Create the boxes. The trainer APPENDS, so on a re-save the boxes this page sent
+        //    last time are deleted AFTER the new ones are in (a failed save keeps the old set).
+        let created;
+        try {
+            const r = await fetch('/api/ai_trainer/annotate', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ annotations: payload }),
+            });
+            const d = await r.json();
+            if (!r.ok) throw new Error(d.error || ('save HTTP ' + r.status));
+            created = d.created;
+        } catch (e) {
+            _setStatus('✗ Save failed: ' + (e.message || e), true);
+            return;
+        }
+        const rows = Array.isArray(created) ? created : ((created && created.results) || []);
+        const newIds = rows.map(x => x && x.id).filter(id => id != null);
+        const oldIds = sent.annIds;
+        sent.annIds = newIds;
+        let leftOver = 0;
+        for (const id of oldIds) {
+            try {
+                const r = await fetch('/api/ai_trainer/annotate/' + encodeURIComponent(id), { method: 'DELETE' });
+                if (!r.ok) leftOver++;
+            } catch (e) { leftOver++; }
+        }
+        _setStatus(`✓ Sent ${payload.length} annotation${payload.length === 1 ? '' : 's'} to trainer (image ${sent.imageId}).`
+                   + (oldIds.length ? ` Replaced the ${oldIds.length} sent before.` : '')
+                   + (leftOver ? ` ✗ ${leftOver} earlier box(es) could not be removed on the trainer.` : ''),
+                   leftOver > 0);
     } finally {
+        _annotateSaving = false;
         _enableSubmit(true);
     }
 }

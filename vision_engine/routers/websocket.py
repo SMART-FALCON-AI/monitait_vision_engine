@@ -11,14 +11,12 @@ import json
 import logging
 import numpy as np
 import os
-import pickle
 from typing import Dict, List, Tuple, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis import Redis
 
 import config as cfg
 from config import TIMELINE_REDIS_PREFIX
-from services.detection import evaluate_eject_from_detections
 from services.render import draw_detection_on
 from routers.timeline import (_timeline_cam_order, _unpack_timeline_entry, _build_header_strip, _HEADER_HEIGHT,
                               draw_eject_boxes)
@@ -47,16 +45,6 @@ class ConnectionManager:
             clients.remove(ws)
         logger.info(f"WS disconnect: {channel} ({len(clients)} clients)")
 
-    async def broadcast_binary(self, channel: str, data: bytes):
-        dead: List[WebSocket] = []
-        for ws in self._channels.get(channel, []):
-            try:
-                await ws.send_bytes(data)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(channel, ws)
-
     async def send_binary(self, ws: WebSocket, data: bytes):
         try:
             await ws.send_bytes(data)
@@ -68,16 +56,6 @@ class ConnectionManager:
             await ws.send_text(data)
         except Exception:
             pass
-
-    async def broadcast_text(self, channel: str, data: str):
-        dead: List[WebSocket] = []
-        for ws in self._channels.get(channel, []):
-            try:
-                await ws.send_text(data)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(channel, ws)
 
 
 manager = ConnectionManager()
@@ -103,7 +81,6 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
             frames_per_page = tl_config.get('num_rows', 10)
             image_rotation = tl_config.get('image_rotation', 0)
             show_bbox = tl_config.get('show_bounding_boxes', True)
-            obj_filters = tl_config.get('object_filters', {})
             procedures = tl_config.get('procedures', [])
         except Exception:
             tl_config = None
@@ -111,7 +88,6 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
             frames_per_page = 10
             image_rotation = 0
             show_bbox = True
-            obj_filters = {}
             procedures = []
         # 3.21.26 — draw_filters loads audio_settings itself; nothing for us to do here.
 
@@ -330,6 +306,30 @@ def _build_timeline_composite(page: int, app_state, mark_ejects: bool = False, m
 # ---------------------------------------------------------------------------
 # /ws/timeline — event-driven timeline push
 # ---------------------------------------------------------------------------
+def _timeline_subscribe():
+    """4.0.445 — connect + SUBSCRIBE (executor thread), with timeouts: done on the event loop
+    with no timeout, a Redis that doesn't answer froze every request."""
+    r = Redis("redis", 6379, db=cfg.REDIS_DB, socket_connect_timeout=3, socket_timeout=10)
+    ps = r.pubsub()
+    ps.subscribe("ws:timeline_update")
+    return ps
+
+
+def _timeline_wait_update(pubsub, timeout):
+    """Blocking wait (executor thread) → True if ≥1 update arrived. 4.0.445 — every frame of
+    every camera publishes one message and the loop rendered once PER message: a busy line
+    queued renders behind each other. Everything already queued is drained — one render
+    covers them all."""
+    m = pubsub.get_message(timeout=timeout)
+    got = bool(m and m.get("type") == "message")
+    for _ in range(100000):
+        m = pubsub.get_message(timeout=0)
+        if not m:
+            break
+        got = got or m.get("type") == "message"
+    return got
+
+
 @router.websocket("/ws/timeline")
 async def ws_timeline(websocket: WebSocket):
     app_state = websocket.app.state
@@ -355,19 +355,26 @@ async def ws_timeline(websocket: WebSocket):
     # mark/thickness and sends ONLY to itself, tracking its own last-sent state — no
     # shared cache, no cross-connection broadcast, no flicker.
     last = {"version": -1, "page": None, "mark": None, "thick": None}
+    # 4.0.445 — one render+send at a time per connection: a page change (client task) and a
+    # frame update (redis task) rendering concurrently interleaved their two sends, and the
+    # browser paired one render's meta with the other's JPEG.
+    send_lock = asyncio.Lock()
 
     async def _render_and_send_self():
-        result = await loop.run_in_executor(
-            None, _build_timeline_composite, client_page, app_state, client_mark, client_thick
-        )
-        if result:
-            jpeg, meta = result
-            last["version"] = cfg.timeline_frame_counter
-            last["page"] = client_page
-            last["mark"] = client_mark
-            last["thick"] = client_thick
-            await manager.send_text(websocket, json.dumps(meta))
-            await manager.send_binary(websocket, jpeg)
+        async with send_lock:
+            # 4.0.445 — snapshot the version + view BEFORE rendering. It was read after the
+            # render, so a frame that landed mid-render was recorded as already shown and
+            # its own update skipped: the newest product stayed off the timeline until the
+            # next one arrived (a whole product late on a slow line).
+            ver, page, mark, thick = cfg.timeline_frame_counter, client_page, client_mark, client_thick
+            result = await loop.run_in_executor(
+                None, _build_timeline_composite, page, app_state, mark, thick
+            )
+            if result:
+                jpeg, meta = result
+                last.update(version=ver, page=page, mark=mark, thick=thick)
+                await manager.send_text(websocket, json.dumps(meta))
+                await manager.send_binary(websocket, jpeg)
 
     try:
         # Immediate frame on connect (mark/thickness already known from the query string)
@@ -413,35 +420,33 @@ async def ws_timeline(websocket: WebSocket):
 
         async def _listen_redis():
             """Subscribe to timeline updates from inference workers via Redis Pub/Sub."""
-            nonlocal client_page, client_mark, client_thick
-
-            def _wait_for_message(pubsub, timeout=1.0):
-                """Blocking Redis get_message — runs in executor thread."""
-                return pubsub.get_message(timeout=timeout)
-
-            r = Redis("redis", 6379, db=cfg.REDIS_DB)
-            pubsub = r.pubsub()
-            pubsub.subscribe("ws:timeline_update")
-
+            pubsub = None
             try:
+                pubsub = await loop.run_in_executor(None, _timeline_subscribe)
                 while True:
-                    # Wait for Redis notification (blocking in executor)
-                    msg = await loop.run_in_executor(None, _wait_for_message, pubsub, 2.0)
-                    if msg and msg["type"] == "message":
-                        current_version = cfg.timeline_frame_counter
-                        # Rebuild for THIS connection only when its own view changed.
-                        if (current_version != last["version"]
-                                or client_page != last["page"]
-                                or client_mark != last["mark"]
-                                or client_thick != last["thick"]):
-                            await _render_and_send_self()
+                    if not await loop.run_in_executor(None, _timeline_wait_update, pubsub, 2.0):
+                        continue
+                    # Rebuild for THIS connection only when its own view changed.
+                    if (cfg.timeline_frame_counter != last["version"]
+                            or client_page != last["page"]
+                            or client_mark != last["mark"]
+                            or client_thick != last["thick"]):
+                        t0 = loop.time()
+                        await _render_and_send_self()
+                        # 4.0.445 — at most ~4 frame-driven renders/s per connection (each is a
+                        # full composite decode+draw+encode in a worker thread); updates that
+                        # arrive meanwhile are drained into the next one, never lost.
+                        await asyncio.sleep(max(0.0, 0.25 - (loop.time() - t0)))
             except (WebSocketDisconnect, RuntimeError):
                 pass
             except Exception as e:
                 logger.debug(f"WS timeline redis loop error: {e}")
             finally:
-                pubsub.unsubscribe()
-                pubsub.close()
+                if pubsub is not None:
+                    try:
+                        pubsub.close()      # drops the connection = unsubscribed; no round trip
+                    except Exception:
+                        pass
 
         # Run both concurrently; when one exits, cancel the other
         listen_client_task = asyncio.create_task(_listen_client())
@@ -482,9 +487,23 @@ async def ws_camera(websocket: WebSocket, camera_id: int):
     channel = f"camera:{camera_id}"
     await manager.connect(channel, websocket)
 
+    # 4.0.445 — the loop only noticed a closed browser when a SEND failed, and a camera with
+    # no frame (disconnected / never streamed) never sends: every Cameras-tab visit left one
+    # loop per dead camera polling cam.read() 3×/s on the executor until MVE restarted.
+    # A receiver ends it as soon as the browser goes.
+    async def _until_closed():
+        try:
+            while True:
+                m = await websocket.receive()
+                if m.get("type") == "websocket.disconnect":
+                    return
+        except Exception:
+            return
+    closed = asyncio.ensure_future(_until_closed())
+
     try:
         loop = asyncio.get_event_loop()
-        while True:
+        while not closed.done():
             # Read frame in executor to avoid blocking asyncio
             frame = await loop.run_in_executor(None, cam.read)
             if frame is not None:
@@ -494,15 +513,16 @@ async def ws_camera(websocket: WebSocket, camera_id: int):
                 # ended — every Cameras-tab visit left one immortal 3-fps encode loop per
                 # camera behind (28 per visit on a 28-camera site), on the event loop.
                 jpeg = await loop.run_in_executor(None, _jpeg_q70, frame)
-                if jpeg is not None:
+                if jpeg is not None and not closed.done():
                     await websocket.send_bytes(jpeg)
-            await asyncio.sleep(0.33)  # ~3 FPS
+            await asyncio.wait([closed], timeout=0.33)  # ~3 FPS; wakes at once on close
     except WebSocketDisconnect:
         pass
     except Exception as e:
         # a send on a socket the browser already closed ends up here — a normal end
         logger.debug(f"WS camera {camera_id} closed: {type(e).__name__}: {e}")
     finally:
+        closed.cancel()
         manager.disconnect(channel, websocket)
 
 

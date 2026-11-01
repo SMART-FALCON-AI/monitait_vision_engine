@@ -30,7 +30,6 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-import time
 from typing import Any, Dict, List, Optional
 
 from services.db import get_db_connection, release_db_connection
@@ -398,10 +397,38 @@ def confirm_payment(ref: str, params: Optional[Dict[str, Any]] = None,
         verify = gw.verify_payment(ref, {**(params or {}), "amount": amount})
         paid = bool(verify.get("paid"))
     if paid:
-        _exec("UPDATE mve_payments SET status='paid', paid_at=NOW() WHERE ref=%s", (ref,))
+        # 4.0.445 — CLAIM the payment atomically: two confirms at once (the gateway's return
+        # page loaded twice, or a manual confirm next to the callback) both passed the
+        # status check above and both activated the subscription (two 'active' rows).
+        claimed = _exec("UPDATE mve_payments SET status='paid', paid_at=NOW() "
+                        "WHERE ref=%s AND status <> 'paid' RETURNING ref", (ref,), fetch="one")
+        if not claimed:
+            return {"ok": True, "already": True, "paid": True, "plan_code": plan_code}
         _activate_subscription(plan_code, gateway, ref)
         return {"ok": True, "paid": True, "plan_code": plan_code}
     return {"ok": False, "paid": False, "plan_code": plan_code}
+
+
+# Where each gateway puts the payment id on its return URL: Zarinpal `Authority`,
+# IDPay `id` (its own transaction id, which is the stored ref — `order_id` is MVE's),
+# PayPal `token` (the order id); `ref` for the manual / own links.
+_CALLBACK_REF_PARAMS = ("ref", "Authority", "authority", "id", "token", "order_id")
+
+
+def find_callback_ref(params: Dict[str, Any]) -> str:
+    """4.0.445 — the stored payment ref among a gateway callback's query parameters.
+    The callback only looked at ref / authority / order_id, so Zarinpal (Authority),
+    IDPay (id) and PayPal (token) payments were never matched and never activated."""
+    _ensure_schema()
+    cands = []
+    for k in _CALLBACK_REF_PARAMS:
+        v = str(params.get(k) or "").strip()
+        if v and v not in cands and len(v) <= 200:
+            cands.append(v)
+    if not cands:
+        return ""
+    row = _exec("SELECT ref FROM mve_payments WHERE ref = ANY(%s) LIMIT 1", (cands,), fetch="one")
+    return row[0] if row else ""
 
 
 def list_payments(limit: int = 50) -> List[Dict[str, Any]]:

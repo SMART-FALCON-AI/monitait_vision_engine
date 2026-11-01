@@ -1474,6 +1474,7 @@ def _process_gathered_groups_batched(gathered, allow_eject=True, failed_out=None
     # Slice each group's valid frames + their raw bytes, and build one flat byte list.
     per_group_valid_frames = []
     all_img_bytes = []
+    all_stream_keys = []
     for fd in gathered:
         frames = fd.get("frames", [])
         vfs = []
@@ -1481,13 +1482,14 @@ def _process_gathered_groups_batched(gathered, allow_eject=True, failed_out=None
             if isinstance(f, (list, tuple)) and len(f) >= 2 and f[1]:
                 vfs.append(f)
                 all_img_bytes.append(f[1])  # jpeg_bytes
+                all_stream_keys.append(pipeline_manager.stream_key(f[0]))   # 4.0.445 — per-camera stride
         per_group_valid_frames.append(vfs)
 
     if not all_img_bytes:
         return True
 
     try:
-        multi_results = pipeline_manager.run_inference_multi(all_img_bytes)
+        multi_results = pipeline_manager.run_inference_multi(all_img_bytes, all_stream_keys)
     except Exception as e:
         logger.error(f"run_inference_multi failed: {e} — reverting gathered groups to non-batched path")
         ok = True

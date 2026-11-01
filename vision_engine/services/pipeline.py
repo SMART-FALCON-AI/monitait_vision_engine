@@ -199,7 +199,9 @@ class PipelineManager:
         self.pipelines: Dict[str, Pipeline] = {}
         self.current_pipeline: Optional[Pipeline] = None
         self.pipeline_lock = threading.Lock()
-        self._frame_counter = 0  # advanced once per run_inference, for phase stride
+        # 4.0.445 — phase-stride counters PER camera stream (see _stride_counts)
+        self._frame_counters: Dict[str, int] = {}
+        self._stride_lock = threading.Lock()
 
         # Gradio client cache (for reuse)
         self._gradio_clients: Dict[str, Any] = {}
@@ -457,7 +459,32 @@ class PipelineManager:
 
         return self.models.get("default_gradio")
 
-    def run_inference(self, image_bytes: bytes) -> tuple:
+    @staticmethod
+    def stream_key(frame_id) -> str:
+        """'<shipment>/<hour>/<stamp>_p<phase>_<cam>' → 'p<phase>_<cam>': one camera's frame
+        stream (legacy '<stamp>_<cam>' → '<cam>')."""
+        try:
+            parts = str(frame_id or "").rsplit("/", 1)[-1].split("_")
+            return "_".join(parts[-2:]) if len(parts) >= 3 else parts[-1]
+        except Exception:
+            return ""
+
+    def _stride_counts(self, keys) -> List[int]:
+        """4.0.445 — advance + return the frame count of each image's camera stream. One GLOBAL
+        counter was shared by every camera: frames arrive camera by camera, so with 2 cameras
+        and stride 2 the strided phase ran on camera 1's frames only and NEVER on camera 0's
+        (any stride sharing a factor with the camera count skewed it the same way)."""
+        out = []
+        with self._stride_lock:
+            if len(self._frame_counters) > 1000:     # unknown frame names must not grow it forever
+                self._frame_counters.clear()
+            for k in keys:
+                c = self._frame_counters.get(k or "", 0) + 1
+                self._frame_counters[k or ""] = c
+                out.append(c)
+        return out
+
+    def run_inference(self, image_bytes: bytes, stream_key: str = "") -> tuple:
         """Run inference through the current pipeline.
 
         Returns:
@@ -474,9 +501,8 @@ class PipelineManager:
         models_used = []
         ran = failed = 0   # 4.0.444 — phases attempted / failed for THIS frame
 
-        # Frame counter drives per-phase stride (run phase every Nth frame).
-        self._frame_counter += 1
-        fc = self._frame_counter
+        # Frame counter drives per-phase stride (run phase every Nth frame of this camera).
+        fc = self._stride_counts([stream_key])[0]
 
         # Run through each enabled phase in order
         for phase in sorted(self.current_pipeline.phases, key=lambda p: p.order):
@@ -641,7 +667,7 @@ class PipelineManager:
             logger.error(f"_run_yolo_inference_batch error: {e}")
             return None
 
-    def run_inference_multi(self, image_bytes_list: List[bytes]) -> List[Tuple[List[Dict], str]]:
+    def run_inference_multi(self, image_bytes_list: List[bytes], stream_keys=None) -> List[Tuple[List[Dict], str]]:
         """v4.0.82 — Run the current pipeline over a batch of images.
 
         For each phase in order:
@@ -658,22 +684,21 @@ class PipelineManager:
         N = len(image_bytes_list)
         if N == 0:
             return []
+        keys = list(stream_keys) if stream_keys is not None and len(stream_keys) == N else [""] * N
         if N == 1:
-            det, name = self.run_inference(image_bytes_list[0])
+            det, name = self.run_inference(image_bytes_list[0], keys[0])
             return [(det, name)]
         if not self.current_pipeline:
-            return [self.run_inference(b) for b in image_bytes_list]
+            return [self.run_inference(b, k) for b, k in zip(image_bytes_list, keys)]
 
         all_dets_per_image: List[List[Dict]] = [[] for _ in range(N)]
         models_used_per_image: List[List[str]] = [[] for _ in range(N)]
         ran_per_image = [0] * N      # 4.0.444 — phases attempted / failed per image
         failed_per_image = [0] * N
 
-        # Bump the frame counter by N so per-phase stride semantics stay consistent with the
-        # single-image path (each image counts as one frame).
-        with self.pipeline_lock:
-            fc_start = self._frame_counter
-            self._frame_counter += N
+        # Each image advances its own camera stream's counter by one, exactly like the
+        # single-image path.
+        fcs = self._stride_counts(keys)
 
         for phase in sorted(self.current_pipeline.phases, key=lambda p: p.order):
             if not phase.enabled:
@@ -681,8 +706,7 @@ class PipelineManager:
 
             stride = getattr(phase, "stride", 1) or 1
             if stride > 1:
-                # Position i in the batch acts as if it were the (fc_start + i + 1)-th call.
-                active_indices = [i for i in range(N) if ((fc_start + i + 1) % stride) == 0]
+                active_indices = [i for i in range(N) if (fcs[i] % stride) == 0]
                 if not active_indices:
                     continue
             else:
