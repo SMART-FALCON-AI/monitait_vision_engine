@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.451] - 2026-11-01 - Audit batch 31: shipment length after a restart
+
+**Fixed**
+- **A restart could close the running shipment at once.** At start-up the saved shipment length is checked against the encoder, to carry the length on after a real encoder reset. That check often ran before the first encoder reading had arrived from the board. The encoder still read 0, which looked like a reset, so the start position was moved back by the whole saved length. When the real (not reset) value arrived, the shipment's length jumped by that amount: the Length tile was wrong, and a length-based auto cutoff closed the shipment right after the restart. The check now waits up to 5 s for a real reading and keeps the saved start if none comes. A real encoder reset is still handled as before.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.450] - 2026-11-01 - Audit batch 30: shipment start time, Basler exposure, smaller fixes
 
 **Fixed**

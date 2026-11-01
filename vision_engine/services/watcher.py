@@ -987,6 +987,7 @@ class ArduinoSocket:
                 if wrap and nxt > wrap:
                     nxt = 0
                 self.encoder_value = nxt
+                self._encoder_seen = True
                 self.data = {"encoder_value": self.encoder_value}
                 try:
                     self._maybe_auto_cutoff()
@@ -1402,6 +1403,18 @@ class ArduinoSocket:
                 return  # different shipment; no restore
             persisted_start  = int(state.get("shipment_start_encoder", 0) or 0)
             persisted_length = int(state.get("last_seen_length", 0) or 0)
+            # 4.0.451 — wait (≤5 s) for the FIRST real encoder reading. Called at boot, often
+            # before the serial reader had parsed a line: encoder_value was still the initial
+            # 0, read as "encoder reset", and the start was rebuilt to -persisted_length — when
+            # the real (never reset) value arrived the length jumped by the whole saved length
+            # and a length cutoff closed the shipment right at boot.
+            _src = self.serial_available or str(os.environ.get("MVE_FAKE_ENCODER", "")).strip().lower() in ("1", "true", "yes", "on")
+            _deadline = time.time() + (5.0 if _src else 0.0)
+            while not getattr(self, "_encoder_seen", False) and time.time() < _deadline:
+                time.sleep(0.1)
+            if not getattr(self, "_encoder_seen", False):
+                logger.info("length restore: no encoder reading yet — keeping the saved shipment start")
+                return
             current_encoder  = int(getattr(self, "encoder_value", 0) or 0)
             # v4.0.114 — reject poisoned state. Prior versions saved
             # negative persisted_length when the encoder was reset
@@ -1812,6 +1825,7 @@ class ArduinoSocket:
                                 self.encoder_value = int(
                                     line[encoder_first_string_index + len("Encoder:"):encoder_last_string_index]
                                 )
+                                self._encoder_seen = True
                                 # v4.0.153 — check max-shipment-size auto-cutoff
                                 # on the legacy Encoder: line too. Cheap when
                                 # disabled (single dict lookup).
@@ -1847,6 +1861,7 @@ class ArduinoSocket:
 
                                 self.last_encoder_value = self.encoder_value
                                 self.encoder_value = kv["ENC"]
+                                self._encoder_seen = True
                                 # v4.0.153 — auto-cutoff check on the new ENC:
                                 # line format (primary encoder path in v4+).
                                 try: self._maybe_auto_cutoff()
