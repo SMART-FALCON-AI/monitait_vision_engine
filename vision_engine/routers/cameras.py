@@ -724,13 +724,25 @@ def upload_config(request: Request, _mve_body=Depends(_json_body_dep)):
         #  (b) LEGACY (pre-3.15.7 export): the flat service_config contents
         #      (cameras/states/… at top level, no `service_config` wrapper).
         #      Persist under service_config only.
+        # 4.0.439 — a backup carries the shipment that was running when it was taken. Keep
+        # the LIVE shipment in what gets saved: the backup's current_shipment was persisted,
+        # so the next restart switched the line to a days-old shipment.
+        def _keep_live_shipment(_svc):
+            _live = str(getattr(watcher, "shipment", "") or "").strip()
+            if isinstance(_svc, dict) and _live:
+                _svc["current_shipment"] = _live
+                _svc["shipment_start_encoder"] = int(getattr(watcher, "shipment_start_encoder", 0) or 0)
+
         if isinstance(config, dict) and "service_config" in config:
             full_data = config
             svc = config.get("service_config", {}) or {}
+            _keep_live_shipment(svc)
+            full_data["service_config"] = svc
             if not save_data_file(full_data):
                 return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
         else:
             svc = config
+            _keep_live_shipment(svc)
             if not save_service_config(svc):
                 return JSONResponse(content={"error": "Failed to save configuration"}, status_code=500)
             full_data = load_data_file()  # reload merged file so timeline_config (if any) is present

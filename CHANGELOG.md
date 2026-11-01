@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.439] - 2026-11-01 - Audit batch 19: ejection safety
+
+**Fixed**
+- **A late verdict ejected the wrong product.** When inference falls behind (overload, a slow YOLO), the backlog drains newest-first and old frames get their verdict long after their product passed the ejector. The eject request then fired at once on whatever product was at the ejector, a good one; the defective one is gone either way. On encoder-offset lines, a request already past its target by more than 25% of the offset (`MVE_EJECT_LATE_TOLERANCE` pulses overrides) is now logged as `[EJ_QUEUE] MISSED` and not fired. This covers the fail-safe ejects too. Time-delay lines (offset 0) are unchanged.
+- **One failed group in a batch fail-safe-ejected all of them.** When batched inference failed for one group, every gathered group (up to 16) was fail-safe ejected and replayed, including groups already inferred, evaluated and stored. That meant physical ejects of good product and duplicate result rows. Only the failed groups are now ejected and replayed.
+- **Every Store=ON eject wrote two `ejection_events` rows**, doubling the per-procedure eject analytics. The evaluator already writes one (deduped per shipment / procedure / encoder); the second, un-deduped writer was removed.
+- **Boot could come up with no ejection rules.** If Redis wasn't ready when the saved AI key was pushed to it at boot, the exception aborted the rest of the config apply: ejector settings, procedures, camera configs. The timeline self-heal never started either. That push is now guarded. If the boot apply fails or finds nothing, a default timeline config is put in place and flagged, so the self-heal reloads the stored one once the DB answers.
+- **Restoring a config backup switched the live shipment.** Uploading a backup also restored its old `current_shipment` and start encoder onto the running line, so live frames went into a stale shipment, and it was persisted for the next restart too. The shipment is now restored only at boot, and an upload keeps the live shipment.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.438] - 2026-11-01 - Audit batch 18: weights, procedures, states and pipelines
 
 **Fixed — weights / pipelines**

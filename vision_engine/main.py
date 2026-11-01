@@ -109,7 +109,7 @@ except Exception as e:
 # Global reference to watcher instance (set after ArduinoSocket initialization)
 watcher_instance = None
 
-def apply_config_settings(config, watcher_inst=None, full_data=None):
+def apply_config_settings(config, watcher_inst=None, full_data=None, boot=False):
     """Apply configuration settings from a config dict.
 
     This is a helper function used by startup loading, API endpoints, and config upload.
@@ -230,10 +230,17 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
         ai_model = config["ai"].get("model", "claude")
         ai_api_key = config["ai"].get("api_key", "")
         if ai_api_key:  # Only load if API key exists
-            watcher_inst.redis_connection.redis_connection.set("ai_model", ai_model)
-            watcher_inst.redis_connection.redis_connection.set("ai_api_key", ai_api_key)
-            settings_applied["ai"] = True
-            logger.info(f"AI configuration loaded: model={ai_model}")
+            # 4.0.439 — guarded: Redis unreachable / still LOADING here raised out of this
+            # whole function, skipping the ejector settings, timeline_config (procedures) and
+            # camera configs below — the line then ran with NO ejection rules and the
+            # timeline self-heal never started (the default flag was never set).
+            try:
+                watcher_inst.redis_connection.redis_connection.set("ai_model", ai_model)
+                watcher_inst.redis_connection.redis_connection.set("ai_api_key", ai_api_key)
+                settings_applied["ai"] = True
+                logger.info(f"AI configuration loaded: model={ai_model}")
+            except Exception as _aie:
+                logger.warning(f"AI configuration not pushed to Redis at boot (non-fatal): {_aie}")
 
     # Apply ejector settings
     if "ejector" in config:
@@ -305,7 +312,7 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
     # line came back with shipment=no_shipment even though length_state.json
     # on disk still held the real id — operator had to POST it back through
     # /api/config manually.
-    if not cur_ship or cur_ship == "no_shipment":
+    if boot and (not cur_ship or cur_ship == "no_shipment"):
         try:
             _ls_path = "/code/.env.length_state.json"
             if os.path.exists(_ls_path):
@@ -327,7 +334,12 @@ def apply_config_settings(config, watcher_inst=None, full_data=None):
                         config["shipment_start_encoder"] = int(_fallback_sse)
         except Exception as _lse:
             logger.warning(f"[SHIPMENT-RESTORE] length_state fallback read failed: {_lse}")
-    if not cur_ship:
+    if not boot:
+        # 4.0.439 — only at BOOT. This also ran on POST /api/cameras/config/upload (and
+        # /load): restoring a days-old backup switched the LIVE line to the backup's
+        # shipment and reset its start encoder — live frames went into a stale shipment.
+        logger.info("[SHIPMENT-RESTORE] not at boot (config upload/load) — the live shipment is kept")
+    elif not cur_ship:
         logger.info("[SHIPMENT-RESTORE] no current_shipment in saved config AND length_state fallback empty — staying at default 'no_shipment'")
     elif cur_ship == "no_shipment":
         logger.info("[SHIPMENT-RESTORE] saved config explicitly says 'no_shipment' — not restoring")
@@ -628,12 +640,13 @@ def apply_saved_config_at_startup(watcher_inst):
 
         if not config:
             logger.info("No saved configuration found - using defaults")
+            _boot_default_timeline_config()
             return False
 
         logger.info(f"Loading saved configuration from {DATA_FILE} (saved at: {config.get('saved_at', 'unknown')})")
 
         # Use the helper function to apply all settings (pass full_data for root-level configs)
-        settings_applied, cameras_loaded = apply_config_settings(config, watcher_inst, full_data)
+        settings_applied, cameras_loaded = apply_config_settings(config, watcher_inst, full_data, boot=True)
 
         # Log what was applied
         for setting in settings_applied:
@@ -650,7 +663,26 @@ def apply_saved_config_at_startup(watcher_inst):
 
     except Exception as e:
         logger.error(f"Error loading saved config at startup: {e}")
+        _boot_default_timeline_config()
         return False
+
+
+def _boot_default_timeline_config():
+    """4.0.439 — when the boot config apply fails (or finds nothing because the DB was
+    down and there is no disk copy), make sure there IS a timeline_config and that it is
+    flagged as defaults, so _timeline_config_selfheal re-reads the stored one once the DB
+    answers. Without this the line could run with no procedures and nothing re-read them."""
+    try:
+        if getattr(app.state, "timeline_config", None) and not getattr(app.state, "timeline_config_is_default", False):
+            return   # a real one was applied before the failure
+        if not getattr(app.state, "timeline_config", None):
+            app.state.timeline_config = {
+                'show_bounding_boxes': True, 'camera_order': 'normal', 'image_quality': 85,
+                'num_rows': 20, 'buffer_size': 100, 'object_filters': {}, 'procedures': []}
+        app.state.timeline_config_is_default = True
+        logger.warning("[BOOT-RACE] boot config apply failed — DEFAULT timeline_config in use; self-heal will re-read it")
+    except Exception as _be:
+        logger.error(f"default timeline_config fallback failed: {_be}")
 
 
 def apply_states_from_config(sm):
@@ -1326,23 +1358,10 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
                 else:
                     logger.info(f"EJECT condition met on cold path (no physical eject) | reasons={' '.join(eject_reasons)} | encoder={capture_encoder}")
 
-                # Persist ejection events for procedures with Store=ON.
-                # Runs on both hot AND cold so analytics tables stay complete.
-                try:
-                    reason_by_name = {}
-                    for _r in eject_reasons:
-                        _nm = _r.split(':', 1)[0].strip()
-                        reason_by_name.setdefault(_nm, _r)
-                    for _proc in _enabled_procs:
-                        if not _proc.get('store'):
-                            continue
-                        _pn = _proc.get('name', 'Unnamed')
-                        if _pn in reason_by_name:
-                            write_ejection_event_to_db(
-                                _pn, reason_by_name[_pn], capture_shipment, capture_encoder
-                            )
-                except Exception as _e:
-                    logger.warning(f"ejection_events write skipped: {_e}")
+                # 4.0.439 — the ejection_events row is written by evaluate_eject_from_detections
+                # itself (side_effects=True above; deduped per shipment/procedure/encoder). This
+                # block wrote a SECOND row for every Store=ON eject, with no dedupe — doubling the
+                # per-procedure eject analytics.
             elif allow_eject:
                 watcher.eject_ok_counter += 1
     except Exception as e:
@@ -1413,7 +1432,7 @@ def _gather_more_groups(hot_q, gathered):
         gathered.append(fd2)
         total += len(fd2.get("frames", []))
 
-def _process_gathered_groups_batched(gathered, allow_eject=True):
+def _process_gathered_groups_batched(gathered, allow_eject=True, failed_out=None):
     """Flatten frames across the gathered groups, call pipeline.run_inference_multi ONCE,
     then dispatch per-group post-processing with the precomputed yolo results threaded through.
 
@@ -1423,7 +1442,10 @@ def _process_gathered_groups_batched(gathered, allow_eject=True):
         fall back per-image (handled inside pipeline.run_inference_multi itself)
 
     Returns True if all groups' post-processing succeeded (or had nothing to do); False if any
-    group's yolo failed after retry.
+    group's yolo failed after retry. 4.0.439 — the groups that failed are appended to
+    `failed_out`: the caller fail-safe-ejected and replayed ALL gathered groups (up to 16)
+    when one failed — a physical eject of good product plus duplicate result rows for the
+    groups that had already succeeded.
     """
     # Slice each group's valid frames + their raw bytes, and build one flat byte list.
     per_group_valid_frames = []
@@ -1446,7 +1468,10 @@ def _process_gathered_groups_batched(gathered, allow_eject=True):
         logger.error(f"run_inference_multi failed: {e} — reverting gathered groups to non-batched path")
         ok = True
         for fd in gathered:
-            ok = _process_frame_batch(fd, allow_eject=allow_eject) and ok
+            _r = _process_frame_batch(fd, allow_eject=allow_eject)
+            if not _r and failed_out is not None:
+                failed_out.append(fd)
+            ok = _r and ok
         return ok
 
     # Distribute per-image results back to each group.
@@ -1458,7 +1483,10 @@ def _process_gathered_groups_batched(gathered, allow_eject=True):
         n = len(vfs)
         precomputed = multi_results[cursor:cursor + n] if n else []
         cursor += n
-        ok = _process_frame_batch(fd, allow_eject=allow_eject, precomputed_yolo_per_frame=precomputed) and ok
+        _r = _process_frame_batch(fd, allow_eject=allow_eject, precomputed_yolo_per_frame=precomputed)
+        if not _r and failed_out is not None:
+            failed_out.append(fd)
+        ok = _r and ok
     return ok
 
 
@@ -1516,15 +1544,19 @@ def inference_worker_thread():
                     if do_batch:
                         _gather_more_groups(hot_q, gathered)
                         total_frames = sum(len(g.get("frames", [])) for g in gathered)
+                    _failed = []
                     if do_batch and total_frames > 1:
-                        success = _process_gathered_groups_batched(gathered, allow_eject=True)
+                        success = _process_gathered_groups_batched(gathered, allow_eject=True, failed_out=_failed)
                     else:
                         # Single-group unbatched — original behavior.
                         success = _process_frame_batch(frames_data, allow_eject=True)
+                        if not success:
+                            _failed = [frames_data]
 
                     if not success:
-                        # YOLO failed after retry — fail-safe eject + spill ALL gathered groups to cold.
-                        for fd in gathered:
+                        # YOLO failed after retry — fail-safe eject + spill the FAILED groups to cold
+                        # (4.0.439 — only those; the others were already inferred, evaluated + stored)
+                        for fd in (_failed or gathered):
                             if cfg_module.EJECTOR_ENABLED:
                                 capture_encoder = fd.get("encoder", 0)
                                 eject_data = json.dumps({"encoder": capture_encoder, "dm": None})

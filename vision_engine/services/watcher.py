@@ -55,6 +55,22 @@ def _insert_by_target(queue, entry):
     queue.insert(i, entry)
 
 
+def _eject_late_tolerance():
+    """Pulses past its target a NEW eject request may still be (4.0.439): env
+    MVE_EJECT_LATE_TOLERANCE, else 25 % of EJECTOR_OFFSET (the ejector still catches a
+    product that is only slightly past its trigger point)."""
+    try:
+        v = os.environ.get("MVE_EJECT_LATE_TOLERANCE")
+        if v not in (None, ""):
+            return max(0, int(float(v)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        return max(0, int(float(cfg.EJECTOR_OFFSET) * 0.25))
+    except Exception:
+        return 0
+
+
 def _drop_before_reset(queue, encoder):
     """Remove (and return) entries captured before an encoder reset: the encoder is now
     far below where they were captured, so their target can never be reached again."""
@@ -2030,6 +2046,20 @@ class ArduinoSocket:
                         capture_encoder = ejector_data.get("encoder", self.encoder_value)
                         dm = ejector_data.get("dm", None)
                         target_encoder = capture_encoder + cfg.EJECTOR_OFFSET
+                        # 4.0.439 — a verdict that arrives AFTER its product passed the ejector
+                        # (backlog drain: the hot queue is LIFO and its frames are never aged out)
+                        # used to fire at once — on whatever product is at the ejector NOW, a good
+                        # one; the defective one is gone either way. Encoder-offset lines only
+                        # (offset 0 = time-delay lines, untouched); tolerance 25 % of the offset
+                        # by default (MVE_EJECT_LATE_TOLERANCE, pulses, overrides).
+                        _late = self.encoder_value - target_encoder
+                        if cfg.EJECTOR_OFFSET > 0 and _late > _eject_late_tolerance():
+                            self.missed_ejects = getattr(self, "missed_ejects", 0) + 1
+                            logger.warning(f"[EJ_QUEUE] MISSED — not firing: the product passed the ejector "
+                                           f"{_late} pulses ago (capture_enc={capture_encoder}, target={target_encoder}, "
+                                           f"current_enc={self.encoder_value}); firing now would reject another product "
+                                           f"(missed so far: {self.missed_ejects})")
+                            continue
                         _insert_by_target(self.ejection_queue, {
                             "target": target_encoder,
                             "dm": dm,
