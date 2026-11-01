@@ -21,6 +21,7 @@ it immediately.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -125,10 +126,21 @@ def _create_user(username: str, password: str, role: str = "operator") -> None:
           (username, role if role in ROLE_RANK else "operator", salt, _hash(password, salt)))
 
 
+def _admin_count(exclude: Optional[str] = None) -> int:
+    row = _exec("SELECT COUNT(*) FROM mve_users WHERE role='admin' AND username <> %s",
+                (exclude or "",), fetch="one")
+    return int(row[0] or 0) if row else 0
+
+
 def create_user(username: str, password: str, role: str = "operator") -> Dict[str, Any]:
     _ensure_schema()
     if not username or not password:
         raise ValueError("username and password required")
+    # 4.0.440 — never demote the LAST admin (the upsert did; boot then silently re-seeded
+    # admin/admin, re-opening the default password)
+    cur = _exec("SELECT role FROM mve_users WHERE username=%s", (username.strip(),), fetch="one")
+    if cur and cur[0] == "admin" and role != "admin" and _admin_count(exclude=username.strip()) == 0:
+        raise ValueError("cannot demote the last admin - create another admin first")
     _create_user(username.strip(), password, role)
     return {"username": username.strip(), "role": role}
 
@@ -141,8 +153,19 @@ def list_users() -> List[Dict[str, Any]]:
 
 def delete_user(username: str) -> None:
     _ensure_schema()
+    # 4.0.440 — never delete the LAST admin (see create_user)
+    cur = _exec("SELECT role FROM mve_users WHERE username=%s", (username,), fetch="one")
+    if cur and cur[0] == "admin" and _admin_count(exclude=username) == 0:
+        raise ValueError("cannot delete the last admin - create another admin first")
     _exec("DELETE FROM mve_users WHERE username=%s", (username,))
     _exec("DELETE FROM mve_auth_tokens WHERE username=%s", (username,))
+
+
+def admin_password_is_default() -> bool:
+    """4.0.440 — True while the seeded admin/admin account still has password 'admin'."""
+    _ensure_schema()
+    row = _exec("SELECT salt, pw_hash FROM mve_users WHERE username='admin' AND role='admin'", fetch="one")
+    return bool(row) and hmac.compare_digest(_hash("admin", row[0]), row[1])
 
 
 # --------------------------------------------------------------------------- #
@@ -151,7 +174,12 @@ def delete_user(username: str) -> None:
 def login(username: str, password: str) -> Dict[str, Any]:
     _ensure_schema()
     row = _exec("SELECT role, salt, pw_hash FROM mve_users WHERE username=%s", (username,), fetch="one")
-    if not row or _hash(password, row[1]) != row[2]:
+    # 4.0.440 — constant-time compare, and an unknown user costs the same PBKDF2 as a known
+    # one (it returned at once — usernames could be enumerated by timing)
+    if not row:
+        _hash(password, "0" * 32)
+        raise ValueError("invalid credentials")
+    if not hmac.compare_digest(_hash(password, row[1]), row[2]):
         raise ValueError("invalid credentials")
     token = secrets.token_urlsafe(32)
     _exec("INSERT INTO mve_auth_tokens (token, username, expires_at) VALUES (%s,%s,%s)",
@@ -218,12 +246,19 @@ def set_rbac_enabled(on: bool) -> None:
 def required_role_for(method: str, path: str) -> Optional[str]:
     """Minimum role to perform `method path`, or None if not gated.
     Reads (GET/HEAD/OPTIONS) are never gated, except the audit log view."""
+    if path in ("/api/auth/login", "/api/auth/logout"):
+        return None                             # 4.0.440 — with RBAC on these needed "operator",
+                                                # i.e. a token you can only get by logging in:
+                                                # turning RBAC on locked everyone out for good
     if path.startswith("/api/factory/"):
         return None                             # unauthenticated machine ingestion
                                                 # (Watcher Jet & compatible devices) — never
                                                 # gated or audited; devices can't hold a token
     if path.startswith("/api/audit"):
         return "engineer"                       # even GET of the audit log is gated
+    if path.rstrip("/") == "/api/export_service_config":
+        return "engineer"                       # 4.0.440 — the full backup carries every secret
+                                                # in clear (API keys, tokens, camera passwords)
     if method.upper() in ("GET", "HEAD", "OPTIONS"):
         return None
     for prefix, role in _PROTECTED:
@@ -231,12 +266,23 @@ def required_role_for(method: str, path: str) -> Optional[str]:
             return role
     if path.startswith("/api/"):
         return "operator"                       # any other mutating /api call
+    # 4.0.440 — the serial-board commands (POST /<command>: ejector, lights, offset /
+    # delay, counter adjust) live outside /api/, so they were never gated or audited.
+    _seg = path.strip("/")
+    if _seg and "/" not in _seg:
+        try:
+            from config import USER_COMMANDS
+            if _seg in USER_COMMANDS or _seg in USER_COMMANDS.values():
+                return "operator"
+        except Exception:
+            pass
     return None
 
 
 def is_mutating_protected(method: str, path: str) -> bool:
     return required_role_for(method, path) is not None and (
-        method.upper() not in ("GET", "HEAD", "OPTIONS") or path.startswith("/api/audit"))
+        method.upper() not in ("GET", "HEAD", "OPTIONS") or path.startswith("/api/audit")
+        or path.rstrip("/") == "/api/export_service_config")
 
 
 # --------------------------------------------------------------------------- #

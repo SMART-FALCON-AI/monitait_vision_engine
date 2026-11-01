@@ -358,15 +358,6 @@ def metrics(register_id: str, since_ms: Optional[int] = None,
             "metric_keys": sorted(keys), "count": len(points)}
 
 
-def set_name(register_id: str, name: str) -> None:
-    _ensure_schema()
-    reg = str(register_id or "").strip()
-    if not reg:
-        raise ValueError("register_id required")
-    _exec("INSERT INTO watcher_registry (register_id, name) VALUES (%s,%s) "
-          "ON CONFLICT (register_id) DO UPDATE SET name=EXCLUDED.name",
-          (reg, str(name or "").strip() or None))
-
 
 def compute_oee(register_id: str, since_ms: Optional[int] = None,
                 until_ms: Optional[int] = None) -> Dict[str, Any]:

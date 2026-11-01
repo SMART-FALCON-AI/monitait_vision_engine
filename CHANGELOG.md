@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.440] - 2026-11-01 - Audit batch 20: security
+
+**Fixed**
+- **Turning RBAC on locked everyone out, and anyone could turn it on.** While RBAC is off everyone counts as admin, so any LAN client, or a web page open in the operator's browser, could enable it. Once on, even `/api/auth/login` needed a token, and the UI has no login screen, so every change from the browser got 403 with no way back short of a DB edit. Login / logout are no longer gated. Enabling RBAC now needs a real admin login and a changed default `admin/admin` password.
+- **Admin accounts**: the last admin can no longer be deleted or demoted. Before, the next boot silently re-seeded `admin/admin`. Password checks are constant-time, and an unknown user costs the same as a known one, so usernames can no longer be enumerated by timing.
+- **Secrets that 4.0.424 masked on `/api/cameras/config` still leaked elsewhere**:
+  - the Advanced tab's data-file view (now masked, and read-only);
+  - support diagnostics, which sent camera `user:pass@` to the support chat server via `!diag` / `!cameras` (now stripped);
+  - the AI assistant's API tool, which could read the full config export and pass it to the AI provider. The export, data file, diagnostics, DB / AI model configs, auth, audit and billing are now denied to it.
+
+  With RBAC on, `GET /api/export_service_config` (every secret in clear) needs engineer.
+- **A shipment id became a filesystem path.**
+  - An id like `PO-123/45` made nested folders the disk-full janitor never evicts, so the disk filled.
+  - `/x` or `../..` wrote frames outside the raw-images root.
+
+  The API now rejects such ids (400). Barcode scans are cleaned: `/ \` → `-`, `..` and control characters removed, max 128 characters.
+- **Support attachments could run script on MVE's own origin.** The media proxy passed the homeserver's Content-Type straight through, so an HTML or SVG file, or a crafted link, executed with the operator's session. Only PNG / JPEG / GIF / WEBP render inline; anything else is a sandboxed, never-sniffed download.
+- **Serial-board commands** (`POST /<command>`: ejector, lights, offset / delay) are now audited, and gated when RBAC is on. They were outside `/api/`, so neither applied.
+
+**Removed** (no caller anywhere; several were hazards):
+- `POST /api/data-file`, which wrote the config file outside the config lock, skipping the DB;
+- `/api/save_data_file`, `/api/load_service_config`, `/api/cameras/config/load`;
+- `/video_feed` and `/video_feed_detections`, whose generators pinned a worker thread forever;
+- `/api/camera/{id}/stream`, which ran JPEG encoding at 30 fps on the event loop;
+- `/api/shipments/next_code`, which was replaced client-side;
+- `/api/watchers/name`, a duplicate of `/register` without its length limit.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.439] - 2026-11-01 - Audit batch 19: ejection safety
 
 **Fixed**

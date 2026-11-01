@@ -87,16 +87,6 @@ def watcher_metrics_ep(register_id: str, since_ms: int = 0, until_ms: int = 0,
                             status_code=500)
 
 
-@router.post("/api/watchers/name")
-def watcher_name(request: Request, _mve_body=Depends(_json_body_dep)):
-    """Give a machine a friendly display name."""
-    try:
-        b = _req_body(_mve_body)
-        wm.set_name(str(b.get("register_id", "")), str(b.get("name", "")))
-        return {"ok": True}
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
 
 @router.post("/api/watchers/register")
 def watcher_register(request: Request, _mve_body=Depends(_json_body_dep)):

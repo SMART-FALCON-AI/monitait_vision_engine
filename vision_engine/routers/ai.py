@@ -672,6 +672,12 @@ def get_ai_tools():
 
 # 4.0.424 — the only endpoint the assistant may POST to (see call_api_endpoint).
 _AI_POST_ALLOWED = {"/api/why"}
+# 4.0.440 — never readable by the assistant (secrets / accounts): the full config export and
+# the raw data file (API keys, trainer + Telegram tokens, camera passwords), support
+# diagnostics, auth + audit.
+_AI_GET_DENIED = {"/api/export_service_config", "/api/data-file", "/api/support/diagnostics",
+                  "/api/db_config", "/api/ai_models", "/api/ai_config"}
+_AI_GET_DENIED_PREFIX = ("/api/auth", "/api/audit", "/api/billing")
 
 
 def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str:
@@ -805,6 +811,11 @@ def execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> str
             if method == "POST" and endpoint.split("?")[0] not in _AI_POST_ALLOWED:
                 return json.dumps({"error": f"POST {endpoint} is not allowed for the assistant",
                                    "allowed_post": sorted(_AI_POST_ALLOWED)})
+            # 4.0.440 — paths that return secrets / account data are not readable by the
+            # assistant: whatever it reads goes to the external AI provider.
+            _p = endpoint.split("?")[0].rstrip("/")
+            if _p in _AI_GET_DENIED or any(_p.startswith(x) for x in _AI_GET_DENIED_PREFIX):
+                return json.dumps({"error": f"{endpoint} is not available to the assistant (contains secrets or account data)"})
             url = f"http://127.0.0.1:5050{endpoint}"
 
             if method == "POST":

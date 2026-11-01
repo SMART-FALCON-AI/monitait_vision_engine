@@ -78,6 +78,16 @@ from fastapi.responses import JSONResponse, Response
 
 from services.machine_id import machine_fingerprint, fingerprint_sources
 
+
+def _safe_src(src):
+    """Camera source without user:pass@ (RTSP / HTTP URLs)."""
+    try:
+        from services.camera import safe_source
+        return safe_source(src) if src else src
+    except Exception:
+        import re as _re
+        return _re.sub(r"(://)[^/@\s]+@", r"***@", str(src)) if src else src
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -389,7 +399,8 @@ def collect_diagnostics(app_state) -> Dict[str, Any]:
             cam = cams[cid]
             rows.append({
                 "id": cid,
-                "source": getattr(cam, "source", None),
+                # 4.0.440 — credentials stripped: this goes to the support chat server (!diag, !cameras)
+                "source": _safe_src(getattr(cam, "source", None)),
                 "ok": bool(getattr(cam, "success", False)),
                 "gain": (getattr(cam, "_saved_props", {}) or {}).get(_CAP_PROP_GAIN),
             })
@@ -966,8 +977,17 @@ async def support_media(mxc: str = ""):
     """
     try:
         data, ctype = await asyncio.to_thread(_media_sync, mxc)
-        return Response(content=data, media_type=ctype,
-                        headers={"Cache-Control": "private, max-age=3600"})
+        # 4.0.440 — served from MVE's OWN origin: only plain images render inline. Anything
+        # else (HTML, SVG, …) is a download, sandboxed and never sniffed — passing the
+        # homeserver's Content-Type straight through let an HTML/SVG attachment (or a
+        # crafted ?mxc= link) run script with the operator's MVE session.
+        _ct = (ctype or "").split(";", 1)[0].strip().lower()
+        _hdrs = {"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff",
+                 "Content-Security-Policy": "sandbox; default-src 'none'"}
+        if _ct not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            _hdrs["Content-Disposition"] = "attachment"
+            _ct = "application/octet-stream"
+        return Response(content=data, media_type=_ct, headers=_hdrs)
     except SupportError as e:
         return JSONResponse(content={"ok": False, "error": e.message}, status_code=e.status)
     except Exception as e:

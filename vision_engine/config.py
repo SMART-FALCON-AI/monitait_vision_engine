@@ -639,6 +639,34 @@ def mutate_service_config(fn):
         return save_service_config(svc)
 
 
+def shipment_id_problem(sid):
+    """4.0.440 — why `sid` cannot be a shipment id, or None if it can. The id becomes a
+    directory (raw_images/<shipment>/<hour>/…): "PO-123/45" made nested folders the disk
+    janitor never evicts (the disk fills), and "/x" or "../.." wrote frames OUTSIDE the
+    raw-images root (os.path.join restarts at an absolute part)."""
+    s = str(sid or "")
+    if not s.strip():
+        return "empty"
+    if len(s) > 128:
+        return "longer than 128 characters"
+    if "/" in s or "\\" in s:
+        return "contains / or \\"
+    if s.strip() in (".", "..") or ".." in s:
+        return "contains .."
+    if any(ord(c) < 32 for c in s):
+        return "contains control characters"
+    return None
+
+
+def clean_shipment_id(sid):
+    """A scanned id that can be used as a directory: / \ .. and control characters
+    replaced, capped at 128. (A physical scan can't be rejected; the API path rejects.)"""
+    s = "".join(("-" if c in "/\\" else c) for c in str(sid or "") if ord(c) >= 32)
+    while ".." in s:
+        s = s.replace("..", ".")
+    return s.strip()[:128]
+
+
 def persist_current_shipment(sid, start_encoder=None):
     """4.0.413 — the ONE writer that makes the active shipment survive a restart.
 

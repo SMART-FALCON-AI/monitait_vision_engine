@@ -73,8 +73,19 @@ def set_auth_config(request: Request, _mve_body=Depends(_json_body_dep)):
     except PermissionError:
         return JSONResponse({"error": "admin role required"}, status_code=403)
     body = _req_body(_mve_body)
+    want = bool(body.get("rbac_enabled"))
+    if want and not sec.rbac_enabled():
+        # 4.0.440 — while RBAC is off everyone counts as admin, so ANY LAN client (or a web
+        # page in the operator's browser) could switch it on — and the UI has no login screen,
+        # so every change from the browser then got 403 with no way back. Enabling needs a REAL
+        # admin login and a changed default password.
+        user, role = _actor(request)
+        if user is None or role != "admin":
+            return JSONResponse({"error": "log in as an admin first (POST /api/auth/login) - enabling RBAC needs an admin token"}, status_code=403)
+        if sec.admin_password_is_default():
+            return JSONResponse({"error": "change the default admin password (admin/admin) before enabling RBAC"}, status_code=400)
     try:
-        sec.set_rbac_enabled(bool(body.get("rbac_enabled")))
+        sec.set_rbac_enabled(want)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     return {"rbac_enabled": sec.rbac_enabled()}
@@ -109,7 +120,10 @@ def del_user(request: Request, username: str):
         _require(request, "admin")
     except PermissionError:
         return JSONResponse({"error": "admin role required"}, status_code=403)
-    sec.delete_user(username)
+    try:
+        sec.delete_user(username)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": True}
 
 

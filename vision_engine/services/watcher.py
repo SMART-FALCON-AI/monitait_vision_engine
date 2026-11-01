@@ -1644,6 +1644,11 @@ class ArduinoSocket:
                         # Barcode complete - set shipment ID
                         if barcode_buffer.strip():
                             new_shipment = barcode_buffer.strip()
+                            # 4.0.440 — the id becomes a directory under raw_images/
+                            _clean = cfg.clean_shipment_id(new_shipment)
+                            if _clean != new_shipment:
+                                logger.warning(f"Barcode {new_shipment!r} is not usable as a folder name - using {_clean!r}")
+                                new_shipment = _clean
                             logger.info(f"Barcode scanned: {new_shipment}")
 
                             # 4.0.54 — snapshot current encoder as the shipment's

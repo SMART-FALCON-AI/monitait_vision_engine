@@ -569,6 +569,11 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
         # Shipment ID
         if "shipment" in config_data:
             shipment_id = str(config_data["shipment"]).strip() or "no_shipment"
+            # 4.0.440 — the id becomes a directory under raw_images/
+            from config import shipment_id_problem
+            _why = shipment_id_problem(shipment_id)
+            if _why:
+                raise HTTPException(status_code=400, detail=f"Invalid shipment id ({_why})")
             # 4.0.60 — REORDERED. Previously this handler did the persistence
             # (save_service_config → JSON read + DB round-trip + file copy +
             # fsync + os.replace) BEFORE flipping `watcher.shipment`, all on
@@ -1181,6 +1186,14 @@ def get_data_file(request: Request):
     try:
         with open(DATA_FILE, "r") as f:
             content = f.read()
+        # 4.0.440 — secrets masked (AI keys, trainer password/tokens, Telegram bot token,
+        # camera user:pass@ in RTSP URLs), as /api/cameras/config has been since 4.0.424.
+        # This view is read-only (the old POST /api/data-file writer is gone).
+        try:
+            from routers.cameras import _mask_secrets
+            content = json.dumps(_mask_secrets(json.loads(content)), indent=2, ensure_ascii=False)
+        except Exception:
+            content = "(config file could not be parsed for display)"
         return JSONResponse(content={
             "file_path": DATA_FILE,
             "content": content,
@@ -1192,57 +1205,6 @@ def get_data_file(request: Request):
         logger.error(f"Error reading data file: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to read data file: {str(e)}")
 
-
-@router.post("/api/data-file")
-def update_data_file(request: Request, data: Dict[str, Any]):
-    """Update the DATA_FILE content and reload prepared_query_data.
-
-    Expected body:
-        - content: str - The new JSON content for the data file
-    """
-    if "content" not in data:
-        raise HTTPException(status_code=400, detail="Missing 'content' field")
-
-    try:
-        # Validate JSON
-        new_data = json.loads(data["content"])
-
-        # Backup the old file
-        backup_path = f"{DATA_FILE}.backup"
-        try:
-            with open(DATA_FILE, "r") as f:
-                old_content = f.read()
-            with open(backup_path, "w") as f:
-                f.write(old_content)
-        except FileNotFoundError:
-            pass  # No existing file to backup
-
-        # Write new content
-        with open(DATA_FILE, "w") as f:
-            f.write(data["content"])
-
-        # Reload the prepared_query_data (handle both formats)
-        if isinstance(new_data, list):
-            request.app.state.prepared_query_data = new_data
-        elif isinstance(new_data, dict) and "prepared_query_data" in new_data:
-            request.app.state.prepared_query_data = new_data["prepared_query_data"]
-        else:
-            request.app.state.prepared_query_data = new_data
-        logger.info(f"Updated DATA_FILE ({DATA_FILE}) with {len(request.app.state.prepared_query_data)} entries")
-
-        return JSONResponse(content={
-            "status": "ok",
-            "file_path": DATA_FILE,
-            "entries_count": len(request.app.state.prepared_query_data),
-            "backup_path": backup_path,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
-
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-    except Exception as e:
-        logger.error(f"Error updating data file: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update data file: {str(e)}")
 
 
 # =============================================================================
@@ -1266,35 +1228,6 @@ def api_save_service_config(request: Request):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@router.post("/api/save_data_file")
-def api_save_data_file(request: Request):
-    """Save current data file (same as service config)."""
-    try:
-        # Build current config from runtime state (preserves unsaved changes)
-        svc_config = build_current_service_config(request.app.state)
-        if not svc_config:
-            svc_config = load_service_config() or {}
-        if save_service_config(svc_config):
-            return JSONResponse(content={"success": True, "message": "Data file saved"})
-        else:
-            return JSONResponse(content={"error": "Failed to save data file"}, status_code=500)
-    except Exception as e:
-        logger.error(f"Error saving data file: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@router.post("/api/load_service_config")
-def api_load_service_config(request: Request):
-    """Load service configuration from file (triggers page reload on client)."""
-    try:
-        svc_config = load_service_config()
-        if svc_config:
-            return JSONResponse(content={"success": True, "message": "Service configuration loaded"})
-        else:
-            return JSONResponse(content={"error": "No saved configuration found"}, status_code=404)
-    except Exception as e:
-        logger.error(f"Error loading service config: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 @router.get("/api/export_service_config")
