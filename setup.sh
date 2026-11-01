@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# MonitaQC Setup (interactive installer)
+# MVE Setup (interactive installer)
 #
 # Two ways to run:
 #
@@ -61,7 +61,7 @@ if [ ! -t 0 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] \
     # No terminal found — surface an error via zenity/notify if possible.
     MSG="No terminal emulator found. Open a terminal and run:  sudo bash $SELF"
     if command -v zenity &>/dev/null; then zenity --error --text="$MSG"
-    elif command -v notify-send &>/dev/null; then notify-send "MonitaQC Setup" "$MSG"
+    elif command -v notify-send &>/dev/null; then notify-send "MVE Setup" "$MSG"
     fi
     exit 1
 fi
@@ -96,9 +96,9 @@ IMAGES=(
     "monitait/mve:latest"
     "redis:7-alpine"
     "timescale/timescaledb:latest-pg15"
-    "grafana/grafana:latest"
     "bpatrik/pigallery2:latest"
-)
+)   # 4.0.436 — grafana removed: it left docker-compose in 4.0.47, and an offline site
+    #   stopped here with "Could not acquire images"
 
 # image_tag -> build_context_dir (relative to project root = $SCRIPT_DIR)
 declare -A BUILDABLE=(
@@ -155,7 +155,7 @@ EOF
 # ---------- 0. Interactive config ----------
 gather_config() {
     hr
-    echo " MonitaQC Setup"
+    echo " MVE Setup"
     if is_interactive; then
         echo " Interactive mode — press Enter to accept [defaults]."
     else
@@ -355,7 +355,7 @@ install_project() {
 }
 
 start_stack() {
-    log "Starting MonitaQC ..."
+    log "Starting MVE ..."
     cd "$INSTALL_DIR"
     if ! confirm "Start the stack now (docker compose up -d)?" "Y"; then
         echo "  Skipped. Start later with:  cd $INSTALL_DIR && python3 deploy/start.py"
@@ -376,7 +376,7 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 cat <<EOF
 
 ===========================================
- MonitaQC installed at: ${INSTALL_DIR}
+ MVE installed at: ${INSTALL_DIR}
  Dashboard: http://${IP:-localhost}:80
 ===========================================
 

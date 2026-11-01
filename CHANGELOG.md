@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.436] - 2026-11-01 - Audit batch 16: install / offline-pack / start scripts
+
+These scripts run at install or start time; the running MVE is unchanged.
+
+**Fixed**
+- **`setup.sh` (offline install) stopped with "Could not acquire images"**: it still required `grafana/grafana`, which left docker-compose in 4.0.47. Grafana has been removed from its image list. Its messages say MVE.
+- **`deploy/pack.sh` (offline archive)**:
+  - `docker save` failed on the same Grafana image (under `set -e`).
+  - The yolo / math / anomaly images were silently left out on a clean build host: `docker compose images` only lists images of containers that already exist. It now uses `docker compose config --images`.
+  - The archive was always named `…-vunknown`: it grepped `main.py` for a version string that no longer exists. It now reads `VERSION`.
+  - It no longer packs the packing site's own config (`.env.prepared_query_data*`) or its cold queue.
+  - The archive is named `mve-v<VERSION>-offline`.
+- **`deploy/start.py`**:
+  - It sized YOLO for 80% of the GPU (500 MB per worker), giving 13 workers on an 8 GB card, which starved the math / anomaly services and MVE on the same GPU (the vteam12 incident). It now uses ~40%, 2–4 workers.
+  - It overwrote the auto-detected `.env` values on every start, undoing any manual fix. It now records what it wrote, and a value edited by hand is kept; the others are still re-detected.
+
 ## [4.0.435] - 2026-11-01 - Audit batch 15: state exposure survives a reconnect, no frames stranded at boot, AI config kept
 
 **Fixed**
