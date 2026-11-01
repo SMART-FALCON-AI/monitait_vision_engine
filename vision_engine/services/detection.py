@@ -897,19 +897,6 @@ def add_frame_to_timeline(camera_id, frame, capture_t=None, detections=None, d_p
     except Exception as e:
         logger.error(f"Timeline add frame error: {e}", exc_info=True)
 
-def create_dynamic_images(frame_height):
-    h = frame_height # Extract height from the frame's image (frame[1] contains the image)
-    blank_image = np.zeros((h, 1, 3), dtype=np.uint8)  # (height, width, channels)
-    
-    # Create green and red 7px width images with height from the frame
-    green_image = np.zeros((h, 7, 3), dtype=np.uint8)  # (height, width, channels)
-    green_image[:, :, 1] = 255  # Set green channel to full (R=0, G=255, B=0)
-
-    red_image = np.zeros((h, 7, 3), dtype=np.uint8)
-    red_image[:, :, 2] = 255  # Set red channel to full (R=255, G=0, B=0)
-
-    return blank_image, green_image, red_image
-
 def calculate_distance(box, obj):
     box_center_x = (box['xmin'] + box['xmax']) / 2
     box_center_y = (box['ymin'] + box['ymax']) / 2

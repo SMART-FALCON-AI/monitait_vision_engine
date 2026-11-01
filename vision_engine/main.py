@@ -21,25 +21,15 @@ from config import *
 import config as cfg_module  # Direct module ref for syncing config changes
 
 # Import extracted services
-from services.state_machine import CaptureState, CapturePhase, State, StateManager
-from services.pipeline import InferenceModel, PipelinePhase, Pipeline, PipelineManager
-from services.redis_service import RedisConnection
-from services.db import (
-    db_connection_pool, get_db_connection, release_db_connection,
-    write_inference_to_db, write_production_metrics_to_db, write_ejection_event_to_db
-)
+from services.state_machine import State, StateManager
+from services.pipeline import PipelineManager
 from services.camera import (
-    CameraBuffer, safe_source,
-    get_camera_config_for_save, apply_camera_config_from_saved,
-    DETECTED_CAMERAS,
-    CAM_1_PATH, CAM_2_PATH, CAM_3_PATH, CAM_4_PATH,
-    IP_CAMERA_BRIGHTNESS, IP_CAMERA_CONTRAST, IP_CAMERA_SATURATION
+    CameraBuffer, safe_source, apply_camera_config_from_saved, DETECTED_CAMERAS,
 )
-from services.watcher import ArduinoSocket, set_state_manager, set_app, _inference_queue
+from services.watcher import ArduinoSocket, set_state_manager, set_app
 from services import detection
 from services.detection import (
-    add_detection_event, add_frame_to_timeline, evaluate_eject_from_detections,
-    process_frame_helper, most_frequent_string, create_dynamic_images,
+    evaluate_eject_from_detections, process_frame_helper, most_frequent_string,
 )
 
 logger.info(f"Auto-detected cameras: {DETECTED_CAMERAS}")
@@ -347,8 +337,13 @@ def apply_config_settings(config, watcher_inst=None, full_data=None, boot=False)
         try:
             watcher_inst.shipment = cur_ship
             from redis import Redis as _R
-            _r = _R("redis", 6379, db=REDIS_DB)
-            _r.set("shipment", cur_ship)
+            # 4.0.460 — its own try: Redis still loading on a cold reboot raised here and skipped
+            # the start encoder / start time / length-state restore below (Length = the lifetime
+            # encoder count, so a length cutoff could close the shipment at boot)
+            try:
+                _R("redis", 6379, db=REDIS_DB, socket_timeout=5, socket_connect_timeout=5).set("shipment", cur_ship)
+            except Exception as _re:
+                logger.warning(f"[SHIPMENT-RESTORE] Redis 'shipment' not set at boot ({_re}); the in-memory value is used")
             # Make sure the directory exists so the very first capture after boot
             # doesn't fail on missing parent path.
             import os as _os
@@ -977,6 +972,9 @@ async def _stop_notifications_scheduler():
         pass
 
 
+_WEB_SERVER = None   # 4.0.460 — so a SIGTERM can stop it (it runs in a thread: no signal handlers)
+
+
 def start_web_server():
     """Start the FastAPI web server in a separate thread."""
     try:
@@ -997,6 +995,8 @@ def start_web_server():
             timeout_keep_alive=5
         )
         server = uvicorn.Server(config)
+        global _WEB_SERVER
+        _WEB_SERVER = server
         asyncio.run(server.serve())
     except Exception as e:
         logger.error(f"Web server error: {e}")
@@ -1366,19 +1366,25 @@ def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_fra
             queue_messages[0]["extra_info"] = {"data": watcher.stream_histogram_data}
             watcher.stream_histogram_data = []
 
-    if queue_messages:
-        # Add encoder value to each queue message for ejector tracking
-        for msg in queue_messages:
-            msg['encoder'] = capture_encoder
-        watcher.send_queue_messages(json.dumps(queue_messages))
-
-    if processed_frames:
-        watcher.redis_connection.update_queue_messages_redis(
-            json.dumps(processed_frames),
-            stream_name="stream_queue"
-        )
+    # 4.0.460 — these two pushes are optional (external dms consumers, histogram stream) and ran
+    # OUTSIDE any try: a Redis timeout here skipped the eject evaluation below (no physical
+    # eject) and the hot handler then replayed the group (duplicate result rows).
+    try:
+        if queue_messages:
+            # Add encoder value to each queue message for ejector tracking
+            for msg in queue_messages:
+                msg['encoder'] = capture_encoder
+            watcher.send_queue_messages(json.dumps(queue_messages))
+        if processed_frames:
+            watcher.redis_connection.update_queue_messages_redis(
+                json.dumps(processed_frames),
+                stream_name="stream_queue"
+            )
+    except Exception as _pe:
+        logger.warning(f"result push to Redis failed (eject evaluation continues): {_pe}")
 
     # Log results
+    first_dms = None
     for msg in queue_messages:
         ts = msg.get('ts', 'N/A')
         dms_list = msg.get('dms', [])
@@ -1626,10 +1632,14 @@ def inference_worker_thread():
                     if do_batch and total_frames > 1:
                         success = _process_gathered_groups_batched(gathered, allow_eject=True, failed_out=_failed)
                     else:
-                        # Single-group unbatched — original behavior.
-                        success = _process_frame_batch(frames_data, allow_eject=True)
-                        if not success:
-                            _failed = [frames_data]
+                        # Unbatched — original behavior, for EVERY gathered group (4.0.460: with
+                        # ≤1 frame in total, the extra groups the gather had pulled off the queue
+                        # were dropped — never inferred, stored or eject-evaluated)
+                        success = True
+                        for _fd in gathered:
+                            if not _process_frame_batch(_fd, allow_eject=True):
+                                success = False
+                                _failed.append(_fd)
 
                     if not success:
                         # YOLO failed after retry — fail-safe eject + spill the FAILED groups to cold
@@ -2081,8 +2091,62 @@ logger.info(f"Pro camera reconciler started — every {PRO_RECONCILE_INTERVAL}s"
 # Main thread - keep application alive
 # All work is done in separate threads (uvicorn, inference, capture, etc.)
 logger.info('All worker threads started - main thread entering keep-alive loop')
+# 4.0.460 — handle SIGTERM. Python is PID 1 here with no handler, so `docker stop/restart`
+# waited 10 s and SIGKILLed: queued result rows and un-inferred frames were lost and the
+# shutdown hooks never ran. Now: stop capture, park un-inferred frames in the (disk) cold
+# queue — replayed after the restart — let the DB writers drain, then stop the web server.
+import signal as _signal
+_STOP = threading.Event()
+
+
+def _on_term(signum, frame):
+    _STOP.set()
+
+
+_signal.signal(_signal.SIGTERM, _on_term)
 try:
-    while True:
-        time.sleep(1)
+    while not _STOP.is_set():
+        _STOP.wait(1)
 except KeyboardInterrupt:
-    logger.info('Shutting down...')
+    pass
+logger.info('Shutting down...')
+try:
+    watcher.stop_thread = True
+except Exception:
+    pass
+try:
+    import queue as _q
+    import services.watcher as _wm_stop
+    _n_spill = 0
+    while True:
+        try:
+            _fd = _wm_stop._hot_queue.get(timeout=0.01)
+        except _q.Empty:
+            break
+        _wm_stop._cold_queue_disk.put(_fd)
+        _n_spill += 1
+    if _n_spill:
+        logger.info(f"Shutdown: {_n_spill} un-inferred frame group(s) parked in the cold queue")
+except Exception as _se:
+    logger.warning(f"Shutdown: hot-queue spill failed: {_se}")
+try:
+    from services.db import _db_queue as _dbq_stop
+    _t_stop = time.time()
+    while not _dbq_stop.empty() and time.time() - _t_stop < 4.0:
+        time.sleep(0.1)
+    if not _dbq_stop.empty():
+        logger.warning(f"Shutdown: {_dbq_stop.qsize()} result row(s) still queued for the database")
+except Exception:
+    pass
+try:
+    if _WEB_SERVER is not None:
+        _WEB_SERVER.should_exit = True
+        web_server_thread.join(timeout=2.0)
+except Exception:
+    pass
+logger.info('Shutdown complete')
+# non-daemon threads (capture, writers…) would keep the process alive until docker's SIGKILL
+try:
+    logging.shutdown()
+finally:
+    os._exit(0)

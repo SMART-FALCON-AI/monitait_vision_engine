@@ -1021,6 +1021,15 @@ def apply_camera_config_from_saved(cam, saved_config):
     if cam is None or saved_config is None:
         return
 
+    # 4.0.460 — pixel/mm calibration: restored only for USB cameras at boot, so an IP / pro
+    # camera came back blank and the next save persisted px_per_mm: null
+    if 'px_per_mm' in saved_config:
+        try:
+            _ppm = saved_config.get('px_per_mm')
+            cam.px_per_mm = float(_ppm) if _ppm not in (None, "") else None
+        except (TypeError, ValueError):
+            pass
+
     # Apply ROI settings
     cam.roi_enabled = saved_config.get('roi_enabled', False)
     cam.roi_xmin = saved_config.get('roi_xmin', 0)

@@ -25,8 +25,9 @@ class RedisConnection:
     # service). Where nothing reads them they grew forever (vteam12: 82,776 `dms` +
     # 82,880 `speaker` items, Redis at 730 MB) until allkeys-lru evicted live keys such
     # as `shipment`. Keep the newest N — a consumer that keeps up never sees the cap.
-    # MVE's own queues (stream_queue, ejector_queue) are never trimmed.
-    _LIST_CAPS = {"dms": 2000, "speaker": 200}
+    # 4.0.460 — stream_queue too: its consumer (histograms) can fall behind on a big site and
+    # the list then grew inside Redis until LRU evicted live keys. ejector_queue never trimmed.
+    _LIST_CAPS = {"dms": 2000, "speaker": 200, "stream_queue": 500}
 
     def update_queue_messages_redis(self, queue_messages , stream_name="dms"):
         with self.redis_connection.pipeline() as pipe2:

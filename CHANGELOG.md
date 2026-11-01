@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.460] - 2026-11-01 - Audit batch 40: frame processing and shutdown
+
+**Fixed**
+- **A product could vanish under load.** In batch mode, when the collected groups held at most one frame in total (e.g. an empty group from a failed camera read plus a one-frame group), only the first group was processed. The others were never inferred, stored or checked for an eject. Every collected group is now processed.
+- **A Redis hiccup could cancel an eject.** The optional result pushes (the `dms` list and the histogram stream) ran before the eject decision, outside any error handling. A Redis timeout there skipped the eject for that product, and the replay then wrote duplicate result rows. The pushes are now guarded and the eject decision always runs.
+- **Restarts lost data.** MVE did not handle the stop signal, so every `docker stop` or restart waited 10 s and then killed it: queued result rows and frames still waiting for inference were lost, and the shutdown steps never ran. It now stops capture, parks un-inferred frames in the disk queue (they are processed after the restart), lets the database writers drain, and exits cleanly. A restart on vteam12 now takes about 2 s instead of 10–15 s.
+- **After a cold reboot with Redis still starting,** the shipment's start encoder, start time and length state were not restored, so Length showed the lifetime encoder count and a length cutoff could close the shipment at boot.
+- **Pixel/mm calibration of IP and Pro cameras was blank after a restart** (only USB cameras restored it), and the next save stored it as empty.
+- **Histogram stream:** the list is now capped in Redis (it could grow until Redis evicted live keys). Its consumer no longer draws boxes, labels and a full-product mosaic that nothing used. On a 30-camera site that was about 1 GB of memory copying per trigger, and the drawn boxes leaked into the colour histograms, which are now taken from the clean image.
+
+**Removed**
+- Unused imports in `main.py` and the dead mosaic helper.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.459] - 2026-11-01 - Audit batch 39: settings that don't stick, status badges, AI leftovers
 
 **Fixed**

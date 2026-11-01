@@ -31,7 +31,6 @@ from services.camera import (
 from redis import Redis as DirectRedis
 from services.redis_service import RedisConnection
 from services.db import write_production_metrics_to_db
-from services.detection import create_dynamic_images
 
 logger = logging.getLogger(__name__)
 
@@ -2353,11 +2352,11 @@ class ArduinoSocket:
         return self.redis_connection.pop_queue_messages_redis(stream_name)
 
     def stream_results(self):
-        # Target height for stream concatenation (all frames will be resized to this height)
-        TARGET_STREAM_HEIGHT = 720
-        # Pre-create green/red separator images once (same height every time)
-        _, _green_img, _red_img = create_dynamic_images(TARGET_STREAM_HEIGHT)
-
+        # 4.0.460 — this loop used to draw boxes, labels and DM text onto every frame, resize it
+        # and concatenate a mosaic of the product (~1 GB of memcpy per trigger on a 30-camera
+        # site) that NOTHING reads since 3.21.22 — and the drawn boxes leaked into the colour
+        # histogram regions. What remains is what has a consumer: per-object histograms (sent
+        # with the next result message) and the raw-image removal after a DM decode.
         while not self.stop_thread:
             self.raw_stream_queue = None
             self.raw_mismatch_queue = None
@@ -2366,7 +2365,6 @@ class ArduinoSocket:
                 self.raw_stream_queue = self.get_queue_messages(stream_name="stream_queue")
                 if self.raw_stream_queue:
                     self.stream_data = json.loads(self.raw_stream_queue)
-                    stream_image = None
                     self.stream_histogram_data = []
                     remove_raw_image = cfg.remove_raw_image_when_dm_decoded
                     for stream_frame in self.stream_data:
@@ -2409,37 +2407,6 @@ class ArduinoSocket:
                                 continue
                             if res.get('confidence', 0) < min_confidence_for(_nm):
                                 continue
-                            cv2.rectangle(stream_frame[1], (int(res['xmin']), int(res['ymin'])),(int(res['xmax']), int(res['ymax'])), (100, 150, 250), 4)
-                            text = f"{res['name']} {res['confidence']:.2f}"
-                            font = cv2.FONT_HERSHEY_COMPLEX
-                            font_scale = 1
-                            font_color = (255, 255, 255)
-                            thickness = 1
-                            text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-                            text_w, text_h = text_size
-                            x, y = int(res['xmin']), int(res['ymin'])
-                            # Clamp label inside the visible frame. When the bbox top sits at
-                            # y=0 (full-frame detections from the math module) the original
-                            # `y - text_h` puts the label above the canvas → invisible. Draw
-                            # inside-the-bbox in that case; also clamp x against the right edge.
-                            frame_h, frame_w = stream_frame[1].shape[:2]
-                            label_inside = (y - text_h - 4) < 0
-                            if label_inside:
-                                label_top = min(y + 2, max(0, frame_h - text_h - 6))
-                            else:
-                                label_top = y - text_h - 4
-                            label_x = min(max(x, 0), max(0, frame_w - text_w - 4))
-                            cv2.rectangle(
-                                stream_frame[1],
-                                (label_x, label_top),
-                                (label_x + text_w + 4, label_top + text_h + 4),
-                                (120, 120, 120), -1,
-                            )
-                            cv2.putText(
-                                stream_frame[1], text,
-                                (label_x + 2, label_top + text_h + 1),
-                                font, font_scale, font_color, thickness,
-                            )
 
                             # Calculate and save histogram for each detected object (if enabled)
                             if cfg.HISTOGRAM_ENABLED:
@@ -2497,56 +2464,10 @@ class ArduinoSocket:
 
                         self.stream_histogram_data.append(frame_histogram_data)
 
-                        # Resize frame to target height for consistent concatenation (handles different ROI sizes)
-                        if stream_frame[1] is not None:
-                            orig_h, orig_w = stream_frame[1].shape[:2]
-                            if orig_h != TARGET_STREAM_HEIGHT:
-                                scale = TARGET_STREAM_HEIGHT / orig_h
-                                new_w = int(orig_w * scale)
-                                stream_frame[1] = cv2.resize(stream_frame[1], (new_w, TARGET_STREAM_HEIGHT), interpolation=cv2.INTER_LINEAR)
-
-                        frame_green_image, frame_red_image = _green_img, _red_img
-
+                        # DM decoded on this frame → its raw image may be removed (last value wins, as before)
                         for k in range(len(stream_frame) - 4):
-                            if stream_frame[4 + k] is not None:
-                                remove_raw_image = cfg.remove_raw_image_when_dm_decoded
-                                # Concatenate green image
-                                stream_image = np.concatenate((stream_image, frame_green_image), axis=1) if stream_image is not None else frame_green_image
-                                # Draw a semi-transparent rectangle behind the text
-                                text = stream_frame[4 + k]
-                                font = cv2.FONT_HERSHEY_SIMPLEX
-                                fontScale = 1.5  # Larger font size
-                                fontColor = (255, 255, 255)  # White color
-                                thickness = 2
-                                lineType = cv2.LINE_AA
-
-                                # Calculate text size
-                                text_size = cv2.getTextSize(text, font, fontScale, thickness)[0]
-                                text_x, text_y = 10, 40  # Starting position
-                                box_coords = ((text_x - 5, text_y - text_size[1] - 5), (text_x + text_size[0] + 5, text_y + 5))
-
-                                # Draw the rectangle
-                                cv2.rectangle(stream_frame[1], box_coords[0], box_coords[1], (0, 0, 0), cv2.FILLED)
-
-                                # Add text with a stroke (optional for better visibility)
-                                cv2.putText(stream_frame[1], text, (text_x, text_y), font, fontScale, (0, 0, 0), thickness + 2, lineType)  # Black border
-                                cv2.putText(stream_frame[1], text, (text_x, text_y), font, fontScale, fontColor, thickness, lineType)  # Inner white text
-
-                            else:
-                                remove_raw_image = False
-                                # v4.0.124 — removed the `_nd.jpg` write.
-                                # Grepped the whole repo: nothing ever reads
-                                # `_nd.jpg` files (write-only dead code).
-                                # It was also going to the wrong path — the
-                                # `os.path.join("raw_images", stream_path…)`
-                                # form produced a nested `raw_images/
-                                # raw_images/…` tree the disk-pressure
-                                # janitor never walked, so it grew forever.
-                                # The raw frame is already on disk at
-                                # `stream_path.jpg`; no need for a `_nd`
-                                # duplicate. Operator asked: "don't we only
-                                # store the raw image?" — yes, correct.
-                                stream_image = np.concatenate((stream_image, frame_red_image), axis=1) if stream_image is not None else frame_red_image
+                            remove_raw_image = (cfg.remove_raw_image_when_dm_decoded
+                                                if stream_frame[4 + k] is not None else False)
 
                         # Check if we should remove the raw image
                         # 4.0.57 — tolerate a missing file. Earlier code would
@@ -2561,14 +2482,12 @@ class ArduinoSocket:
                             except OSError as _rm_err:
                                 logger.warning(f"Failed to remove raw image {stream_path}.jpg: {_rm_err}")
 
-                        stream_image = np.concatenate((stream_image, stream_frame[1]), axis=1) if stream_image is not None else stream_frame[1]
 
                     # 3.21.22 — removed the `output.jpg` write + `http://stream:5000`
                     # POST. The `stream` service was removed from docker-compose long
                     # ago, but the unconditional call here was still spamming the log
                     # ~once per frame with "Temporary failure in name resolution".
-                    # The intermediate `stream_image` mosaic is no longer consumed
-                    # by anything, so the concat above could also be deleted later.
+                    # (4.0.460 — the mosaic itself is gone too.)
 
 
                 try:
