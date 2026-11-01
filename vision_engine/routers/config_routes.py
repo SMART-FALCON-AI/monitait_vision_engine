@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from config import (
-    load_data_file, save_data_file, load_service_config, save_service_config,
+    load_service_config, save_service_config,
     # Read-only config globals (never modified via global keyword in these routes)
-    DATA_FILE, WATCHER_USB, SERIAL_BAUDRATE, USER_COMMANDS,
+    DATA_FILE, USER_COMMANDS,
     POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER,
 )
 from services.camera import (
@@ -15,6 +15,7 @@ from typing import Dict, Any
 import config
 import json
 import logging
+import math
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,78 @@ def _merge_running_cameras(saved: dict, running: list) -> dict:
         merged[key] = cfg
         claimed.add(key)
     return merged
+
+
+def _num(v, name, lo=None, hi=None, integer=False, lo_open=False):
+    """4.0.459 — a FINITE number in range, else HTTP 400. float() accepts "nan" / "inf" (and the
+    JSON body NaN / Infinity): a NaN ejector duration kept the ejector ON for good, a negative
+    offset fired it at once on whatever was in front of it, and a NaN anywhere broke every
+    config save (the database refuses it)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{name} must be a number")
+    if not math.isfinite(f):
+        raise HTTPException(status_code=400, detail=f"{name} must be a finite number")
+    if integer:
+        if f != int(f):
+            raise HTTPException(status_code=400, detail=f"{name} must be a whole number")
+        f = int(f)
+    if lo is not None and (f <= lo if lo_open else f < lo):
+        raise HTTPException(status_code=400, detail=f"{name} must be {'>' if lo_open else '>='} {lo}")
+    if hi is not None and f > hi:
+        raise HTTPException(status_code=400, detail=f"{name} must be <= {hi}")
+    return f
+
+
+def _as_bool(v, default=False):
+    """4.0.459 — bool("false") is True: an API client sending strings switched things ON."""
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return default
+    if isinstance(v, (int, float)):
+        return v != 0
+    s = str(v).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off", ""):
+        return False
+    return default
+
+
+def _finite_or_none(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+# 4.0.459 — POST /api/config keys that are LIVE runtime values → where boot reads them back.
+# They were saved only when something later rebuilt the whole config (a camera auto-save,
+# Save All): a restart before that brought back e.g. the old ejector offset.
+_LIVE_PERSIST = {
+    "ejector_enabled": ("ejector", "enabled", "EJECTOR_ENABLED"),
+    "ejector_offset": ("ejector", "offset", "EJECTOR_OFFSET"),
+    "ejector_delay": ("ejector", "delay", "EJECTOR_DELAY"),
+    "ejector_duration": ("ejector", "duration", "EJECTOR_DURATION"),
+    "ejector_poll_interval": ("ejector", "poll_interval", "EJECTOR_POLL_INTERVAL"),
+    "capture_mode": ("capture", "mode", "CAPTURE_MODE"),
+    "remove_raw_image_when_dm_decoded": ("image_processing", "remove_raw_image_when_dm_decoded", "REMOVE_RAW_IMAGE_WHEN_DM_DECODED"),
+    "parent_object_list": ("image_processing", "parent_object_list", "PARENT_OBJECT_LIST"),
+    "enforce_parent_object": ("image_processing", "enforce_parent_object", "ENFORCE_PARENT_OBJECT"),
+    "dm_chars_sizes": ("datamatrix", "chars_sizes", "DM_CHARS_SIZES"),
+    "dm_confidence_threshold": ("datamatrix", "confidence_threshold", "DM_CONFIDENCE_THRESHOLD"),
+    "dm_overlap_threshold": ("datamatrix", "overlap_threshold", "DM_OVERLAP_THRESHOLD"),
+    "check_class_counts_enabled": ("class_count_check", "enabled", "CHECK_CLASS_COUNTS_ENABLED"),
+    "check_class_counts_classes": ("class_count_check", "classes", "CHECK_CLASS_COUNTS_CLASSES"),
+    "check_class_counts_confidence": ("class_count_check", "confidence", "CHECK_CLASS_COUNTS_CONFIDENCE"),
+    "histogram_enabled": ("histogram", "enabled", "HISTOGRAM_ENABLED"),
+    "histogram_save_image": ("histogram", "save_image", "HISTOGRAM_SAVE_IMAGE"),
+    "store_annotation_enabled": ("store_annotation", "enabled", "STORE_ANNOTATION_ENABLED"),
+    "serial_mode": ("infrastructure", "serial_mode", "SERIAL_MODE"),
+}
 
 
 def build_current_service_config(app_state):
@@ -371,22 +444,22 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             logger.info(f"Updated EJECTOR_ENABLED to {config.EJECTOR_ENABLED}")
 
         if "ejector_offset" in config_data:
-            config.EJECTOR_OFFSET = int(config_data["ejector_offset"])
+            config.EJECTOR_OFFSET = _num(config_data["ejector_offset"], "ejector_offset", lo=0, hi=10**9, integer=True)
             updated["ejector_offset"] = config.EJECTOR_OFFSET
             logger.info(f"Updated EJECTOR_OFFSET to {config.EJECTOR_OFFSET}")
 
         if "ejector_delay" in config_data:
-            config.EJECTOR_DELAY = float(config_data["ejector_delay"])
+            config.EJECTOR_DELAY = _num(config_data["ejector_delay"], "ejector_delay", lo=0, hi=60)
             updated["ejector_delay"] = config.EJECTOR_DELAY
             logger.info(f"Updated EJECTOR_DELAY to {config.EJECTOR_DELAY}")
 
         if "ejector_duration" in config_data:
-            config.EJECTOR_DURATION = float(config_data["ejector_duration"])
+            config.EJECTOR_DURATION = _num(config_data["ejector_duration"], "ejector_duration", lo=0, hi=10, lo_open=True)
             updated["ejector_duration"] = config.EJECTOR_DURATION
             logger.info(f"Updated EJECTOR_DURATION to {config.EJECTOR_DURATION}")
 
         if "ejector_poll_interval" in config_data:
-            config.EJECTOR_POLL_INTERVAL = float(config_data["ejector_poll_interval"])
+            config.EJECTOR_POLL_INTERVAL = _num(config_data["ejector_poll_interval"], "ejector_poll_interval", lo=0, hi=5, lo_open=True)
             updated["ejector_poll_interval"] = config.EJECTOR_POLL_INTERVAL
             logger.info(f"Updated EJECTOR_POLL_INTERVAL to {config.EJECTOR_POLL_INTERVAL}")
 
@@ -423,19 +496,19 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
         if "dm_chars_sizes" in config_data:
             value = config_data["dm_chars_sizes"]
             if isinstance(value, str):
-                config.DM_CHARS_SIZES = [int(x.strip()) for x in value.split(",") if x.strip()]
+                config.DM_CHARS_SIZES = [_num(x.strip(), "dm_chars_sizes", lo=1, hi=1000, integer=True) for x in value.split(",") if x.strip()]
             elif isinstance(value, list):
-                config.DM_CHARS_SIZES = [int(x) for x in value]
+                config.DM_CHARS_SIZES = [_num(x, "dm_chars_sizes", lo=1, hi=1000, integer=True) for x in value]
             updated["dm_chars_sizes"] = config.DM_CHARS_SIZES
             logger.info(f"Updated DM_CHARS_SIZES to {config.DM_CHARS_SIZES}")
 
         if "dm_confidence_threshold" in config_data:
-            config.DM_CONFIDENCE_THRESHOLD = float(config_data["dm_confidence_threshold"])
+            config.DM_CONFIDENCE_THRESHOLD = _num(config_data["dm_confidence_threshold"], "dm_confidence_threshold", lo=0, hi=1)
             updated["dm_confidence_threshold"] = config.DM_CONFIDENCE_THRESHOLD
             logger.info(f"Updated DM_CONFIDENCE_THRESHOLD to {config.DM_CONFIDENCE_THRESHOLD}")
 
         if "dm_overlap_threshold" in config_data:
-            config.DM_OVERLAP_THRESHOLD = float(config_data["dm_overlap_threshold"])
+            config.DM_OVERLAP_THRESHOLD = _num(config_data["dm_overlap_threshold"], "dm_overlap_threshold", lo=0, hi=1)
             updated["dm_overlap_threshold"] = config.DM_OVERLAP_THRESHOLD
             logger.info(f"Updated DM_OVERLAP_THRESHOLD to {config.DM_OVERLAP_THRESHOLD}")
 
@@ -457,7 +530,7 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
 
         if "check_class_counts_confidence" in config_data:
             value = config_data["check_class_counts_confidence"]
-            config.CHECK_CLASS_COUNTS_CONFIDENCE = float(value)
+            config.CHECK_CLASS_COUNTS_CONFIDENCE = _num(value, "check_class_counts_confidence", lo=0, hi=1)
             updated["check_class_counts_confidence"] = config.CHECK_CLASS_COUNTS_CONFIDENCE
             logger.info(f"Updated CHECK_CLASS_COUNTS_CONFIDENCE to {config.CHECK_CLASS_COUNTS_CONFIDENCE}")
 
@@ -507,7 +580,7 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             logger.info(f"Updated GRADIO_MODEL to {config.GRADIO_MODEL}")
 
         if "gradio_confidence" in config_data:
-            config.GRADIO_CONFIDENCE_THRESHOLD = float(config_data["gradio_confidence"])
+            config.GRADIO_CONFIDENCE_THRESHOLD = _num(config_data["gradio_confidence"], "gradio_confidence", lo=0, hi=1)
             updated["gradio_confidence"] = config.GRADIO_CONFIDENCE_THRESHOLD
             logger.info(f"Updated GRADIO_CONFIDENCE_THRESHOLD to {config.GRADIO_CONFIDENCE_THRESHOLD}")
 
@@ -517,7 +590,7 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
             logger.info(f"Updated REDIS_HOST to {config.REDIS_HOST}")
 
         if "redis_port" in config_data:
-            config.REDIS_PORT = int(config_data["redis_port"])
+            config.REDIS_PORT = _num(config_data["redis_port"], "redis_port", lo=1, hi=65535, integer=True)
             updated["redis_port"] = config.REDIS_PORT
             logger.info(f"Updated REDIS_PORT to {config.REDIS_PORT}")
 
@@ -638,6 +711,20 @@ def update_config(request: Request, config_data: Dict[str, Any], background_task
 
         if not updated:
             raise HTTPException(status_code=400, detail="No valid configuration keys provided")
+
+        _persist = [(sec, key, getattr(config, attr)) for k, (sec, key, attr) in _LIVE_PERSIST.items()
+                    if k in updated]
+        if _persist:
+            def _keep_live(c):
+                for sec, key, val in _persist:
+                    if not isinstance(c.get(sec), dict):
+                        c[sec] = {}
+                    c[sec][key] = val
+            from config import mutate_service_config
+            if background_tasks is not None:
+                background_tasks.add_task(mutate_service_config, _keep_live)
+            else:
+                mutate_service_config(_keep_live)
 
         _out = {
             "status": "ok",
@@ -792,12 +879,11 @@ def set_color_reference_position(payload: Dict[str, Any]):
             return JSONResponse(content={"error": "axis must be 'encoder' or 'time'"}, status_code=400)
         try:
             value = float(payload["value"])
+            if not math.isfinite(value):
+                raise ValueError("not finite")
         except (TypeError, ValueError):
-            return JSONResponse(content={"error": "value must be a number"}, status_code=400)
-        try:
-            window = float(payload.get("window") or 0)
-        except (TypeError, ValueError):
-            window = 0.0
+            return JSONResponse(content={"error": "value must be a finite number"}, status_code=400)
+        window = _finite_or_none(payload.get("window") or 0) or 0.0
         import time as _t
         svc = load_service_config() or {}
         svc["color_reference_position"] = {
@@ -839,8 +925,8 @@ def set_score_scale_factor(payload: Dict[str, Any]):
     try:
         raw = payload.get("score_scale_factor", payload.get("value"))
         val = float(raw)
-        if val <= 0:
-            return JSONResponse(content={"error": "score_scale_factor must be > 0"}, status_code=400)
+        if not math.isfinite(val) or val <= 0:     # 4.0.459 — NaN / inf became 1e9
+            return JSONResponse(content={"error": "score_scale_factor must be a finite number > 0"}, status_code=400)
         val = max(0.001, min(1e9, val))
         svc = load_service_config() or {}
         svc["score_scale_factor"] = round(val, 4)
@@ -886,6 +972,8 @@ def set_encoder_calibration(payload: Dict[str, Any]):
         if raw is not None:
             try:
                 v = float(raw or 0)
+                if not math.isfinite(v):
+                    raise ValueError("not finite")        # 4.0.459 — ignored like any bad value
                 v = max(0.0, v) if v > 0 else 0
                 svc["encoder_units_per_unit"]  = v
                 svc["encoder_units_per_meter"] = v   # keep legacy in sync one release
@@ -987,7 +1075,7 @@ def set_auto_cutoff_config(payload: Dict[str, Any]):
         svc = load_service_config() or {}
         # v4.0.155 — explicit boolean enable toggle.
         if "auto_cutoff_enabled" in payload:
-            svc["auto_cutoff_enabled"] = bool(payload["auto_cutoff_enabled"])
+            svc["auto_cutoff_enabled"] = _as_bool(payload["auto_cutoff_enabled"])
         # Metric
         if "auto_cutoff_metric" in payload:
             m = str(payload["auto_cutoff_metric"] or "").strip().lower()
@@ -1005,6 +1093,8 @@ def set_auto_cutoff_config(payload: Dict[str, Any]):
         if thr_key is not None:
             try:
                 v = float(payload[thr_key])
+                if not math.isfinite(v):
+                    raise ValueError("not finite")        # 4.0.459
                 svc["auto_cutoff_threshold"] = v
                 svc["max_shipment_length"] = v   # keep legacy alias in sync
             except (TypeError, ValueError):
@@ -1016,6 +1106,8 @@ def set_auto_cutoff_config(payload: Dict[str, Any]):
         if "auto_cutoff_cooldown_sec" in payload:
             try:
                 c = float(payload["auto_cutoff_cooldown_sec"])
+                if not math.isfinite(c):
+                    raise ValueError("not finite")        # 4.0.459 — max(0.5, inf) = inf
                 svc["auto_cutoff_cooldown_sec"] = max(0.5, c)
             except (TypeError, ValueError):
                 pass
@@ -1061,7 +1153,7 @@ def set_color_config(payload: Dict[str, Any]):
     try:
         svc = load_service_config() or {}
         if "parent_color_check_enabled" in payload:
-            svc["parent_color_check_enabled"] = bool(payload["parent_color_check_enabled"])
+            svc["parent_color_check_enabled"] = _as_bool(payload["parent_color_check_enabled"])
         save_service_config(svc)
         # config.save_data_file invalidates its own cache, but detection.py
         # keeps a *separate* 5s TTL cache of this flag. Without this call,
@@ -1372,18 +1464,18 @@ def api_set_audio_settings(payload: Dict[str, Any]):
                 # numbers stay clean even if the caller sent a non-zero value.
                 sev = 0 if role == "parent" else max(0, min(100, int(cfg.get("severity", 0) or 0)))
                 new_settings[str(cls)] = {
-                    "show": bool(cfg.get("show", True)),
-                    "narrate": bool(cfg.get("narrate", False)),
-                    "beep": bool(cfg.get("beep", False)),
-                    "min_confidence": float(cfg.get("min_confidence", 0.01)),
+                    "show": _as_bool(cfg.get("show", True), True),
+                    "narrate": _as_bool(cfg.get("narrate", False)),
+                    "beep": _as_bool(cfg.get("beep", False)),
+                    "min_confidence": max(0.0, min(1.0, _finite_or_none(cfg.get("min_confidence", 0.01)) or 0.0)),
                     # 3.21.12 — per-class severity weight (0-100). Default 0 = no impact.
                     "severity": sev,
                     # 4.0.26 — context | defect | parent | marker
                     "role": role,
                     # 3.22.2 — ColorE: track CIELAB ΔE drift over time for this class.
-                    "color_e": bool(cfg.get("color_e", False)),
+                    "color_e": _as_bool(cfg.get("color_e", False)),
                     # 3.22.3 — Area: show bbox-area percentiles for this class on the card.
-                    "area": bool(cfg.get("area", False)),
+                    "area": _as_bool(cfg.get("area", False)),
                 }
             settings = new_settings
         elif "class_name" in payload:
@@ -1391,12 +1483,11 @@ def api_set_audio_settings(payload: Dict[str, Any]):
             entry = settings.get(cls, {"show": True, "narrate": False, "beep": False, "min_confidence": 0.01, "severity": 0, "role": "context", "color_e": False, "area": False})
             for k in ("show", "narrate", "beep", "color_e", "area"):
                 if k in payload:
-                    entry[k] = bool(payload[k])
+                    entry[k] = _as_bool(payload[k])
             if "min_confidence" in payload:
-                try:
-                    entry["min_confidence"] = float(payload["min_confidence"])
-                except (TypeError, ValueError):
-                    pass
+                _mc = _finite_or_none(payload["min_confidence"])
+                if _mc is not None:
+                    entry["min_confidence"] = max(0.0, min(1.0, _mc))     # 4.0.459 — finite, 0..1
             if "role" in payload:
                 entry["role"] = _clean_role(payload["role"])
             if "severity" in payload:
@@ -1442,10 +1533,10 @@ def api_set_store_objects(payload: Dict[str, Any]):
 
         if "store_objects" in payload and isinstance(payload["store_objects"], dict):
             # Bulk replace
-            store_map = {k: bool(v) for k, v in payload["store_objects"].items()}
+            store_map = {k: _as_bool(v) for k, v in payload["store_objects"].items()}
         elif "class_name" in payload:
             cls = str(payload["class_name"])
-            store_map[cls] = bool(payload.get("store", False))
+            store_map[cls] = _as_bool(payload.get("store", False))
         else:
             return JSONResponse(
                 content={"error": "expected {class_name, store} or {store_objects: {...}}"},

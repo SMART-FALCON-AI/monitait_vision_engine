@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.459] - 2026-11-01 - Audit batch 39: settings that don't stick, status badges, AI leftovers
+
+**Fixed**
+- **Hardware-tab "Set" values were lost on restart.** Ejector offset / delay / duration, capture mode, DataMatrix, histogram and the other "Set" buttons changed only the running values. They reached the saved configuration only when something else later saved everything, such as a camera change or Save All. A restart in between brought back, for example, the old ejector offset, and the wrong products were ejected. Each Set is now saved immediately.
+- **Impossible values were accepted.**
+  - "NaN" or "inf" as the ejector duration kept the ejector ON for good.
+  - A negative offset fired the ejector at once on whatever was in front of it.
+  - A negative duration gave no pulse; a poll interval of 0 spun the CPU; "12.5" as the offset gave a server error.
+  - A NaN anywhere broke every later configuration save: the database refuses it, the save was taken for a database outage, and changes looked reverted.
+
+  Out-of-range values are now refused with a clear message, and a NaN can never reach the saved configuration. The same check covers the DataMatrix / confidence thresholds, the colour reference, the score scale, encoder units, cutoff threshold and cooldown, and per-class minimum confidence (now clamped to 0–1).
+- **"false" sent as text switched things ON** (class Show/Narrate/Beep, Store, auto-cutoff, colour check, watcher "assigned").
+- **Dashboard status badges:**
+  - **DB** showed "disconnected" for the first 30 s after every page load or tab switch. It now uses one shared check.
+  - **Redis** always said "connected", even when Redis was down.
+  - **Gradio restart warning** was never shown.
+  - **Camera table** labels flipped between "1" and "Camera 1" every few seconds.
+- **The live status stream is much lighter.** Every open dashboard read two 2000-entry lists and parsed the full configuration twice, every 100 ms. It now reads only the last 5 s of timestamps and refreshes the configuration every 2 s.
+- **/health with a Gradio model** made Redis calls on the server's main loop and logged at info level on every call.
+- **The camera "connected" test** was duplicated between /health and the live stream; there is now one copy, and it uses the live device path after a USB re-enumeration.
+- **AI assistant:**
+  - An answer that reached the length limit was thrown away ("Unexpected response: max_tokens"); it is now returned with a note. Only the first text block of an answer was returned; now all blocks are.
+  - Its "system status" tool reported settings as they were at startup, and advertised a pipelines section it never built.
+  - Saving AI models no longer leaves a second plain-text copy of the active API key in Redis.
+- **Watcher ideal rate** of 0, a negative value or NaN is refused; it made OEE 0 % with no warning.
+
+**Removed**
+- Unused imports in the health, AI and configuration routes.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.458] - 2026-11-01 - Audit batch 38: Charts tab
 
 **Fixed**

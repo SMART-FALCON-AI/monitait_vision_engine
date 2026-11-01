@@ -486,6 +486,16 @@ def _merge_and_persist(partial, updated_by="mve"):
             if _disk:
                 base = _disk
 
+        # 4.0.459 — NaN / Infinity cannot be stored (jsonb rejects them): the DB save failed,
+        # was taken for a DB outage ("DISK ONLY", re-push loop) and the reader kept serving the
+        # old row, so the change looked reverted. Refuse the write instead.
+        try:
+            json.dumps(partial, allow_nan=False)
+        except ValueError:
+            logger.error(f"[ONE-KEY] config NOT saved — it contains NaN/Infinity "
+                         f"({','.join(map(str, partial.keys()))})")
+            return False
+
         merged = dict(base or {})
         merged.update(partial)
 

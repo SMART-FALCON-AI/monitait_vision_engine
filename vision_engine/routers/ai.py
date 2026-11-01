@@ -1,21 +1,14 @@
 import asyncio
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from config import (
-    REDIS_HOST, REDIS_PORT, REDIS_DB, load_data_file, save_data_file,
-    YOLO_INFERENCE_URL, GRADIO_MODEL, GRADIO_CONFIDENCE_THRESHOLD,
-    CAPTURE_MODE, EJECTOR_ENABLED, HISTOGRAM_ENABLED,
-    CHECK_CLASS_COUNTS_ENABLED, CHECK_CLASS_COUNTS_CLASSES,
-    PARENT_OBJECT_LIST, STORE_ANNOTATION_ENABLED,
-)
-from services.db import db_connection_pool, get_db_connection, release_db_connection
+from config import REDIS_DB
+import config as _cfg      # 4.0.459 — LIVE values (the import-time copies went stale on every Set)
+from services.db import get_db_connection, release_db_connection
 from redis import Redis
 from datetime import datetime
 from typing import Dict, Any
 import json
-import time
 import logging
-import os
 import psycopg2
 
 # v4.0.224 — knowledge (RAG) helpers from the MKB proxy router. Imported in a
@@ -135,11 +128,9 @@ def _save_ai_models_to_redis(data):
     try:
         r = Redis("redis", 6379, db=REDIS_DB)
         r.set("ai_models", json.dumps(data))
-        active_name = data.get("active")
-        if active_name and active_name in data.get("models", {}):
-            m = data["models"][active_name]
-            r.set("ai_model", m["provider"])
-            r.set("ai_api_key", m["api_key"])
+        # 4.0.459 — no more legacy single-model keys: only the pre-3.21 migration read them, so
+        # they were just a second plain-text copy of the active API key
+        r.delete("ai_model", "ai_api_key")
         redis_ok = True
     except Exception as e:
         logger.warning(f"Failed to save AI models to Redis cache: {e}")
@@ -490,14 +481,14 @@ def get_ai_tools():
         },
         {
             "name": "get_system_status",
-            "description": "Get comprehensive system status: cameras, inference config, pipelines, states, system metrics (CPU/memory/disk), and current configuration.",
+            "description": "Get comprehensive system status: cameras, inference config, states, system metrics (CPU/memory/disk), and current configuration. (Pipelines: call /api/pipelines.)",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "sections": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Which sections to include: cameras, inference, pipelines, states, metrics, config. Omit for all."
+                        "description": "Which sections to include: cameras, inference, states, metrics, config. Omit for all."
                     }
                 },
                 "required": []
@@ -824,7 +815,7 @@ def _execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> st
             return json.dumps(results, default=str)
 
         elif tool_name == "get_system_status":
-            sections = tool_input.get("sections") or ["cameras", "inference", "pipelines", "states", "metrics", "config"]
+            sections = tool_input.get("sections") or ["cameras", "inference", "states", "metrics", "config"]
             status = {}
 
             if "cameras" in sections and watcher_instance:
@@ -840,10 +831,10 @@ def _execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> st
 
             if "inference" in sections:
                 status["inference"] = {
-                    "yolo_url": YOLO_INFERENCE_URL,
-                    "gradio_model": GRADIO_MODEL,
-                    "gradio_confidence": GRADIO_CONFIDENCE_THRESHOLD,
-                    "service_type": "YOLO" if YOLO_INFERENCE_URL else "Gradio",
+                    "yolo_url": _cfg.YOLO_INFERENCE_URL,
+                    "gradio_model": _cfg.GRADIO_MODEL,
+                    "gradio_confidence": _cfg.GRADIO_CONFIDENCE_THRESHOLD,
+                    "service_type": "YOLO" if _cfg.YOLO_INFERENCE_URL else "Gradio",
                 }
 
             if "metrics" in sections:
@@ -859,13 +850,14 @@ def _execute_tool(tool_name: str, tool_input: dict, watcher_instance=None) -> st
 
             if "config" in sections:
                 status["config"] = {
-                    "capture_mode": CAPTURE_MODE,
-                    "ejector_enabled": EJECTOR_ENABLED,
-                    "histogram_enabled": HISTOGRAM_ENABLED,
-                    "check_class_counts_enabled": CHECK_CLASS_COUNTS_ENABLED,
-                    "check_class_counts_classes": CHECK_CLASS_COUNTS_CLASSES,
-                    "parent_object_list": PARENT_OBJECT_LIST,
-                    "store_annotation_enabled": STORE_ANNOTATION_ENABLED,
+                    "capture_mode": _cfg.CAPTURE_MODE,
+                    "ejector_enabled": _cfg.EJECTOR_ENABLED,
+                    "ejector_offset": _cfg.EJECTOR_OFFSET,
+                    "histogram_enabled": _cfg.HISTOGRAM_ENABLED,
+                    "check_class_counts_enabled": _cfg.CHECK_CLASS_COUNTS_ENABLED,
+                    "check_class_counts_classes": _cfg.CHECK_CLASS_COUNTS_CLASSES,
+                    "parent_object_list": _cfg.PARENT_OBJECT_LIST,
+                    "store_annotation_enabled": _cfg.STORE_ANNOTATION_ENABLED,
                 }
 
             if "states" in sections and watcher_instance:
@@ -1090,13 +1082,18 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
                     _create_kwargs["tools"] = tools
                 response = await _asyncio.to_thread(client.messages.create, **_create_kwargs)
 
-                # Check if Claude wants to use tools
-                if response.stop_reason == "end_turn":
-                    # No more tools, return final answer
-                    for block in response.content:
-                        if hasattr(block, 'text'):
-                            return block.text
-                    return "No response generated"
+                # Check if the model wants to use tools
+                if response.stop_reason in ("end_turn", "stop_sequence", "max_tokens"):
+                    # 4.0.459 — ALL text blocks (only the first was returned), and a length-capped
+                    # answer is kept (it was replaced by "Unexpected response: max_tokens")
+                    _texts = [b.text for b in response.content
+                              if getattr(b, "type", "") == "text" and getattr(b, "text", None)]
+                    if not _texts:
+                        return "No response generated"
+                    _out = "\n\n".join(_texts)
+                    if response.stop_reason == "max_tokens":
+                        _out += "\n\n[answer cut at the length limit]"
+                    return _out
 
                 elif response.stop_reason == "tool_use":
                     # Add assistant response to messages
@@ -1199,7 +1196,10 @@ async def call_ai_model(model: str, api_key: str, system_prompt: str, user_query
 
                 if not tool_calls:
                     # No tool call → this is the final answer.
-                    return message.content
+                    _out = message.content or ""
+                    if getattr(response.choices[0], "finish_reason", "") == "length":
+                        _out += "\n\n[answer cut at the length limit]"     # 4.0.459
+                    return _out
 
                 # Record the assistant turn (with its tool calls) then run each.
                 messages.append({
@@ -1417,7 +1417,7 @@ def why_for_dot(request: Request, payload: Dict[str, Any]):
 
             try:
                 # Reuse the same SQL helpers the endpoints use, in-process.
-                import urllib.request, json as _json
+                import json as _json
                 # color_drift + area_stats are JSON-only — call our own
                 # FastAPI handlers directly to avoid the HTTP round trip.
                 from routers.timeline import get_color_drift, get_area_stats
@@ -2446,7 +2446,7 @@ def query_ai(request: Request, payload: Dict[str, Any]):
 - Shipment: {_r_get('shipment', 'none')} | Moving: {_r_get('is_moving', 'false')}
 - Downtime: {_r_get('downtime_seconds', '0')}s
 - Cameras: {camera_info}
-- Inference: {'YOLO (' + YOLO_INFERENCE_URL + ')' if YOLO_INFERENCE_URL else 'Gradio HuggingFace'}
+- Inference: {'YOLO (' + _cfg.YOLO_INFERENCE_URL + ')' if _cfg.YOLO_INFERENCE_URL else 'Gradio HuggingFace'}
 
 ## Database Schema (TimescaleDB - PostgreSQL)
 You MUST use these exact table and column names:

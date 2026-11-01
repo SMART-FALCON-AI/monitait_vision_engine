@@ -97,14 +97,22 @@ def watcher_register(request: Request, _mve_body=Depends(_json_body_dep)):
     try:
         b = _req_body(_mve_body)
         ir = b.get("ideal_rate")
+        if ir not in (None, ""):
+            ir = float(ir)
+            # 4.0.459 — 0 / negative / NaN made OEE 0 % (or NaN) with no warning
+            if not (ir == ir and ir not in (float("inf"), float("-inf")) and ir > 0):
+                raise ValueError("ideal_rate must be a positive number")
+        _as = b.get("assigned")
+        if isinstance(_as, str):
+            _as = _as.strip().lower() in ("true", "1", "yes", "on")   # bool("false") was True
         return wm.register_watcher(
             str(b.get("register_id", "")),
             name=b.get("name"), line=b.get("line"),
             sensor=b.get("sensor"), wtype=b.get("type") or b.get("wtype"),
-            ideal_rate=(float(ir) if ir not in (None, "") else None),
+            ideal_rate=(ir if ir not in (None, "") else None),
             next_watcher=b.get("next_watcher"),
             ok_factor=b.get("ok_factor"), ng_factor=b.get("ng_factor"),
-            assigned=b.get("assigned"),
+            assigned=_as,
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)

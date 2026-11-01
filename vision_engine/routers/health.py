@@ -4,6 +4,7 @@ import os
 import time
 import json
 import logging
+import threading
 import requests
 import psutil
 import psycopg2
@@ -14,7 +15,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
-    FileResponse,
     HTMLResponse,
     RedirectResponse,
 )
@@ -62,6 +62,46 @@ def _load_svc_cfg_for_status():
 _VERSION_FILE_CACHE = {"path": None, "mtime": 0.0, "value": None}
 
 
+# 4.0.459 — ONE database probe shared by every live-stream connection, at most every 30 s.
+# Each connection used to start with db "disconnected" until its own first probe 30 s in, so
+# the DB badge went red for 30 s after every page load / tab refocus.
+_SSE_DB = {"ok": None, "ts": 0.0}
+_SSE_DB_LOCK = threading.Lock()
+
+
+def _sse_db_ok() -> bool:
+    if _SSE_DB["ok"] is not None and time.time() - _SSE_DB["ts"] < 30:
+        return _SSE_DB["ok"]
+    if not _SSE_DB_LOCK.acquire(blocking=False):
+        return bool(_SSE_DB["ok"])          # another stream is probing right now
+    try:
+        try:
+            _c = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT, database=POSTGRES_DB,
+                                  user=POSTGRES_USER, password=POSTGRES_PASSWORD, connect_timeout=2)
+            _c.close()
+            ok = True
+        except Exception:
+            ok = False
+        _SSE_DB.update(ok=ok, ts=time.time())
+        return ok
+    finally:
+        _SSE_DB_LOCK.release()
+
+
+def _recent_timestamps(redis_conn, key, horizon=5.0, cap=2000):
+    """4.0.459 — the newest-first (LPUSH) timestamps of the last `horizon` s, reading only as
+    much of the list as that needs. The stream read the WHOLE 2000-entry list (x2) every
+    100 ms per open dashboard to count the last 5 s."""
+    now = time.time()
+    n = 128
+    while True:
+        raw = redis_conn.lrange(key, 0, n - 1)
+        vals = [float(t) for t in raw if t]
+        if len(raw) < n or not vals or now - vals[-1] > horizon or n >= cap:
+            return [v for v in vals if now - v <= horizon]
+        n = min(cap, n * 4)
+
+
 def _sse_cam_connected(watcher, cam_id, cam) -> bool:
     """4.0.394 — the ONE connection test, shared by the SSE camera dict so the
     Dashboard status table agrees with /api/cameras and the camera cards.
@@ -72,6 +112,10 @@ def _sse_cam_connected(watcher, cam_id, cam) -> bool:
             return False
         paths = getattr(watcher, 'camera_paths', []) or []
         cam_path = paths[cam_id - 1] if isinstance(cam_id, int) and 0 < cam_id <= len(paths) else None
+        # 4.0.452/459 — the live node after a USB re-enumeration (the boot path is stale)
+        _src = getattr(cam, "source", None)
+        if isinstance(_src, str) and _src.startswith("/dev/video"):
+            cam_path = _src
         meta = (getattr(watcher, 'camera_metadata', {}) or {}).get(cam_id, {})
         is_usb = str(meta.get('type', 'usb')) == 'usb'
         device_exists = os.path.exists(cam_path) if (is_usb and cam_path) else True
@@ -179,10 +223,6 @@ def _encoder_calibration_payload(svc):
 
 
 from config import (
-    YOLO_INFERENCE_URL,
-    EJECTOR_OFFSET,
-    EJECTOR_ENABLED,
-    HISTOGRAM_ENABLED,
     WATCHER_USB,
     SERIAL_BAUDRATE,
     SERIAL_MODE,
@@ -192,7 +232,6 @@ from config import (
     POSTGRES_USER,
     POSTGRES_PASSWORD,
     DETECTION_EVENTS_REDIS_KEY,
-    DETECTION_EVENTS_MAX_SIZE,
 )
 
 logger = logging.getLogger(__name__)
@@ -282,16 +321,8 @@ async def health_check(request: Request):
             # 4.0.442 — a copy: hot-add / the pro reconciler change the dict while we iterate
             # ("dictionary changed size during iteration" → a spurious 503)
             for cam_id, cam in list(watcher.cameras.items()):
-                cam_path = watcher.camera_paths[cam_id - 1] if cam_id <= len(watcher.camera_paths) else None
-                # 4.0.452 — the live node after a USB re-enumeration (the boot path is stale)
-                _src = getattr(cam, "source", None) if cam is not None else None
-                if isinstance(_src, str) and _src.startswith("/dev/video"):
-                    cam_path = _src
-                is_usb = True
-                if hasattr(watcher, 'camera_metadata') and cam_id in watcher.camera_metadata:
-                    is_usb = watcher.camera_metadata[cam_id].get("type", "usb") == "usb"
-                device_exists = os.path.exists(cam_path) if is_usb and cam_path else True
-                cameras_status[f"cam_{cam_id}"] = (cam is not None and cam.success and device_exists) if cam else False
+                # 4.0.459 — the same test as the live stream (was a second copy of it)
+                cameras_status[f"cam_{cam_id}"] = _sse_cam_connected(watcher, cam_id, cam)
 
         # Check serial availability
         serial_available = watcher.serial_available if watcher else False
@@ -299,6 +330,7 @@ async def health_check(request: Request):
         # Check YOLO/Gradio inference availability
         # Use pipeline manager's current model URL if available (more accurate than static global)
         yolo_ok = False
+        gradio_health_info = {}
         active_inference_url = cfg_module.YOLO_INFERENCE_URL   # 4.0.442 — live value, not the import-time copy
         if pipeline_manager and pipeline_manager.get_current_model():
             active_inference_url = pipeline_manager.get_current_model().inference_url
@@ -316,7 +348,6 @@ async def health_check(request: Request):
 
                     # 4.0.66 — same to_thread wrapping as the traditional-YOLO
                     # branch below. Never call sync requests from an async handler.
-                    import asyncio as _asyncio
                     health_response = await _probe(_session.get, health_url, timeout=5)
 
                     if health_response.status_code == 200:
@@ -324,7 +355,9 @@ async def health_check(request: Request):
                         last_detection_ts = 0.0
                         if watcher and watcher.redis_connection:
                             try:
-                                cached_ts = watcher.redis_connection.redis_connection.get("gradio_last_detection_timestamp")
+                                # 4.0.459 — on the probe pool (was a direct call on the event loop)
+                                cached_ts = await _probe(watcher.redis_connection.redis_connection.get,
+                                                         "gradio_last_detection_timestamp")
                                 if cached_ts:
                                     last_detection_ts = float(cached_ts.decode('utf-8'))
                             except Exception as e:
@@ -343,12 +376,12 @@ async def health_check(request: Request):
                                 yolo_ok = False
                                 gradio_health_status = "stale"
                                 gradio_needs_restart = True
-                            logger.info(f"Gradio health: {gradio_health_status}, last inference {age:.1f}s ago")
+                            logger.debug(f"Gradio health: {gradio_health_status}, last inference {age:.1f}s ago")
                         else:
                             # Health endpoint OK but no recent inferences
                             yolo_ok = True
                             gradio_health_status = "idle"
-                            logger.info(f"Gradio health: {gradio_health_status} (no recent inferences)")
+                            logger.debug(f"Gradio health: {gradio_health_status} (no recent inferences)")
                     else:
                         raise Exception(f"Health endpoint returned {health_response.status_code}")
 
@@ -359,12 +392,18 @@ async def health_check(request: Request):
                     gradio_needs_restart = True
                     logger.error(f"Gradio health check failed: {e}")
 
-                # Store status in Redis for monitoring
+                # Store status in Redis for monitoring (the live stream reads gradio_needs_restart)
+                gradio_health_info = {"gradio_status": gradio_health_status,
+                                      "gradio_needs_restart": bool(gradio_needs_restart)}
                 try:
                     if watcher and watcher.redis_connection:
-                        watcher.redis_connection.redis_connection.set("gradio_health_status", gradio_health_status)
-                        watcher.redis_connection.redis_connection.set("gradio_needs_restart", str(gradio_needs_restart))
-                except:
+                        _rc = watcher.redis_connection.redis_connection
+
+                        def _store_gradio():
+                            _rc.set("gradio_health_status", gradio_health_status)
+                            _rc.set("gradio_needs_restart", str(gradio_needs_restart))
+                        await _probe(_store_gradio)     # 4.0.459 — off the event loop
+                except Exception:
                     pass
             else:
                 # For traditional YOLO endpoint, try a quick ping
@@ -376,7 +415,6 @@ async def health_check(request: Request):
                 # when I stopped the container), the full 2s timeout hung the
                 # loop → every OTHER endpoint stalled behind it. Offload to a
                 # worker thread. Same fix for the psycopg2.connect below.
-                import asyncio as _asyncio
                 response = await _probe(_session.get, health_url, timeout=2)
                 # Any response means server is running (200, 404, etc.)
                 yolo_ok = response.status_code in [200, 404, 405]
@@ -387,19 +425,6 @@ async def health_check(request: Request):
         # Consider healthy if redis works and either serial is connected or we're in camera-only mode
         status_code = 200 if redis_ok else 503
 
-        # Get Gradio-specific health info from Redis
-        gradio_health_info = {}
-        if "hf.space" in active_inference_url or "huggingface" in active_inference_url:
-            try:
-                if watcher and watcher.redis_connection:
-                    health_status = watcher.redis_connection.redis_connection.get("gradio_health_status")
-                    needs_restart = watcher.redis_connection.redis_connection.get("gradio_needs_restart")
-                    gradio_health_info = {
-                        "gradio_status": health_status.decode('utf-8') if health_status else "unknown",
-                        "gradio_needs_restart": needs_restart.decode('utf-8') == "True" if needs_restart else False
-                    }
-            except:
-                pass
 
         # Check TimescaleDB/PostgreSQL connection
         # 4.0.66 — psycopg2.connect is a blocking C call. Running it directly
@@ -407,7 +432,6 @@ async def health_check(request: Request):
         # 2s per /health request when Postgres was slow. Offload to a worker.
         db_ok = False
         try:
-            import asyncio as _asyncio
             def _pg_probe():
                 _c = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT,
                                        database=POSTGRES_DB, user=POSTGRES_USER,
@@ -953,13 +977,10 @@ async def status_stream(request: Request):
         yield 'data: {"wake":true}\n\n'
 
         last_data = None
-        _db_ok = False
-        # v4.0.71 — was `_db_check_time = 0` which forced the 2 s
-        # psycopg2.connect probe on iter 1 BEFORE the first yield. Now
-        # initialised to the current wall clock so the first probe runs
-        # 30 s in, well after the wake packet and initial data yield.
-        _db_check_time = time.time()
         _last_yield = time.time()
+        # 4.0.459 — config + Gradio flag snapshot, refreshed every 2 s (two full config parses
+        # per 100 ms tick per dashboard, under the config cache lock every reader takes)
+        _svc_snap, _svc_ts, _gradio_restart = {}, 0.0, False
 
         # 4.0.66 — Create ONE Redis client for the lifetime of this SSE
         # generator. Prior code built `Redis("redis", 6379, ...)` inside the
@@ -978,35 +999,35 @@ async def status_stream(request: Request):
           # Re-read inference buffers from Redis each iteration (cross-process safe)
           while True:
             try:
-                # Periodic DB health check (every 30s)
-                if time.time() - _db_check_time > 30:
+                _db_ok = _sse_db_ok()
+                if time.time() - _svc_ts > 2.0:
+                    _svc_snap, _svc_ts = _load_svc_cfg_for_status(), time.time()
                     try:
-                        _c = psycopg2.connect(host=POSTGRES_HOST, port=POSTGRES_PORT, database=POSTGRES_DB, user=POSTGRES_USER, password=POSTGRES_PASSWORD, connect_timeout=2)
-                        _c.close()
-                        _db_ok = True
+                        _pm = getattr(request.app.state, "pipeline_manager", None)
+                        _cm = _pm.get_current_model() if _pm else None
+                        _url = str(getattr(_cm, "inference_url", "") or cfg_module.YOLO_INFERENCE_URL or "")
+                        if "hf.space" in _url or "huggingface" in _url:
+                            _g = redis_conn.get("gradio_needs_restart")
+                            _gradio_restart = (_g.decode() if isinstance(_g, bytes) else str(_g or "")) == "True"
+                        else:
+                            _gradio_restart = False     # a stale flag from an earlier Gradio model
                     except Exception:
-                        _db_ok = False
-                    _db_check_time = time.time()
+                        pass
 
                 # Fetch inference timing data from Redis
                 inference_times = []
-                inf_frame_timestamps = []
-                cap_frame_timestamps = []
+                _inf_recent, _cap_recent = [], []
+                _redis_ok = True
                 try:
                     times_raw = redis_conn.lrange("inference_times", 0, -1)
                     inference_times = [float(t.decode('utf-8')) for t in times_raw if t]
-                    inf_raw = redis_conn.lrange("inf_frame_timestamps", 0, -1)
-                    inf_frame_timestamps = [float(t.decode('utf-8')) for t in inf_raw if t]
-                    cap_raw = redis_conn.lrange("cap_frame_timestamps", 0, -1)
-                    cap_frame_timestamps = [float(t.decode('utf-8')) for t in cap_raw if t]
+                    _inf_recent = _recent_timestamps(redis_conn, "inf_frame_timestamps")
+                    _cap_recent = _recent_timestamps(redis_conn, "cap_frame_timestamps")
                 except Exception:
-                    pass
+                    _redis_ok = False   # 4.0.459 — the badge said "connected" whenever a client object existed
 
                 # True FPS: count frames in last 5 seconds
-                _now = time.time()
-                _inf_recent = [t for t in inf_frame_timestamps if _now - t <= 5.0]
                 _inf_fps = (len(_inf_recent) - 1) / (max(_inf_recent) - min(_inf_recent)) if len(_inf_recent) >= 2 and max(_inf_recent) > min(_inf_recent) else 0
-                _cap_recent = [t for t in cap_frame_timestamps if _now - t <= 5.0]
                 _cap_fps = (len(_cap_recent) - 1) / (max(_cap_recent) - min(_cap_recent)) if len(_cap_recent) >= 2 and max(_cap_recent) > min(_cap_recent) else 0
 
                 # Build current status data
@@ -1069,14 +1090,14 @@ async def status_stream(request: Request):
                     # when Advanced tab has mm/1000 set.
                     # v4.0.157 — use the same helper as /api/status so both
                     # channels emit identical field names (was inline lambda).
-                    **_encoder_calibration_payload(_load_svc_cfg_for_status()),
+                    **_encoder_calibration_payload(_svc_snap),
                     # v4.0.157 — mirror auto-cutoff slice on SSE too. v4.0.156
                     # added it to /api/status poll but the Dashboard reads
                     # from SSE, so the badge next to Shipment never received
                     # the auto_cutoff fields and stayed hidden. Same helper as
                     # /api/status → identical values on both channels.
                     **_auto_cutoff_status_slice(
-                _load_svc_cfg_for_status(),
+                _svc_snap,
                 procedures=(getattr(request.app.state, 'timeline_config', {}) or {}).get('procedures'),
             ),
                     # Camera status
@@ -1087,8 +1108,10 @@ async def status_stream(request: Request):
                     # emitted an OBJECT per camera — always truthy — so every camera showed
                     # "OK" even when disconnected. `active` (last frame present) is kept for
                     # back-compat but is NOT a connection signal (it latches the last frame).
+                    # 4.0.459 — "cam_<id>" like /health: the dashboard table got "1" from here and
+                    # "cam_1" from /health, so its labels flipped every few seconds
                     "cameras": {
-                        name: {
+                        f"cam_{name}": {
                             "connected": _sse_cam_connected(watcher, name, cam),
                             "active": hasattr(cam, 'frame') and cam.frame is not None,
                             "name": getattr(cam, 'name', name),
@@ -1105,9 +1128,9 @@ async def status_stream(request: Request):
                     },
                     # Health status
                     "health": {
-                        "redis": "connected" if (watcher and watcher.redis_connection and watcher.redis_connection.redis_connection) else "disconnected",
+                        "redis": "connected" if _redis_ok else "disconnected",
                         "db": "connected" if _db_ok else "disconnected",
-                        "gradio_needs_restart": False,  # Will be updated if needed
+                        "gradio_needs_restart": _gradio_restart,
                     },
                     # Latest detection event for audio notification
                     "detection_event": None,
