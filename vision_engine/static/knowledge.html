@@ -734,7 +734,16 @@ async function deleteDbSource(id) {
   const _avail = await health();
   if (!_avail) return;               // service down → no doc/job loads, no interval
   loadDocs(); loadAssets(); loadJobs();
-  setInterval(loadJobs, 5000);
+  // 4.0.448 — only while the Knowledge tab is actually shown (this iframe is loaded with
+  // every dashboard, its tab usually hidden) and one request at a time: every open
+  // dashboard polled the KB every 5 s, and a hung KB held a server thread per poll.
+  let _jobsBusy = false;
+  setInterval(async () => {
+    const fe = window.frameElement;
+    if (_jobsBusy || document.hidden || (fe && fe.offsetParent === null)) return;
+    _jobsBusy = true;
+    try { await loadJobs(); } finally { _jobsBusy = false; }
+  }, 5000);
 })();
 
 // --- i18n ---------------------------------------------------------------

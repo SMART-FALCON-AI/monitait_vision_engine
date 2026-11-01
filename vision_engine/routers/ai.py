@@ -26,7 +26,7 @@ import psycopg2
 # exactly as before.
 try:
     from routers.knowledge import (
-        kb_available, kb_call_federated, kb_context, kb_federated_tools,
+        kb_available, kb_call_federated, kb_federated_tools,
         kb_propose_action, kb_resolve_asset, kb_search, kb_similar_issues,
         kb_list_db_sources, kb_describe_db, kb_query_db,
     )
@@ -34,7 +34,6 @@ except Exception as _kb_imp_exc:  # defensive: never brick boot
     logging.getLogger(__name__).warning("knowledge helpers unavailable: %s", _kb_imp_exc)
     def kb_available(*a, **k): return False
     def kb_search(*a, **k): return {}
-    def kb_context(*a, **k): return {}
     def kb_similar_issues(*a, **k): return {}
     def kb_resolve_asset(*a, **k): return None
     def kb_list_db_sources(*a, **k): return {}

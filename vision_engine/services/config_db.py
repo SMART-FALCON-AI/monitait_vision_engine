@@ -109,6 +109,15 @@ def _ensure_schema(conn) -> bool:
         return False
 
 
+def _schema_lost(e) -> None:
+    """4.0.448 — the table vanished under a running MVE (DB volume recreated): with the
+    ready flag stuck True it was never re-created and every config read/write counted as
+    'DB unreachable' (disk only) until a restart. 42P01 = undefined_table."""
+    global _schema_ready
+    if getattr(e, "pgcode", None) == "42P01" or "does not exist" in str(e):
+        _schema_ready = False
+
+
 def is_db_empty() -> Optional[bool]:
     """True if mve_config_kv has zero rows. None if DB unreachable
     (so the caller can defer the decision rather than guess)."""
@@ -124,6 +133,7 @@ def is_db_empty() -> Optional[bool]:
         cur.close()
         return int(n or 0) == 0
     except Exception as e:
+        _schema_lost(e)
         logger.warning(f"config_db: is_db_empty failed: {e}")
         return None
     finally:
@@ -203,6 +213,7 @@ def load_all() -> Optional[Dict[str, Any]]:
                 "deleting; they may hold settings that went missing.", len(strays), sorted(strays))
         return bundle
     except Exception as e:
+        _schema_lost(e)
         logger.warning(f"config_db: load_all failed: {e}")
         try:
             conn.rollback()
@@ -246,6 +257,7 @@ def save_all(data: Dict[str, Any], updated_by: str = "mve") -> bool:
         cur.close()
         return True
     except Exception as e:
+        _schema_lost(e)
         logger.warning(f"config_db: save_all failed: {e}")
         try:
             conn.rollback()

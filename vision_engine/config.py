@@ -469,6 +469,15 @@ def _merge_and_persist(partial, updated_by="mve"):
         db_reachable = base is not None
         if not db_reachable:
             base = _read_disk_dict()
+        elif not base:
+            # 4.0.448 — reachable but EMPTY (volume recreated, fresh DB, bootstrap skipped
+            # because the DB was still starting): the disk copy is the config, exactly as the
+            # READER treats it ('db-empty'). Merging into {} wrote ONLY this one key to BOTH
+            # stores — procedures, eject rules, camera order, states all erased by the first
+            # save (camera normalize, shipment change, a scheduler run…).
+            base = _read_disk_dict()
+            if base:
+                logger.warning("[ONE-KEY] config DB is empty — seeding it from the disk copy with this write")
         elif _db_write_pending:
             # 4.0.442 — a disk-only write is still outstanding: the DISK copy is the newer
             # one. Basing this write on the DB silently dropped that change (both stores

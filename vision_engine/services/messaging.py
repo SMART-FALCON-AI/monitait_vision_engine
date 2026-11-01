@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Optional, Tuple, Dict, Any
@@ -40,7 +41,20 @@ def _base(token: str, base_url: Optional[str] = None) -> str:
         # Operator entered a host without the token placeholder — append it.
         sep = "" if template.endswith("/") else "/"
         template = template + sep + "bot{token}/"
-    return template.format(token=token)
+    # 4.0.448 — a plain replace: .format() raised KeyError/IndexError on any other brace in
+    # an operator-typed base URL (outside every try → 500 on Test, no notification_log row)
+    return template.replace("{token}", token or "")
+
+
+def _scrub_obj(obj, token: str):
+    """4.0.448 — an error page that echoes the request path (`/bot<TOKEN>/…`, e.g. a
+    self-hosted gateway's 404) went back to the browser in `body` unscrubbed."""
+    if not token:
+        return obj
+    try:
+        return json.loads(json.dumps(obj).replace(token, "***"))
+    except Exception:
+        return {"raw": "(error body withheld)"}
 
 
 def _scrub(err: Exception, token: str) -> str:
@@ -99,7 +113,7 @@ def send_document(
         "error": (body.get("description") if isinstance(body, dict) else None)
                  or f"HTTP {r.status_code}",
         "status_code": r.status_code,
-        "body": body,
+        "body": _scrub_obj(body, token),
     }
 
 
@@ -140,7 +154,7 @@ def send_text(
         "error": (body.get("description") if isinstance(body, dict) else None)
                  or f"HTTP {r.status_code}",
         "status_code": r.status_code,
-        "body": body,
+        "body": _scrub_obj(body, token),
     }
 
 

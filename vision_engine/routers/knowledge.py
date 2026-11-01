@@ -88,7 +88,7 @@ def _probe_kb_background() -> None:
             _probing = False
 
 
-def kb_available(force: bool = False) -> bool:
+def kb_available() -> bool:
     """NON-BLOCKING cached liveness check. Returns the last known result
     INSTANTLY and refreshes in a background thread when the cache goes stale,
     so a KB outage can never hold a core request thread (charts, status, the
@@ -97,12 +97,8 @@ def kb_available(force: bool = False) -> bool:
     health of a service that is allowed to be absent.
 
     First-ever call returns False (assume-down until proven up — the safe
-    default that never waits) and kicks off the first probe. `force=True` does a
-    synchronous probe; it is used ONLY by /api/knowledge/status, which the
-    Knowledge tab hits deliberately and is never in a core code path."""
+    default that never waits) and kicks off the first probe."""
     global _probing
-    if force:
-        return _probe_kb_blocking()
     now = time.monotonic()
     if _available is not None and (now - _available_ts) < _AVAILABLE_TTL:
         return _available
@@ -116,6 +112,14 @@ def kb_available(force: bool = False) -> bool:
 
 
 def _fail(exc: Exception, what: str) -> Dict[str, Any]:
+    # 4.0.448 — only a service that is DOWN (no connection, timeout, 5xx) is marked down.
+    # A 4xx (e.g. a bad filter in one model tool call) marked the whole KB unavailable for
+    # 45 s: every KB tool vanished from the assistant although the service was healthy.
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None and status < 500:
+        logger.info("MVE: knowledge request rejected during %s: %s", what, exc)
+        return {"error": "knowledge_request_rejected", "detail": str(exc), "hits": [],
+                "citations": [], "found": False}
     _mark(False)
     logger.warning("MVE: knowledge service unavailable during %s: %s", what, exc)
     return {"error": "knowledge_service_unavailable", "detail": str(exc), "hits": [],
@@ -134,18 +138,6 @@ def kb_search(query: str, top_k: int = 8, **filters) -> Dict[str, Any]:
         return resp.json()
     except Exception as exc:
         return _fail(exc, "search")
-
-
-def kb_context(query: str, token_budget: int = 3000, **filters) -> Dict[str, Any]:
-    """Citation-numbered passages, ready to drop into a prompt."""
-    try:
-        resp = requests.post(f"{KB_URL}/api/kb/context",
-                             json={"query": query, "token_budget": token_budget, **filters},
-                             timeout=KB_TIMEOUT)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        return _fail(exc, "context")
 
 
 def kb_similar_issues(text: str, limit: int = 5) -> Dict[str, Any]:
@@ -266,6 +258,8 @@ async def kb_proxy(path: str, request: Request):
     method = request.method
     # Uploads stream large PDFs; reindex_all can walk the whole corpus.
     timeout = KB_LONG_TIMEOUT if ("upload" in path or "reindex" in path) else KB_TIMEOUT
+    if method == "GET" and path.startswith("jobs"):
+        timeout = min(timeout, 8)      # 4.0.448 — the 5-s job poll must not hold a thread for 30 s
 
     try:
         body = await request.body()

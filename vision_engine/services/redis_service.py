@@ -1,4 +1,3 @@
-import json
 import logging
 
 from redis import Redis
@@ -21,9 +20,6 @@ class RedisConnection:
         # call made on it (BLPOP with ≤ 1 s timeout).
         return Redis(self.redis_hostname, self.redis_port, db=REDIS_DB,
                      socket_timeout=10, socket_connect_timeout=5)
-
-    def update_encoder_redis(self, encoder):
-        self.redis_connection.set("encoder_values", json.dumps(encoder))
 
     # 4.0.422 — lists that only an EXTERNAL consumer may read (fabriqc / the speaker
     # service). Where nothing reads them they grew forever (vteam12: 82,776 `dms` +

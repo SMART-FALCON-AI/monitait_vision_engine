@@ -1152,6 +1152,14 @@ try:
     from config import wait_for_config_db, invalidate_config_cache
     if wait_for_config_db(timeout=_cfg_wait):
         invalidate_config_cache()   # force the boot read below to hit the now-ready DB, not a cached disk load
+        # 4.0.448 — the first-run bootstrap (disk → empty DB) also ran at import time, BEFORE
+        # this wait: on a cold boot the DB was still starting, it was skipped and never retried
+        try:
+            from services.migrations import migrate_data_file_into_db as _boot_migrate
+            if _boot_migrate():
+                invalidate_config_cache()
+        except Exception as _bm:
+            logger.warning(f"[BOOT-DB] config bootstrap after the DB wait failed: {_bm}")
     else:
         logger.error(f"[BOOT-RACE] config DB did not answer within {_cfg_wait:.0f}s — "
                      f"booting on the disk fallback; self-heal will keep retrying")

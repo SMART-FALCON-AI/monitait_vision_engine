@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.448] - 2026-11-01 - Audit batch 28: config wipe on an empty database, knowledge polling, messaging
+
+**Fixed**
+- **The whole configuration could be erased by one save.** When the config database answers but is empty, reads correctly came from the disk copy, but a save merged its change into the empty database contents and wrote only that one key to both the database and the disk. That happens after the DB volume is recreated or on a fresh database, if the first-run copy was skipped because the database was still starting. Procedures, eject rules, camera order and states were lost the first time anything saved: camera path normalization, a shipment change, a scheduled report. A save now builds on the disk copy when the database is empty, and the first-run copy from disk is retried once the database is up.
+- **Config table lost while MVE runs** (database volume recreated): MVE never re-created the table, and every config read and write counted as "database unreachable" until a restart. It is now re-created on the next access.
+- **Knowledge tab:** its job list was polled every 5 s on every open dashboard, even with the Knowledge tab hidden, and a hung knowledge service tied up a server thread for 30 s per poll. It now polls only while the tab is shown, one request at a time, with an 8 s limit.
+- **Knowledge service marked down on a rejected request:** one bad search filter in an AI tool call hid all knowledge tools for 45 s. Only a service that is really down (no connection, timeout, 5xx) is marked unavailable now.
+- **Telegram / Bale:**
+  - A bot base URL containing other braces made Test and scheduled sends fail with a server error and no log entry.
+  - An error page that echoed the request path could return the bot token to the browser.
+
+**Removed**: unused `kb_context`, the `kb_available(force=…)` branch, and `update_encoder_redis`.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.447] - 2026-11-01 - Audit batch 27: ejector timing, watcher board reconnect, Basler freeze
 
 **Fixed**
