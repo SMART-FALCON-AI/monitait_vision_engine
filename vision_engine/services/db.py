@@ -693,30 +693,50 @@ _SIDE_TABLE_RETENTION = [
     # Hardware-tab ingestion is unauthenticated). Pruned before only by a billing plan.
     ("watcher_metrics", "ts", int(os.environ.get("MVE_WATCHER_METRICS_DAYS", "365") or 0)),
 ]
-_PRUNE_BATCH = 50000
-_PRUNE_MAX_BATCHES = 20
+_PRUNE_MAX_SLICES = 400
+
+
+def delete_older_than(conn, table, col, days, max_slices=_PRUNE_MAX_SLICES):
+    """4.0.453 — delete rows with `col` older than `days`, ONE DAY OF DATA PER STATEMENT
+    (from the oldest row up), each in its own short transaction. Safe on hypertables:
+    the old `ctid IN (SELECT ctid … LIMIT n)` batching matched by ctid, which is unique
+    only WITHIN one chunk — on watcher_metrics (a hypertable) every batch also deleted the
+    rows at the same positions in EVERY newer chunk, i.e. recent OEE history (one device
+    report with a 1970 timestamp was enough to start it). Returns rows deleted."""
+    cur = conn.cursor()
+    n = 0
+    for _ in range(int(max_slices)):
+        cur.execute("SET LOCAL statement_timeout = 60000")
+        cur.execute(f"DELETE FROM {table} WHERE {col} < LEAST(NOW() - make_interval(days => %s), "
+                    f"(SELECT MIN({col}) FROM {table}) + INTERVAL '1 day')", [int(days)])
+        n += max(0, cur.rowcount or 0)
+        conn.commit()
+        cur.execute(f"SELECT 1 FROM {table} WHERE {col} < NOW() - make_interval(days => %s) LIMIT 1", [int(days)])
+        more = cur.fetchone() is not None
+        conn.commit()
+        if not more:
+            break
+    return n
 
 
 def _prune_side_tables(conn):
     total = {}
-    jobs = [(t, f"{c} < NOW() - make_interval(days => %s)", [d]) for t, c, d in _SIDE_TABLE_RETENTION if d > 0]
-    jobs.append(("mve_auth_tokens", "expires_at < EXTRACT(EPOCH FROM NOW()) - 86400", []))
-    for table, where, args in jobs:
+    jobs = [(t, c, d) for t, c, d in _SIDE_TABLE_RETENTION if d > 0]
+    jobs.append(("mve_auth_tokens", None, None))
+    for table, col, days in jobs:
         try:
             cur = conn.cursor()
             cur.execute("SELECT to_regclass(%s)", [table])
             if not (cur.fetchone() or [None])[0]:
                 conn.rollback()
                 continue
-            n = 0
-            for _ in range(_PRUNE_MAX_BATCHES):
+            if col is None:     # a small plain table (expired login tokens)
                 cur.execute("SET LOCAL statement_timeout = 60000")
-                cur.execute(f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} WHERE {where} LIMIT {_PRUNE_BATCH})", args)
-                k = cur.rowcount or 0
+                cur.execute("DELETE FROM mve_auth_tokens WHERE expires_at < EXTRACT(EPOCH FROM NOW()) - 86400")
+                n = max(0, cur.rowcount or 0)
                 conn.commit()
-                n += k
-                if k < _PRUNE_BATCH:
-                    break
+            else:
+                n = delete_older_than(conn, table, col, days)
             if n:
                 total[table] = n
         except Exception as e:

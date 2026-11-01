@@ -571,9 +571,14 @@ def evaluate_eject_from_detections(detections_list, procedures, matched_cams_out
             if cond in ('shipment_time_greater', 'shipment_time_less',
                         'shipment_encoder_greater', 'shipment_encoder_less'):
                 try:
-                    thr = float(rule.get('threshold', 0))
+                    thr = float(rule.get('threshold'))
                 except (TypeError, ValueError):
                     thr = 0.0
+                # 4.0.453 — no usable threshold (missing / null / 0 — the editor saved new
+                # shipment rules without one) = "> 0": true on EVERY frame — the shipment was
+                # closed every cooldown or every product ejected. Such a rule never fires.
+                if not (thr > 0) or thr != thr:
+                    return False
                 if _watcher is None:
                     return False
                 if cond in ('shipment_time_greater', 'shipment_time_less'):

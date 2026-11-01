@@ -1154,6 +1154,16 @@ function toggleProcedureStore(procId, checked) {
 function updateRuleField(procId, ruleIndex, field, value) {
     const proc = procedures.find(p => p.id === procId);
     if (!proc || !proc.rules[ruleIndex]) return;
+    const _prevCond = String(proc.rules[ruleIndex].condition || '');
+    if (field === 'threshold') {
+        // 4.0.453 — an emptied / zero / non-numeric shipment threshold was saved as null or 0,
+        // i.e. "Time > 0" / "Length > 0": the rule fired on EVERY frame (close the shipment
+        // every cooldown, or eject every product). Keep the previous value instead.
+        const v = Number(value);
+        if (!(Number.isFinite(v) && v > 0)) { renderProcedures(); return; }
+        proc.rules[ruleIndex].threshold = v;
+        return;
+    }
     if (field === 'min_confidence' || field === 'marginal_confidence' || field === 'count' || field === 'area') {
         proc.rules[ruleIndex][field] = Math.max(0, parseInt(value) || 0);
         // 4.0.395 — confidence fields clamp to 0..100 (percent).
@@ -1175,6 +1185,20 @@ function updateRuleField(procId, ruleIndex, field, value) {
             proc.rules[ruleIndex].condition = 'shipment_encoder_greater';
         } else if (!goingShipment && isShipCond) {
             proc.rules[ruleIndex].condition = 'count_greater';
+        }
+    }
+    // 4.0.453 — a shipment rule is SAVED with the default it shows (200 s / 1000 pulses).
+    // The input only DISPLAYED it: the rule went out without a threshold and the backend
+    // evaluated "> 0" — true on every frame. Switching between time and length resets it
+    // too (seconds vs encoder pulses).
+    if (field === 'condition' || field === 'object') {
+        const r = proc.rules[ruleIndex];
+        const c = String(r.condition || '');
+        if (c.startsWith('shipment_')) {
+            const kind = c.startsWith('shipment_time') ? 'time' : 'enc';
+            const prevKind = _prevCond.startsWith('shipment_time') ? 'time' : (_prevCond.startsWith('shipment_enc') ? 'enc' : '');
+            const t = Number(r.threshold);
+            if (kind !== prevKind || !(Number.isFinite(t) && t > 0)) r.threshold = (kind === 'time') ? 200 : 1000;
         }
     }
     if (field === 'condition' || field === 'reference_mode' || field === 'object') renderProcedures();

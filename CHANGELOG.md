@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.453] - 2026-11-01 - Audit batch 33: shipment rules that fired on every frame, calibration wiped, prune of recent data
+
+**Fixed**
+- **A new "📦 shipment" rule fired on every frame.** The editor showed a default threshold (Length 1000, Time 200 s) but saved the rule without one, and the evaluator then used "> 0". Enabled with Close shipment, it closed the shipment every cooldown (5 s); with Eject, it ejected every product. An emptied threshold field did the same. The shown default is now saved, an empty or 0 value keeps the previous one, and a shipment rule without a usable threshold never fires (this protects rules already saved that way).
+- **Apply on a USB camera erased its px/mm calibration.** The camera list never returned the value, so the field showed empty and every Apply (an exposure tweak) cleared and saved it away. Defect sizes fell back to pixels.
+- **Hardware OK/NG "Set" could send the old value.** The status stream rewrote the inputs up to 10 times a second. Pressing Set moved the focus to the button, the next update rewrote the field, and the board got its previous value (the UI said "OK"). A typed value is now kept until its Set succeeds. Values are URL-encoded, and FastAPI validation errors are readable (no more "[object Object]").
+- **Clicking a paused timeline could open a different product.** While paused, the newest frame details kept replacing the ones of the picture on screen, so a click was mapped to a newer frame. Details are now applied only together with their picture.
+- **The log-table prune deleted recent device data.** It deleted in batches by row position (`ctid`), which on the `watcher_metrics` hypertable also matched rows in every newer chunk, wiping recent OEE history. This happened once a site had data older than 365 days, or after a single device report with a 1970 timestamp. It now deletes one day at a time from the oldest row. The billing retention prune had the same pattern and is fixed the same way. Device timestamps more than 7 days old or more than a day in the future (an unset clock) are replaced by the server time.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.452] - 2026-11-01 - Audit batch 32: cameras (wrong-camera self-heal, frozen USB, passwords)
 
 **Fixed**

@@ -116,12 +116,30 @@ def _ensure_schema() -> None:
 # helpers
 # --------------------------------------------------------------------------- #
 def _parse_ts(ts: Any) -> datetime:
-    """Best-effort parse of the device timestamp; default = now (UTC)."""
+    """Best-effort parse of the device timestamp; default = now (UTC).
+    4.0.453 — a device clock that is unset (1970 / 2000) or wildly off is replaced by the
+    server time: the row landed in a decades-old chunk (charts, retention) and an
+    unauthenticated report could put anything there. Naive times are taken as UTC."""
+    now = datetime.now(timezone.utc)
+    dt = _parse_ts_raw(ts)
+    if dt is None:
+        return now
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if dt < now - timedelta(days=7) or dt > now + timedelta(days=1):
+        return now
+    return dt
+
+
+def _parse_ts_raw(ts: Any):
     if ts is None or ts == "":
-        return datetime.now(timezone.utc)
-    if isinstance(ts, (int, float)):
-        # seconds vs milliseconds
-        return datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, timezone.utc)
+        return None
+    try:
+        if isinstance(ts, (int, float)):
+            # seconds vs milliseconds
+            return datetime.fromtimestamp(ts / 1000.0 if ts > 1e12 else ts, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
     s = str(ts).strip().replace("Z", "+00:00")
     try:
         return datetime.fromisoformat(s)
@@ -133,7 +151,7 @@ def _parse_ts(ts: Any) -> datetime:
             return datetime.strptime(base, fmt).replace(tzinfo=timezone.utc)
         except Exception:
             pass
-    return datetime.now(timezone.utc)
+    return None
 
 
 def _num(v: Any) -> Optional[float]:

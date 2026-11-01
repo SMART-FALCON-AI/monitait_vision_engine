@@ -148,6 +148,7 @@ def get_cameras_status(request: Request):
                         "roi_xmax": getattr(cam, 'roi_xmax', 1280),
                         "roi_ymax": getattr(cam, 'roi_ymax', 720),
                         "pixel_format": saved.get("basler.pixel_format"),
+                        "px_per_mm": getattr(cam, 'px_per_mm', None),   # 4.0.453 — see below
                     }
                 else:
                     # Existing UVC / IP path — untouched.
@@ -173,6 +174,10 @@ def get_cameras_status(request: Request):
                         # them Auto-Exposure always rendered unchecked after a refresh.
                         "auto_exposure": bool(getattr(cam, 'auto_exposure', False)),
                         "auto": bool(getattr(cam, 'auto', False)),
+                        # 4.0.453 — the card's px/mm field reads this back. It was never returned,
+                        # so the field rendered blank and every Apply (an exposure tweak) sent
+                        # px_per_mm=null: the calibration was cleared and auto-saved away.
+                        "px_per_mm": getattr(cam, 'px_per_mm', None),
                     }
             except:
                 cam_info["config"] = {}

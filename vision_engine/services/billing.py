@@ -594,15 +594,20 @@ def _retention_count(table: str, tscol: str, days: int) -> int:
 
 
 def _retention_delete(table: str, tscol: str, days: int, batch: int = 20000) -> int:
-    """Delete in batches (short transactions, no long lock / WAL burst)."""
-    import time as _t
-    total = 0
-    while True:
-        _, rc = _with_timeout(
-            f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} "
-            f"WHERE {tscol} < NOW() - (%s || ' days')::interval LIMIT {int(batch)})",
-            (str(days),), None, 60000)
-        total += max(0, int(rc or 0))
-        if not rc or rc < batch:
-            return total
-        _t.sleep(0.2)
+    """Delete in day-sized slices (short transactions). 4.0.453 — NOT by ctid: watcher_metrics
+    is a hypertable, ctid is unique only within one chunk, and `ctid IN (…)` also deleted
+    rows in every newer chunk. Same helper as the db janitor."""
+    from services.db import delete_older_than
+    conn = get_db_connection()
+    if conn is None:
+        raise RuntimeError("db unavailable")
+    try:
+        return delete_older_than(conn, table, tscol, int(days))
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        release_db_connection(conn)

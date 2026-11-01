@@ -220,9 +220,13 @@ function updateStatusUI(data) {
     setVerbose('v-dwt', 'DWT');
 
     // Populate OK/NG config inputs from verbose data (skip if user is editing)
+    // 4.0.453 — also skip a value the operator TYPED and has not sent yet: pressing Set moves
+    // the focus to the button, the next status tick (up to 10/s) rewrote the input, and the
+    // click then sent the board's OLD value (shown as "OK").
     const setInput = (id, key) => {
         const el = document.getElementById(id);
-        if (el && document.activeElement !== el && v[key] !== undefined && v[key] !== null) {
+        if (el && document.activeElement !== el && el.dataset.dirty !== '1'
+                && v[key] !== undefined && v[key] !== null) {
             el.value = v[key];
         }
     };
@@ -401,12 +405,20 @@ function connectTimelineWs() {
             try {
                 const meta = JSON.parse(e.data);
                 if (meta.type === 'timeline_meta') {
-                    window._timelineMeta = meta;
+                    // 4.0.453 — held until ITS image arrives (the server sends meta, then the
+                    // JPEG). It was applied at once even while paused, when the image is
+                    // dropped: a click on the frozen picture was mapped through the NEWER
+                    // meta and the drawer opened another product's frame.
+                    window._timelineMetaPending = meta;
                 }
             } catch(err) {}
             return;
         }
-        if (!window.timelineAutoUpdate) return; // respect Stop button
+        if (!window.timelineAutoUpdate) { window._timelineMetaPending = null; return; } // respect Stop button
+        if (window._timelineMetaPending) {
+            window._timelineMeta = window._timelineMetaPending;
+            window._timelineMetaPending = null;
+        }
         const blob = new Blob([e.data], {type: 'image/jpeg'});
         const url = URL.createObjectURL(blob);
         const img = document.getElementById('timeline-slide');
@@ -1712,6 +1724,20 @@ async function updateConfig(key, value) {
     } finally { _btnDone(_b); }
 }
 
+// 4.0.453 — a Hardware input the operator types into is "dirty" until its Set succeeds
+document.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t && t.id && /^(ok|ng)-/.test(t.id)) t.dataset.dirty = '1';
+}, true);
+
+function _errDetail(data) {
+    // FastAPI 422 → detail is a list of {loc,msg}: it showed "[object Object]"
+    const d = data && data.detail;
+    if (typeof d === 'string') return d;
+    if (Array.isArray(d)) return d.map(x => (x && x.msg) ? x.msg : JSON.stringify(x)).join('; ');
+    return (data && data.error) || (d ? JSON.stringify(d) : 'Unknown error');
+}
+
 async function sendCommand(command, value = null) {
     const responseId = `cmd-${command}-response`;
     const responseEl = document.getElementById(responseId);
@@ -1719,7 +1745,7 @@ async function sendCommand(command, value = null) {
     try {
         let url = `/${command}`;
         if (value !== null) {
-            url += `?value=${value}`;
+            url += `?value=${encodeURIComponent(value)}`;
         }
 
         const response = await fetch(url, {
@@ -1731,12 +1757,16 @@ async function sendCommand(command, value = null) {
 
         const data = await response.json();
 
+        if (response.ok) {
+            const _in = document.getElementById(String(command).toLowerCase().replace(/_/g, '-'));
+            if (_in) delete _in.dataset.dirty;      // sent — status updates may refresh it again
+        }
         if (responseEl) {
             if (response.ok) {
                 responseEl.textContent = `OK: ${data.command}`;
                 responseEl.className = 'control-response success';
             } else {
-                responseEl.textContent = `Error: ${data.detail || 'Unknown error'}`;
+                responseEl.textContent = `Error: ${_errDetail(data)}`;
                 responseEl.className = 'control-response error';
             }
 
