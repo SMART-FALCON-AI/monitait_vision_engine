@@ -99,8 +99,10 @@ def add_api_key(request: Request, _mve_body=Depends(_json_body_dep)):
 
 @router.delete("/api/billing/api-keys/{key}")
 def del_api_key(key: str):
-    billing.revoke_api_key(key)
-    return {"ok": True}
+    n = billing.revoke_api_key(key)
+    if not n:        # 4.0.446 — say so instead of "ok" for an unknown / ambiguous key
+        return JSONResponse({"ok": False, "error": "no single matching active key"}, status_code=404)
+    return {"ok": True, "revoked": n}
 
 
 # --------------------------------------------------------------------------- #

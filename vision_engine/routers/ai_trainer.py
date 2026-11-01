@@ -718,13 +718,18 @@ def get_trainer_labels(task_id: Optional[str] = None, force: int = 0):
 
 
 @router.get("/api/ai_trainer/class_map")
-def get_class_map():
+def get_class_map(task_id: Optional[str] = None):
     """Return the operator's MVE-class → trainer-category-id mapping.
-    Persisted under service_config.ai_trainer.class_map.
-    """
-    svc = load_service_config() or {}
-    raw = (svc.get("ai_trainer") or {}).get("class_map") or {}
-    return JSONResponse(content={"class_map": raw if isinstance(raw, dict) else {}})
+
+    4.0.446 — PER TRAINER TASK (service_config.ai_trainer.class_maps[task_id]): category ids
+    belong to one task, and each pipeline has its own task (4.0.294). The single global
+    map (`class_map`, still read as the fallback) carried task A's ids into task B, where
+    the prefilled boxes silently vanished and the class could not be re-mapped."""
+    ai = (load_service_config() or {}).get("ai_trainer") or {}
+    tid = str(task_id or "").strip()
+    per = (ai.get("class_maps") or {}) if isinstance(ai.get("class_maps"), dict) else {}
+    raw = per.get(tid) if tid and isinstance(per.get(tid), dict) else ai.get("class_map")
+    return JSONResponse(content={"class_map": raw if isinstance(raw, dict) else {}, "task_id": tid or None})
 
 
 @router.post("/api/ai_trainer/class_map")
@@ -745,12 +750,19 @@ def save_class_map(request: Request, _mve_body=Depends(_json_body_dep)):
             cleaned[str(k)] = int(v)
         except (TypeError, ValueError):
             continue
+    tid = str((body or {}).get("task_id") or "").strip()
+
     def _fn(svc):
         ai = dict(svc.get("ai_trainer") or {})
-        ai["class_map"] = cleaned
+        if tid:                       # 4.0.446 — per task (see get_class_map)
+            per = dict(ai.get("class_maps") or {}) if isinstance(ai.get("class_maps"), dict) else {}
+            per[tid] = cleaned
+            ai["class_maps"] = per
+        else:
+            ai["class_map"] = cleaned
         svc["ai_trainer"] = ai
     mutate_service_config(_fn)     # 4.0.445 — atomic (was a whole-blob read-modify-write)
-    return JSONResponse(content={"class_map": cleaned, "saved": True})
+    return JSONResponse(content={"class_map": cleaned, "task_id": tid or None, "saved": True})
 
 
 @router.post("/api/ai_trainer/annotate")

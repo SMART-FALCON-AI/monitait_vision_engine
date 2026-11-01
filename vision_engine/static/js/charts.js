@@ -5301,9 +5301,9 @@ function _imgUrlsFor(pt) {
     const relRaw = String(pt.img)
         .replace(/^raw_images\//, '')
         .replace(/_DETECTED\.jpg$/, '.jpg');
-    const ann = '/api/render_detected/' + encodeURI(relRaw);
+    const ann = '/api/render_detected/' + String(relRaw).split('/').map(encodeURIComponent).join('/');
     // The raw URL is the same path through /api/raw_image/.
-    const raw = '/api/raw_image/' + encodeURI(relRaw);
+    const raw = '/api/raw_image/' + String(relRaw).split('/').map(encodeURIComponent).join('/');   // 4.0.446 — '#'/'?' in shipment ids
     return { ann, raw };
 }
 // Attach Panzoom + wheel-to-zoom on an <img> already in the DOM. Reuses the

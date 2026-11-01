@@ -2662,7 +2662,9 @@ def frame_detections(image_path: str = "", request: Request = None):
 
         return JSONResponse(content={
             "image_path": image_path,
-            "image_url": "/api/raw_image/" + rel_raw,
+            # 4.0.446 — percent-encoded: a shipment id with '#' / '?' / '%' (allowed in ids)
+            # cut the URL there and the annotator's image 404'd
+            "image_url": "/api/raw_image/" + _url_quote(rel_raw, safe="/"),
             "px_per_mm": px_per_mm,
             "detections": dets,
         })
@@ -5706,6 +5708,9 @@ def _csv_columns_with_unit(unit):
     return cols
 
 
+from urllib.parse import quote as _url_quote
+
+
 def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max, min_conf_f, img_prefix="", upm=None):
     """Build one detection row (list of column values) or None if the row is
     filtered out by min_conf. Extracted so single-CSV and ZIP paths share it.
@@ -5741,7 +5746,7 @@ def _detection_row(t, ship, enc, img, infms, model, d, sev_map, enc_min, enc_max
     # the operator is using. Falls back to the raw path when no prefix is supplied.
     if img and img_prefix:
         rel = img.split("raw_images/")[-1].lstrip("/") if "raw_images/" in str(img) else str(img).lstrip("/")
-        img_out = img_prefix + rel
+        img_out = img_prefix + _url_quote(rel, safe="/")      # 4.0.446 — '#' / '?' in shipment ids
     else:
         img_out = img or ""
     return [

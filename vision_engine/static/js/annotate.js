@@ -21,10 +21,11 @@ let _annotateLS = null;          // current LabelStudio instance
 let _annotateFrame = null;       // { image_path, image_url, image_w, image_h, detections }
 let _annotateLabels = [];        // [{id, category_name, color}]
 let _annotateClassMap = {};      // { mve_class_name: trainer_category_id }
-let _annotateTaskId = null;      // trainer task id (from /api/ai_trainer/config)
+let _annotateTaskId = null;      // trainer task id (the pipeline's task, 4.0.295)
 // 4.0.445 — what this page already sent for a frame: { key: image_path|task, imageId, annIds }
 let _annotateSent = null;
 let _annotateSaving = false;
+let _annotateOpenSeq = 0;       // 4.0.446 — a slower, older open must not land over a newer one
 
 function _setStatus(msg, isErr) {
     const el = document.getElementById('annotate-status');
@@ -61,8 +62,8 @@ function downloadFrameBundle() {
         .replace(/^raw_images\//, '')
         .replace(/_DETECTED\.jpg$/, '.jpg');
     const stem = rel.split('/').pop().replace(/\.jpg$/i, '');
-    const rawUrl = '/api/raw_image/' + encodeURI(rel);
-    const annUrl = '/api/render_detected/' + encodeURI(rel) + '?download=1';
+    const rawUrl = '/api/raw_image/' + rel.split('/').map(encodeURIComponent).join('/');   // 4.0.446 — '#'/'?' in shipment ids
+    const annUrl = '/api/render_detected/' + rel.split('/').map(encodeURIComponent).join('/') + '?download=1';
     function _kick(url, name) {
         const a = document.createElement('a');
         a.href = url; a.download = name; a.style.display = 'none';
@@ -114,22 +115,20 @@ async function openAnnotateModal() {
     }
     _setStatus('Loading frame + labels…');
     _enableSubmit(false);
+    const seq = ++_annotateOpenSeq;
 
     try {
         // 4.0.294 — bind the annotation to the ACTIVE pipeline's ai-trainer task, NOT the
         // global config task. So annotating a Razin detection uses Razin's task (321 →
         // PVB_FILM, HOLE…) instead of the app-wide global task (324 → sky-test-1…). A
         // charts dot carries its own pipeline's task; the dashboard uses the active pipeline.
-        const [frameRes, mapRes, cfgRes, pipesRes] = await Promise.all([
+        const [frameRes, pipesRes] = await Promise.all([
             fetch('/api/frame_detections?image_path=' + encodeURIComponent(window._currentDefectItem.image_path)),
-            fetch('/api/ai_trainer/class_map'),
-            fetch('/api/ai_trainer/config'),
             fetch('/api/pipelines'),
         ]);
         const frameD = await frameRes.json();
-        const mapD   = await mapRes.json();
-        const cfgD   = await cfgRes.json();
         let   pipesD = {}; try { pipesD = await pipesRes.json(); } catch (_) {}
+        if (seq !== _annotateOpenSeq) return;
         if (!frameRes.ok) throw new Error(frameD.error || 'frame load failed');
 
         let taskId = '';
@@ -152,8 +151,14 @@ async function openAnnotateModal() {
             return;
         }
 
-        const labelsRes = await fetch('/api/ai_trainer/labels?task_id=' + encodeURIComponent(taskId));
+        // 4.0.446 — the class map is per trainer task (category ids belong to one task)
+        const [labelsRes, mapRes] = await Promise.all([
+            fetch('/api/ai_trainer/labels?task_id=' + encodeURIComponent(taskId)),
+            fetch('/api/ai_trainer/class_map?task_id=' + encodeURIComponent(taskId)),
+        ]);
         const labelsD = await labelsRes.json();
+        let   mapD = {}; try { mapD = await mapRes.json(); } catch (_) {}
+        if (seq !== _annotateOpenSeq) return;
         if (!labelsRes.ok) throw new Error(labelsD.error || 'labels load failed — check Advanced → AI Trainer');
 
         _annotateFrame    = frameD;
@@ -193,7 +198,7 @@ async function openAnnotateModal() {
         const _byNorm = new Map(_annotateLabels.map(l => [_norm(l.category_name), l]));
         let _autoMatched = 0;
         for (const mveCls of mveClassesOnFrame) {
-            if (_annotateClassMap[mveCls]) continue;       // already mapped
+            if (_mappedHere(mveCls)) continue;             // already mapped to a category of THIS task
             const hit = _byNorm.get(_norm(mveCls));
             if (hit) {
                 _annotateClassMap[mveCls] = Number(hit.id);
@@ -206,26 +211,43 @@ async function openAnnotateModal() {
         if (_autoMatched > 0) {
             fetch('/api/ai_trainer/class_map', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ class_map: _annotateClassMap }),
+                body: JSON.stringify({ class_map: _validClassMap(_annotateClassMap), task_id: _annotateTaskId }),
             }).catch(() => {});
         }
 
-        const unmapped = mveClassesOnFrame.filter(c => !_annotateClassMap[c]);
+        const unmapped = mveClassesOnFrame.filter(c => !_mappedHere(c));
         _renderClassMapPanel(mveClassesOnFrame, unmapped);
 
         // Wait for the image to load so LSF gets the right natural dimensions.
         // LSF reads the image via the `data.image` URL; we just need to ensure
         // it's reachable (HEAD probe via Image()).
         await _waitForImage(_annotateFrame.image_url);
+        if (seq !== _annotateOpenSeq) return;
 
         _mountLabelStudio();
         _setStatus('Edit boxes — click Submit when done.');
         _enableSubmit(unmapped.length === 0);
     } catch (e) {
-        _setStatus('✗ ' + (e.message || e), true);
+        if (seq === _annotateOpenSeq) _setStatus('✗ ' + (e.message || e), true);
     }
 }
 window.openAnnotateModal = openAnnotateModal;
+
+// 4.0.446 — a class counts as mapped only if its category exists in THIS task's labels
+// (a mapping made for another task's ids used to hide the class from the mapping panel
+// while its prefilled boxes were silently dropped).
+function _mappedHere(mveCls) {
+    const id = _annotateClassMap[mveCls];
+    return id != null && _annotateLabels.some(l => Number(l.id) === Number(id));
+}
+// only this task's category ids are saved into this task's map
+function _validClassMap(m) {
+    const out = {};
+    for (const [k, v] of Object.entries(m || {})) {
+        if (_annotateLabels.some(l => Number(l.id) === Number(v))) out[k] = v;
+    }
+    return out;
+}
 
 function closeAnnotateModal() {
     // 4.0.12 — close = hide + destroy. We don't reuse the instance anymore (the
@@ -235,6 +257,7 @@ function closeAnnotateModal() {
     // ~300–500 ms after the very first cold-start.
     const modal = document.getElementById('annotate-modal');
     if (modal) modal.style.display = 'none';
+    _annotateOpenSeq++;            // 4.0.446 — an open still loading must not re-mount after close
     // 4.0.14 — restore body scroll.
     document.body.style.overflow = '';
     if (_annotateLS) {
@@ -598,7 +621,7 @@ async function saveClassMapAndRemount() {
     try {
         const r = await fetch('/api/ai_trainer/class_map', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ class_map: next }),
+            body: JSON.stringify({ class_map: _validClassMap(next), task_id: _annotateTaskId }),
         });
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
@@ -613,7 +636,7 @@ async function saveClassMapAndRemount() {
                 .map(d => String(d.name || ''))
                 .filter(n => n && !n.startsWith('_'))
         ));
-        const unmapped = mveClasses.filter(c => !_annotateClassMap[c]);
+        const unmapped = mveClasses.filter(c => !_mappedHere(c));
         _renderClassMapPanel(mveClasses, unmapped);
         _mountLabelStudio();
         _enableSubmit(unmapped.length === 0);

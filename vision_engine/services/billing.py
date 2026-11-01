@@ -459,19 +459,29 @@ def list_api_keys() -> List[Dict[str, Any]]:
     _ensure_schema()
     rows = _exec("SELECT api_key, label, created_at, last_used, calls, revoked "
                  "FROM mve_api_keys ORDER BY created_at DESC", fetch="all") or []
-    def _mask(k):
-        return (k[:8] + "…" + k[-4:]) if k and len(k) > 14 else k
-    return [{"api_key_masked": _mask(r[0]), "label": r[1], "created_at": str(r[2]),
+    return [{"api_key_masked": _mask_key(r[0]), "label": r[1], "created_at": str(r[2]),
              "last_used": str(r[3]) if r[3] else None, "calls": int(r[4] or 0),
              "revoked": r[5]} for r in rows]
 
 
-def revoke_api_key(masked_or_key: str) -> None:
+def _mask_key(k: str) -> str:
+    return (k[:8] + "…" + k[-4:]) if k and len(k) > 14 else k
+
+
+def revoke_api_key(masked_or_key: str) -> int:
+    """Revoke the key given in full or exactly as the UI shows it masked. Returns how many.
+    4.0.446 — it matched `api_key LIKE <text before '…'> || '%'`: a short argument ("m",
+    "mve_") revoked EVERY key, and `_` in keys is a LIKE wildcard."""
     _ensure_schema()
-    # accept either the full key or the prefix shown in the UI
-    prefix = masked_or_key.split("…")[0]
-    _exec("UPDATE mve_api_keys SET revoked=TRUE WHERE api_key=%s OR api_key LIKE %s",
-          (masked_or_key, prefix + "%"))
+    want = str(masked_or_key or "").strip()
+    if not want:
+        return 0
+    rows = _exec("SELECT api_key FROM mve_api_keys WHERE NOT revoked", fetch="all") or []
+    hits = [r[0] for r in rows if r[0] == want or _mask_key(r[0]) == want]
+    if len(hits) != 1:          # unknown, or an ambiguous mask — revoke nothing
+        return 0
+    _exec("UPDATE mve_api_keys SET revoked=TRUE WHERE api_key=%s", (hits[0],))
+    return 1
 
 
 def verify_api_key(key: str) -> bool:
@@ -544,12 +554,55 @@ def enforce_retention(dry_run: bool = True) -> Dict[str, Any]:
     result: Dict[str, Any] = {"retention_days": days, "live": live, "tables": {}}
     for table, tscol in _RETENTION_TABLES.items():
         try:
-            cnt = _exec(f"SELECT COUNT(*) FROM {table} WHERE {tscol} < NOW() - (%s || ' days')::interval",
-                        (str(days),), fetch="one")
-            n = int(cnt[0]) if cnt else 0
-            if live and n:
-                _exec(f"DELETE FROM {table} WHERE {tscol} < NOW() - (%s || ' days')::interval", (str(days),))
-            result["tables"][table] = {"eligible": n, "deleted": (n if live else 0)}
+            n = _retention_count(table, tscol, days)
+            deleted = _retention_delete(table, tscol, days) if (live and n) else 0
+            result["tables"][table] = {"eligible": n, "deleted": deleted}
         except Exception as e:
             result["tables"][table] = {"error": str(e)}
     return result
+
+
+def _with_timeout(sql: str, params: tuple, fetch: Optional[str], timeout_ms: int):
+    """4.0.446 — one statement with its own statement_timeout: the pool's 3 s cap made the
+    COUNT and the single DELETE over a large table fail every time."""
+    conn = get_db_connection()
+    if conn is None:
+        raise RuntimeError("db unavailable")
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
+        cur.execute(sql, params)
+        out = cur.fetchone() if fetch == "one" else None
+        rc = cur.rowcount
+        conn.commit()
+        cur.close()
+        return out, rc
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def _retention_count(table: str, tscol: str, days: int) -> int:
+    out, _ = _with_timeout(f"SELECT COUNT(*) FROM {table} WHERE {tscol} < NOW() - (%s || ' days')::interval",
+                           (str(days),), "one", 60000)
+    return int(out[0]) if out else 0
+
+
+def _retention_delete(table: str, tscol: str, days: int, batch: int = 20000) -> int:
+    """Delete in batches (short transactions, no long lock / WAL burst)."""
+    import time as _t
+    total = 0
+    while True:
+        _, rc = _with_timeout(
+            f"DELETE FROM {table} WHERE ctid IN (SELECT ctid FROM {table} "
+            f"WHERE {tscol} < NOW() - (%s || ' days')::interval LIMIT {int(batch)})",
+            (str(days),), None, 60000)
+        total += max(0, int(rc or 0))
+        if not rc or rc < batch:
+            return total
+        _t.sleep(0.2)

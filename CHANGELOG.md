@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.446] - 2026-11-01 - Audit batch 26: annotator class map per task, '#' in shipment ids, small fixes
+
+**Fixed**
+- **Annotator class map is now per AI-Trainer task.** Each pipeline has its own trainer task (4.0.294), but the MVE-class → trainer-category map was global. A class mapped while annotating for task A kept task A's category id when annotating for task B, with three effects:
+  - its pre-filled boxes silently vanished;
+  - the class still counted as mapped, so the mapping panel never offered it;
+  - auto-matching by name was skipped.
+  The map is now stored per task, and a class counts as mapped only if its category exists in the current task. Old maps are still read as a fallback.
+- **Annotator, frame opening:**
+  - Opening a frame while a previous one was still loading could leave the editor on the older frame.
+  - Removed an unused settings fetch on every open.
+- **Images of shipments whose id contains `#` or `?` didn't load.** Such ids are allowed. Image and "rendered detection" URLs (annotator, Charts drawer, timeline) and the CSV export's image links cut the address at the `#`. Every path part is now percent-encoded.
+- **Shift reports:** when the report could not be produced (for example no data for the shipment), the error text was sent to the chat as a `.pdf` file that no viewer opens. Now nothing is sent and the reason is logged.
+- **Billing:**
+  - Revoking an API key matched every key starting with the given text: an argument like `m` revoked all keys. Only an exact key, or its exact masked form, is revoked now. Anything else gets a 404.
+  - The retention prune ran one COUNT and one DELETE under the 3-second database limit, so it failed on any large table. It now has its own time limit and deletes in batches.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.445] - 2026-11-01 - Audit batch 25: timeline feed, AI trainer, notifications, billing, phase stride
 
 **Fixed**

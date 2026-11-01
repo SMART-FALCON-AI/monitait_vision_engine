@@ -1992,7 +1992,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Build URLs that work even when Store=off (annotated jpg may not be
             // persisted to raw_images/, so we use the live /api/timeline_frame).
             const frameUrl = `/api/timeline_frame?cam=${camId}&col=${colIndex}&page=${currentPage}&path=${encodeURIComponent(dPath)}&t=${Date.now()}`;
-            const rawUrl   = `/api/raw_image/${encodeURI(dPath)}.jpg`;
+            const rawUrl   = `/api/raw_image/${String(dPath).split('/').map(encodeURIComponent).join('/')}.jpg`;   // 4.0.446
             const ejectTag = col.should_eject ? 'EJECT' : 'OK';
             const tags = [ejectTag, 'cam ' + camId];
             if (col.encoder != null) tags.push('enc ' + col.encoder);

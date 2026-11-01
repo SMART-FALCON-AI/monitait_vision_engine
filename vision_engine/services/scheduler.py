@@ -117,15 +117,24 @@ async def _fetch_shipment_report_pdf(app, shipment: str) -> Optional[bytes]:
         resp = await asyncio.to_thread(shipment_quality_score_report, _FakeReq(app),
                                        shipment=shipment, window="24h")
         # The handler returns a StreamingResponse for the PDF — iterate the body.
+        data = None
         if hasattr(resp, "body_iterator"):
             chunks = []
             async for chunk in resp.body_iterator:
                 if isinstance(chunk, str):
                     chunk = chunk.encode()
                 chunks.append(chunk)
-            return b"".join(chunks)
-        if hasattr(resp, "body"):
-            return bytes(resp.body)
+            data = b"".join(chunks)
+        elif hasattr(resp, "body"):
+            data = bytes(resp.body)
+        # 4.0.446 — an error answer (JSON, 4xx/5xx — e.g. no data for the shipment) was
+        # returned as the "PDF" and sent to the chat as shift_….pdf that no viewer opens.
+        status = int(getattr(resp, "status_code", 200) or 200)
+        if data is not None and status == 200 and data[:5] == b"%PDF-":
+            return data
+        logger.warning(f"shift report for {shipment!r} not generated: HTTP {status} "
+                       f"{(data or b'')[:200]!r}")
+        return None
     except Exception as e:
         logger.warning(f"shift report PDF generation failed: {e}")
     return None
