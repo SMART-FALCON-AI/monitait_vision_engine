@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.434] - 2026-11-01 - Audit batch 14: Charts tab: local times, sticky choices, one hover preview
+
+**Fixed**
+- **Line charts were 3.5 h off** from the scatter and strips in Iran. Detection count, size / confidence over time, ejections, production and the Machines chart were labelled from server strings formatted in the database's zone (UTC). The endpoints now also send each bucket's epoch time (`ts`), and the charts label it in the operator's local time; an older backend's `t` still works.
+- **Score per shipment stayed empty after one failed load**, for example a tunnel reset. The loader swallowed its own error, so the card counted as "loaded" and every later non-forced load skipped it. A failed load is now retried.
+- **Parent-class choice silently reset to "All"** when a new window's probe didn't list the chosen parent: the probe replaced the list instead of merging it into the list that never shrinks.
+- **Scatter legend**: when a new class streamed in, the legend was rebuilt with every entry at full opacity while hidden classes stayed hidden, so the next click did the opposite of what it showed. One builder now replaces the two identical copies and draws hidden classes as hidden. Class names are escaped.
+- **The hover preview flickered between two versions.** A Chart.js external tooltip and the mousemove preview both drew the same popup, with different captions and positions. The mousemove preview, which carries the time and encoder, is now the only one.
+
+**Removed**: the external scatter tooltip (~95 lines) and unused chart variables.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.433] - 2026-11-01 - Audit batch 13: AI / services: DB profiles, cron time zone, usage logging, retention
 
 **Fixed**

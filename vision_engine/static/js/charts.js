@@ -38,7 +38,6 @@ function _pipeTaskById(pid) {
     return (pid != null && _pipeTaskByIdMap[String(pid)]) ? _pipeTaskByIdMap[String(pid)] : '';
 }
 try { _loadPipeTaskMap(); } catch (e) {}
-let _insightCameraScatterEncoder = null;  // 3.25.13: kept (unused) to avoid touching unrelated old refs.
 // v4.0.108 — module-level cache of the last authoritative `camera_y_order`
 // returned by /api/detection_charts. `_extendScatterFromBucket` fetches
 // with `scatter_only=1` which SKIPS computing camera_y_order server-side,
@@ -148,11 +147,6 @@ let _prodUptime = null;
 let _prodSpc = null;
 let _prodOee = null;
 let _prodSpeed = null;
-let _qualPareto = null;
-let _qualCamera = null;
-let _qualHeatmap = null;
-let _qualLatency = null;
-let _shipmentsLoaded = false;
 
 // Per-class "Show" toggle (Process tab → Per-Object Configuration) mirrors into
 // /api/audio_settings. The charts honor it: a class with Show=off is hidden from
@@ -1486,7 +1480,7 @@ async function _refreshDetectionInsightsNow() {
         _insightTimelineChart = new Chart(tlCtx, {
             type: 'line',
             data: {
-                labels: timeline.map(p => p.t),
+                labels: timeline.map(_bktLabel),
                 datasets: [{
                     label: 'Detections', data: timeline.map(p => p.count),
                     borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.15)',
@@ -2151,6 +2145,51 @@ function _paintShipmentStrip(cells, nbins, axis, lo, hi) {
 // Rebuild the dense cell arrays from the streamed accumulators + repaint. Uses
 // _progressiveColorRange as the single source of the domain (identical to the
 // colour heatmap), so quality/ejection cell K == colour cell K == scatter bin K.
+// 4.0.434 — time-bucket label in the operator's LOCAL time. The server's "t" is formatted in
+// the DB session zone (UTC), so these line charts sat 3.5 h off the scatter / strips in Iran;
+// it now also sends "ts" (epoch ms). Falls back to "t" from an older backend.
+function _bktLabel(p) {
+    if (p && Number.isFinite(Number(p.ts)) && Number(p.ts) > 0) {
+        const d = new Date(Number(p.ts)), z = n => String(n).padStart(2, '0');
+        return z(d.getMonth() + 1) + '-' + z(d.getDate()) + ' ' + z(d.getHours()) + ':' + z(d.getMinutes());
+    }
+    return (p && p.t) || '';
+}
+
+// 4.0.434 — ONE scatter legend builder (there were two identical copies). It also draws a
+// class the operator HID as hidden: a rebuild (a new class streaming in) used to reset every
+// entry to full opacity while the dataset stayed hidden, so the next click did the opposite
+// of what the legend showed.
+function _renderScatterLegend(datasets) {
+    const el = document.getElementById('insight-scatter-legend');
+    if (!el) return;
+    const ch = _insightCameraScatter;
+    const _visible = (ds, i) => {
+        try {
+            if (ch && ch.data && ch.data.datasets && ch.data.datasets[i] === ds) return ch.isDatasetVisible(i);
+        } catch (_e) {}
+        return !ds.hidden;
+    };
+    el.innerHTML = (datasets || []).map((ds, i) => {
+        const swatch = String((typeof _classColor === 'function' ? _classColor(ds.label) : '') || '#3b82f6');
+        const label  = _mveEsc(String(ds.label || ''));
+        const on = _visible(ds, i);
+        return `<span data-ds-idx="${i}" style="display:inline-flex; align-items:center; gap:4px; cursor:pointer; user-select:none;${on ? '' : ' opacity:0.4; text-decoration:line-through;'}"><span style="display:inline-block; width:12px; height:12px; background:${_mveEsc(swatch)}; border-radius:2px;"></span>${label}</span>`;
+    }).join('');
+    el.querySelectorAll('[data-ds-idx]').forEach(item => {
+        item.onclick = () => {
+            const idx = parseInt(item.getAttribute('data-ds-idx'), 10);
+            const c = _insightCameraScatter;
+            if (!c || !Number.isFinite(idx)) return;
+            const vis = c.isDatasetVisible(idx);
+            c.setDatasetVisibility(idx, !vis);
+            c.update();
+            item.style.opacity = vis ? '0.4' : '1';
+            item.style.textDecoration = vis ? 'line-through' : 'none';
+        };
+    });
+}
+
 function _repaintProgressiveStrips() {
     const rng = _progressiveColorRange;
     if (!rng || !(rng.hi > rng.lo)) return;
@@ -2879,8 +2918,10 @@ async function refreshAdvancedCharts() {
                     window._mveColorCheckEnabled = _rangeJson.parent_color_check_enabled;
                 }
                 if (Array.isArray(_rangeJson.parent_classes_available)) {
-                    window._mveParentClassesFull = _rangeJson.parent_classes_available;
-                    try { _renderParentClassButtons(window._mveParentClassesFull); } catch (_e) {}
+                    // 4.0.434 — pass it in to be MERGED (the union never shrinks). Assigning it here
+                    // replaced the list, and if this window lacked the operator's chosen parent the
+                    // dropdown silently reset to "All".
+                    try { _renderParentClassButtons(_rangeJson.parent_classes_available); } catch (_e) {}
                 }
                 window._lengthCache = window._lengthCache || {};
                 if (_rangeJson.encoder_unit) window._lengthCache.unit = _rangeJson.encoder_unit;
@@ -3207,10 +3248,6 @@ function _unmountScatterLoader() {
     setTimeout(() => { if (el && el.parentElement) el.parentElement.removeChild(el); }, 220);
 }
 
-// v4.0.74 — animate the scatter's growth from newest → oldest so the operator
-// sees dots progressively appear. All data was already fetched by the Core
-// render above; this just re-orders the visual reveal.
-let _scatterAnimTicket = 0;
 
 // Convert a window string ('24h', '7d', ...) to milliseconds.
 function _windowToMs(w) {
@@ -3527,29 +3564,7 @@ async function _extendScatterFromBucket(sinceMs, untilMs, shipment, minConf, tic
     }
     if (newDatasetAdded) {
         try {
-            const _legendEl = document.getElementById('insight-scatter-legend');
-            if (_legendEl) {
-                const _datasets = _insightCameraScatter.data.datasets || [];
-                _legendEl.innerHTML = _datasets.map((ds, i) => {
-                    const swatch = String(
-                        (typeof _classColor === 'function' ? _classColor(ds.label) : '#3b82f6')
-                    );
-                    const label  = String(ds.label || '').replace(/[<>&]/g, '');
-                    return `<span data-ds-idx="${i}" style="display:inline-flex; align-items:center; gap:4px; cursor:pointer; user-select:none;"><span style="display:inline-block; width:12px; height:12px; background:${swatch}; border-radius:2px;"></span>${label}</span>`;
-                }).join('');
-                _legendEl.querySelectorAll('[data-ds-idx]').forEach(el => {
-                    el.onclick = () => {
-                        const idx = parseInt(el.getAttribute('data-ds-idx'), 10);
-                        const ch = _insightCameraScatter;
-                        if (!ch || !Number.isFinite(idx)) return;
-                        const vis = ch.isDatasetVisible(idx);
-                        ch.setDatasetVisibility(idx, !vis);
-                        ch.update();
-                        el.style.opacity = vis ? '0.4' : '1';
-                        el.style.textDecoration = vis ? 'line-through' : 'none';
-                    };
-                });
-            }
+            _renderScatterLegend(_insightCameraScatter.data.datasets || []);   // 4.0.434 — one builder
         } catch (_e) { /* legend re-render is non-fatal */ }
     }
     if (addedCount > 0) {
@@ -3738,7 +3753,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         _insightSizeChart = new Chart(sizeCtx, {
             type: 'line',
             data: {
-                labels: sizeT.map(p => p.t),
+                labels: sizeT.map(_bktLabel),
                 datasets: [
                     { label: 'Width p90', data: sizeT.map(p => p.w_hi), borderColor: 'rgba(59,130,246,0.4)', backgroundColor: 'rgba(59,130,246,0.12)', fill: '+1', tension: 0.3, pointRadius: 0, borderWidth: 1 },
                     { label: 'Width p10', data: sizeT.map(p => p.w_lo), borderColor: 'rgba(59,130,246,0.4)', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 1 },
@@ -3757,7 +3772,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
         _insightConfidenceChart = new Chart(confCtx, {
             type: 'line',
             data: {
-                labels: confT.map(p => p.t),
+                labels: confT.map(_bktLabel),
                 datasets: [
                     { label: 'Max %', data: confT.map(p => p.c_max), borderColor: 'rgba(16,185,129,0.4)', backgroundColor: 'rgba(16,185,129,0.12)', fill: '+1', tension: 0.3, pointRadius: 0, borderWidth: 1 },
                     { label: 'Min %', data: confT.map(p => p.c_min), borderColor: 'rgba(16,185,129,0.4)', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 1 },
@@ -3993,26 +4008,7 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                     ? 'Camera × time — hover for image, click dot to open the exact frame'
                     : 'Camera × encoder (roll position) — hover for image, click dot for the exact frame') + measTag;
             }
-            const _legendEl = document.getElementById('insight-scatter-legend');
-            if (_legendEl) {
-                _legendEl.innerHTML = datasets.map((ds, i) => {
-                    const swatch = String(_classColor(ds.label) || '#3b82f6');
-                    const label  = String(ds.label || '').replace(/[<>&]/g, '');
-                    return `<span data-ds-idx="${i}" style="display:inline-flex; align-items:center; gap:4px; cursor:pointer; user-select:none;"><span style="display:inline-block; width:12px; height:12px; background:${swatch}; border-radius:2px;"></span>${label}</span>`;
-                }).join('');
-                _legendEl.querySelectorAll('[data-ds-idx]').forEach(el => {
-                    el.onclick = () => {
-                        const idx = parseInt(el.getAttribute('data-ds-idx'), 10);
-                        const ch = _insightCameraScatter;
-                        if (!ch || !Number.isFinite(idx)) return;
-                        const vis = ch.isDatasetVisible(idx);
-                        ch.setDatasetVisibility(idx, !vis);
-                        ch.update();
-                        el.style.opacity = vis ? '0.4' : '1';
-                        el.style.textDecoration = vis ? 'line-through' : 'none';
-                    };
-                });
-            }
+            _renderScatterLegend(datasets);   // 4.0.434 — one builder
         } catch (_e) { /* legend render is non-fatal */ }
         // 4.0.38 — no UI hint about which classes are filtered server-side via
         // Process tab Show. The operator already knows what they toggled off
@@ -4618,7 +4614,10 @@ async function _refreshAdvancedChartsCore(preloadedData) {
                 plugins: {
                     legend: { display: false },
                     title:  { display: false },
-                    tooltip: { enabled: false, external: _scatterImageTooltip }
+                    // 4.0.434 — no external tooltip: the mousemove preview (_attachHoverPreview) is the ONE
+                    // hover path. Both wrote #chart-image-preview with different captions / positions, so
+                    // the preview flipped between them within 80 ms.
+                    tooltip: { enabled: false }
                 },
                 onClick: (evt, els, chart) => {
                     // 4.0.32 — if the operator is in baseline-pick mode, the
@@ -5063,7 +5062,7 @@ async function refreshEjectionCharts() {
         _ejectionTimeline = new Chart(tlCtx, {
             type: 'line',
             data: {
-                labels: timeline.map(p => p.t),
+                labels: timeline.map(_bktLabel),
                 datasets: [{
                     label: 'Ejections', data: timeline.map(p => p.count),
                     borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.15)',
@@ -5130,7 +5129,7 @@ async function refreshProductionCharts() {
     _set('kpi-downtime', _fmtDur(data.downtime_total_s));
     _set('kpi-speed', `${data.speed_avg ?? 0} / ${data.speed_max ?? 0}`);
 
-    const labels = tl.map(p => p.t);
+    const labels = tl.map(_bktLabel);
 
     // ---- Reject rate over time: OK/NG stacked bars + reject% line ----
     const rejCtx = document.getElementById('production-reject-chart');
@@ -5605,9 +5604,7 @@ function _attachHoverPreview(canvasEl, getChart) {
 function _runHoverPreview(event, getChart) {
         // 4.0.40 — when the operator is in baseline-pick mode the entire
         // hover preview must stay hidden so they can SEE where to click.
-        // The Chart.js external tooltip (_scatterImageTooltip) is already
-        // guarded the same way; this path is the manual mousemove handler
-        // and was the one still painting the preview during pick mode.
+        // (4.0.434 — this mousemove handler is now the only hover path.)
         if (window._pickingBaseline) {
             const el = document.getElementById('chart-image-preview');
             if (el) el.style.display = 'none';
@@ -5674,100 +5671,6 @@ function _runHoverPreview(event, getChart) {
         _showHoverPreview(dp, ds.label, anchorX, anchorY);
 }
 
-function _scatterImageTooltip(ctx) {
-    // 4.0.6 — bullet-proof hover preview:
-    //   * Don't gate on tt.opacity — some Chart.js builds keep it at 0 when
-    //     using an external handler, which was hiding our preview even when
-    //     dataPoints were present.
-    //   * If dataPoints are missing, leave preview alone (don't re-hide it
-    //     during mouseout transitions — that caused flicker on dense scatters).
-    //   * If pt.img is missing, surface that in the caption instead of failing
-    //     silently so the operator knows WHY no preview.
-    // 4.0.38 — also suppress the preview entirely while the operator is in
-    // baseline-pick mode. The 420x280 preview floats next to the cursor and
-    // visually obscures the spot the operator is trying to aim at — even with
-    // pointer-events:none making clicks pass through, the operator can't SEE
-    // where to click. Hiding the preview in pick mode unblocks the flow.
-    const el = document.getElementById('chart-image-preview');
-    if (!el) return;
-    if (window._pickingBaseline) {
-        el.style.display = 'none'; return;
-    }
-    const tt = ctx && ctx.tooltip;
-    if (!tt || !tt.dataPoints || !tt.dataPoints.length) {
-        el.style.display = 'none'; return;
-    }
-    // 4.0.46 — Chart.js signals "hide" by setting opacity=0 but leaves the
-    // last dataPoints populated. The dataPoints check above doesn't catch
-    // that path; without this opacity gate the preview stayed visible after
-    // the cursor left the chart even though Chart.js had already retired
-    // the tooltip. Earlier comment said "don't gate on opacity"; that was
-    // for the show path. Hiding on opacity=0 is correct.
-    if (tt.opacity === 0) {
-        el.style.display = 'none'; return;
-    }
-    const dp = tt.dataPoints[0];
-    const pt = (dp && dp.raw) || {};
-    const cls = (dp.dataset && dp.dataset.label) || pt.cls || '';
-    const conf = ((pt.conf || 0) * 100).toFixed(0);
-    const img = el.querySelector('img');
-    const cap = el.querySelector('.cap');
-    const urls = _imgUrlsFor(pt);
-    const target = urls.ann || urls.raw;
-    if (img) {
-        if (target && img.dataset.src !== target) {
-            img.dataset.src = target;
-            img.style.display = '';
-            img.src = target;
-            img.dataset.fellBack = '';
-            img.onload = function() { img.style.display = ''; };
-            img.onerror = function() {
-                if (urls.raw && img.dataset.fellBack !== '1') {
-                    img.dataset.fellBack = '1';
-                    img.src = urls.raw;
-                } else {
-                    // 4.0.198 — purged old image: hide instead of broken box.
-                    img.removeAttribute('src');
-                    img.style.display = 'none';
-                    img.onerror = null;
-                }
-            };
-        } else if (!target) {
-            img.removeAttribute('src');
-            img.dataset.src = '';
-        }
-    }
-    if (cap) {
-        const meta = cls + ' • cam ' + (pt.cam_id != null ? pt.cam_id : (pt.y != null ? pt.y : '?')) + ' • conf ' + conf + '%';   // 4.0.429 — camera ID, not row index
-        cap.textContent = target
-            ? meta + '   (click to edit in ai-trainer)'
-            : meta + '   (no image_path on this point)';
-    }
-    // Position next to the cursor. Use clientX/Y when caret values aren't set
-    // (Chart.js drops them on some hover modes).
-    // 4.0.39 — viewport clamp (mirrors the logic in _showHoverPreview at
-    // line ~2050). Without it, when the cursor sits near the right or bottom
-    // edge of the chart the preview lands off-canvas in the corner of the
-    // viewport. With it the preview flips to the left of the cursor and
-    // pins to the visible viewport box, never drifting into the corner.
-    const box = ctx.chart.canvas.getBoundingClientRect();
-    const cx = (tt.caretX != null) ? tt.caretX : 0;
-    const cy = (tt.caretY != null) ? tt.caretY : 0;
-    const mouseX = box.left + cx;
-    const mouseY = box.top  + cy;
-    const pw = el.offsetWidth  || 432;
-    const ph = el.offsetHeight || 320;
-    const vw = window.innerWidth  || 1920;
-    const vh = window.innerHeight || 1080;
-    let left = mouseX + 14;
-    if (left + pw > vw - 8) left = Math.max(8, mouseX - pw - 14);
-    let top = mouseY - Math.round(ph / 2);
-    if (top + ph > vh - 8) top = Math.max(8, vh - ph - 8);
-    if (top < 8) top = 8;
-    el.style.left = left + 'px';
-    el.style.top  = top + 'px';
-    el.style.display = 'block';
-}
 // Click handler factory for bar/pie/pareto: drills into the drawer.
 
 // 3.21.2 — centered modal showing the EXACT clicked frame at BIG size.
@@ -6476,7 +6379,13 @@ async function _loadQualityShipmentsChart(win) {
                 },
             }],
         });
-    } catch (e) { console.warn('shipments chart failed', e); }
+    } catch (e) {
+        console.warn('shipments chart failed', e);
+        // 4.0.434 — re-throw so loadScorePerShipment() leaves _scorePerShipmentLoaded false:
+        // swallowing it here marked a FAILED load (e.g. a tunnel reset) as done, and the
+        // card stayed empty — every later non-forced load was skipped.
+        throw e;
+    }
 }
 
 // 3.25.12 — deterministic color per procedure name (golden-angle hue). Same name

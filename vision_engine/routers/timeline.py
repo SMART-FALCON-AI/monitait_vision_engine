@@ -2786,7 +2786,9 @@ def detection_stats(request: Request, window: str = "1h", min_conf: float = 0.0,
                 """,
                 tuple([bucket] + _base_args),
             )
-            timeline = [{"t": b.strftime("%m-%d %H:%M"), "count": int(n)} for b, n in cur.fetchall()]
+            # 4.0.434 — + "ts" (epoch ms): "t" is formatted in the DB session zone (UTC); the UI
+            # formats ts in the operator's local time like the scatter (was 3.5 h off in Iran).
+            timeline = [{"t": b.strftime("%m-%d %H:%M"), "ts": int(b.timestamp() * 1000), "count": int(n)} for b, n in cur.fetchall()]
             cur.close()
         except Exception as _e2:
             logger.warning(f"detection_stats timeline failed: {type(_e2).__name__}: {_e2}")
@@ -3423,13 +3425,14 @@ def detection_charts(request: Request, window: str = "24h", shipment: str = "", 
         for row in cur.fetchall():
             bkt, wp10, wp50, wp90, hp10, hp50, hp90, cmin, cavg, cmax = row
             t = bkt.strftime("%m-%d %H:%M")
+            _ts = int(bkt.timestamp() * 1000)   # 4.0.434 — local-time label in the UI
             size_over_time.append({
-                "t": t,
+                "t": t, "ts": _ts,
                 "w_lo": round(wp10 or 0, 1), "w_mid": round(wp50 or 0, 1), "w_hi": round(wp90 or 0, 1),
                 "h_lo": round(hp10 or 0, 1), "h_mid": round(hp50 or 0, 1), "h_hi": round(hp90 or 0, 1),
             })
             confidence_over_time.append({
-                "t": t,
+                "t": t, "ts": _ts,
                 "c_min": round((cmin or 0) * 100, 1),
                 "c_avg": round((cavg or 0) * 100, 1),
                 "c_max": round((cmax or 0) * 100, 1),
@@ -5258,7 +5261,7 @@ def ejection_stats(request: Request, window: str = "24h", shipment: str = ""):
             base_params,
         )
         timeline = [
-            {"t": bkt.strftime("%m-%d %H:%M"), "count": int(c)}
+            {"t": bkt.strftime("%m-%d %H:%M"), "ts": int(bkt.timestamp() * 1000), "count": int(c)}   # 4.0.434 — + ts
             for bkt, c in cur.fetchall()
         ]
         cur.close()
@@ -5387,7 +5390,7 @@ def production_stats(request: Request, window: str = "24h", shipment: str = ""):
             quality = (ok / units) if units else 0.0
             performance = (speed / speed_max) if speed_max else 0.0
             timeline.append({
-                "t": bkt.strftime("%m-%d %H:%M"),
+                "t": bkt.strftime("%m-%d %H:%M"), "ts": int(bkt.timestamp() * 1000),   # 4.0.434 — + ts
                 "ok": ok, "ng": ng, "units": units,
                 "reject_rate": round(ng / units * 100, 2) if units else 0.0,
                 "uptime_pct": round(uptime, 1),
