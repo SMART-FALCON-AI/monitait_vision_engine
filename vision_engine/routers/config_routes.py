@@ -157,7 +157,10 @@ def build_current_service_config(app_state):
         },
         "image_processing": {
             "remove_raw_image_when_dm_decoded": config.REMOVE_RAW_IMAGE_WHEN_DM_DECODED,
-            "parent_object_list": config.PARENT_OBJECT_LIST
+            "parent_object_list": config.PARENT_OBJECT_LIST,
+            # 4.0.443 — boot reads it (main.py) but this rebuild dropped it, so every Save All
+            # / camera save reverted it to the env default on the next restart
+            "enforce_parent_object": getattr(config, "ENFORCE_PARENT_OBJECT", True),
         },
         "histogram": {
             "enabled": config.HISTOGRAM_ENABLED,

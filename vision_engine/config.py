@@ -180,6 +180,22 @@ _cfg_cache_lock = _threading.Lock()
 # changed, so unrelated keys are never carried (nor clobbered) by another writer's
 # stale snapshot.
 _CONFIG_WRITE_LOCK = _threading.RLock()
+# 4.0.443 — app.state.timeline_config read-modify-write (procedures, timeline settings,
+# mark-ejects): three endpoints, each reading the dict, changing its part and saving the
+# whole — two at once reverted each other's change.
+TIMELINE_CONFIG_LOCK = _threading.RLock()
+
+
+def timeline_config_locked(fn):
+    """Run a (sync) endpoint under TIMELINE_CONFIG_LOCK. functools.wraps keeps the
+    signature, so FastAPI still sees the endpoint's parameters / dependencies."""
+    import functools as _ft
+
+    @_ft.wraps(fn)
+    def _w(*a, **k):
+        with TIMELINE_CONFIG_LOCK:
+            return fn(*a, **k)
+    return _w
 
 
 _cfg_cache_gen = 0   # 4.0.426 — bumped on every invalidation (see load_data_file)

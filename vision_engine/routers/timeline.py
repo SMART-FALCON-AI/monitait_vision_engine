@@ -8,6 +8,7 @@ from config import (load_data_file, save_data_file, save_config_key, TIMELINE_RE
                     latest_detections, latest_detections_timestamp,
                     DETECTION_EVENTS_REDIS_KEY)
 import config as cfg_module
+from config import timeline_config_locked as _tl_locked   # 4.0.443
 import cv2, numpy as np, time, json, pickle, logging, os
 from redis import Redis
 from services.detection import evaluate_eject_from_detections
@@ -5456,6 +5457,7 @@ def get_timeline_config(request: Request):
 
 
 @router.post("/api/timeline_config")
+@_tl_locked   # 4.0.443
 def update_timeline_config(request: Request, _mve_body=Depends(_json_body_dep)):
     """Update timeline configuration (bounding boxes, camera order, quality, rows, buffer size)."""
     try:
@@ -5546,6 +5548,7 @@ def update_timeline_config(request: Request, _mve_body=Depends(_json_body_dep)):
 
 
 @router.post("/api/timeline/mark_config")
+@_tl_locked   # 4.0.443
 def update_mark_config(request: Request, _mve_body=Depends(_json_body_dep)):
     """4.0.378 — persist the 'mark ejected frames' box setting (enabled + thickness) into
     timeline_config so BOTH renderers draw the box SERVER-SIDE, in the same pass as the

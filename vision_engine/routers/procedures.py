@@ -5,6 +5,7 @@ from fastapi import Depends as Depends
 from routers._body import json_body as _json_body_dep, body as _req_body  # 4.0.425
 from fastapi.responses import JSONResponse
 from config import load_data_file, save_data_file, save_config_key
+from config import timeline_config_locked as _tl_locked   # 4.0.443
 import logging
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ def _clean_procedures(procs):
 
 
 @router.post("/api/procedures")
+@_tl_locked   # 4.0.443
 def update_procedures(request: Request, _mve_body=Depends(_json_body_dep)):
     """Update ejection procedures configuration."""
     try:

@@ -843,6 +843,9 @@ def _scan_commands_sync(app_state) -> int:
     if not _CMD_STATE["since_ts"]:
         for ev in events:
             _CMD_STATE["since_ts"] = max(_CMD_STATE["since_ts"], ev.get("origin_server_ts") or 0)
+        # 4.0.443 — an EMPTY room left since_ts at 0, so the next pass was "first" again and
+        # swallowed the first real command as backlog. Mark the first pass done regardless.
+        _CMD_STATE["since_ts"] = _CMD_STATE["since_ts"] or 1
         return 0
 
     handled = 0

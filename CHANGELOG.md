@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.443] - 2026-11-01 - Audit batch 23: concurrent settings saves, small persistence fixes
+
+**Fixed**
+- **Two settings saves at once could undo each other.** Procedures, the timeline settings and the mark-ejects box each read the timeline config, changed their part and saved the whole thing, so a procedures save and a mark-ejects change landing together reverted one of them. They now take one lock.
+- **"Enforce parent object" reverted to the env default after a restart.** Boot reads it, but every Save All / camera save rebuilt the config without it.
+- **Support chat**: in a room with no messages yet, the first admin `!command` was swallowed as "backlog".
+
+Deployed to **vteam12 only**.
+
 ## [4.0.442] - 2026-11-01 - Audit batch 22: runtime (threads, event loop, config durability)
 
 **Fixed**
