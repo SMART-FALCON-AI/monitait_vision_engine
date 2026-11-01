@@ -1046,7 +1046,13 @@ try:
     _svc = load_service_config() or {}
     _data = load_data_file() or {}
     _changed = migrate_object_filters_into_audio_settings(_svc, _data)
-    if _changed:
+    from config import config_db_was_down_at_load as _db_down_at_load
+    if _changed and _db_down_at_load():
+        # 4.0.444 — this runs BEFORE the boot DB wait: with the DB not up yet the inputs
+        # came from the disk fallback, and persisting them would later be pushed over the
+        # (newer) DB copy. Idempotent — it simply runs again at the next boot.
+        logger.warning("startup migrations: DB not ready yet — persist deferred to the next boot")
+    elif _changed:
         save_service_config(_svc)
         save_data_file(_data)
         logger.info("startup migrations: persisted")
@@ -1230,6 +1236,8 @@ logger.info(f"Web server started on http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
 # ── Shared frame processing logic ──
 # 4.0.442 — counters shared by the inference worker threads
 _COUNTER_LOCK = threading.Lock()
+# 4.0.444 — see the fail-safe branch in inference_worker_thread
+_FAILSAFE_EJECT = os.environ.get("MVE_FAILSAFE_EJECT", "0").strip().lower() in ("1", "true", "yes")
 
 
 def _process_frame_batch(frames_data, allow_eject=True, precomputed_yolo_per_frame=None):
@@ -1574,7 +1582,11 @@ def inference_worker_thread():
                         # YOLO failed after retry — fail-safe eject + spill the FAILED groups to cold
                         # (4.0.439 — only those; the others were already inferred, evaluated + stored)
                         for fd in (_failed or gathered):
-                            if cfg_module.EJECTOR_ENABLED:
+                            # 4.0.444 — the PHYSICAL fail-safe eject is opt-in (MVE_FAILSAFE_EJECT=1).
+                            # Until 4.0.444 a YOLO error never reached this branch (it was stored as
+                            # "no detections"), so in practice it never fired; turning it on means
+                            # every product is ejected while YOLO is down. The replay below always runs.
+                            if cfg_module.EJECTOR_ENABLED and _FAILSAFE_EJECT:
                                 capture_encoder = fd.get("encoder", 0)
                                 eject_data = json.dumps({"encoder": capture_encoder, "dm": None})
                                 watcher.redis_connection.update_queue_messages_redis(
@@ -1611,9 +1623,23 @@ def inference_worker_thread():
                 if enqueue_age > 600:  # older than 10 minutes → discard
                     continue
                 try:
-                    _process_frame_batch(frames_data, allow_eject=False)
+                    _ok = _process_frame_batch(frames_data, allow_eject=False)
                 except Exception as e:
+                    _ok = False
                     logger.error(f"Cold processing error: {e}")
+                if not _ok:
+                    # 4.0.444 — inference failed (YOLO down): put it back for a later replay
+                    # instead of dropping it (it is still discarded once >10 min old, above)
+                    _n = int(frames_data.get('_cold_attempts', 0) or 0) + 1
+                    if _n < 5:
+                        frames_data['_cold_attempts'] = _n
+                        try:
+                            cold_q.put(frames_data)
+                        except Exception:
+                            pass
+                        time.sleep(1.0)   # inference is down — don't spin on replays
+                    else:
+                        logger.warning(f"Cold frame dropped after {_n} failed inference attempts (encoder={frames_data.get('encoder')})")
                 continue
 
             # Both queues empty — brief sleep to avoid busy-wait

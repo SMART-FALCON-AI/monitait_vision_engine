@@ -492,13 +492,17 @@ def _merge_and_persist(partial, updated_by="mve"):
 
         # 3. if the DB could not take it, remember to push disk up when it returns —
         #    otherwise a DB that comes back with older data silently wins on next boot.
-        if not db_ok:
+        if not db_ok and file_ok:
+            # only when the DISK took it: pending means "the disk copy is the newest" — with
+            # both stores failed, later writes would otherwise be based on a stale disk copy
             _set_db_pending(True)
             logger.warning(
                 "[ONE-KEY] config written to DISK ONLY (DB unreachable) — will re-push "
                 "to the database as soon as it answers")
-        else:
+        elif db_ok:
             _set_db_pending(False)
+        else:
+            logger.error("[ONE-KEY] config write reached NEITHER the database nor the disk")
 
         if file_ok or db_ok:
             logger.info(

@@ -42,6 +42,10 @@ GRADIO_CONFIDENCE_THRESHOLD = float(os.environ.get("GRADIO_CONFIDENCE_THRESHOLD"
 logger = logging.getLogger(__name__)
 
 
+# 4.0.444 — model name returned with detections=None when every phase of a frame failed
+INFERENCE_FAILED = "failed"
+
+
 @dataclass
 class InferenceModel:
     """Represents a single inference model configuration.
@@ -468,6 +472,7 @@ class PipelineManager:
 
         all_detections = []
         models_used = []
+        ran = failed = 0   # 4.0.444 — phases attempted / failed for THIS frame
 
         # Frame counter drives per-phase stride (run phase every Nth frame).
         self._frame_counter += 1
@@ -488,14 +493,22 @@ class PipelineManager:
                 logger.warning(f"Model not found for phase: {phase.model_id}")
                 continue
 
+            ran += 1
             try:
                 detections = self._run_model_inference(image_bytes, model)
-                if detections:
+                if detections is None:
+                    failed += 1
+                elif detections:
                     all_detections.extend(detections)
                     models_used.append(model.name)
             except Exception as e:
+                failed += 1
                 logger.error(f"Error running inference with model {model.name}: {e}")
 
+        # 4.0.444 — every phase that ran FAILED → the frame was not inspected: report it
+        # (None) so the caller retries / spills it, instead of storing it as clean.
+        if ran and failed == ran:
+            return None, INFERENCE_FAILED
         model_names = ", ".join(models_used) if models_used else "none"
         return all_detections, model_names
 
@@ -582,7 +595,9 @@ class PipelineManager:
             return result
         except Exception as e:
             logger.error(f"YOLO inference error: {e}")
-            return []
+            # 4.0.444 — None = FAILED (not "no detections"). Returning [] stored every frame
+            # of a YOLO outage as a clean product: no retry, no replay, wrong stats.
+            return None
 
     def _run_yolo_inference_batch(self, image_bytes_list: List[bytes], model: 'InferenceModel') -> Optional[List[List[Dict]]]:
         """v4.0.82 — POST a batch of images to the model's /batch-detect endpoint.
@@ -651,6 +666,8 @@ class PipelineManager:
 
         all_dets_per_image: List[List[Dict]] = [[] for _ in range(N)]
         models_used_per_image: List[List[str]] = [[] for _ in range(N)]
+        ran_per_image = [0] * N      # 4.0.444 — phases attempted / failed per image
+        failed_per_image = [0] * N
 
         # Bump the frame counter by N so per-phase stride semantics stay consistent with the
         # single-image path (each image counts as one frame).
@@ -696,6 +713,9 @@ class PipelineManager:
                         # Chunk-level fallback: run each image single. Never loses detections.
                         per_image_dets = [self._run_yolo_inference(image_bytes_list[i], model) for i in chunk]
                     for offset, i in enumerate(chunk):
+                        ran_per_image[i] += 1
+                        if per_image_dets[offset] is None:
+                            failed_per_image[i] += 1
                         dets = per_image_dets[offset] or []
                         if dets:
                             all_dets_per_image[i].extend(dets)
@@ -704,10 +724,14 @@ class PipelineManager:
             else:
                 # Per-image loop — same as single-frame path.
                 for i in active_indices:
+                    ran_per_image[i] += 1
                     try:
                         dets = self._run_model_inference(image_bytes_list[i], model)
                     except Exception as e:
                         logger.error(f"Per-image inference error for model {model.name} at index {i}: {e}")
+                        dets = None
+                    if dets is None:
+                        failed_per_image[i] += 1
                         dets = []
                     if dets:
                         all_dets_per_image[i].extend(dets)
@@ -715,7 +739,8 @@ class PipelineManager:
                             models_used_per_image[i].append(model.name)
 
         return [
-            (all_dets_per_image[i], ", ".join(models_used_per_image[i]) or "none")
+            ((None, INFERENCE_FAILED) if ran_per_image[i] and failed_per_image[i] == ran_per_image[i]
+             else (all_dets_per_image[i], ", ".join(models_used_per_image[i]) or "none"))
             for i in range(N)
         ]
 

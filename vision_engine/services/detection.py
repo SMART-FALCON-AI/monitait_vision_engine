@@ -1403,14 +1403,19 @@ def process_frame(frame, capture_mode, capture_t=None, encoder=None, precomputed
 
         if precomputed_yolo is not None:
             yolo_res, model_name_used = precomputed_yolo
-            if yolo_res is None:
-                yolo_res = []
         elif _pipeline_manager:
             yolo_res, model_name_used = _pipeline_manager.run_inference(img_bytes)
         else:
             # Fallback to legacy inference
             yolo_res = json.loads(req_predict(img_bytes))
             model_name_used = "legacy"
+        # 4.0.444 — None = inference FAILED for this frame (YOLO down / 500 / timeout).
+        # It was stored as a frame with zero detections — a clean product — so a YOLO
+        # outage passed every product as good. Return None: the caller retries once, then
+        # (hot path) spills the frame to the cold queue for a replay, writing no false row.
+        if yolo_res is None:
+            logger.warning(f"Inference failed for {frame_id} ({model_name_used}) — frame will be retried / replayed")
+            return None
 
         # 3.21.25 — auto-register newly-seen classes in audio_settings so they
         # appear as unticked cards in the Process tab. Combined with the strict

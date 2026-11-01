@@ -76,6 +76,8 @@ def ensure_shipment_stats_tables():
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_shipment_summary_finalized ON shipment_summary (finalized_at DESC)"
         )
+        # 4.0.444 — which length algorithm computed length_raw (NULL = the pre-4.0.444 one)
+        cur.execute("ALTER TABLE shipment_summary ADD COLUMN IF NOT EXISTS length_algo SMALLINT")
         conn.commit()
         cur.close()
         _shipment_stats_ready = True
@@ -104,6 +106,51 @@ def _units_per_unit():
         return (float(upu) if upu else 0.0), str(unit)
     except Exception:
         return 0.0, "units"
+
+
+# 4.0.444 — length_raw = the sum, over the segments between REAL encoder resets (a drop of
+# more than LENGTH_RESET_DROP pulses — a roll change / PLC reboot; the same rule as the
+# length_state wrap guard), of each segment's MAX − MIN, walking the rows in CAPTURE order.
+# It summed every forward step in ORDER BY time order — but inference_results.time is the DB
+# writer's NOW(), which is CONSTANT within a write transaction (≈200 rows share one time) and
+# several writer threads interleave their batches. Rows came out in an arbitrary / zig-zag
+# encoder order, and summing the forward steps of a zig-zag counts the same stretch again
+# (≈2× with 2 writers) — the length axis widths and length_units were inflated. The zig-zag
+# can also exceed LENGTH_RESET_DROP (≈400 frames' worth), so `time` can't be the order at all.
+# The capture loop names every frame raw_images/<shipment>/<YYYY-MM-DD_HH>/<YYYY-MM-DD-HH-MM-SS-ffffff>
+# _p<ph>_<cam>.jpg — within one shipment the whole path sorts BYTE-WISE (COLLATE "C") in capture
+# order (the locale collation was ~10× slower). `_` → `!` so a stamp whose microseconds are 0
+# (str(datetime) drops the "-ffffff") sorts before, not after, the rest of its second.
+# 7.4 M rows: ≈6 s, one sort (was 1.8 s, wrong).
+LENGTH_RESET_DROP = 10000
+LENGTH_ALGO = 3
+_SUMMARY_SQL = """
+    WITH base AS (
+        SELECT time, encoder_value, translate(image_path, '_', '!') COLLATE "C" AS k
+        FROM inference_results
+        WHERE shipment = %s AND encoder_value IS NOT NULL
+    ),
+    ord AS (
+        SELECT time, encoder_value, k,
+               encoder_value - LAG(encoder_value) OVER (ORDER BY k, time, encoder_value) AS d
+        FROM base
+    ),
+    seg AS (
+        SELECT time, encoder_value,
+               SUM(CASE WHEN d < -%s THEN 1 ELSE 0 END)
+                   OVER (ORDER BY k, time, encoder_value ROWS UNBOUNDED PRECEDING) AS sid
+        FROM ord
+    ),
+    spans AS (SELECT MIN(time) AS t0, MAX(time) AS t1, MIN(encoder_value) AS lo, MAX(encoder_value) AS hi,
+                     COUNT(*) AS n
+              FROM seg GROUP BY sid)
+    SELECT EXTRACT(EPOCH FROM MIN(t0)) * 1000.0,
+           EXTRACT(EPOCH FROM MAX(t1)) * 1000.0,
+           MIN(lo), MAX(hi),
+           COALESCE(SUM(hi - lo), 0),
+           COALESCE(SUM(n), 0)
+    FROM spans
+"""
 
 
 def compute_and_store_shipment_stats(shipment, skip_if_exists=False):
@@ -161,23 +208,7 @@ def compute_and_store_shipment_stats(shipment, skip_if_exists=False):
         # --- summary: time + encoder extent, reset-safe cumulative length, row count ---
         # length_raw sums only FORWARD encoder deltas so a per-roll encoder reset (a big
         # negative jump) contributes 0 instead of corrupting the total.
-        cur.execute(
-            """
-            WITH rows AS (
-                SELECT time, encoder_value,
-                       encoder_value - LAG(encoder_value) OVER (ORDER BY time) AS d
-                FROM inference_results
-                WHERE shipment = %s AND encoder_value IS NOT NULL
-            )
-            SELECT EXTRACT(EPOCH FROM MIN(time)) * 1000.0,
-                   EXTRACT(EPOCH FROM MAX(time)) * 1000.0,
-                   MIN(encoder_value), MAX(encoder_value),
-                   COALESCE(SUM(GREATEST(0, d)), 0),
-                   COUNT(*)
-            FROM rows
-            """,
-            [shipment],
-        )
+        cur.execute(_SUMMARY_SQL, [shipment, LENGTH_RESET_DROP])
         r = cur.fetchone() or (None, None, None, None, 0, 0)
         t_start_ms, t_stop_ms, enc_min, enc_max, length_raw, n_total = r
         upu, unit = _units_per_unit()
@@ -216,19 +247,20 @@ def compute_and_store_shipment_stats(shipment, skip_if_exists=False):
             """
             INSERT INTO shipment_summary
               (shipment, t_start, t_stop, enc_min, enc_max, enc_span,
-               length_raw, length_units, length_unit, score, score_absolute, verdict, n_total, finalized_at)
+               length_raw, length_units, length_unit, score, score_absolute, verdict, n_total, finalized_at,
+               length_algo)
             VALUES (%s, to_timestamp(%s / 1000.0), to_timestamp(%s / 1000.0), %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, NOW())
+                    %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
             ON CONFLICT (shipment) DO UPDATE SET
               t_start=EXCLUDED.t_start, t_stop=EXCLUDED.t_stop,
               enc_min=EXCLUDED.enc_min, enc_max=EXCLUDED.enc_max, enc_span=EXCLUDED.enc_span,
               length_raw=EXCLUDED.length_raw, length_units=EXCLUDED.length_units, length_unit=EXCLUDED.length_unit,
               score=EXCLUDED.score, score_absolute=EXCLUDED.score_absolute, verdict=EXCLUDED.verdict,
-              n_total=EXCLUDED.n_total, finalized_at=NOW()
+              n_total=EXCLUDED.n_total, finalized_at=NOW(), length_algo=EXCLUDED.length_algo
             """,
             [shipment, float(t_start_ms or 0), float(t_stop_ms or 0),
              enc_min, enc_max, enc_span, length_raw, length_units, unit,
-             score, score_abs, verdict, int(n_total or 0)],
+             score, score_abs, verdict, int(n_total or 0), LENGTH_ALGO],
         )
 
         # --- replace the shipment's per-cam/phase/parent stat rows ---
@@ -323,6 +355,70 @@ def backfill_shipment_stats(current_shipment="", max_shipments=600, pace_sec=0.1
         except Exception:
             pass
     logger.info(f"shipment_stats backfill complete: {done}/{len(ships)} recent shipments cached")
+    try:
+        _fixed = recompute_old_lengths(pace_sec=pace_sec)
+        if _fixed:
+            logger.info(f"shipment_stats: recomputed the length of {_fixed} shipment(s) cached before 4.0.444")
+    except Exception as _le:
+        logger.warning(f"shipment_stats length recompute failed: {_le}")
+
+
+def recompute_old_lengths(batch=500, pace_sec=0.2, max_total=100000):
+    """4.0.444 — re-derive length_raw / length_units for summary rows computed by an older length
+    algorithm, NEWEST first, until none are left (a shipment that errors is skipped for this run).
+    Only the encoder query per shipment; the score and colour stats are left alone. Paced;
+    idempotent (stamps length_algo), so a restart mid-way just continues."""
+    import time as _t
+    upu, _unit = _units_per_unit()
+    n, failed = 0, set()
+    while n + len(failed) < max_total:
+        conn = get_db_connection()
+        if not conn:
+            break
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT shipment FROM shipment_summary WHERE length_algo IS DISTINCT FROM %s "
+                        "AND NOT (shipment = ANY(%s)) ORDER BY finalized_at DESC NULLS LAST LIMIT %s",
+                        [LENGTH_ALGO, list(failed), int(batch)])
+            ships = [r[0] for r in cur.fetchall() if r and r[0]]
+            cur.close()
+        finally:
+            release_db_connection(conn)
+        if not ships:
+            break
+        for sh in ships:
+            c = get_db_connection()
+            if not c:
+                return n
+            try:
+                cur = c.cursor()
+                cur.execute("SET LOCAL statement_timeout = 120000")
+                cur.execute(_SUMMARY_SQL, [sh, LENGTH_RESET_DROP])
+                r = cur.fetchone()
+                if r and r[5]:
+                    length_raw = float(r[4] or 0)
+                    length_units = (length_raw / upu) if upu else None
+                    cur.execute("UPDATE shipment_summary SET length_raw=%s, length_units=%s, length_algo=%s "
+                                "WHERE shipment=%s", [length_raw, length_units, LENGTH_ALGO, sh])
+                else:
+                    cur.execute("UPDATE shipment_summary SET length_algo=%s WHERE shipment=%s", [LENGTH_ALGO, sh])
+                c.commit()
+                cur.close()
+                n += 1
+            except Exception as e:
+                failed.add(sh)
+                logger.debug(f"length recompute for {sh} skipped: {e}")
+                try:
+                    c.rollback()
+                except Exception:
+                    pass
+            finally:
+                release_db_connection(c)
+            try:
+                _t.sleep(max(0.0, float(pace_sec)))
+            except Exception:
+                pass
+    return n
 
 
 def start_backfill_async(current_shipment=""):

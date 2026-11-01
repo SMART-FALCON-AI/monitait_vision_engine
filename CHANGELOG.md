@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.444] - 2026-11-01 - Audit batch 24: a YOLO outage is no longer "all good", shipment lengths
+
+**Fixed**
+- **During a YOLO outage every product counted as good.** A failed inference call (YOLO restarting, refused connection, timeout, a 500 such as "Detector has no attribute model") was returned as "no detections". Every frame was stored as a clean product: no retry, no replay, and wrong quality and OEE numbers. Now a frame where every inference phase failed is reported as failed: it is retried once, then put in the cold queue and replayed when inference is back (up to 5 tries within the 10-minute frame lifetime). No false "clean" row is written. A frame where one phase failed but another worked keeps its partial result, as before.
+  - **The physical fail-safe eject is opt-in.** The code ejected on inference failure by design, but until now it never ran, because failures looked like clean frames. Turning it on means every product is ejected while YOLO is down. Set `MVE_FAILSAFE_EJECT=1` to enable it.
+- **Shipment lengths were inflated (often ~2×).** `length_raw` summed every forward encoder step in time order. But the stored time is the DB writer's flush time: about 200 rows share one timestamp, and several writer threads interleave. The rows came out in a zig-zag encoder order whose forward steps counted the same stretch again. Length is now computed in capture order, which comes from the capture time stamped in each frame's name. It is the sum, over the segments between real encoder resets (a drop of more than 10,000 pulses), of each segment's max − min. Ordering by the writer's time was not enough: the zig-zag itself can be bigger than 10,000 pulses and was taken for a reset. Shipments already cached are recomputed once at startup, newest first and paced, until all are done. The query now takes about 6 s for a 7.4 M-row shipment. This changes the Charts' length-axis widths and stored shipment lengths.
+- **Config durability**:
+  - A config write that reached neither the DB nor the disk no longer marks the disk copy as newest. Later writes would have been based on a stale disk copy.
+  - The startup migrations no longer persist while the DB isn't up yet. They read the disk fallback, which would later have been pushed over the newer DB copy.
+
+Deployed to **vteam12 only**.
+
 ## [4.0.443] - 2026-11-01 - Audit batch 23: concurrent settings saves, small persistence fixes
 
 **Fixed**
